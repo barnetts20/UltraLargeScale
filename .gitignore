@@ -1,0 +1,57 @@
+git commit -m "Remove PreBaked3dNoise from repo and update .gitignore"
+
+# Ignore compiled binaries, intermediates, etc.
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+.vs/
+*.VC.db
+*.VC.opendb
+*.sln
+*.suo
+*.opensdf
+*.sdf
+*.log
+*.tlog
+*.obj
+*.ipch
+*.pch
+*.pdb
+*.idb
+*.class
+*.exe
+*.dll
+*.lib
+*.app
+*.dSYM/
+*.xcworkspace/
+*.xcodeproj/
+*.xcuser*
+
+# Ignore backup / temp folders
+Build/
+enc_temp_folder/
+
+# Ignore plugin binaries and intermediates
+Plugins/*/Binaries/
+Plugins/*/Intermediate/
+
+# Keep source content
+!Source/
+!Source/**
+
+# Keep config
+!Config/
+!Config/**
+
+# Include UProject
+!*.uproject
+
+# Include only specific blueprint and material folders
+#!Content/Blueprints/CoreGameplay/**
+#!Content/Materials/Functions/**
+Content/
+# Shader files
+#!Content/**/*.usf
+#!Content/**/*.hlsl
