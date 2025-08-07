@@ -22,7 +22,7 @@ void AGalaxyActor::Initialize()
 			//Populate Data into the tree
 			Octree = MakeShared<FOctree>(Extent);
 			FRandomStream Stream = FRandomStream(Seed);
-
+			//TODO: Add some % chance for globular noise based galaxy, increased Z axis spread and noise amount
 			auto SpiralGenerator = new SpiralNoiseGenerator(Seed);
 			//Proceduralize
 			SpiralGenerator->Count = Stream.RandRange(200000, 500000);
@@ -44,14 +44,11 @@ void AGalaxyActor::Initialize()
 			SpiralGenerator->WarpAmount = FVector(HorizontalWarp, HorizontalWarp, VerticalWarp);
 			SpiralGenerator->EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
 
-			//TODO: EXTENT AND UNIT SCALE CALCULATIONS TO MAKE IT MATCH THE PERCIEVED NODE SCALE IN THE UNIVERSE OCTREE
-
-
 
 			SpiralGenerator->GenerateData(Octree);
 			//GlobularGenerator->GenerateData(Octree);
 			//Extract data from the tree and construct niagara arrays
-			TArray<TSharedPtr<FOctreeNode>> Leaves = Octree->GetLeafNodes(); // Replace this to pick up nodes with density instead of leaves, can store gas/stars in same tree at different depths
+			TArray<TSharedPtr<FOctreeNode>> Leaves = Octree->GetPopulatedNodes(); // Replace this to pick up nodes with density instead of leaves, can store gas/stars in same tree at different depths
 			TArray<FVector> Positions;
 			TArray<float> Extents;
 			TArray<FLinearColor> Colors;

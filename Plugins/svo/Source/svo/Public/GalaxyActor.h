@@ -45,7 +45,7 @@ public:
 	int Seed = 133780085;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
-	int64 Extent = 2097152;
+	int64 Extent = 8388608;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
 	double UnitScale = 1.0;

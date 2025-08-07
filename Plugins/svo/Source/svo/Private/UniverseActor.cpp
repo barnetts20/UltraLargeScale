@@ -33,7 +33,7 @@ void AUniverseActor::Initialize()
 			Generator->GenerateData(Octree);
 
 			//Extract data from the tree and construct niagara arrays
-			TArray<TSharedPtr<FOctreeNode>> Leaves = Octree->GetLeafNodes(); // Replace this to pick up nodes with density instead of leaves, can store gas/stars in same tree at different depths
+			TArray<TSharedPtr<FOctreeNode>> Leaves = Octree->GetPopulatedNodes(); // Replace this to pick up nodes with density instead of leaves, can store gas/stars in same tree at different depths
 			TArray<FVector> Positions;
 			TArray<FVector> Rotations;
 			TArray<float> Extents;
@@ -105,35 +105,24 @@ void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InRefer
 	}
 
 	//Scale is derived from perceived universe extent divided galaxy extent
-	const double GalaxyUnitScale = (InNode->Extent * this->UnitScale) / 2097152; //Base galaxy extent consider moving to like a constance file or something
-	const double UniverseUnitScale = this->UnitScale;  
-	const double SharedSpeedScale = this->SpeedScale;
-
+	const double GalaxyUnitScale = (InNode->Extent * this->UnitScale) / GalaxyExtent; 
 	// Compute correct parallax ratios
-	const double GalaxyParallaxRatio = (SharedSpeedScale / GalaxyUnitScale);
-	const double UniverseParallaxRatio = (SharedSpeedScale / UniverseUnitScale);
-
-	const FVector NodeUniversePosition = FVector(InNode->Center.X, InNode->Center.Y, InNode->Center.Z);
+	const double GalaxyParallaxRatio = (SpeedScale / GalaxyUnitScale);
+	const double UniverseParallaxRatio = (SpeedScale / UnitScale);
 	// 1. Node world position
 	FVector NodeWorldPosition = FVector(InNode->Center.X, InNode->Center.Y, InNode->Center.Z) + GetActorLocation();
-
 	// 2. Player offset from node
 	FVector PlayerToNode = InReferencePosition - NodeWorldPosition;
-
-	// 3. Motion ratios
-	double UniverseMotionRatio = (SpeedScale / UniverseUnitScale); // 0.0
-	double GalaxyMotionRatio = (SpeedScale / GalaxyUnitScale);     // -19.0
-
 	// 4. Final spawn position
-	FVector GalaxySpawnPosition = InReferencePosition - PlayerToNode * (GalaxyMotionRatio/UniverseMotionRatio); // +19 * offset
+	FVector GalaxySpawnPosition = InReferencePosition - PlayerToNode * (GalaxyParallaxRatio / UniverseParallaxRatio);
 
 	AGalaxyActor* NewGalaxy = GetWorld()->SpawnActor<AGalaxyActor>(GalaxyActorClass, GalaxySpawnPosition, FRotator::ZeroRotator);
-
 	if (NewGalaxy)
 	{
 		NewGalaxy->Universe = this; // We need to delay spawn till we can proceduralize bounding info
+		NewGalaxy->Extent = GalaxyExtent;
 		NewGalaxy->Seed = InNode->Data.ObjectId;
-		NewGalaxy->SpeedScale = SharedSpeedScale;
+		NewGalaxy->SpeedScale = SpeedScale;
 		NewGalaxy->UnitScale = GalaxyUnitScale;
 		FRandomStream RandStream(InNode->Data.ObjectId);
 		FVector normal = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
@@ -176,44 +165,11 @@ void AUniverseActor::DestroyGalaxy(TSharedPtr<FOctreeNode> InNode)
 	}
 }
 
-void AUniverseActor::DebugDrawTree()
-{
-	if (!Octree.IsValid()) return;
-	TArray<TSharedPtr<FOctreeNode>> Leaves = Octree->GetLeafNodes();
-
-	for (auto& Node : Leaves)
-	{
-		FVector WorldCenter = FVector(
-			Node->Center.X, Node->Center.Y, Node->Center.Z
-		) + GetActorLocation();
-
-		float BoxExtent = Node->Extent;
-
-		DrawDebugBox(
-			GetWorld(),
-			WorldCenter,
-			FVector(BoxExtent),
-			FColor::Green,
-			true,
-			10.0f,
-			255,
-			1.0f
-		);
-	}
-}
-
 // Called when the game starts or when spawned
 void AUniverseActor::BeginPlay()
 {
 	Super::BeginPlay();
 	Initialize();
-
-	bool debugDraw = false;
-
-	if (debugDraw) {
-		DebugDrawTree();
-	}
-
 }
 
 void AUniverseActor::Tick(float DeltaTime)
@@ -236,7 +192,6 @@ void AUniverseActor::Tick(float DeltaTime)
 	}
 
 	double ParallaxRatio = SpeedScale / UnitScale;
-	FVector ActorOrigin = FVector::ZeroVector; // Replace with your origin if dynamic
 	FVector PlayerOffset = CurrentFrameOfReferenceLocation - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
 	FVector ParallaxOffset = PlayerOffset * (1.0 - ParallaxRatio);
