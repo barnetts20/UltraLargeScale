@@ -18,7 +18,7 @@ public:
 	int DepthRange = 8;
 	int MinInsertionDepth = 1;
 	int MaxInsertionDepth = 1;
-
+	int InsertDepthOffset = 0;
 	//Other implementations responsible for handling their internal configuration randomization
 	PointCloudGenerator(int InSeed) : Seed(InSeed) {};
 	virtual ~PointCloudGenerator() = default;

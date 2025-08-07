@@ -156,8 +156,7 @@ void GlobularNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {
 	if (!InOctree) return;
 	FRandomStream Stream(Seed);
-	DepthRange = Stream.RandRange(4, 4);
-	MaxInsertionDepth = InOctree->MaxDepth - 4;
+	MaxInsertionDepth = FMath::Max(InOctree->MaxDepth - InsertDepthOffset, 1);
 	MinInsertionDepth = FMath::Max(MaxInsertionDepth - DepthRange, 1); //Do not insert above level 1
 	auto Noise = FastNoise::NewFromEncodedNodeTree(EncodedTree);
 

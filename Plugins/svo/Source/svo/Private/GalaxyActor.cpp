@@ -22,30 +22,47 @@ void AGalaxyActor::Initialize()
 			//Populate Data into the tree
 			Octree = MakeShared<FOctree>(Extent);
 			FRandomStream Stream = FRandomStream(Seed);
-			//TODO: Add some % chance for globular noise based galaxy, increased Z axis spread and noise amount
-			auto SpiralGenerator = new SpiralNoiseGenerator(Seed);
-			//Proceduralize
-			SpiralGenerator->Count = Stream.RandRange(200000, 500000);
-			SpiralGenerator->Rotation = FRotator(AxisRotation.X, AxisRotation.Y, AxisRotation.Z);
-			SpiralGenerator->DepthRange = 4;
-			SpiralGenerator->NumArms = Stream.RandRange(2, 12);
-			SpiralGenerator->PitchAngle = Stream.FRandRange(5, 40);
-			SpiralGenerator->ArmContrast = Stream.FRandRange(.2, .8);
-			SpiralGenerator->RadialFalloff = Stream.FRandRange(2, 4);
-			SpiralGenerator->CenterScale = Stream.FRandRange(.01, .02);
-			SpiralGenerator->HorizontalSpreadMin = Stream.FRandRange(.01, .03);
-			SpiralGenerator->HorizontalSpreadMax = Stream.FRandRange(.15, .3);
-			SpiralGenerator->VerticalSpreadMin = Stream.FRandRange(.01, .03);
-			SpiralGenerator->VerticalSpreadMax = Stream.FRandRange(.05, .15);
+			this->Count = Stream.RandRange(200000, 500000);
+			auto EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
+			int DepthRange = 4;
+			if (Stream.FRand() < .3) {
+				auto GlobularGenerator = new GlobularNoiseGenerator(Seed);
+				GlobularGenerator->Count = Count;
+				GlobularGenerator->Falloff = Stream.FRandRange(.5, 1.5);
+				GlobularGenerator->Rotation = FRotator(AxisRotation.X, AxisRotation.Y, AxisRotation.Z);
+				GlobularGenerator->EncodedTree = EncodedTree;
+				GlobularGenerator->DepthRange = DepthRange;
+				GlobularGenerator->HorizontalExtent = .9;/// *Extent;
+				GlobularGenerator->VerticalExtent = Stream.FRandRange(.1, .9);// *Extent;
+				GlobularGenerator->WarpAmount = FVector(Stream.FRandRange(.0, 1.1));
+				GlobularGenerator->InsertDepthOffset = 0;
+				GlobularGenerator->GenerateData(Octree);
+			}
+			else {
+				auto SpiralGenerator = new SpiralNoiseGenerator(Seed);
+				//Proceduralize
+				SpiralGenerator->Count = Count;
+				SpiralGenerator->Rotation = FRotator(AxisRotation.X, AxisRotation.Y, AxisRotation.Z);
+				SpiralGenerator->DepthRange = DepthRange;
+				SpiralGenerator->NumArms = Stream.RandRange(2, 12);
+				SpiralGenerator->PitchAngle = Stream.FRandRange(5, 40);
+				SpiralGenerator->ArmContrast = Stream.FRandRange(.2, .8);
+				SpiralGenerator->RadialFalloff = Stream.FRandRange(2, 4);
+				SpiralGenerator->CenterScale = Stream.FRandRange(.01, .02);
+				SpiralGenerator->HorizontalSpreadMin = Stream.FRandRange(.01, .03);
+				SpiralGenerator->HorizontalSpreadMax = Stream.FRandRange(.15, .3);
+				SpiralGenerator->VerticalSpreadMin = Stream.FRandRange(.01, .03);
+				SpiralGenerator->VerticalSpreadMax = Stream.FRandRange(.05, .15);
 
-			double HorizontalWarp = Stream.FRandRange(.1, .9);
-			double VerticalWarp = Stream.FRandRange(.1, .9);
+				double HorizontalWarp = Stream.FRandRange(.1, .9);
+				double VerticalWarp = Stream.FRandRange(.1, .9);
 
-			SpiralGenerator->WarpAmount = FVector(HorizontalWarp, HorizontalWarp, VerticalWarp);
-			SpiralGenerator->EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
+				SpiralGenerator->WarpAmount = FVector(HorizontalWarp, HorizontalWarp, VerticalWarp);
+				SpiralGenerator->EncodedTree = EncodedTree;
 
+				SpiralGenerator->GenerateData(Octree);
+			}
 
-			SpiralGenerator->GenerateData(Octree);
 			//GlobularGenerator->GenerateData(Octree);
 			//Extract data from the tree and construct niagara arrays
 			TArray<TSharedPtr<FOctreeNode>> Leaves = Octree->GetPopulatedNodes(); // Replace this to pick up nodes with density instead of leaves, can store gas/stars in same tree at different depths
