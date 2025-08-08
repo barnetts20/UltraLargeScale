@@ -38,7 +38,7 @@ void AGalaxyActor::Initialize()
 				GlobularGenerator->HorizontalExtent = .9;/// *Extent;
 				GlobularGenerator->VerticalExtent = Stream.FRandRange(.1, .9);// *Extent;
 				GlobularGenerator->WarpAmount = FVector(Stream.FRandRange(.0, 1.1));
-				GlobularGenerator->InsertDepthOffset = 0;
+				GlobularGenerator->InsertDepthOffset = 4;
 				GlobularGenerator->GenerateData(Octree);
 			}
 			else {
@@ -62,7 +62,7 @@ void AGalaxyActor::Initialize()
 
 				SpiralGenerator->WarpAmount = FVector(HorizontalWarp, HorizontalWarp, VerticalWarp);
 				SpiralGenerator->EncodedTree = EncodedTree;
-
+				SpiralGenerator->InsertDepthOffset = 4;
 				SpiralGenerator->GenerateData(Octree);
 			}
 
@@ -128,7 +128,7 @@ void AGalaxyActor::InitializeNiagara()
 
 			FLinearColor HsvParent = ParentColor.LinearRGBToHSV();
 
-			float Offset = Stream.FRandRange(15.f, 60.f);
+			float Offset = Stream.FRandRange(20.f, 60.f);
 
 			FLinearColor Color1 = FLinearColor(HsvParent.R - Offset + 360.f, HsvParent.G, HsvParent.B);
 			FLinearColor Color2 = FLinearColor(HsvParent.R + Offset + 360.f, HsvParent.G, HsvParent.B);
@@ -166,23 +166,22 @@ void AGalaxyActor::InitializeNiagara()
 			}
 			DynamicMaterial->SetTextureParameterValue(FName("BaseNoise"), NoiseTextures[Stream.RandRange(0, NoiseTextures.Num() - 1)]);
 			DynamicMaterial->SetTextureParameterValue(FName("DistortionNoise"), NoiseTextures[Stream.RandRange(0, NoiseTextures.Num() - 1)]);
-			//
 			NiagaraComponent->SetVariableMaterial(FName("User.GasMaterial"), DynamicMaterial);
 			//
 			// 
-			Async(EAsyncExecution::Thread, [this]()
-			{
+			//Async(EAsyncExecution::Thread, [this]()
+			//{
 					// Pass in user parameters (assuming Niagara system is setup to receive them)
-					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), Positions);
-					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), Colors);
-					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), Extents);
+			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), Positions);
+			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), Colors);
+			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), Extents);
 
-					AsyncTask(ENamedThreads::GameThread, [this, Positions = MoveTemp(Positions), Extents = MoveTemp(Extents), Colors = MoveTemp(Colors)]()
-					{
-						NiagaraComponent->Activate(true);
-						NiagaraComponent->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-					});
-			});
+					//AsyncTask(ENamedThreads::GameThread, [this, Positions = MoveTemp(Positions), Extents = MoveTemp(Extents), Colors = MoveTemp(Colors)]()
+					//{
+			NiagaraComponent->Activate(true);
+			NiagaraComponent->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+					//});
+			//});
 
 		}
 	}

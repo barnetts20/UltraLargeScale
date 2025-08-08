@@ -26,8 +26,8 @@ void AUniverseActor::Initialize()
 			Generator->Count = this->Count;
 			Generator->Falloff = .5;
 			Generator->Rotation = FRotator(0);
-			Generator->DepthRange = 10;
-			Generator->InsertDepthOffset = 0;
+			Generator->DepthRange = 6;
+			Generator->InsertDepthOffset = 8;
 			Generator->WarpAmount = FVector(1);
 
 			//Finally populate data into the tree

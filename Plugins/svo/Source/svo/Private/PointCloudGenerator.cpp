@@ -257,8 +257,8 @@ void SpiralNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 	int64 Extent = InOctree->Extent;
 
 	// Proceduralize parameters before entering population loop
-	MaxInsertionDepth = InOctree->MaxDepth;
-	MinInsertionDepth = FMath::Max(InOctree->MaxDepth - DepthRange, 1); //Do not insert above level 1
+	MaxInsertionDepth = FMath::Max(InOctree->MaxDepth - InsertDepthOffset, 1);
+	MinInsertionDepth = FMath::Max(MaxInsertionDepth - DepthRange, 1); //Do not insert above level 1
 	HorizontalSpreadDistance = InOctree->Extent * HorizontalSpreadMax;
 	VerticalSpreadDistance = InOctree->Extent * VerticalSpreadMax;
 	RadialDistance = InOctree->Extent - HorizontalSpreadDistance; //Radius
