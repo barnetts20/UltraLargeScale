@@ -49,11 +49,10 @@ void AUniverseActor::Initialize()
 					const TSharedPtr<FOctreeNode>& Leaf = Leaves[Index];
 					FRandomStream RandStream(Leaf->Data.ObjectId);
 					FVector ColorVector = RandStream.GetUnitVector();
-					//ColorVector = FVector(FMath::Abs(ColorVector.X), FMath::Abs(ColorVector.Y), FMath::Abs(ColorVector.Z)).GetSafeNormal();
 					Rotations[Index] = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
 					Positions[Index] = FVector(Leaf->Center.X, Leaf->Center.Y, Leaf->Center.Z);
 					Extents[Index] = static_cast<float>(Leaf->Extent);
-					Colors[Index] = FLinearColor(ColorVector.X, ColorVector.Y, ColorVector.Z);
+					Colors[Index] = FLinearColor(ColorVector.X, ColorVector.Y, ColorVector.Z);;
 				});
 
 			//Pass the arrays back to the game thread to instantiate the particle system
@@ -127,6 +126,8 @@ void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InRefer
 		NewGalaxy->SpeedScale = SpeedScale;
 		NewGalaxy->UnitScale = GalaxyUnitScale;
 		FRandomStream RandStream(InNode->Data.ObjectId);
+		FVector ColorVector = RandStream.GetUnitVector();
+		NewGalaxy->ParentColor = FLinearColor(ColorVector.X, ColorVector.Y, ColorVector.Z);
 		FVector normal = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
 		FMatrix RotationMatrix = FRotationMatrix::MakeFromZX(normal, FVector::ForwardVector);
 		NewGalaxy->AxisRotation = normal * 360;

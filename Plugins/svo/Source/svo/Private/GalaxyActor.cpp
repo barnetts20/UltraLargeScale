@@ -2,7 +2,9 @@
 #include "GalaxyActor.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include <PointCloudGenerator.h>
+#include "Engine/VolumeTexture.h"
 #include <Kismet/GameplayStatics.h>
+#include <AssetRegistry/AssetRegistryModule.h>
 
 void AGalaxyActor::Initialize()
 {
@@ -25,6 +27,7 @@ void AGalaxyActor::Initialize()
 			this->Count = Stream.RandRange(200000, 500000);
 			auto EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
 			int DepthRange = 4;
+
 			if (Stream.FRand() < .3) {
 				auto GlobularGenerator = new GlobularNoiseGenerator(Seed);
 				GlobularGenerator->Count = Count;
@@ -66,9 +69,6 @@ void AGalaxyActor::Initialize()
 			//GlobularGenerator->GenerateData(Octree);
 			//Extract data from the tree and construct niagara arrays
 			TArray<TSharedPtr<FOctreeNode>> Leaves = Octree->GetPopulatedNodes(); // Replace this to pick up nodes with density instead of leaves, can store gas/stars in same tree at different depths
-			TArray<FVector> Positions;
-			TArray<float> Extents;
-			TArray<FLinearColor> Colors;
 			Positions.SetNumUninitialized(Leaves.Num());
 			Extents.SetNumUninitialized(Leaves.Num());
 			Colors.SetNumUninitialized(Leaves.Num());
@@ -78,26 +78,24 @@ void AGalaxyActor::Initialize()
 					const TSharedPtr<FOctreeNode>& Leaf = Leaves[Index];
 					FRandomStream RandStream(Leaf->Data.ObjectId);
 					FVector ColorVector = RandStream.GetUnitVector();
-					//ColorVector = FVector(FMath::Abs(ColorVector.X), FMath::Abs(ColorVector.Y), FMath::Abs(ColorVector.Z)).GetSafeNormal();
-
 					Positions[Index] = FVector(Leaf->Center.X, Leaf->Center.Y, Leaf->Center.Z);// Should already be in particle system local space
 					Extents[Index] = static_cast<float>(Leaf->Extent);
-					Colors[Index] = FLinearColor(ColorVector.X, ColorVector.Y, ColorVector.Z);
+					Colors[Index] = FLinearColor(ColorVector);
 				});
 
 			//Pass the arrays back to the game thread to instantiate the particle system
-			AsyncTask(ENamedThreads::GameThread, [this, Positions = MoveTemp(Positions), Extents = MoveTemp(Extents), Colors = MoveTemp(Colors)]()
+			//InitializeNiagara(Positions, Extents, Colors);
+			AsyncTask(ENamedThreads::GameThread, [this]()
 				{
-					InitializeNiagara(Positions, Extents, Colors);
+					InitializeNiagara();
 				});
 		});
 }
 
-void AGalaxyActor::InitializeNiagara(TArray<FVector> Positions, TArray<float> Extents, TArray<FLinearColor> Colors)
+void AGalaxyActor::InitializeNiagara()
 {
 	FSoftObjectPath NiagaraSystemPath(NiagaraPath);
 	PointCloudNiagara = Cast<UNiagaraSystem>(NiagaraSystemPath.TryLoad());
-
 	if (PointCloudNiagara)
 	{
 		//SYSTEM IS SPAWNING WITH EITHER AN OFFSET AT THE SYSTEM LEVEL OR AT INSERTION OF POINTS IN A WAY THAT IS UNCENTERING IT
@@ -120,13 +118,72 @@ void AGalaxyActor::InitializeNiagara(TArray<FVector> Positions, TArray<float> Ex
 			FBox Bounds(FVector(-Extent), FVector(Extent));
 			NiagaraComponent->SetSystemFixedBounds(Bounds);
 
-			// Pass in user parameters (assuming Niagara system is setup to receive them)
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), Positions);
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), Colors);
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), Extents);
-			// Optionally reactivate to refresh state if needed
-			NiagaraComponent->Activate(true);
-			NiagaraComponent->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+			//TODO::Proceduralize Dust cloud material
+			FRandomStream Stream = FRandomStream(Seed);
+			UMaterialInterface* GasMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/GasSpriteMaterial_Inst.GasSpriteMaterial_Inst"));
+			UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(GasMaterial, this);
+
+			FLinearColor SecondaryColor = FLinearColor(Stream.GetUnitVector());
+			DynamicMaterial->SetScalarParameterValue(FName("Extent"), Extent);
+
+			FLinearColor HsvParent = ParentColor.LinearRGBToHSV();
+
+			float Offset = Stream.FRandRange(15.f, 60.f);
+
+			FLinearColor Color1 = FLinearColor(HsvParent.R - Offset + 360.f, HsvParent.G, HsvParent.B);
+			FLinearColor Color2 = FLinearColor(HsvParent.R + Offset + 360.f, HsvParent.G, HsvParent.B);
+			//dm->SetScalarParameterValue(FName("RadialFalloff"), 4);
+
+			DynamicMaterial->SetVectorParameterValue(FName("Color1"), Color1.HSVToLinearRGB());
+			DynamicMaterial->SetVectorParameterValue(FName("Color2"), Color2.HSVToLinearRGB());
+			DynamicMaterial->SetVectorParameterValue(FName("PositionScaleOffset"), FVector4(Stream.FRandRange(-1,1), Stream.FRandRange(-1, 1), Stream.FRandRange(-1, 1), Stream.FRandRange(.75, 1.25)));
+			DynamicMaterial->SetScalarParameterValue(FName("BaseNoiseScale"), Stream.FRandRange(.5, 1.5));
+			DynamicMaterial->SetScalarParameterValue(FName("DistortionNoiseScale"), Stream.FRandRange(.1, .5));
+			DynamicMaterial->SetScalarParameterValue(FName("DistortionAmount"), Stream.FRandRange(.02, .5));
+			DynamicMaterial->SetScalarParameterValue(FName("ColorBalance"), Stream.FRandRange(1.5, 2.5));
+			DynamicMaterial->SetScalarParameterValue(FName("ParticleColorInfluence"), Stream.FRandRange(0, .6));
+			DynamicMaterial->SetScalarParameterValue(FName("OpacityMultiplier"), Stream.FRandRange(.005, .02));
+
+			//Select random volume textures here
+			TArray<UVolumeTexture*> NoiseTextures;
+			FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+
+			FARFilter Filter;
+			Filter.ClassPaths.Add(UVolumeTexture::StaticClass()->GetClassPathName());
+			Filter.PackagePaths.Add("/SVO/VolumeTextures");
+			Filter.bRecursivePaths = true;
+
+			TArray<FAssetData> AssetList;
+			AssetRegistryModule.Get().GetAssets(Filter, AssetList);
+
+			for (const FAssetData& Asset : AssetList)
+			{
+				UVolumeTexture* Tex = Cast<UVolumeTexture>(Asset.GetAsset());
+				if (Tex)
+				{
+					NoiseTextures.Add(Tex);
+				}
+			}
+			DynamicMaterial->SetTextureParameterValue(FName("BaseNoise"), NoiseTextures[Stream.RandRange(0, NoiseTextures.Num() - 1)]);
+			DynamicMaterial->SetTextureParameterValue(FName("DistortionNoise"), NoiseTextures[Stream.RandRange(0, NoiseTextures.Num() - 1)]);
+			//
+			NiagaraComponent->SetVariableMaterial(FName("User.GasMaterial"), DynamicMaterial);
+			//
+			// 
+			Async(EAsyncExecution::Thread, [this]()
+			{
+					// Pass in user parameters (assuming Niagara system is setup to receive them)
+					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), Positions);
+					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), Colors);
+					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), Extents);
+
+					AsyncTask(ENamedThreads::GameThread, [this, Positions = MoveTemp(Positions), Extents = MoveTemp(Extents), Colors = MoveTemp(Colors)]()
+					{
+						NiagaraComponent->Activate(true);
+						NiagaraComponent->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+					});
+			});
+
 		}
 	}
 }

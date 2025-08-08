@@ -20,21 +20,21 @@ class SVO_API AGalaxyActor : public AActor
 public:
 	AGalaxyActor() {
 		PrimaryActorTick.bCanEverTick = true;
-		NiagaraPath = FString("/svo/NG_PointCloud.NG_PointCloud");
+		NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
 		USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
 		SetRootComponent(SceneRoot);
 	}
 	// Sets default values for this actor's properties
 	AGalaxyActor(AUniverseActor* InUniverse) : Universe(InUniverse) {
 		PrimaryActorTick.bCanEverTick = true;
-		NiagaraPath = FString("/svo/NG_PointCloud.NG_PointCloud");
+		NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
 		USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
 		SetRootComponent(SceneRoot);
 	};
 
 	AGalaxyActor(AUniverseActor* InUniverse, int InSeed, int64 InExtent, double InUnitScale, int InCount, FVector InAxisRotation) : Universe(InUniverse), Seed(Seed), Extent(InExtent), UnitScale(InUnitScale), Count(InCount), AxisRotation(InAxisRotation) {
 		PrimaryActorTick.bCanEverTick = true;
-		NiagaraPath = FString("/svo/NG_PointCloud.NG_PointCloud");
+		NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
 		USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
 		SetRootComponent(SceneRoot);
 	};
@@ -77,10 +77,16 @@ public:
 	FVector LastFrameOfReferenceLocation = FVector(0,0,0);
 	FVector CurrentFrameOfReferenceLocation;
 	FVector GalaxyRealSpaceOrigin;
+
+	TArray<FVector> Positions;
+	TArray<float> Extents;
+	TArray<FLinearColor> Colors;
+
+	FLinearColor ParentColor = FLinearColor(1,1,1,0);
 	void Initialize();
 
 protected:
-	void InitializeNiagara(TArray<FVector> Positions, TArray<float> Extents, TArray<FLinearColor> Colors);
+	void InitializeNiagara();
 	void DebugDrawTree();
 	virtual void BeginPlay() override;
 
