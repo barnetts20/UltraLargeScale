@@ -16,8 +16,8 @@ public:
 
 struct SVO_API FVoxelData {
 public:
-	FVoxelData() : Density(-1), ObjectId(-1) {};
-	FVoxelData(double InDensity, int InObjectId) : Density(InDensity), ObjectId(InObjectId) {};
+	FVoxelData() : Density(0.0), ObjectId(-1), TypeId(-1) {};
+	FVoxelData(double InDensity, int InObjectId, int InTypeId = -1) : Density(InDensity), ObjectId(InObjectId), TypeId(InTypeId) {};
 
 	double Density;
 	int ObjectId;

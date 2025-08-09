@@ -24,7 +24,7 @@ void AGalaxyActor::Initialize()
 			//Populate Data into the tree
 			Octree = MakeShared<FOctree>(Extent);
 			FRandomStream Stream = FRandomStream(Seed);
-			this->Count = Stream.RandRange(200000, 500000);
+			this->Count = Stream.RandRange(100000, 400000);
 			auto EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
 			int DepthRange = 4;
 
@@ -68,7 +68,7 @@ void AGalaxyActor::Initialize()
 
 			//GlobularGenerator->GenerateData(Octree);
 			//Extract data from the tree and construct niagara arrays
-			TArray<TSharedPtr<FOctreeNode>> Leaves = Octree->GetPopulatedNodes(); // Replace this to pick up nodes with density instead of leaves, can store gas/stars in same tree at different depths
+			TArray<TSharedPtr<FOctreeNode>> Leaves = Octree->GetPopulatedNodes(-1, -1, 1); // Replace this to pick up nodes with density instead of leaves, can store gas/stars in same tree at different depths
 			Positions.SetNumUninitialized(Leaves.Num());
 			Extents.SetNumUninitialized(Leaves.Num());
 			Colors.SetNumUninitialized(Leaves.Num());
@@ -77,7 +77,7 @@ void AGalaxyActor::Initialize()
 				{
 					const TSharedPtr<FOctreeNode>& Leaf = Leaves[Index];
 					FRandomStream RandStream(Leaf->Data.ObjectId);
-					FVector ColorVector = RandStream.GetUnitVector();
+					FVector ColorVector = (RandStream.GetUnitVector()).GetAbs();
 					Positions[Index] = FVector(Leaf->Center.X, Leaf->Center.Y, Leaf->Center.Z);// Should already be in particle system local space
 					Extents[Index] = static_cast<float>(Leaf->Extent);
 					Colors[Index] = FLinearColor(ColorVector);
@@ -117,7 +117,7 @@ void AGalaxyActor::InitializeNiagara()
 			// Set system bounds
 			FBox Bounds(FVector(-Extent), FVector(Extent));
 			NiagaraComponent->SetSystemFixedBounds(Bounds);
-
+			NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Extent);
 			//TODO::Proceduralize Dust cloud material
 			FRandomStream Stream = FRandomStream(Seed);
 			UMaterialInterface* GasMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/GasSpriteMaterial_Inst.GasSpriteMaterial_Inst"));
@@ -128,7 +128,7 @@ void AGalaxyActor::InitializeNiagara()
 
 			FLinearColor HsvParent = ParentColor.LinearRGBToHSV();
 
-			float Offset = Stream.FRandRange(20.f, 60.f);
+			float Offset = Stream.FRandRange(20.f, 45.f);
 
 			FLinearColor Color1 = FLinearColor(HsvParent.R - Offset + 360.f, HsvParent.G, HsvParent.B);
 			FLinearColor Color2 = FLinearColor(HsvParent.R + Offset + 360.f, HsvParent.G, HsvParent.B);

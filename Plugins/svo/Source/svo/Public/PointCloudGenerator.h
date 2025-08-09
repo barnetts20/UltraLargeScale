@@ -14,7 +14,7 @@ class SVO_API PointCloudGenerator
 public:
 	int Seed;
 	int Count = 1000000;
-
+	int Type = 1;
 	int DepthRange = 8;
 	int MinInsertionDepth = 1;
 	int MaxInsertionDepth = 1;

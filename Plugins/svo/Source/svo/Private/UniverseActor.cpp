@@ -34,7 +34,7 @@ void AUniverseActor::Initialize()
 			Generator->GenerateData(Octree);
 
 			//Extract data from the tree and construct niagara arrays
-			TArray<TSharedPtr<FOctreeNode>> Leaves = Octree->GetPopulatedNodes(); // Replace this to pick up nodes with density instead of leaves, can store gas/stars in same tree at different depths
+			TArray<TSharedPtr<FOctreeNode>> Leaves = Octree->GetPopulatedNodes(-1, -1, 1); // Replace this to pick up nodes with density instead of leaves, can store gas/stars in same tree at different depths
 			TArray<FVector> Positions;
 			TArray<FVector> Rotations;
 			TArray<float> Extents;
@@ -94,6 +94,7 @@ void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVect
 			NiagaraComponent->Activate(true);
 		}
 	}
+	DensityVolumeTexture = Octree->CreateVolumeTextureFromOctreeSimple();
 	Initialized = true;
 }
 
@@ -109,7 +110,7 @@ void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InRefer
 	// Compute correct parallax ratios
 	const double GalaxyParallaxRatio = (SpeedScale / GalaxyUnitScale);
 	const double UniverseParallaxRatio = (SpeedScale / UnitScale);
-	if (UniverseParallaxRatio > 40) return;
+
 	// 1. Node world position
 	FVector NodeWorldPosition = FVector(InNode->Center.X, InNode->Center.Y, InNode->Center.Z) + GetActorLocation();
 	// 2. Player offset from node

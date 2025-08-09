@@ -48,6 +48,7 @@ public:
 	FVector LastFrameOfReferenceLocation;
 	FVector CurrentFrameOfReferenceLocation;
 
+	UVolumeTexture* DensityVolumeTexture;
 	void SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InReferencePosition);
 	void DestroyGalaxy(TSharedPtr<FOctreeNode> InNode);
 
