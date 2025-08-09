@@ -313,6 +313,7 @@ public:
 			NewVolumeTexture->SetPlatformData(VolumeTexture->GetPlatformData());
 		}
 
+		NewVolumeTexture->Source.SetOwner(NewVolumeTexture);
 		// Copy properties (using the correct property names from the header)
 		NewVolumeTexture->SRGB = VolumeTexture->SRGB;
 		NewVolumeTexture->CompressionSettings = VolumeTexture->CompressionSettings;

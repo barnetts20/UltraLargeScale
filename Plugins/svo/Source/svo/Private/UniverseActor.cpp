@@ -94,8 +94,9 @@ void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVect
 			NiagaraComponent->Activate(true);
 		}
 	}
-	DensityVolumeTexture = Octree->CreateVolumeTextureFromOctreeSimple();
 	Initialized = true;
+	DensityVolumeTexture = Octree->CreateVolumeTextureFromOctreeSimple();
+	Octree->SaveVolumeTextureAsAsset(DensityVolumeTexture, FString("/svo"), FString("test1"));
 }
 
 void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InReferencePosition)
