@@ -3,12 +3,24 @@ struct DensitySampler{
     SamplerState TexSampler;
     Texture3D NoiseTex;
     SamplerState NoiseTexSampler;
+    
     float4 Sample(float3 InPos){
-        float4 volumesample = Texture3DSample(Tex, TexSampler, saturate(InPos));
+        float3 samplepos = saturate(InPos);
+        
+        // Domain warping parameters
+        float WarpScale1 = 16.0;
+        float WarpStrength1 = 0.04;
+        
+        // First level of domain warp - single sample, use RGB channels
+        float3 Warp1 = Texture3DSample(NoiseTex, NoiseTexSampler, samplepos * WarpScale1).rgb;
+        Warp1 = (Warp1 - 0.5) * WarpStrength1;
+                
+        float3 finalpos = saturate(samplepos + Warp1);
+        float4 volumesample = Texture3DSample(Tex, TexSampler, finalpos);
+        
         return volumesample;
     }
 };
-
 DensitySampler densitysampler;
 densitysampler.Tex = Tex;
 densitysampler.TexSampler = TexSampler;
