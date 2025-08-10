@@ -16,10 +16,11 @@ public:
 
 struct SVO_API FVoxelData {
 public:
-	FVoxelData() : Density(0.0), ObjectId(-1), TypeId(-1) {};
-	FVoxelData(double InDensity, int InObjectId, int InTypeId = -1) : Density(InDensity), ObjectId(InObjectId), TypeId(InTypeId) {};
+	FVoxelData() : Density(0.0), Composition(0, 0, 0), ObjectId(-1), TypeId(-1) {};
+	FVoxelData(double InDensity, FVector InComposition, int InObjectId, int InTypeId = -1) : Density(InDensity), Composition(InComposition), ObjectId(InObjectId), TypeId(InTypeId) {};
 
 	double Density;
+	FVector Composition;
 	int ObjectId;
 	int TypeId;
 };

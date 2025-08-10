@@ -21,6 +21,10 @@
 		{
 			"Name": "CMakeTarget",
 			"Enabled": true
+		},
+		{
+			"Name": "Volumetrics",
+			"Enabled": true
 		}
 	]
 }

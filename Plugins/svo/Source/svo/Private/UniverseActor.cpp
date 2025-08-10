@@ -48,20 +48,19 @@ void AUniverseActor::Initialize()
 				{
 					const TSharedPtr<FOctreeNode>& Leaf = Leaves[Index];
 					FRandomStream RandStream(Leaf->Data.ObjectId);
-					FVector ColorVector = RandStream.GetUnitVector();
 					Rotations[Index] = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
 					Positions[Index] = FVector(Leaf->Center.X, Leaf->Center.Y, Leaf->Center.Z);
 					Extents[Index] = static_cast<float>(Leaf->Extent);
-					Colors[Index] = FLinearColor(ColorVector.X, ColorVector.Y, ColorVector.Z);;
+					Colors[Index] = FLinearColor(Leaf->Data.Composition);
 				});
 
 			//Pass the arrays back to the game thread to instantiate the particle system
 			AsyncTask(ENamedThreads::GameThread, [this, Positions = MoveTemp(Positions), Rotations = MoveTemp(Rotations), Extents = MoveTemp(Extents), Colors = MoveTemp(Colors)]()
 				{
-					InitializeNiagara(Positions, Rotations, Extents, Colors);
-					//DensityVolumeTexture = Octree->CreateVolumeTextureFromOctreeSimple();
-					//Octree->CreateVolumeTexture_RHIOnly_Test();
-					//Octree->SaveVolumeTextureAsAsset(DensityVolumeTexture, FString("/svo/Generated"), FString("universe_" + FString::FromInt(Seed)));
+					//InitializeNiagara(Positions, Rotations, Extents, Colors);
+					int TexResolution = 256;
+					//DensityVolumeTexture = Octree->CreateVolumeTextureFromOctreeSimple(TexResolution);
+					Octree->SaveVolumeTextureAsAssetFromOctree(256, FString("/svo/Generated"), FString("universe_" + FString::FromInt(Seed) + "_" + FString::FromInt(TexResolution)));
 				});
 		});
 }
@@ -128,8 +127,7 @@ void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InRefer
 		NewGalaxy->SpeedScale = SpeedScale;
 		NewGalaxy->UnitScale = GalaxyUnitScale;
 		FRandomStream RandStream(InNode->Data.ObjectId);
-		FVector ColorVector = RandStream.GetUnitVector();
-		NewGalaxy->ParentColor = FLinearColor(ColorVector.X, ColorVector.Y, ColorVector.Z);
+		NewGalaxy->ParentColor = FLinearColor(InNode->Data.Composition.GetSafeNormal());
 		FVector normal = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
 		FMatrix RotationMatrix = FRotationMatrix::MakeFromZX(normal, FVector::ForwardVector);
 		NewGalaxy->AxisRotation = normal * 360;

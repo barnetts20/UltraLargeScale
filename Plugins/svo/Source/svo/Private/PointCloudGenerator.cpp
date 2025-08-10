@@ -47,7 +47,7 @@ FInt64Coordinate PointCloudGenerator::ApplyNoise(FastNoise::SmartNode<> InNoise,
 	FZ = FMath::Clamp(FZ, -InExtent, InExtent);
 
 	//Back to int64 octree coordinates
-	OutDensity = Output[13] + 1;
+	OutDensity = (Output[13] + 1)/2;
 	auto InsertPosition = FInt64Coordinate(FX, FY, FZ);
 	return InsertPosition;
 }
@@ -92,7 +92,7 @@ void SimpleRandomGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 
 		auto InsertPosition = FInt64Coordinate(X, Y, Z);
 		int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-		auto InsertData = FVoxelData(Stream.FRand(), i, Type); //For now just placing the index in ObectId, will probably use it to map to object types
+		auto InsertData = FVoxelData(Stream.FRand(), Stream.GetUnitVector(), i, Type); //For now just placing the index in ObectId, will probably use it to map to object types
 		
 		InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 	});
@@ -120,7 +120,7 @@ void SimpleRandomNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			FInt64Coordinate InsertPosition = ApplyNoise(Noise, 1, InOctree->Extent, FInt64Coordinate(X, Y, Z), OutDensity);
 
 			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-			auto InsertData = FVoxelData(OutDensity, i, Type);
+			auto InsertData = FVoxelData(OutDensity, Stream.GetUnitVector(), i, Type);
 			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 		});
 }
@@ -148,7 +148,7 @@ void GlobularGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 		InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
 		auto InsertDepth = Stream.FRandRange(MinInsertionDepth, MaxInsertionDepth);
-		auto InsertData = FVoxelData(Stream.FRand(), i, Type);
+		auto InsertData = FVoxelData(Stream.FRand(), Stream.GetUnitVector(), i, Type);
 
 		InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 	});
@@ -180,7 +180,7 @@ void GlobularNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
 			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-			auto InsertData = FVoxelData(OutDensity, i, Type); // May need to add some way to control typing. for instance galaxy tree could contain stars, blackholes, gas all at different depths
+			auto InsertData = FVoxelData(OutDensity, Stream.GetUnitVector(), i, Type); // May need to add some way to control typing. for instance galaxy tree could contain stars, blackholes, gas all at different depths
 			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 		});
 }
@@ -247,7 +247,7 @@ void SpiralGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 		InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
 		auto InsertDepth = FMath::Lerp(MinInsertionDepth, MaxInsertionDepth, Stream.FRand());//  Stream.FRandRange(MinInsertionDepth, MaxInsertionDepth); //If a different scale distribution is wanted can change the way depth is randomized
-		auto InsertData = FVoxelData(Stream.FRand(), i, Type);
+		auto InsertData = FVoxelData(Stream.FRand(), Stream.GetUnitVector(), i, Type);
 		InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 	});
 }
@@ -316,7 +316,7 @@ void SpiralNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
 			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-			auto InsertData = FVoxelData(Stream.FRand(), i, Type);
+			auto InsertData = FVoxelData(Stream.FRand(), Stream.GetUnitVector(), i, Type);
 			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 		});
 }
@@ -369,7 +369,7 @@ void BurstGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 		);
 
 		int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-		FVoxelData Data(NoiseValue, i, Type);
+		FVoxelData Data(NoiseValue, Stream.GetUnitVector(), i, Type);
 		Coord = RotateCoordinate(Coord, Rotation);
 		InOctree->InsertPosition(Coord, InsertDepth, Data);
 	});
@@ -427,7 +427,7 @@ void BurstNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
 			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-			FVoxelData Data(OutDensity, i, Type);
+			FVoxelData Data(OutDensity, Stream.GetUnitVector(), i, Type);
 
 			InOctree->InsertPosition(InsertPosition, InsertDepth, Data);
 		});

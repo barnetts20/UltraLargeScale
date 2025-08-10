@@ -77,10 +77,9 @@ void AGalaxyActor::Initialize()
 				{
 					const TSharedPtr<FOctreeNode>& Leaf = Leaves[Index];
 					FRandomStream RandStream(Leaf->Data.ObjectId);
-					FVector ColorVector = (RandStream.GetUnitVector()).GetAbs();
 					Positions[Index] = FVector(Leaf->Center.X, Leaf->Center.Y, Leaf->Center.Z);// Should already be in particle system local space
 					Extents[Index] = static_cast<float>(Leaf->Extent);
-					Colors[Index] = FLinearColor(ColorVector);
+					Colors[Index] = FLinearColor(Leaf->Data.Composition);
 				});
 
 			//Pass the arrays back to the game thread to instantiate the particle system
