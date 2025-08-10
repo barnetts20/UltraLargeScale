@@ -2,6 +2,11 @@
 
 #pragma once
 #include <DataTypes.h>
+#include "UObject/SavePackage.h"
+#include "RHICommandList.h"
+#include "RenderResource.h"
+#include "RHIResources.h"       // For FRHITexture3D
+#include "RHIUtilities.h"   
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Engine/VolumeTexture.h"
 #include "CoreMinimal.h"
@@ -199,28 +204,29 @@ public:
 
 	UVolumeTexture* CreateVolumeTextureFromOctreeSimple()
 	{
-		const int32 Resolution = 256;
+		// --- CONFIG ---
+		const int32 Resolution = 128;
+		const int32 BytesPerPixel = 4;
+		const ETextureSourceFormat SourceFormat = TSF_BGRA8;    // match BGRA8 source layout
+		const EPixelFormat PixelFormat = PF_B8G8R8A8;           // BGRA on RHI
 
-		// Create the volume texture
-		UVolumeTexture* VolumeTexture = NewObject<UVolumeTexture>(
-			GetTransientPackage(),
-			NAME_None,
-			RF_Transient
-		);
+		// --- 1) Gather octree nodes at desired depth on the game thread ---
+		const int TargetDepth = FMath::FloorLog2(Resolution);
+		TArray<TSharedPtr<FOctreeNode>> PopulatedNodes = this->GetPopulatedNodes(TargetDepth, TargetDepth, -1);
+		const float MaxDensityAtDepth = (DepthMaxDensities.IsValidIndex(TargetDepth) ? (float)DepthMaxDensities[TargetDepth] : 1.0f);
+		const int64 NodeExtentAtDepth = (this->Extent >> TargetDepth);
+		const int64 OctreeExtent = this->Extent;
 
-		// Cache octree data for the lambda
-		TArray<TSharedPtr<FOctreeNode>> PopulatedNodes = this->GetPopulatedNodes(8, 8, -1);
-		float MaxDensityAtDepth = this->DepthMaxDensities[8];
-		int64 NodeExtentAtDepth = this->Extent >> 8;
-		int64 OctreeExtent = this->Extent;
-
-		// Create a lookup map for faster access
+		// Build a quick map of populated voxel coords -> node
 		TMap<FIntVector, TSharedPtr<FOctreeNode>> NodeMap;
+		NodeMap.Reserve(PopulatedNodes.Num());
 		for (const auto& Node : PopulatedNodes)
 		{
-			int32 VolumeX = (Node->Center.X + OctreeExtent) / (2 * NodeExtentAtDepth);
-			int32 VolumeY = (Node->Center.Y + OctreeExtent) / (2 * NodeExtentAtDepth);
-			int32 VolumeZ = (Node->Center.Z + OctreeExtent) / (2 * NodeExtentAtDepth);
+			if (!Node.IsValid()) continue;
+
+			int32 VolumeX = static_cast<int32>((Node->Center.X + OctreeExtent) / (2 * NodeExtentAtDepth));
+			int32 VolumeY = static_cast<int32>((Node->Center.Y + OctreeExtent) / (2 * NodeExtentAtDepth));
+			int32 VolumeZ = static_cast<int32>((Node->Center.Z + OctreeExtent) / (2 * NodeExtentAtDepth));
 
 			if (VolumeX >= 0 && VolumeX < Resolution &&
 				VolumeY >= 0 && VolumeY < Resolution &&
@@ -230,51 +236,205 @@ public:
 			}
 		}
 
-		// Define the voxel query function
-		auto QueryVoxel = [&](const int32 X, const int32 Y, const int32 Z, void* ReturnValue)
+		// --- 2) Create transient UVolumeTexture (UObject) on game thread ---
+		// IMPORTANT: we will NOT call UpdateResource() on this UObject. Doing so triggers engine texture building (DDC),
+		// which is the source of the crash/stalls you were seeing.
+		UVolumeTexture* VolumeTexture = NewObject<UVolumeTexture>(GetTransientPackage(), NAME_None, RF_Transient);
+		if (!VolumeTexture)
+		{
+			UE_LOG(LogTemp, Error, TEXT("CreateVolumeTextureFromOctreeSimple: failed to create UVolumeTexture"));
+			return nullptr;
+		}
+
+		// Configure to avoid as much derived-data work as possible (sane defaults).
+		VolumeTexture->SRGB = false;
+		VolumeTexture->CompressionSettings = TC_VectorDisplacementmap; // less likely to trigger heavy compression
+		VolumeTexture->CompressionNone = true;
+		VolumeTexture->Filter = TF_Nearest;
+		VolumeTexture->AddressMode = TA_Clamp;
+		VolumeTexture->MipGenSettings = TMGS_NoMipmaps;
+		VolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
+		VolumeTexture->NeverStream = true;
+
+		// Initialize the Source so code that queries Source dimensions won't crash, but do NOT call UpdateResource().
+		VolumeTexture->Source.Init(Resolution, Resolution, Resolution, 1, SourceFormat);
+
+		// --- 3) Build CPU-side BGRA buffer (BGRA order: B=ObjectId, G=TypeId, R=Density, A=255) ---
+		const int64 TotalBytes64 = static_cast<int64>(Resolution) * Resolution * Resolution * BytesPerPixel;
+		if (TotalBytes64 <= 0 || TotalBytes64 > INT32_MAX)
+		{
+			UE_LOG(LogTemp, Error, TEXT("CreateVolumeTextureFromOctreeSimple: invalid buffer size"));
+			return nullptr;
+		}
+		const int32 TotalBytes = static_cast<int32>(TotalBytes64);
+
+		TSharedPtr<TArray<uint8>, ESPMode::ThreadSafe> BufferShared = MakeShared<TArray<uint8>, ESPMode::ThreadSafe>();
+		BufferShared->SetNumZeroed(TotalBytes);
+
+		for (const auto& Pair : NodeMap)
+		{
+			const FIntVector& Coord = Pair.Key;
+			const TSharedPtr<FOctreeNode>& Node = Pair.Value;
+			if (!Node.IsValid()) continue;
+
+			int32 X = Coord.X;
+			int32 Y = Coord.Y;
+			int32 Z = Coord.Z;
+			int32 Index = ((Z * Resolution + Y) * Resolution + X) * BytesPerPixel;
+			if (Index < 0 || (Index + 3) >= BufferShared->Num()) continue;
+
+			uint8 DensityByte = 0;
+			if (MaxDensityAtDepth > 0.0f)
 			{
-				FIntVector Coord(X, Y, Z);
+				float Norm = static_cast<float>(Node->Data.Density) / MaxDensityAtDepth;
+				DensityByte = static_cast<uint8>(FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f));
+			}
 
-				if (auto* NodePtr = NodeMap.Find(Coord))
+			// BGRA: B = ObjectId, G = TypeId, R = Density, A = 255
+			(*BufferShared)[Index + 0] = static_cast<uint8>(FMath::Clamp(Node->Data.ObjectId, 0, 255));
+			(*BufferShared)[Index + 1] = static_cast<uint8>(FMath::Clamp(Node->Data.TypeId, 0, 255));
+			(*BufferShared)[Index + 2] = DensityByte;
+			(*BufferShared)[Index + 3] = 255;
+		}
+
+		// --- 4) Render-thread: create RHI 3D texture, upload the buffer, and bind to the UVolumeTexture ---
+		ENQUEUE_RENDER_COMMAND(Octree_CreateAndUpload3D)(
+			[VolumeTexture, BufferShared, Resolution, BytesPerPixel, PixelFormat](FRHICommandListImmediate& RHICmdList)
+			{
+				// Build 3D texture description (UE5)
+				FRHITextureCreateDesc Desc = FRHITextureCreateDesc::Create3D(TEXT("OctreeVolumeTexture3D"), Resolution, Resolution, Resolution, PixelFormat)
+					.SetFlags(ETextureCreateFlags::ShaderResource)
+					.SetClearValue(FClearValueBinding::Black)
+					.SetNumMips(1);
+
+				FTexture3DRHIRef RHITexture = RHICreateTexture(Desc);
+				if (!RHITexture.IsValid())
 				{
-					auto Node = *NodePtr;
-
-					// For RGBA format
-					if constexpr (true) // Assuming RGBA8 format
-					{
-						uint8* Voxel = static_cast<uint8*>(ReturnValue);
-						uint8 NormalizedDensity = FMath::Clamp(Node->Data.Density / MaxDensityAtDepth * 255.0f, 0.0f, 255.0f);
-
-						Voxel[0] = NormalizedDensity;     // R: density
-						Voxel[1] = Node->Data.TypeId;     // G: type
-						Voxel[2] = Node->Data.ObjectId;   // B: object
-						Voxel[3] = 255;                   // A: alpha
-					}
+					UE_LOG(LogTemp, Error, TEXT("Octree_CreateAndUpload3D: RHICreateTexture failed"));
+					return;
 				}
-				else
+
+				// Upload region and pitches
+				FUpdateTextureRegion3D Region(0, 0, 0, 0, 0, 0, Resolution, Resolution, Resolution);
+				const uint32 SrcRowPitch = static_cast<uint32>(Resolution * BytesPerPixel);
+				const uint32 SrcSlicePitch = static_cast<uint32>(SrcRowPitch * Resolution);
+
+				// Single big upload (runs on render thread)
+				RHICmdList.UpdateTexture3D(RHITexture, 0, Region, SrcRowPitch, SrcSlicePitch, BufferShared->GetData());
+
+				// Keep the RHI texture alive: store in static map keyed by UVolumeTexture*
+				// This prevents immediate destruction if engine code expects the RHI texture later.
+				static TMap<UVolumeTexture*, FTexture3DRHIRef> G_OctreeTransientRHITextures;
+				G_OctreeTransientRHITextures.Add(VolumeTexture, RHITexture);
+
+				// Bind the RHI texture to the UVolumeTexture's TextureReference for shader sampling
+				if (VolumeTexture)
 				{
-					// Empty voxel
-					uint8* Voxel = static_cast<uint8*>(ReturnValue);
-					Voxel[0] = 0;
-					Voxel[1] = 0;
-					Voxel[2] = 0;
-					Voxel[3] = 0;
+					RHIUpdateTextureReference(VolumeTexture->TextureReference.TextureReferenceRHI, RHITexture);
 				}
-			};
-
-		// Update the volume texture from the function
-		VolumeTexture->UpdateSourceFromFunction(
-			QueryVoxel,
-			Resolution,                          // SizeX
-			Resolution,                          // SizeY  
-			Resolution,                          // SizeZ
-			ETextureSourceFormat::TSF_BGRA8      // Format
+			}
 		);
 
-		VolumeTexture->UpdateResource();
+		// For robustness while debugging, wait for the render command to complete to avoid lifetime races.
+		// Remove this if you want truly asynchronous behavior.
+		FlushRenderingCommands();
+
+		// NOTE: Do NOT call VolumeTexture->UpdateResource() here. That is what triggers engine to build derived data
+		// (texture compression / DDC) and was the source of the crash/stall you reported.
+		// The texture is usable by materials via the bound RHI texture reference.
+
+		UE_LOG(LogTemp, Warning, TEXT("CreateVolumeTextureFromOctreeSimple: Created volume texture (Res=%d), populated entries=%d"),
+			Resolution, NodeMap.Num());
 
 		return VolumeTexture;
 	}
+
+	// Call this to test isolation: creates only an RHI 3D texture and uploads the octree buffer.
+	// Returns true on success (RHI texture created and stored).
+	bool CreateVolumeTexture_RHIOnly_Test()
+	{
+		const int32 Resolution = 128;
+		const int32 BytesPerPixel = 4;
+		const EPixelFormat PixelFormat = PF_B8G8R8A8; // BGRA order
+
+		const int TargetDepth = FMath::FloorLog2(Resolution);
+		TArray<TSharedPtr<FOctreeNode>> PopulatedNodes = this->GetPopulatedNodes(TargetDepth, TargetDepth, -1);
+		const float MaxDensityAtDepth = (DepthMaxDensities.IsValidIndex(TargetDepth) ? (float)DepthMaxDensities[TargetDepth] : 1.0f);
+		const int64 NodeExtentAtDepth = (this->Extent >> TargetDepth);
+		const int64 OctreeExtent = this->Extent;
+
+		TMap<FIntVector, TSharedPtr<FOctreeNode>> NodeMap;
+		NodeMap.Reserve(PopulatedNodes.Num());
+		for (const auto& Node : PopulatedNodes)
+		{
+			if (!Node.IsValid()) continue;
+			int32 X = static_cast<int32>((Node->Center.X + OctreeExtent) / (2 * NodeExtentAtDepth));
+			int32 Y = static_cast<int32>((Node->Center.Y + OctreeExtent) / (2 * NodeExtentAtDepth));
+			int32 Z = static_cast<int32>((Node->Center.Z + OctreeExtent) / (2 * NodeExtentAtDepth));
+			if (X >= 0 && X < Resolution && Y >= 0 && Y < Resolution && Z >= 0 && Z < Resolution)
+				NodeMap.Add(FIntVector(X, Y, Z), Node);
+		}
+
+		const int64 TotalBytes64 = int64(Resolution) * Resolution * Resolution * BytesPerPixel;
+		if (TotalBytes64 <= 0 || TotalBytes64 > INT32_MAX) return false;
+		const int32 TotalBytes = static_cast<int32>(TotalBytes64);
+
+		TSharedPtr<TArray<uint8>, ESPMode::ThreadSafe> BufferShared = MakeShared<TArray<uint8>, ESPMode::ThreadSafe>();
+		BufferShared->SetNumZeroed(TotalBytes);
+
+		for (const auto& Pair : NodeMap)
+		{
+			const FIntVector& C = Pair.Key;
+			const TSharedPtr<FOctreeNode>& N = Pair.Value;
+			if (!N.IsValid()) continue;
+			int32 idx = ((C.Z * Resolution + C.Y) * Resolution + C.X) * BytesPerPixel;
+			if (idx < 0 || (idx + 3) >= BufferShared->Num()) continue;
+			uint8 DensityByte = 0;
+			if (MaxDensityAtDepth > 0.0f)
+			{
+				float Norm = static_cast<float>(N->Data.Density) / MaxDensityAtDepth;
+				DensityByte = static_cast<uint8>(FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f));
+			}
+			(*BufferShared)[idx + 0] = static_cast<uint8>(FMath::Clamp(N->Data.ObjectId, 0, 255)); // B
+			(*BufferShared)[idx + 1] = static_cast<uint8>(FMath::Clamp(N->Data.TypeId, 0, 255));   // G
+			(*BufferShared)[idx + 2] = DensityByte;                                               // R
+			(*BufferShared)[idx + 3] = 255;                                                       // A
+		}
+
+		// Render-thread create + upload
+		ENQUEUE_RENDER_COMMAND(Octree_RHIOnlyCreate)(
+			[BufferShared, Resolution, BytesPerPixel, PixelFormat](FRHICommandListImmediate& RHICmdList)
+			{
+				FRHITextureCreateDesc Desc = FRHITextureCreateDesc::Create3D(TEXT("Octree_RHIOnly_Test"), Resolution, Resolution, Resolution, PixelFormat)
+					.SetFlags(ETextureCreateFlags::ShaderResource)
+					.SetClearValue(FClearValueBinding::Black)
+					.SetNumMips(1);
+
+				FTexture3DRHIRef RHITexture = RHICreateTexture(Desc);
+				if (!RHITexture.IsValid())
+				{
+					UE_LOG(LogTemp, Error, TEXT("RHIOnlyCreate: RHICreateTexture failed"));
+					return;
+				}
+
+				FUpdateTextureRegion3D Region(0, 0, 0, 0, 0, 0, Resolution, Resolution, Resolution);
+				const uint32 SrcRowPitch = static_cast<uint32>(Resolution * BytesPerPixel);
+				const uint32 SrcSlicePitch = static_cast<uint32>(SrcRowPitch * Resolution);
+
+				RHICmdList.UpdateTexture3D(RHITexture, 0, Region, SrcRowPitch, SrcSlicePitch, BufferShared->GetData());
+
+				// Keep alive in static map
+				static TMap<uint64, FTexture3DRHIRef> Map;
+				// Use address of buffer as key so multiple calls are unique
+				Map.Add((uint64)BufferShared.Get(), RHITexture);
+			}
+		);
+
+		FlushRenderingCommands(); // sync for test
+		UE_LOG(LogTemp, Warning, TEXT("CreateVolumeTexture_RHIOnly_Test: created RHI-only texture (Res=%d), entries=%d"), Resolution, NodeMap.Num());
+		return true;
+	}
+
 
 	UVolumeTexture* SaveVolumeTextureAsAsset(UVolumeTexture* VolumeTexture, const FString& AssetPath, const FString& AssetName)
 	{
@@ -315,10 +475,15 @@ public:
 
 		NewVolumeTexture->Source.SetOwner(NewVolumeTexture);
 		// Copy properties (using the correct property names from the header)
-		NewVolumeTexture->SRGB = VolumeTexture->SRGB;
-		NewVolumeTexture->CompressionSettings = VolumeTexture->CompressionSettings;
-		NewVolumeTexture->Filter = VolumeTexture->Filter;
-		NewVolumeTexture->AddressMode = VolumeTexture->AddressMode;  // Single AddressMode property
+		NewVolumeTexture->SRGB = false;
+		NewVolumeTexture->CompressionSettings = TC_VectorDisplacementmap; // No compression
+		NewVolumeTexture->CompressionNone = true;
+		NewVolumeTexture->Filter = TF_Nearest;
+		NewVolumeTexture->AddressMode = TA_Clamp;
+		NewVolumeTexture->MipGenSettings = TMGS_NoMipmaps;
+		NewVolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
+		NewVolumeTexture->NeverStream = true;
+		NewVolumeTexture->CompressionNone = true;
 
 		// Update the new texture
 		NewVolumeTexture->UpdateResource();
@@ -333,11 +498,18 @@ public:
 			FPackageName::GetAssetPackageExtension()
 		);
 
+		FSavePackageArgs SaveArgs;
+		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+		SaveArgs.Error = GError; // Or your own FOutputDevice*
+		SaveArgs.SaveFlags = SAVE_NoError; // Optional: same as old default
+		SaveArgs.bForceByteSwapping = false; // Optional
+		SaveArgs.bWarnOfLongFilename = true; // Optional
+
 		bool bSaved = UPackage::SavePackage(
 			Package,
 			NewVolumeTexture,
-			RF_Public | RF_Standalone,
-			*PackageFileName
+			*PackageFileName,
+			SaveArgs
 		);
 
 		if (bSaved)
@@ -354,7 +526,7 @@ public:
 
 	UTexture2D* CreateVolumeTextureFlipbookFromOctree()
 	{
-		const int32 Resolution = 256;
+		const int32 Resolution = 128;
 		const int32 SlicesPerRow = 16;
 		const int32 AtlasSize = Resolution * SlicesPerRow; // 4096x4096
 		EPixelFormat PixelFormat = PF_R8G8B8A8;

@@ -106,13 +106,13 @@ void AGalaxyActor::InitializeNiagara()
 			FVector::ZeroVector,
 			FRotator::ZeroRotator,
 			EAttachLocation::KeepWorldPosition,
-			true
+			true,
+			false
 		);
 
 		if (NiagaraComponent)
 		{
 			NiagaraComponent->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
-			NiagaraComponent->SetAutoActivate(false); // Must be before initialization
 
 			// Set system bounds
 			FBox Bounds(FVector(-Extent), FVector(Extent));

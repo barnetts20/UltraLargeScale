@@ -1,7 +1,6 @@
 
-#include <Engine.h>
 #include "ProximityTrackerComponent.h"
-
+#include <Engine.h>
 
 // Sets default values for this component's properties
 UProximityTrackerComponent::UProximityTrackerComponent()

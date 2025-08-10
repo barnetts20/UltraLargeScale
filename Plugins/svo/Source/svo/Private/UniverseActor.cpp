@@ -59,6 +59,9 @@ void AUniverseActor::Initialize()
 			AsyncTask(ENamedThreads::GameThread, [this, Positions = MoveTemp(Positions), Rotations = MoveTemp(Rotations), Extents = MoveTemp(Extents), Colors = MoveTemp(Colors)]()
 				{
 					InitializeNiagara(Positions, Rotations, Extents, Colors);
+					//DensityVolumeTexture = Octree->CreateVolumeTextureFromOctreeSimple();
+					//Octree->CreateVolumeTexture_RHIOnly_Test();
+					//Octree->SaveVolumeTextureAsAsset(DensityVolumeTexture, FString("/svo/Generated"), FString("universe_" + FString::FromInt(Seed)));
 				});
 		});
 }
@@ -67,7 +70,6 @@ void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVect
 {
 	FSoftObjectPath NiagaraSystemPath(NiagaraPath);
 	PointCloudNiagara = Cast<UNiagaraSystem>(NiagaraSystemPath.TryLoad());
-
 	if (PointCloudNiagara)
 	{
 		NiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
@@ -77,7 +79,7 @@ void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVect
 			FVector::ZeroVector,
 			FRotator::ZeroRotator,
 			EAttachLocation::SnapToTarget,// KeepRelativeOffset,
-			true
+			true, false, ENCPoolMethod::AutoRelease
 		);
 
 		if (NiagaraComponent)
@@ -95,8 +97,6 @@ void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVect
 		}
 	}
 	Initialized = true;
-	DensityVolumeTexture = Octree->CreateVolumeTextureFromOctreeSimple();
-	Octree->SaveVolumeTextureAsAsset(DensityVolumeTexture, FString("/svo"), FString("test1"));
 }
 
 void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InReferencePosition)
