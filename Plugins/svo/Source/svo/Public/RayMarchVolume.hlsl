@@ -1,3 +1,27 @@
+struct DensitySampler{
+    Texture3D Tex;
+    SamplerState TexSampler;
+    Texture3D NoiseTex;
+    SamplerState NoiseTexSampler;
+    float4 Sample(float3 InPos){
+        float4 volumesample = Texture3DSample(Tex, TexSampler, saturate(InPos));
+        return volumesample;
+    }
+};
+
+DensitySampler densitysampler;
+densitysampler.Tex = Tex;
+densitysampler.TexSampler = TexSampler;
+densitysampler.NoiseTex = NoiseTex;
+densitysampler.NoiseTexSampler = NoiseTexSampler;
+
+//Blue noise offset ex
+float2 screenuv = GetScreenPosition(Parameters);
+ float blueSamp = Texture2DSample(BlueNoiseTex, BlueNoiseTexSampler, screenuv * 10);
+float blueFactor = 1;
+float blueOffset = (blueSamp - .5) * blueFactor * StepSize;
+StepSize += blueOffset;
+
 float accumdens = 0;
 float transmittance = 1;
 float3 lightenergy = 0;
@@ -9,7 +33,7 @@ LocalCamVec = normalize( mul(Parameters.CameraVector, (float3x3)LWCToFloat(GetPr
 
 for (int i = 0; i < MaxSteps; i++){
     //Sample density
-    float cursample = Texture3DSample(Tex, TexSampler, saturate(CurPos)).w;
+    float cursample = densitysampler.Sample(saturate(CurPos)).w;
     
     //Sample light if there is density
     if(cursample > .001){
@@ -29,7 +53,7 @@ for (int i = 0; i < MaxSteps; i++){
             float DistanceTraveled = length(lpos - CurPos);
             if(DistanceTraveled >= DistanceToLight) break;
             
-            float lsample = Texture3DSample(Tex, TexSampler, saturate(lpos)).w;
+            float lsample = densitysampler.Sample(saturate(lpos)).w;
 
             float3 shadowboxtest = floor( .5 + ( abs( .5 - lpos)));
             float exitshadowbox = shadowboxtest.x + shadowboxtest.y + shadowboxtest.z;
@@ -63,13 +87,16 @@ for (int i = 0; i < MaxSteps; i++){
         shadowdist = 0;
 
         lpos = CurPos + float3(0, 0, .025);
-        float4 lsample = Texture3DSample(Tex, TexSampler, saturate(lpos));
+        float4 lsample = densitysampler.Sample(saturate(lpos));
+        AmbientColor = lsample.xyz;
         shadowdist += lsample.w;
         lpos = CurPos + float3(0, 0, .05);
-        lsample = Texture3DSample(Tex, TexSampler, saturate(lpos));
+        lsample = densitysampler.Sample(saturate(lpos));
+        AmbientColor += lsample.xyz;
         shadowdist += lsample.w;
         lpos = CurPos + float3(0, 0, .15);
-        lsample = Texture3DSample(Tex, TexSampler, saturate(lpos));
+        lsample = densitysampler.Sample(saturate(lpos));
+        AmbientColor += lsample.xyz;
         shadowdist += lsample.w;
 
         lightenergy += exp(-shadowdist * AmbientDensity) * cursample * AmbientColor * transmittance;
@@ -78,7 +105,7 @@ for (int i = 0; i < MaxSteps; i++){
 }
 
 CurPos += LocalCamVec * ( 1 - FinalStepSize);
-float cursample = Texture3DSample(Tex, TexSampler, saturate(CurPos)).w;
+float cursample = densitysampler.Sample(saturate(CurPos)).w;
 
 if(cursample > .001){
     float3 lpos = CurPos;
@@ -97,7 +124,7 @@ if(cursample > .001){
         float DistanceTraveled = length(lpos - CurPos);
         if(DistanceTraveled >= DistanceToLight) break;
         
-        float lsample = Texture3DSample(Tex, TexSampler, saturate(lpos)).w;
+        float lsample = densitysampler.Sample(saturate(lpos)).w;
 
         float3 shadowboxtest = floor( .5 + ( abs( .5 - lpos)));
         float exitshadowbox = shadowboxtest.x + shadowboxtest.y + shadowboxtest.z;
@@ -131,13 +158,16 @@ if(cursample > .001){
     shadowdist = 0;
 
     lpos = CurPos + float3(0, 0, .025);
-    float4 lsample = Texture3DSample(Tex, TexSampler, saturate(lpos));
+    float4 lsample = densitysampler.Sample(saturate(lpos));
+    AmbientColor = lsample.xyz;
     shadowdist += lsample.w;
     lpos = CurPos + float3(0, 0, .05);
-    lsample = Texture3DSample(Tex, TexSampler, saturate(lpos));
+    lsample = densitysampler.Sample(saturate(lpos));
+    AmbientColor += lsample.xyz;
     shadowdist += lsample.w;
     lpos = CurPos + float3(0, 0, .15);
-    lsample = Texture3DSample(Tex, TexSampler, saturate(lpos));
+    lsample = densitysampler.Sample(saturate(lpos));
+    AmbientColor += lsample.xyz;
     shadowdist += lsample.w;
 
     lightenergy += exp(-shadowdist * AmbientDensity) * cursample * AmbientColor * transmittance;
