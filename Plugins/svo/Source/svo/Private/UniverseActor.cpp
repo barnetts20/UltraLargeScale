@@ -21,17 +21,40 @@ void AUniverseActor::Initialize()
 		{
 			//Populate Data into the tree
 			Octree = MakeShared<FOctree>(Extent);
-			auto Generator = new GlobularNoiseGenerator(Seed);
+			//auto Generator = new GlobularNoiseGenerator(Seed);
 
-			Generator->Count = this->Count;
-			Generator->Falloff = .5;
-			Generator->Rotation = FRotator(0);
-			Generator->DepthRange = 6;
-			Generator->InsertDepthOffset = 8;
-			Generator->WarpAmount = FVector(1);
+			//Generator->Count = this->Count;
+			//Generator->Falloff = .5;
+			//Generator->Rotation = FRotator(0);
+			//Generator->DepthRange = 6;
+			//Generator->InsertDepthOffset = 8;
+			//Generator->WarpAmount = FVector(1);
+			auto SpiralGenerator = new SpiralNoiseGenerator(Seed);
+			//Proceduralize
+			FRandomStream Stream(Seed);
+			SpiralGenerator->Count = Count;
+			SpiralGenerator->Rotation = FRotator(0, 0, 0);
+			SpiralGenerator->DepthRange = 16;
+			SpiralGenerator->NumArms = Stream.RandRange(2, 12);
+			SpiralGenerator->PitchAngle = Stream.FRandRange(5, 40);
+			SpiralGenerator->ArmContrast = Stream.FRandRange(.2, .8);
+			SpiralGenerator->RadialFalloff = Stream.FRandRange(2, 4);
+			SpiralGenerator->CenterScale = Stream.FRandRange(.01, .02);
+			SpiralGenerator->HorizontalSpreadMin = Stream.FRandRange(.01, .03);
+			SpiralGenerator->HorizontalSpreadMax = Stream.FRandRange(.15, .3);
+			SpiralGenerator->VerticalSpreadMin = Stream.FRandRange(.01, .03);
+			SpiralGenerator->VerticalSpreadMax = Stream.FRandRange(.05, .15);
 
+			double HorizontalWarp = Stream.FRandRange(.1, .9);
+			double VerticalWarp = Stream.FRandRange(.1, .9);
+
+			SpiralGenerator->WarpAmount = FVector(HorizontalWarp, HorizontalWarp, VerticalWarp);			
+			auto EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
+			SpiralGenerator->EncodedTree = EncodedTree;
+			SpiralGenerator->InsertDepthOffset = 4;
+			SpiralGenerator->GenerateData(Octree);
 			//Finally populate data into the tree
-			Generator->GenerateData(Octree);
+			SpiralGenerator->GenerateData(Octree);
 
 			//Extract data from the tree and construct niagara arrays
 			TArray<TSharedPtr<FOctreeNode>> Leaves = Octree->GetPopulatedNodes(-1, -1, 1); // Replace this to pick up nodes with density instead of leaves, can store gas/stars in same tree at different depths
@@ -57,10 +80,9 @@ void AUniverseActor::Initialize()
 			//Pass the arrays back to the game thread to instantiate the particle system
 			AsyncTask(ENamedThreads::GameThread, [this, Positions = MoveTemp(Positions), Rotations = MoveTemp(Rotations), Extents = MoveTemp(Extents), Colors = MoveTemp(Colors)]()
 				{
-					//InitializeNiagara(Positions, Rotations, Extents, Colors);
 					int TexResolution = 256;
-					//DensityVolumeTexture = Octree->CreateVolumeTextureFromOctreeSimple(TexResolution);
-					Octree->SaveVolumeTextureAsAssetFromOctree(256, FString("/svo/Generated"), FString("universe_" + FString::FromInt(Seed) + "_" + FString::FromInt(TexResolution)));
+					Octree->SaveVolumeTextureAsAssetFromOctree(TexResolution, FString("/svo/Generated"), FString("universe_" + FString::FromInt(Seed) + "_" + FString::FromInt(TexResolution)));
+					//InitializeNiagara(Positions, Rotations, Extents, Colors);
 				});
 		});
 }
@@ -78,7 +100,7 @@ void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVect
 			FVector::ZeroVector,
 			FRotator::ZeroRotator,
 			EAttachLocation::SnapToTarget,// KeepRelativeOffset,
-			true, false, ENCPoolMethod::AutoRelease
+			true
 		);
 
 		if (NiagaraComponent)
@@ -88,7 +110,7 @@ void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVect
 			NiagaraComponent->SetSystemFixedBounds(Bounds);
 			// Pass in user parameters (assuming Niagara system is setup to receive them)
 			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), InPositions);
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Rotations"), InRotations);
+			//UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Rotations"), InRotations);
 			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), InColors);
 			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), InExtents);
 			// Optionally reactivate to refresh state if needed
@@ -100,7 +122,7 @@ void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVect
 
 void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InReferencePosition)
 {
-	if (!InNode.IsValid() || !GalaxyActorClass || SpawnedGalaxies.Contains(InNode))
+	if (!InNode.IsValid() || !GalaxyActorClass || SpawnedGalaxies.Contains(InNode) || !Initialized)
 	{
 		return;
 	}
