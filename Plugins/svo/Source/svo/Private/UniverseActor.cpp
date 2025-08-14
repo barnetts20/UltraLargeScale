@@ -21,40 +21,37 @@ void AUniverseActor::Initialize()
 		{
 			//Populate Data into the tree
 			Octree = MakeShared<FOctree>(Extent);
-			//auto Generator = new GlobularNoiseGenerator(Seed);
-
-			//Generator->Count = this->Count;
-			//Generator->Falloff = .5;
-			//Generator->Rotation = FRotator(0);
-			//Generator->DepthRange = 6;
-			//Generator->InsertDepthOffset = 8;
-			//Generator->WarpAmount = FVector(1);
-			auto SpiralGenerator = new SpiralNoiseGenerator(Seed);
+			auto Generator = new GlobularNoiseGenerator(Seed);
+			Generator->Count = this->Count;
+			Generator->Falloff = .5;
+			Generator->Rotation = FRotator(0);
+			Generator->DepthRange = 10;
+			Generator->InsertDepthOffset = 10;
+			Generator->WarpAmount = FVector(1);
+			//auto Generator = new SpiralNoiseGenerator(Seed);
 			//Proceduralize
 			FRandomStream Stream(Seed);
-			SpiralGenerator->Count = Count;
-			SpiralGenerator->Rotation = FRotator(0, 0, 0);
-			SpiralGenerator->DepthRange = 16;
-			SpiralGenerator->NumArms = Stream.RandRange(2, 12);
-			SpiralGenerator->PitchAngle = Stream.FRandRange(5, 40);
-			SpiralGenerator->ArmContrast = Stream.FRandRange(.2, .8);
-			SpiralGenerator->RadialFalloff = Stream.FRandRange(2, 4);
-			SpiralGenerator->CenterScale = Stream.FRandRange(.01, .02);
-			SpiralGenerator->HorizontalSpreadMin = Stream.FRandRange(.01, .03);
-			SpiralGenerator->HorizontalSpreadMax = Stream.FRandRange(.15, .3);
-			SpiralGenerator->VerticalSpreadMin = Stream.FRandRange(.01, .03);
-			SpiralGenerator->VerticalSpreadMax = Stream.FRandRange(.05, .15);
-
+/*			Generator->Count = Count;
+			Generator->Rotation = FRotator(0, 0, 0);
+			Generator->DepthRange = 16;
+			Generator->NumArms = Stream.RandRange(2, 12);
+			Generator->PitchAngle = Stream.FRandRange(5, 40);
+			Generator->ArmContrast = Stream.FRandRange(.2, .8);
+			Generator->RadialFalloff = Stream.FRandRange(2, 4);
+			Generator->CenterScale = Stream.FRandRange(.01, .02);
+			Generator->HorizontalSpreadMin = Stream.FRandRange(.01, .03);
+			Generator->HorizontalSpreadMax = Stream.FRandRange(.15, .3);
+			Generator->VerticalSpreadMin = Stream.FRandRange(.01, .03);
+			Generator->VerticalSpreadMax = Stream.FRandRange(.05, .15);
 			double HorizontalWarp = Stream.FRandRange(.1, .9);
 			double VerticalWarp = Stream.FRandRange(.1, .9);
-
-			SpiralGenerator->WarpAmount = FVector(HorizontalWarp, HorizontalWarp, VerticalWarp);			
+			Generator->WarpAmount = FVector(HorizontalWarp, HorizontalWarp, VerticalWarp);	*/		
 			auto EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
-			SpiralGenerator->EncodedTree = EncodedTree;
-			SpiralGenerator->InsertDepthOffset = 4;
-			SpiralGenerator->GenerateData(Octree);
+			Generator->EncodedTree = EncodedTree;
+			Generator->InsertDepthOffset = 4;
+			Generator->GenerateData(Octree);
 			//Finally populate data into the tree
-			SpiralGenerator->GenerateData(Octree);
+			//Generator->GenerateData(Octree);
 
 			//Extract data from the tree and construct niagara arrays
 			TArray<TSharedPtr<FOctreeNode>> Leaves = Octree->GetPopulatedNodes(-1, -1, 1); // Replace this to pick up nodes with density instead of leaves, can store gas/stars in same tree at different depths
@@ -82,7 +79,7 @@ void AUniverseActor::Initialize()
 				{
 					int TexResolution = 256;
 					Octree->SaveVolumeTextureAsAssetFromOctree(TexResolution, FString("/svo/Generated"), FString("universe_" + FString::FromInt(Seed) + "_" + FString::FromInt(TexResolution)));
-					//InitializeNiagara(Positions, Rotations, Extents, Colors);
+					InitializeNiagara(Positions, Rotations, Extents, Colors);
 				});
 		});
 }
@@ -100,7 +97,8 @@ void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVect
 			FVector::ZeroVector,
 			FRotator::ZeroRotator,
 			EAttachLocation::SnapToTarget,// KeepRelativeOffset,
-			true
+			true, 
+			false
 		);
 
 		if (NiagaraComponent)
@@ -122,6 +120,7 @@ void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVect
 
 void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InReferencePosition)
 {
+	return;
 	if (!InNode.IsValid() || !GalaxyActorClass || SpawnedGalaxies.Contains(InNode) || !Initialized)
 	{
 		return;
