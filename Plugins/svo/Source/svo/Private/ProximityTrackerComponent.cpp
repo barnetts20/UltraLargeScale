@@ -26,7 +26,7 @@ void UProximityTrackerComponent::OnProximityUpdate()
 	FInt64Coordinate SampleCoordinate = FInt64Coordinate(FMath::RoundToInt64(SampleLocation.X), FMath::RoundToInt64(SampleLocation.Y), FMath::RoundToInt64(SampleLocation.Z));
 
 	// Perform query
-	TArray<TSharedPtr<FOctreeNode>> NearbyNodes = UniverseActor->Octree->GetNodesInRange(SampleCoordinate, ScanExtent);
+	TArray<TSharedPtr<FOctreeNode>> NearbyNodes = UniverseActor->Octree->GetNodesInRange(SampleCoordinate, ScanExtent, -1, -1, 1);
 
 	// Example processing
     bool bDebugDraw = false;

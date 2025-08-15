@@ -120,7 +120,6 @@ void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVect
 
 void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InReferencePosition)
 {
-	return;
 	if (!InNode.IsValid() || !GalaxyActorClass || SpawnedGalaxies.Contains(InNode) || !Initialized)
 	{
 		return;
