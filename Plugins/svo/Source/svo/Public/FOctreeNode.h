@@ -53,11 +53,22 @@ public:
 		TSharedPtr<FOctreeNode> Current = Root;
 		int64 CurrentExtent = Extent;
 
+		// Calculate the leaf volume once (volume at target depth InDepth)
+		int64 LeafExtent = Extent >> InDepth; // Extent at target depth
+		int64 LeafVolume = LeafExtent;
+
 		for (int Depth = 0; Depth < InDepth; ++Depth) {
-			//Accumulate density and composition of children
-			Current->Data.Density += InData.Density;
-			Current->Data.Composition += InData.Composition * InData.Density;
+			int64 CurrentVolume = CurrentExtent;
+
+			// Weight the contribution by volume ratio
+			double VolumeWeight = static_cast<double>(CurrentVolume) / static_cast<double>(LeafVolume);
+
+			// Accumulate density weighted by volume
+			Current->Data.Density += InData.Density * VolumeWeight;
+			Current->Data.Composition += InData.Composition * (InData.Density * VolumeWeight);
+
 			DepthMaxDensities[Depth] = FMath::Max(DepthMaxDensities[Depth], Current->Data.Density);
+
 
 			//Check/Set Max for layer
 			CurrentExtent /= 2;
@@ -203,28 +214,27 @@ public:
 		return Nodes;
 	}
 
-	UVolumeTexture* CreateVolumeTextureFromOctreeSimple(int InResolution)
+	UVolumeTexture* CreateVolumeTextureFromOctree(int32 Resolution)
 	{
-		// --- CONFIG ---
-		const int32 Resolution = InResolution;
-		const int32 BytesPerPixel = 4;
-		const ETextureSourceFormat SourceFormat = TSF_BGRA8;    // match BGRA8 source layout
-		const EPixelFormat PixelFormat = PF_B8G8R8A8;           // BGRA on RHI
+		// Create the volume texture in memory (transient package)
+		UVolumeTexture* NewVolumeTexture = NewObject<UVolumeTexture>(
+			GetTransientPackage(),
+			NAME_None,
+			RF_Transient
+		);
 
-		// --- 1) Gather octree nodes at desired depth on the game thread ---
+		// Get the octree data (same as in your original function)
 		const int TargetDepth = FMath::FloorLog2(Resolution);
 		TArray<TSharedPtr<FOctreeNode>> PopulatedNodes = this->GetPopulatedNodes(TargetDepth, TargetDepth, -1);
 		const float MaxDensityAtDepth = (DepthMaxDensities.IsValidIndex(TargetDepth) ? (float)DepthMaxDensities[TargetDepth] : 1.0f);
 		const int64 NodeExtentAtDepth = (this->Extent >> TargetDepth);
 		const int64 OctreeExtent = this->Extent;
 
-		// Build a quick map of populated voxel coords -> node
+		// Build node map
 		TMap<FIntVector, TSharedPtr<FOctreeNode>> NodeMap;
-		NodeMap.Reserve(PopulatedNodes.Num());
 		for (const auto& Node : PopulatedNodes)
 		{
 			if (!Node.IsValid()) continue;
-
 			int32 VolumeX = static_cast<int32>((Node->Center.X + OctreeExtent) / (2 * NodeExtentAtDepth));
 			int32 VolumeY = static_cast<int32>((Node->Center.Y + OctreeExtent) / (2 * NodeExtentAtDepth));
 			int32 VolumeZ = static_cast<int32>((Node->Center.Z + OctreeExtent) / (2 * NodeExtentAtDepth));
@@ -237,221 +247,57 @@ public:
 			}
 		}
 
-		// --- 2) Create transient UVolumeTexture (UObject) on game thread ---
-		// IMPORTANT: we will NOT call UpdateResource() on this UObject. Doing so triggers engine texture building (DDC),
-		// which is the source of the crash/stalls you were seeing.
-		UVolumeTexture* VolumeTexture = NewObject<UVolumeTexture>(GetTransientPackage(), NAME_None, RF_Transient);
-		if (!VolumeTexture)
-		{
-			UE_LOG(LogTemp, Error, TEXT("CreateVolumeTextureFromOctreeSimple: failed to create UVolumeTexture"));
-			return nullptr;
-		}
-
-		// Configure to avoid as much derived-data work as possible (sane defaults).
-		VolumeTexture->SRGB = false;
-		VolumeTexture->CompressionSettings = TC_VectorDisplacementmap; // less likely to trigger heavy compression
-		VolumeTexture->CompressionNone = true;
-		VolumeTexture->Filter = TF_Nearest;
-		VolumeTexture->AddressMode = TA_Clamp;
-		VolumeTexture->MipGenSettings = TMGS_NoMipmaps;
-		VolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
-		VolumeTexture->NeverStream = true;
-
-		// Initialize the Source so code that queries Source dimensions won't crash, but do NOT call UpdateResource().
-		VolumeTexture->Source.Init(Resolution, Resolution, Resolution, 1, SourceFormat);
-
-		// --- 3) Build CPU-side BGRA buffer (BGRA order: B=ObjectId, G=TypeId, R=Density, A=255) ---
-		const int64 TotalBytes64 = static_cast<int64>(Resolution) * Resolution * Resolution * BytesPerPixel;
-		if (TotalBytes64 <= 0 || TotalBytes64 > INT32_MAX)
-		{
-			UE_LOG(LogTemp, Error, TEXT("CreateVolumeTextureFromOctreeSimple: invalid buffer size"));
-			return nullptr;
-		}
-		const int32 TotalBytes = static_cast<int32>(TotalBytes64);
-
-		TSharedPtr<TArray<uint8>, ESPMode::ThreadSafe> BufferShared = MakeShared<TArray<uint8>, ESPMode::ThreadSafe>();
-		BufferShared->SetNumZeroed(TotalBytes);
-
-		for (const auto& Pair : NodeMap)
-		{
-			const FIntVector& Coord = Pair.Key;
-			const TSharedPtr<FOctreeNode>& Node = Pair.Value;
-			if (!Node.IsValid()) continue;
-
-			int32 X = Coord.X;
-			int32 Y = Coord.Y;
-			int32 Z = Coord.Z;
-			int32 Index = ((Z * Resolution + Y) * Resolution + X) * BytesPerPixel;
-			if (Index < 0 || (Index + 3) >= BufferShared->Num()) continue;
-
-			uint8 DensityByte = 0;
-			if (MaxDensityAtDepth > 0.0f)
+		// Create the query function that uses your actual data
+		auto QueryVoxel = [&NodeMap, MaxDensityAtDepth](const int32 X, const int32 Y, const int32 Z, void* ReturnValue)
 			{
-				float Norm = static_cast<float>(Node->Data.Density) / MaxDensityAtDepth;
-				DensityByte = static_cast<uint8>(FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f));
-			}
+				FIntVector Coord(X, Y, Z);
+				uint8* Voxel = static_cast<uint8*>(ReturnValue);
 
-			FVector Composition = Node->Data.Composition;
-			(*BufferShared)[Index + 0] = static_cast<uint8>(Composition.X * 255);
-			(*BufferShared)[Index + 1] = static_cast<uint8>(Composition.Y * 255);
-			(*BufferShared)[Index + 2] = static_cast<uint8>(Composition.Z * 255);
-			(*BufferShared)[Index + 3] = DensityByte;
-		}
-
-		// --- 4) Render-thread: create RHI 3D texture, upload the buffer, and bind to the UVolumeTexture ---
-		ENQUEUE_RENDER_COMMAND(Octree_CreateAndUpload3D)(
-			[VolumeTexture, BufferShared, Resolution, BytesPerPixel, PixelFormat](FRHICommandListImmediate& RHICmdList)
-			{
-				// Build 3D texture description (UE5)
-				FRHITextureCreateDesc Desc = FRHITextureCreateDesc::Create3D(TEXT("OctreeVolumeTexture3D"), Resolution, Resolution, Resolution, PixelFormat)
-					.SetFlags(ETextureCreateFlags::ShaderResource)
-					.SetClearValue(FClearValueBinding::Black)
-					.SetNumMips(1);
-
-				FTexture3DRHIRef RHITexture = RHICreateTexture(Desc);
-				if (!RHITexture.IsValid())
+				if (auto* NodePtr = NodeMap.Find(Coord))
 				{
-					UE_LOG(LogTemp, Error, TEXT("Octree_CreateAndUpload3D: RHICreateTexture failed"));
-					return;
+					auto Node = *NodePtr;
+					uint8 DensityByte = 0;
+					if (MaxDensityAtDepth > 0.0f)
+					{
+						float Norm = static_cast<float>(Node->Data.Density) / MaxDensityAtDepth;
+						DensityByte = static_cast<uint8>(FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f));
+					}
+
+					FVector Composition = Node->Data.Composition.GetSafeNormal();
+					Voxel[0] = static_cast<uint8>(Composition.X * 255); // B
+					Voxel[1] = static_cast<uint8>(Composition.Y * 255); // G
+					Voxel[2] = static_cast<uint8>(Composition.Z * 255); // R
+					Voxel[3] = DensityByte; // A
 				}
-
-				// Upload region and pitches
-				FUpdateTextureRegion3D Region(0, 0, 0, 0, 0, 0, Resolution, Resolution, Resolution);
-				const uint32 SrcRowPitch = static_cast<uint32>(Resolution * BytesPerPixel);
-				const uint32 SrcSlicePitch = static_cast<uint32>(SrcRowPitch * Resolution);
-
-				// Single big upload (runs on render thread)
-				RHICmdList.UpdateTexture3D(RHITexture, 0, Region, SrcRowPitch, SrcSlicePitch, BufferShared->GetData());
-
-				// Keep the RHI texture alive: store in static map keyed by UVolumeTexture*
-				// This prevents immediate destruction if engine code expects the RHI texture later.
-				static TMap<UVolumeTexture*, FTexture3DRHIRef> G_OctreeTransientRHITextures;
-				G_OctreeTransientRHITextures.Add(VolumeTexture, RHITexture);
-
-				// Bind the RHI texture to the UVolumeTexture's TextureReference for shader sampling
-				if (VolumeTexture)
+				else
 				{
-					RHIUpdateTextureReference(VolumeTexture->TextureReference.TextureReferenceRHI, RHITexture);
+					Voxel[0] = 0;
+					Voxel[1] = 0;
+					Voxel[2] = 0;
+					Voxel[3] = 0;
 				}
-			}
-		);
+			};
 
-		// For robustness while debugging, wait for the render command to complete to avoid lifetime races.
-		// Remove this if you want truly asynchronous behavior.
-		FlushRenderingCommands();
-
-		// NOTE: Do NOT call VolumeTexture->UpdateResource() here. That is what triggers engine to build derived data
-		// (texture compression / DDC) and was the source of the crash/stall you reported.
-		// The texture is usable by materials via the bound RHI texture reference.
-
-		UE_LOG(LogTemp, Warning, TEXT("CreateVolumeTextureFromOctreeSimple: Created volume texture (Res=%d), populated entries=%d"),
-			Resolution, NodeMap.Num());
-
-		return VolumeTexture;
-	}
-
-	UVolumeTexture* SaveVolumeTextureAsAsset(UVolumeTexture* VolumeTexture, const FString& AssetPath, const FString& AssetName)
-	{
-		if (!VolumeTexture)
-		{
-			UE_LOG(LogTemp, Error, TEXT("VolumeTexture is null"));
-			return nullptr;
-		}
-
-		// Create package path
-		FString PackagePath = AssetPath + "/" + AssetName;
-
-		UPackage* ExistingPackage = FindPackage(nullptr, *PackagePath);
-		if (ExistingPackage)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("Package already exists, attempting to delete: %s"), *PackagePath);
-
-			// Try to delete the existing package
-			TArray<UPackage*> PackagesToDelete;
-			PackagesToDelete.Add(ExistingPackage);
-
-			// This will mark the package for deletion
-			ExistingPackage->SetFlags(RF_Transient);
-			ExistingPackage->ClearFlags(RF_Standalone | RF_Public);
-
-			// Force garbage collection to clean up
-			CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
-		}
-
-		UPackage* Package = CreatePackage(*PackagePath);
-
-		if (!Package)
-		{
-			UE_LOG(LogTemp, Error, TEXT("Failed to create package"));
-			return nullptr;
-		}
-
-		// Create a new volume texture in the package
-		UVolumeTexture* NewVolumeTexture = NewObject<UVolumeTexture>(
-			Package,
-			*AssetName,
-			RF_Public | RF_Standalone | RF_MarkAsRootSet
-		);
-
-		// Copy the source data
-		if (VolumeTexture->Source.IsValid())
-		{
-			NewVolumeTexture->Source = VolumeTexture->Source;
-		}
-
-		// Copy platform data
-		if (VolumeTexture->GetPlatformData())
-		{
-			NewVolumeTexture->SetPlatformData(VolumeTexture->GetPlatformData());
-		}
-
-		NewVolumeTexture->Source.SetOwner(NewVolumeTexture);
-		// Copy properties (using the correct property names from the header)
+		// Set properties
 		NewVolumeTexture->SRGB = false;
-		NewVolumeTexture->CompressionSettings = TC_VectorDisplacementmap; // No compression
-		NewVolumeTexture->CompressionNone = true;
+		NewVolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
 		NewVolumeTexture->Filter = TF_Nearest;
 		NewVolumeTexture->AddressMode = TA_Clamp;
 		NewVolumeTexture->MipGenSettings = TMGS_NoMipmaps;
 		NewVolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
 		NewVolumeTexture->NeverStream = true;
-		NewVolumeTexture->CompressionNone = true;
 
-		// Update the new texture
+		// Create the texture data
+		NewVolumeTexture->UpdateSourceFromFunction(
+			QueryVoxel,
+			Resolution,
+			Resolution,
+			Resolution,
+			ETextureSourceFormat::TSF_BGRA8
+		);
+
 		NewVolumeTexture->UpdateResource();
-
-		// Mark package as dirty and save
-		Package->MarkPackageDirty();
-		FAssetRegistryModule::AssetCreated(NewVolumeTexture);
-
-		// Save the package
-		FString PackageFileName = FPackageName::LongPackageNameToFilename(
-			PackagePath,
-			FPackageName::GetAssetPackageExtension()
-		);
-
-		FSavePackageArgs SaveArgs;
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		SaveArgs.Error = GError; // Or your own FOutputDevice*
-		SaveArgs.SaveFlags = SAVE_NoError; // Optional: same as old default
-		SaveArgs.bForceByteSwapping = false; // Optional
-		SaveArgs.bWarnOfLongFilename = true; // Optional
-
-		bool bSaved = UPackage::SavePackage(
-			Package,
-			NewVolumeTexture,
-			*PackageFileName,
-			SaveArgs
-		);
-
-		if (bSaved)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("Volume texture saved to: %s"), *PackagePath);
-		}
-		else
-		{
-			UE_LOG(LogTemp, Error, TEXT("Failed to save volume texture"));
-		}
+		FlushRenderingCommands();
 
 		return NewVolumeTexture;
 	}
@@ -579,197 +425,6 @@ public:
 
 		return NewVolumeTexture;
 	}
-	//May move to these if volume textures prove too much of a pain
-	//UTexture2D* CreateVolumeTextureFlipbookFromOctree()
-	//{
-	//	const int32 Resolution = 128;
-	//	const int32 SlicesPerRow = 16;
-	//	const int32 AtlasSize = Resolution * SlicesPerRow; // 4096x4096
-	//	EPixelFormat PixelFormat = PF_R8G8B8A8;
-
-	//	// Prepare atlas data asynchronously
-	//	TFuture<TArray<uint8>> AtlasDataFuture = Async(EAsyncExecution::Thread, [this, Resolution, SlicesPerRow, AtlasSize]()
-	//		{
-	//			const int32 AtlasDataSize = AtlasSize * AtlasSize * 4; // RGBA
-	//			TArray<uint8> AtlasData;
-	//			AtlasData.SetNumZeroed(AtlasDataSize);
-
-	//			// Get octree data
-	//			TArray<TSharedPtr<FOctreeNode>> PopulatedNodes = this->GetPopulatedNodes(8, 8, -1);
-	//			float MaxDensityAtDepth = this->DepthMaxDensities[8];
-
-	//			if (MaxDensityAtDepth > 0)
-	//			{
-	//				int64 NodeExtentAtDepth = this->Extent >> 8;
-
-	//				for (const TSharedPtr<FOctreeNode>& Node : PopulatedNodes)
-	//				{
-	//					int32 VolumeX = (Node->Center.X + this->Extent) / (2 * NodeExtentAtDepth);
-	//					int32 VolumeY = (Node->Center.Y + this->Extent) / (2 * NodeExtentAtDepth);
-	//					int32 VolumeZ = (Node->Center.Z + this->Extent) / (2 * NodeExtentAtDepth);
-
-	//					if (VolumeX >= 0 && VolumeX < Resolution &&
-	//						VolumeY >= 0 && VolumeY < Resolution &&
-	//						VolumeZ >= 0 && VolumeZ < Resolution)
-	//					{
-	//						int32 SliceRow = VolumeZ / SlicesPerRow;
-	//						int32 SliceCol = VolumeZ % SlicesPerRow;
-
-	//						int32 AtlasX = SliceCol * Resolution + VolumeX;
-	//						int32 AtlasY = SliceRow * Resolution + VolumeY;
-
-	//						int32 PixelIndex = (AtlasY * AtlasSize + AtlasX) * 4;
-
-	//						uint8 NormalizedDensity = FMath::Clamp(Node->Data.Density / MaxDensityAtDepth * 255.0f, 0.0f, 255.0f);
-
-	//						AtlasData[PixelIndex + 0] = NormalizedDensity;
-	//						AtlasData[PixelIndex + 1] = NormalizedDensity;// Node->Data.TypeId;
-	//						AtlasData[PixelIndex + 2] = NormalizedDensity;// Node->Data.ObjectId;
-	//						AtlasData[PixelIndex + 3] = 1;
-	//					}
-	//				}
-	//			}
-
-	//			return AtlasData;
-	//		});
-
-	//	// Wait for data preparation
-	//	TArray<uint8> AtlasData = AtlasDataFuture.Get();
-
-	//	check(IsInGameThread());
-
-	//	UTexture2D* NewTexture = NewObject<UTexture2D>(
-	//		GetTransientPackage(),
-	//		NAME_None,
-	//		RF_Transient
-	//	);
-
-	//	check(IsValid(NewTexture));
-
-	//	NewTexture->NeverStream = true;
-
-	//	{
-	//		// Create dummy 1x1 texture first
-	//		NewTexture->SetPlatformData(new FTexturePlatformData());
-	//		NewTexture->GetPlatformData()->SizeX = 4096;
-	//		NewTexture->GetPlatformData()->SizeY = 4096;
-	//		NewTexture->GetPlatformData()->PixelFormat = PixelFormat;
-
-	//		FTexture2DMipMap* Mip = new FTexture2DMipMap();
-	//		NewTexture->GetPlatformData()->Mips.Add(Mip);
-	//		Mip->SizeX = NewTexture->GetPlatformData()->SizeX;
-	//		Mip->SizeY = NewTexture->GetPlatformData()->SizeY;
-
-	//		const uint32 DummyMipBytes = NewTexture->GetPlatformData()->SizeX * NewTexture->GetPlatformData()->SizeY * GPixelFormats[PixelFormat].BlockBytes;
-	//		{
-	//			Mip->BulkData.Lock(LOCK_READ_WRITE);
-	//			void* TextureData = Mip->BulkData.Realloc(DummyMipBytes);
-
-	//			static TArray<uint8> DummyBytes;
-	//			DummyBytes.SetNumZeroed(DummyMipBytes);
-	//			FMemory::Memcpy(TextureData, DummyBytes.GetData(), DummyMipBytes);
-
-	//			Mip->BulkData.Unlock();
-	//		}
-
-	//		NewTexture->UpdateResource();
-	//	}
-
-	//	// Async create the real atlas texture with updated signature
-	//	FTexture2DRHIRef RHITexture2D;
-	//	FGraphEventRef CompletionEvent;
-
-	//	Async(
-	//		EAsyncExecution::Thread,
-	//		[&RHITexture2D, &CompletionEvent, AtlasSize, PixelFormat, AtlasData]()
-	//		{
-	//			// Prepare mip data array
-	//			void* MipData[1];
-	//			MipData[0] = (void*)AtlasData.GetData();
-
-	//			RHITexture2D = RHIAsyncCreateTexture2D(
-	//				AtlasSize,                          // SizeX
-	//				AtlasSize,                          // SizeY
-	//				PixelFormat,                        // Format
-	//				1,                                  // NumMips
-	//				TexCreate_ShaderResource,           // Flags
-	//				ERHIAccess::SRVMask,               // InResourceState
-	//				MipData,                           // InitialMipData
-	//				1,                                 // NumInitialMips
-	//				TEXT("OctreeVolumeFlipbook"),      // DebugName
-	//				CompletionEvent                    // OutCompletionEvent
-	//			);
-	//		}
-	//	).Wait();
-
-	//	// Wait for completion event if needed
-	//	if (CompletionEvent.IsValid())
-	//	{
-	//		CompletionEvent->Wait();
-	//	}
-
-	//	// IMPORTANT: Update the UTexture2D's platform data to match the RHI texture
-	//	{
-	//		// Update platform data size to match the real texture
-	//		NewTexture->GetPlatformData()->SizeX = AtlasSize;
-	//		NewTexture->GetPlatformData()->SizeY = AtlasSize;
-
-	//		// Update the mip map size
-	//		NewTexture->GetPlatformData()->Mips[0].SizeX = AtlasSize;
-	//		NewTexture->GetPlatformData()->Mips[0].SizeY = AtlasSize;
-	//	}
-
-	//	// Link RHI texture to UTexture2D
-	//	ENQUEUE_RENDER_COMMAND(UpdateTextureReference)(
-	//		[this, NewTexture, RHITexture2D](FRHICommandListImmediate& RHICmdList)
-	//		{
-	//			RHIUpdateTextureReference(NewTexture->TextureReference.TextureReferenceRHI, RHITexture2D);
-	//			NewTexture->RefreshSamplerStates();
-	//			//SaveTextureToFile(NewTexture, FString("TestTexture"));
-	//		}
-	//	);
-
-	//	return NewTexture;
-	//}
-
-	//void SaveTextureToFile(UTexture2D* Texture, FString Filename)
-	//{
-	//	if (!Texture) return;
-
-	//	// Get texture data
-	//	FTexturePlatformData* PlatformData = Texture->GetPlatformData();
-	//	if (!PlatformData) return;
-
-	//	FTexture2DMipMap& Mip = (PlatformData)->Mips[0];
-	//	void* RawData = Mip.BulkData.Lock(LOCK_READ_ONLY);
-
-	//	if (RawData)
-	//	{
-	//		int32 Width = Texture->GetSizeX();
-	//		int32 Height = Texture->GetSizeY();
-
-	//		// Convert to array for easier handling
-	//		TArray<FColor> ImageData;
-	//		ImageData.SetNum(Width * Height);
-
-	//		uint8* SourceData = static_cast<uint8*>(RawData);
-	//		for (int32 i = 0; i < Width * Height; ++i)
-	//		{
-	//			ImageData[i].R = SourceData[i * 4 + 0]; // Density
-	//			ImageData[i].G = SourceData[i * 4 + 1]; // TypeId
-	//			ImageData[i].B = SourceData[i * 4 + 2]; // ObjectId
-	//			ImageData[i].A = SourceData[i * 4 + 3]; // Z coordinate
-	//		}
-
-	//		// Save as PNG
-	//		FString SavePath = FPaths::ProjectSavedDir() + TEXT("Screenshots/") + Filename;
-	//		FFileHelper::CreateBitmap(*SavePath, Width, Height, ImageData.GetData());
-
-	//		UE_LOG(LogTemp, Warning, TEXT("Texture saved to: %s"), *SavePath);
-	//	}
-
-	//	Mip.BulkData.Unlock();
-	//}
 
 	FOctree(int64 InExtent) {
 		Extent = InExtent;

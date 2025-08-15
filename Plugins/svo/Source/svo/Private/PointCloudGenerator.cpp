@@ -168,7 +168,7 @@ void GlobularNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			FRandomStream Stream(HashedSeed);
 
 			// Generate random coordinates
-			FVector AxisScale = FVector(HorizontalExtent, HorizontalExtent, VerticalExtent) * .9;
+			FVector AxisScale = FVector(HorizontalExtent, HorizontalExtent, VerticalExtent) * .5;
 			FVector Direction = Stream.GetUnitVector();
 			double Distance = FMath::Pow(Stream.FRand(), Falloff) * InOctree->Extent;
 

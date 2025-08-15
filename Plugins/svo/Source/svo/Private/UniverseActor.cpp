@@ -70,17 +70,15 @@ void AUniverseActor::Initialize()
 					FRandomStream RandStream(Leaf->Data.ObjectId);
 					Rotations[Index] = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
 					Positions[Index] = FVector(Leaf->Center.X, Leaf->Center.Y, Leaf->Center.Z);
-					Extents[Index] = static_cast<float>(Leaf->Extent);
+					Extents[Index] = static_cast<float>(Leaf->Extent * 2);
 					Colors[Index] = FLinearColor(Leaf->Data.Composition);
 				});
 
 			//Pass the arrays back to the game thread to instantiate the particle system
 			AsyncTask(ENamedThreads::GameThread, [this, Positions = MoveTemp(Positions), Rotations = MoveTemp(Rotations), Extents = MoveTemp(Extents), Colors = MoveTemp(Colors)]()
 				{
-					int TexResolution = 64;
-					auto VolumeTexture = Octree->SaveVolumeTextureAsAssetFromOctree(TexResolution, FString("/svo/Generated"), FString("universe_" + FString::FromInt(Seed) + "_" + FString::FromInt(TexResolution)));
+					InitializeVolumetric(Octree->CreateVolumeTextureFromOctree(64));
 					InitializeNiagara(Positions, Rotations, Extents, Colors);
-					InitializeVolumetric(VolumeTexture);
 				});
 		});
 }
@@ -122,25 +120,17 @@ void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVect
 void AUniverseActor::InitializeVolumetric(UVolumeTexture* InVolumeTexture) {
 	UMaterialInterface* GasMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_VolumeRaymarch_Inst.MT_VolumeRaymarch_Inst"));
 	UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(GasMaterial, this);
-
 	//TODO: Configure material with the volume texture
 	DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), InVolumeTexture);
 	//Set up color variance etc
 	//
 	
-	// Load static mesh from disk
 	UStaticMesh* VolumetricMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals"));
 	VolumetricComponent = NewObject<UStaticMeshComponent>(this);
-	VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::KeepRelativeTransform);
-
-	// Set the static mesh
 	VolumetricComponent->SetStaticMesh(VolumetricMesh);
-	double scale = 2 * Extent;
-	VolumetricComponent->SetWorldScale3D(FVector(scale));
-
-	// Assign the dynamic material instance
+	VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
+	VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
 	VolumetricComponent->SetMaterial(0, DynamicMaterial);
-
 	VolumetricComponent->RegisterComponent();
 }
 
