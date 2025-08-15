@@ -73,6 +73,7 @@ public:
 	FString NiagaraPath;
 	class UNiagaraSystem* PointCloudNiagara;
 	class UNiagaraComponent* NiagaraComponent;
+	class UStaticMeshComponent* VolumetricComponent;
 
 	FVector LastFrameOfReferenceLocation = FVector(0,0,0);
 	FVector CurrentFrameOfReferenceLocation;

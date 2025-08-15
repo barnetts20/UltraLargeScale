@@ -44,6 +44,7 @@ public:
 	FString NiagaraPath;
 	class UNiagaraSystem* PointCloudNiagara;
 	class UNiagaraComponent* NiagaraComponent;
+	class UStaticMeshComponent* VolumetricComponent;
 
 	FVector LastFrameOfReferenceLocation;
 	FVector CurrentFrameOfReferenceLocation;
@@ -54,6 +55,8 @@ public:
 
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
 	TSubclassOf<AGalaxyActor> GalaxyActorClass;
+
+	UStaticMeshComponent* smc;
 
 	TArray<const char*> EncodedTrees = {
 	"DQAIAAAAAAAAQAcAAAAAAD8AAAAAAA==",
@@ -66,6 +69,7 @@ public:
 protected:
 	void Initialize();
 	void InitializeNiagara(TArray<FVector> InPositions, TArray<FVector> InRotations, TArray<float> InExtents, TArray<FLinearColor> InColors);
+	void InitializeVolumetric(UVolumeTexture* InVolumeTexture);
 	virtual void BeginPlay() override;
 
 public:

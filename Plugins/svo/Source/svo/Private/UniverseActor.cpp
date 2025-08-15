@@ -77,9 +77,10 @@ void AUniverseActor::Initialize()
 			//Pass the arrays back to the game thread to instantiate the particle system
 			AsyncTask(ENamedThreads::GameThread, [this, Positions = MoveTemp(Positions), Rotations = MoveTemp(Rotations), Extents = MoveTemp(Extents), Colors = MoveTemp(Colors)]()
 				{
-					int TexResolution = 256;
-					Octree->SaveVolumeTextureAsAssetFromOctree(TexResolution, FString("/svo/Generated"), FString("universe_" + FString::FromInt(Seed) + "_" + FString::FromInt(TexResolution)));
+					int TexResolution = 64;
+					auto VolumeTexture = Octree->SaveVolumeTextureAsAssetFromOctree(TexResolution, FString("/svo/Generated"), FString("universe_" + FString::FromInt(Seed) + "_" + FString::FromInt(TexResolution)));
 					InitializeNiagara(Positions, Rotations, Extents, Colors);
+					InitializeVolumetric(VolumeTexture);
 				});
 		});
 }
@@ -116,6 +117,31 @@ void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVect
 		}
 	}
 	Initialized = true;
+}
+
+void AUniverseActor::InitializeVolumetric(UVolumeTexture* InVolumeTexture) {
+	UMaterialInterface* GasMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_VolumeRaymarch_Inst.MT_VolumeRaymarch_Inst"));
+	UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(GasMaterial, this);
+
+	//TODO: Configure material with the volume texture
+	DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), InVolumeTexture);
+	//Set up color variance etc
+	//
+	
+	// Load static mesh from disk
+	UStaticMesh* VolumetricMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals"));
+	VolumetricComponent = NewObject<UStaticMeshComponent>(this);
+	VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::KeepRelativeTransform);
+
+	// Set the static mesh
+	VolumetricComponent->SetStaticMesh(VolumetricMesh);
+	double scale = 2 * Extent;
+	VolumetricComponent->SetWorldScale3D(FVector(scale));
+
+	// Assign the dynamic material instance
+	VolumetricComponent->SetMaterial(0, DynamicMaterial);
+
+	VolumetricComponent->RegisterComponent();
 }
 
 void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InReferencePosition)
