@@ -24,7 +24,7 @@ void AGalaxyActor::Initialize()
 			//Populate Data into the tree
 			Octree = MakeShared<FOctree>(Extent);
 			FRandomStream Stream = FRandomStream(Seed);
-			this->Count = Stream.RandRange(100000, 400000);
+			this->Count = Stream.RandRange(100000, 400000); //TODO: should be configurable range at actor level
 			auto EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
 			int DepthRange = 4;
 			int InsertOffset = 5;
@@ -87,6 +87,7 @@ void AGalaxyActor::Initialize()
 			AsyncTask(ENamedThreads::GameThread, [this]()
 				{
 					InitializeNiagara();
+					InitializeVolumetric(Octree->CreateVolumeTextureFromOctree(64));
 				});
 		});
 }
@@ -184,6 +185,31 @@ void AGalaxyActor::InitializeNiagara()
 
 		}
 	}
+}
+
+void AGalaxyActor::InitializeVolumetric(UVolumeTexture* InVolumeTexture) {
+	UMaterialInterface* GasMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_VolumeRaymarch_Inst.MT_VolumeRaymarch_Inst"));
+	UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(GasMaterial, this);
+
+	//TODO: Configure material with the volume texture
+	FRandomStream RandomStream(Seed);
+	DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), InVolumeTexture);
+	DynamicMaterial->SetScalarParameterValue(FName("Density"), 100);
+	DynamicMaterial->SetScalarParameterValue(FName("MaxSteps"), 64);
+	DynamicMaterial->SetScalarParameterValue(FName("WarpAmount"), .1);
+	DynamicMaterial->SetScalarParameterValue(FName("WarpFrequency"), .1);
+	DynamicMaterial->SetVectorParameterValue(FName("LightColor"), RandomStream.GetUnitVector().GetAbs());
+	DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), ParentColor);
+	//Set up color variance etc
+	//
+
+	UStaticMesh* VolumetricMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals"));
+	VolumetricComponent = NewObject<UStaticMeshComponent>(this);
+	VolumetricComponent->SetStaticMesh(VolumetricMesh);
+	VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
+	VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+	VolumetricComponent->SetMaterial(0, DynamicMaterial);
+	VolumetricComponent->RegisterComponent();
 }
 
 void AGalaxyActor::DebugDrawTree()

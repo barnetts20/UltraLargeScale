@@ -23,39 +23,40 @@ public:
 	int Seed = 133780085;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
-	int64 Extent = 16777216;
+	int64 Extent = 2147483648;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
-	int64 GalaxyExtent = 8388608;
+	int64 GalaxyExtent = 2147483648;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
-	double UnitScale = 20000.0;
+	double UnitScale = 10000.0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
 	double SpeedScale = 1.0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
-	int Count = 2000000;
+	int Count = 2000000; //TODO: NIAGARA STREAMING, ASYNC POINT GENERATION IN BATCHES TO OPTIMIZE LOAD TIME/STREAMING
 
 	bool Initialized = false;
-
 	TSharedPtr<FOctree> Octree;
 
+	//Parallax tracking locations
 	FVector LastFrameOfReferenceLocation;
 	FVector CurrentFrameOfReferenceLocation;
 
+	//Subcomponents
 	UNiagaraSystem* PointCloudNiagara;
 	UNiagaraComponent* NiagaraComponent;
 	UStaticMeshComponent* VolumetricComponent;
 	UVolumeTexture* DensityVolumeTexture;
 
+	//Managed galaxy actors
 	TSubclassOf<AGalaxyActor> GalaxyActorClass;
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
 	void SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InReferencePosition);
 	void DestroyGalaxy(TSharedPtr<FOctreeNode> InNode);
 
-
-
+	//Noise formulas
 	TArray<const char*> EncodedTrees = {
 	"DQAIAAAAAAAAQAcAAAAAAD8AAAAAAA==",
 	"FwAAAAAAAACAPwAAgD8AAIC/DwABAAAAAAAAQA0ACAAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAPwAAAAAA",
@@ -70,7 +71,5 @@ protected:
 	void InitializeNiagara(TArray<FVector> InPositions, TArray<FVector> InRotations, TArray<float> InExtents, TArray<FLinearColor> InColors);
 	void InitializeVolumetric(UVolumeTexture* InVolumeTexture);
 	virtual void BeginPlay() override;
-
-public:
 	virtual void Tick(float DeltaTime) override;
 };

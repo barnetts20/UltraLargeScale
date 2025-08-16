@@ -24,20 +24,6 @@ public:
 		USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
 		SetRootComponent(SceneRoot);
 	}
-	// Sets default values for this actor's properties
-	AGalaxyActor(AUniverseActor* InUniverse) : Universe(InUniverse) {
-		PrimaryActorTick.bCanEverTick = true;
-		NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
-		USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
-		SetRootComponent(SceneRoot);
-	};
-
-	AGalaxyActor(AUniverseActor* InUniverse, int InSeed, int64 InExtent, double InUnitScale, int InCount, FVector InAxisRotation) : Universe(InUniverse), Seed(Seed), Extent(InExtent), UnitScale(InUnitScale), Count(InCount), AxisRotation(InAxisRotation) {
-		PrimaryActorTick.bCanEverTick = true;
-		NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
-		USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
-		SetRootComponent(SceneRoot);
-	};
 
 	AUniverseActor* Universe;
 
@@ -45,7 +31,7 @@ public:
 	int Seed = 133780085;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
-	int64 Extent = 8388608;
+	int64 Extent = 2147483648;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
 	double UnitScale = 1.0;
@@ -88,6 +74,7 @@ public:
 
 protected:
 	void InitializeNiagara();
+	void InitializeVolumetric(UVolumeTexture* InVolumeTexture);
 	void DebugDrawTree();
 	virtual void BeginPlay() override;
 
