@@ -41,21 +41,34 @@ public:
 
 	TSharedPtr<FOctree> Octree;
 
-	FString NiagaraPath;
-	class UNiagaraSystem* PointCloudNiagara;
-	class UNiagaraComponent* NiagaraComponent;
-
 	FVector LastFrameOfReferenceLocation;
 	FVector CurrentFrameOfReferenceLocation;
 
+	UNiagaraSystem* PointCloudNiagara;
+	UNiagaraComponent* NiagaraComponent;
+	UStaticMeshComponent* VolumetricComponent;
+	UVolumeTexture* DensityVolumeTexture;
+
+	TSubclassOf<AGalaxyActor> GalaxyActorClass;
+	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
 	void SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InReferencePosition);
 	void DestroyGalaxy(TSharedPtr<FOctreeNode> InNode);
 
-	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
-	TSubclassOf<AGalaxyActor> GalaxyActorClass;
+
+
+	TArray<const char*> EncodedTrees = {
+	"DQAIAAAAAAAAQAcAAAAAAD8AAAAAAA==",
+	"FwAAAAAAAACAPwAAgD8AAIC/DwABAAAAAAAAQA0ACAAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAPwAAAAAA",
+	"FwAAAAAAmpmZPwAAAAAAAIA/DwABAAAAAAAAQA0ACAAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAPwAAAAAA",
+	"DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA==",
+	"FwAAAADAAACAPwAAgD8AAIC/EAAAAAA/DQAGAAAAAAAAQBcAAAAAAAAAgD8AAIC/AACAPwsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAAEbABMAzcxMPg0AAwAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAQA==",
+	"FwAAAAAAAACAPwAAgD8AAIC/DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA=="
+	};
+
 protected:
 	void Initialize();
 	void InitializeNiagara(TArray<FVector> InPositions, TArray<FVector> InRotations, TArray<float> InExtents, TArray<FLinearColor> InColors);
+	void InitializeVolumetric(UVolumeTexture* InVolumeTexture);
 	virtual void BeginPlay() override;
 
 public:

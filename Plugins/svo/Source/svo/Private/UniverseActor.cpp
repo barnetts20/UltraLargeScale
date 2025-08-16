@@ -9,7 +9,6 @@
 AUniverseActor::AUniverseActor()
 {
 	PrimaryActorTick.bCanEverTick = true;
-	NiagaraPath = FString("/svo/NG_UniverseCloud.NG_UniverseCloud");
 	USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
 	SetRootComponent(SceneRoot);
@@ -21,20 +20,23 @@ void AUniverseActor::Initialize()
 		{
 			//Populate Data into the tree
 			Octree = MakeShared<FOctree>(Extent);
+			
+			//Proceduralize
+			FRandomStream Stream(Seed);
 			auto Generator = new GlobularNoiseGenerator(Seed);
-
 			Generator->Count = this->Count;
 			Generator->Falloff = .5;
 			Generator->Rotation = FRotator(0);
-			Generator->DepthRange = 6;
-			Generator->InsertDepthOffset = 8;
+			Generator->DepthRange = 10;
+			Generator->InsertDepthOffset = 4;
 			Generator->WarpAmount = FVector(1);
+			Generator->EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
 
 			//Finally populate data into the tree
 			Generator->GenerateData(Octree);
 
 			//Extract data from the tree and construct niagara arrays
-			TArray<TSharedPtr<FOctreeNode>> Leaves = Octree->GetPopulatedNodes(); // Replace this to pick up nodes with density instead of leaves, can store gas/stars in same tree at different depths
+			TArray<TSharedPtr<FOctreeNode>> Leaves = Octree->GetPopulatedNodes(-1, -1, 1);
 			TArray<FVector> Positions;
 			TArray<FVector> Rotations;
 			TArray<float> Extents;
@@ -48,26 +50,45 @@ void AUniverseActor::Initialize()
 				{
 					const TSharedPtr<FOctreeNode>& Leaf = Leaves[Index];
 					FRandomStream RandStream(Leaf->Data.ObjectId);
-					FVector ColorVector = RandStream.GetUnitVector();
 					Rotations[Index] = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
 					Positions[Index] = FVector(Leaf->Center.X, Leaf->Center.Y, Leaf->Center.Z);
-					Extents[Index] = static_cast<float>(Leaf->Extent);
-					Colors[Index] = FLinearColor(ColorVector.X, ColorVector.Y, ColorVector.Z);;
-				});
+					Extents[Index] = static_cast<float>(Leaf->Extent * 2);
+					Colors[Index] = FLinearColor(Leaf->Data.Composition);
+				}
+			);
 
 			//Pass the arrays back to the game thread to instantiate the particle system
 			AsyncTask(ENamedThreads::GameThread, [this, Positions = MoveTemp(Positions), Rotations = MoveTemp(Rotations), Extents = MoveTemp(Extents), Colors = MoveTemp(Colors)]()
 				{
+					InitializeVolumetric(Octree->CreateVolumeTextureFromOctree(64));
 					InitializeNiagara(Positions, Rotations, Extents, Colors);
-				});
+					Initialized = true;
+				}
+			);
 		});
+}
+
+void AUniverseActor::InitializeVolumetric(UVolumeTexture* InVolumeTexture) {
+	UMaterialInterface* GasMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_VolumeRaymarch_Inst.MT_VolumeRaymarch_Inst"));
+	UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(GasMaterial, this);
+	
+	//TODO: Configure material with the volume texture
+	DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), InVolumeTexture);
+	//Set up color variance etc
+	//
+
+	UStaticMesh* VolumetricMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals"));
+	VolumetricComponent = NewObject<UStaticMeshComponent>(this);
+	VolumetricComponent->SetStaticMesh(VolumetricMesh);
+	VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
+	VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+	VolumetricComponent->SetMaterial(0, DynamicMaterial);
+	VolumetricComponent->RegisterComponent();
 }
 
 void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVector> InRotations, TArray<float> InExtents, TArray<FLinearColor> InColors)
 {
-	FSoftObjectPath NiagaraSystemPath(NiagaraPath);
-	PointCloudNiagara = Cast<UNiagaraSystem>(NiagaraSystemPath.TryLoad());
-
+	PointCloudNiagara = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/NG_UniverseCloud.NG_UniverseCloud"));
 	if (PointCloudNiagara)
 	{
 		NiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
@@ -76,58 +97,52 @@ void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVect
 			NAME_None,
 			FVector::ZeroVector,
 			FRotator::ZeroRotator,
-			EAttachLocation::SnapToTarget,// KeepRelativeOffset,
-			true
+			EAttachLocation::SnapToTarget,
+			true, 
+			false
 		);
 
 		if (NiagaraComponent)
 		{
-			// Set system bounds
-			FBox Bounds(FVector(-Extent), FVector(Extent));
-			NiagaraComponent->SetSystemFixedBounds(Bounds);
-			// Pass in user parameters (assuming Niagara system is setup to receive them)
+			NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Extent), FVector(Extent)));
 			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), InPositions);
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Rotations"), InRotations);
+			//UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Rotations"), InRotations);
 			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), InColors);
 			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), InExtents);
-			// Optionally reactivate to refresh state if needed
 			NiagaraComponent->Activate(true);
 		}
 	}
-	Initialized = true;
 }
 
 void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InReferencePosition)
 {
-	if (!InNode.IsValid() || !GalaxyActorClass || SpawnedGalaxies.Contains(InNode))
+	if (!InNode.IsValid() || !GalaxyActorClass || SpawnedGalaxies.Contains(InNode) || !Initialized)
 	{
 		return;
 	}
 
 	//Scale is derived from perceived universe extent divided galaxy extent
 	const double GalaxyUnitScale = (InNode->Extent * this->UnitScale) / GalaxyExtent; 
+
 	// Compute correct parallax ratios
 	const double GalaxyParallaxRatio = (SpeedScale / GalaxyUnitScale);
 	const double UniverseParallaxRatio = (SpeedScale / UnitScale);
-	if (UniverseParallaxRatio > 40) return;
-	// 1. Node world position
+
+	// Compute spawn location
 	FVector NodeWorldPosition = FVector(InNode->Center.X, InNode->Center.Y, InNode->Center.Z) + GetActorLocation();
-	// 2. Player offset from node
 	FVector PlayerToNode = InReferencePosition - NodeWorldPosition;
-	// 4. Final spawn position
 	FVector GalaxySpawnPosition = InReferencePosition - PlayerToNode * (GalaxyParallaxRatio / UniverseParallaxRatio);
 
 	AGalaxyActor* NewGalaxy = GetWorld()->SpawnActor<AGalaxyActor>(GalaxyActorClass, GalaxySpawnPosition, FRotator::ZeroRotator);
 	if (NewGalaxy)
 	{
-		NewGalaxy->Universe = this; // We need to delay spawn till we can proceduralize bounding info
+		NewGalaxy->Universe = this;
 		NewGalaxy->Extent = GalaxyExtent;
 		NewGalaxy->Seed = InNode->Data.ObjectId;
 		NewGalaxy->SpeedScale = SpeedScale;
 		NewGalaxy->UnitScale = GalaxyUnitScale;
 		FRandomStream RandStream(InNode->Data.ObjectId);
-		FVector ColorVector = RandStream.GetUnitVector();
-		NewGalaxy->ParentColor = FLinearColor(ColorVector.X, ColorVector.Y, ColorVector.Z);
+		NewGalaxy->ParentColor = FLinearColor(InNode->Data.Composition.GetSafeNormal());
 		FVector normal = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
 		FMatrix RotationMatrix = FRotationMatrix::MakeFromZX(normal, FVector::ForwardVector);
 		NewGalaxy->AxisRotation = normal * 360;
@@ -168,7 +183,6 @@ void AUniverseActor::DestroyGalaxy(TSharedPtr<FOctreeNode> InNode)
 	}
 }
 
-// Called when the game starts or when spawned
 void AUniverseActor::BeginPlay()
 {
 	Super::BeginPlay();

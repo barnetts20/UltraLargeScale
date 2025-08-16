@@ -52,6 +52,7 @@ Plugins/*/Intermediate/
 #!Content/Blueprints/CoreGameplay/**
 #!Content/Materials/Functions/**
 Content/
+!/Plugins/svo/Content/
 # Shader files
 #!Content/**/*.usf
 #!Content/**/*.hlsl
