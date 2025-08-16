@@ -220,8 +220,8 @@ void AGalaxyActor::InitializeVolumetric(UVolumeTexture* InVolumeTexture) {
 	FLinearColor RandomizedHSV(NewHue, NewSaturation, NewBrightness, ParentColor.A);
 	FLinearColor LightColor = RandomizedHSV.HSVToLinearRGB();
 
-	//DynamicMaterial->SetVectorParameterValue(FName("LightColor"), RandomStream.GetUnitVector().GetAbs());
-	//DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), ParentColor);
+	DynamicMaterial->SetVectorParameterValue(FName("LightColor"), RandomStream.GetUnitVector().GetAbs());
+	DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), ParentColor);
 	//Set up color variance etc
 	//
 
