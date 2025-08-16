@@ -180,7 +180,7 @@ void GlobularNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
 			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-			auto InsertData = FVoxelData(OutDensity, Stream.GetUnitVector(), i, Type); // May need to add some way to control typing. for instance galaxy tree could contain stars, blackholes, gas all at different depths
+			auto InsertData = FVoxelData(OutDensity, Stream.GetUnitVector().GetAbs(), i, Type); // May need to add some way to control typing. for instance galaxy tree could contain stars, blackholes, gas all at different depths
 			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 		});
 }
@@ -247,7 +247,7 @@ void SpiralGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 		InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
 		auto InsertDepth = FMath::Lerp(MinInsertionDepth, MaxInsertionDepth, Stream.FRand());//  Stream.FRandRange(MinInsertionDepth, MaxInsertionDepth); //If a different scale distribution is wanted can change the way depth is randomized
-		auto InsertData = FVoxelData(Stream.FRand(), Stream.GetUnitVector(), i, Type);
+		auto InsertData = FVoxelData(Stream.FRand(), Stream.GetUnitVector().GetAbs(), i, Type);
 		InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 	});
 }

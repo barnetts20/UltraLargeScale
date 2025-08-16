@@ -26,9 +26,10 @@ void AGalaxyActor::Initialize()
 			FRandomStream Stream = FRandomStream(Seed);
 			this->Count = Stream.RandRange(100000, 400000); //TODO: should be configurable range at actor level
 			auto EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
-			int DepthRange = 4;
-			int InsertOffset = 5;
-			if (Stream.FRand() < .3) {
+			int DepthRange = 6;
+			int InsertOffset = 4;
+			double GlobularChance = .3;
+			if (Stream.FRand() < GlobularChance) {
 				auto GlobularGenerator = new GlobularNoiseGenerator(Seed);
 				GlobularGenerator->Count = Count;
 				GlobularGenerator->Falloff = Stream.FRandRange(.5, 1.5);
@@ -47,18 +48,20 @@ void AGalaxyActor::Initialize()
 				SpiralGenerator->Count = Count;
 				SpiralGenerator->Rotation = FRotator(AxisRotation.X, AxisRotation.Y, AxisRotation.Z);
 				SpiralGenerator->DepthRange = DepthRange;
-				SpiralGenerator->NumArms = Stream.RandRange(2, 12);
+				SpiralGenerator->NumArms = Stream.RandRange(2, 8);
 				SpiralGenerator->PitchAngle = Stream.FRandRange(5, 40);
 				SpiralGenerator->ArmContrast = Stream.FRandRange(.2, .8);
-				SpiralGenerator->RadialFalloff = Stream.FRandRange(2, 4);
+				SpiralGenerator->RadialFalloff = Stream.FRandRange(1.5, 3);
 				SpiralGenerator->CenterScale = Stream.FRandRange(.01, .02);
-				SpiralGenerator->HorizontalSpreadMin = Stream.FRandRange(.01, .03);
-				SpiralGenerator->HorizontalSpreadMax = Stream.FRandRange(.15, .3);
-				SpiralGenerator->VerticalSpreadMin = Stream.FRandRange(.01, .03);
-				SpiralGenerator->VerticalSpreadMax = Stream.FRandRange(.15, .3);
+				double SpreadMin = Stream.FRandRange(.01, .03);
+				double SpreadMax = Stream.FRandRange(.15, .3);
+				SpiralGenerator->HorizontalSpreadMin = SpreadMin;
+				SpiralGenerator->HorizontalSpreadMax = SpreadMax;
+				SpiralGenerator->VerticalSpreadMin = SpreadMin;
+				SpiralGenerator->VerticalSpreadMax = SpreadMax;
 
-				double HorizontalWarp = Stream.FRandRange(.1, .9);
-				double VerticalWarp = Stream.FRandRange(.1, .9);
+				double HorizontalWarp = Stream.FRandRange(.1, .7);
+				double VerticalWarp = Stream.FRandRange(.1, .7);
 
 				SpiralGenerator->WarpAmount = FVector(HorizontalWarp, HorizontalWarp, VerticalWarp);
 				SpiralGenerator->EncodedTree = EncodedTree;
@@ -194,10 +197,29 @@ void AGalaxyActor::InitializeVolumetric(UVolumeTexture* InVolumeTexture) {
 	//TODO: Configure material with the volume texture
 	FRandomStream RandomStream(Seed);
 	DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), InVolumeTexture);
-	DynamicMaterial->SetScalarParameterValue(FName("Density"), 100);
+	DynamicMaterial->SetScalarParameterValue(FName("Density"), 20);
 	DynamicMaterial->SetScalarParameterValue(FName("MaxSteps"), 64);
-	DynamicMaterial->SetScalarParameterValue(FName("WarpAmount"), .1);
-	DynamicMaterial->SetScalarParameterValue(FName("WarpFrequency"), .1);
+	//DynamicMaterial->SetScalarParameterValue(FName("WarpAmount"), .2);
+	//DynamicMaterial->SetScalarParameterValue(FName("WarpFrequency"), .2);
+// Convert parent color to HSV for better color manipulation
+	FVector ColorVector(ParentColor.R, ParentColor.G, ParentColor.B);
+	FLinearColor ParentHSV = ParentColor.LinearRGBToHSV();
+
+	// Randomize hue shift (±30 degrees)
+	float HueShift = RandomStream.FRandRange(-30.0f, 30.0f);
+	float NewHue = FMath::Fmod(ParentHSV.R + HueShift + 360.0f, 360.0f);
+
+	// Randomize saturation (0.7 to 1.3 of original)
+	float SaturationMultiplier = RandomStream.FRandRange(0.7f, 1.3f);
+	float NewSaturation = FMath::Clamp(ParentHSV.G * SaturationMultiplier, 0.0f, 1.0f);
+
+	// Randomize brightness (0.8 to 1.5 of original for lighter variants)
+	float BrightnessMultiplier = RandomStream.FRandRange(0.8f, 1.5f);
+	float NewBrightness = FMath::Clamp(ParentHSV.B * BrightnessMultiplier, 0.0f, 1.0f);
+
+	FLinearColor RandomizedHSV(NewHue, NewSaturation, NewBrightness, ParentColor.A);
+	FLinearColor LightColor = RandomizedHSV.HSVToLinearRGB();
+
 	DynamicMaterial->SetVectorParameterValue(FName("LightColor"), RandomStream.GetUnitVector().GetAbs());
 	DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), ParentColor);
 	//Set up color variance etc

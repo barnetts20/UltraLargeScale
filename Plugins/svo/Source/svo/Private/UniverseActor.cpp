@@ -27,8 +27,8 @@ void AUniverseActor::Initialize()
 			Generator->Count = this->Count;
 			Generator->Falloff = .5;
 			Generator->Rotation = FRotator(0);
-			Generator->DepthRange = 10;
-			Generator->InsertDepthOffset = 4;
+			Generator->DepthRange = 4;
+			Generator->InsertDepthOffset = 8;
 			Generator->WarpAmount = FVector(1);
 			Generator->EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
 
