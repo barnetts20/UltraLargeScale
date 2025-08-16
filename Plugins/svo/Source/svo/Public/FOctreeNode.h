@@ -64,8 +64,8 @@ public:
 			double VolumeWeight = static_cast<double>(CurrentVolume) / static_cast<double>(LeafVolume);
 
 			// Accumulate density weighted by volume
-			Current->Data.Density += InData.Density * VolumeWeight;
-			Current->Data.Composition += InData.Composition * (InData.Density * VolumeWeight);
+			Current->Data.Density += InData.Density;// *VolumeWeight;
+			Current->Data.Composition += InData.Composition * InData.Density;// *VolumeWeight;
 
 			DepthMaxDensities[Depth] = FMath::Max(DepthMaxDensities[Depth], Current->Data.Density);
 

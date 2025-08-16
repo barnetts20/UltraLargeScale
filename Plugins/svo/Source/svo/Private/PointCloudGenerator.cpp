@@ -247,7 +247,7 @@ void SpiralGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 		InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
 		auto InsertDepth = FMath::Lerp(MinInsertionDepth, MaxInsertionDepth, Stream.FRand());//  Stream.FRandRange(MinInsertionDepth, MaxInsertionDepth); //If a different scale distribution is wanted can change the way depth is randomized
-		auto InsertData = FVoxelData(Stream.FRand(), Stream.GetUnitVector().GetAbs(), i, Type);
+		auto InsertData = FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max(FVector(InsertPosition.X, InsertPosition.Y, InsertPosition.Z).Length() - VerticalSpreadDistance, 0.0001) / VerticalSpreadDistance, 4), Stream.GetUnitVector().GetAbs(), i, Type);
 		InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 	});
 }

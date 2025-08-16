@@ -26,8 +26,8 @@ void AGalaxyActor::Initialize()
 			FRandomStream Stream = FRandomStream(Seed);
 			this->Count = Stream.RandRange(100000, 400000); //TODO: should be configurable range at actor level
 			auto EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
-			int DepthRange = 6;
-			int InsertOffset = 4;
+			int DepthRange = 8;
+			int InsertOffset = 2;
 			double GlobularChance = .3;
 			if (Stream.FRand() < GlobularChance) {
 				auto GlobularGenerator = new GlobularNoiseGenerator(Seed);
@@ -90,7 +90,7 @@ void AGalaxyActor::Initialize()
 			AsyncTask(ENamedThreads::GameThread, [this]()
 				{
 					InitializeNiagara();
-					InitializeVolumetric(Octree->CreateVolumeTextureFromOctree(64));
+					InitializeVolumetric(Octree->CreateVolumeTextureFromOctree(128));
 				});
 		});
 }
@@ -197,8 +197,8 @@ void AGalaxyActor::InitializeVolumetric(UVolumeTexture* InVolumeTexture) {
 	//TODO: Configure material with the volume texture
 	FRandomStream RandomStream(Seed);
 	DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), InVolumeTexture);
-	DynamicMaterial->SetScalarParameterValue(FName("Density"), 20);
-	DynamicMaterial->SetScalarParameterValue(FName("MaxSteps"), 64);
+	//DynamicMaterial->SetScalarParameterValue(FName("Density"), 20);
+	DynamicMaterial->SetScalarParameterValue(FName("MaxSteps"), 128);
 	//DynamicMaterial->SetScalarParameterValue(FName("WarpAmount"), .2);
 	//DynamicMaterial->SetScalarParameterValue(FName("WarpFrequency"), .2);
 // Convert parent color to HSV for better color manipulation
@@ -220,8 +220,8 @@ void AGalaxyActor::InitializeVolumetric(UVolumeTexture* InVolumeTexture) {
 	FLinearColor RandomizedHSV(NewHue, NewSaturation, NewBrightness, ParentColor.A);
 	FLinearColor LightColor = RandomizedHSV.HSVToLinearRGB();
 
-	DynamicMaterial->SetVectorParameterValue(FName("LightColor"), RandomStream.GetUnitVector().GetAbs());
-	DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), ParentColor);
+	//DynamicMaterial->SetVectorParameterValue(FName("LightColor"), RandomStream.GetUnitVector().GetAbs());
+	//DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), ParentColor);
 	//Set up color variance etc
 	//
 

@@ -69,7 +69,7 @@ void AUniverseActor::Initialize()
 }
 
 void AUniverseActor::InitializeVolumetric(UVolumeTexture* InVolumeTexture) {
-	UMaterialInterface* GasMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_VolumeRaymarch_Inst.MT_VolumeRaymarch_Inst"));
+	UMaterialInterface* GasMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_UniverseRaymarch_Inst.MT_UniverseRaymarch_Inst"));
 	UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(GasMaterial, this);
 	
 	//TODO: Configure material with the volume texture
