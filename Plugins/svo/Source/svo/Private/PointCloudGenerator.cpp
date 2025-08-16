@@ -247,7 +247,7 @@ void SpiralGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 		InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
 		auto InsertDepth = FMath::Lerp(MinInsertionDepth, MaxInsertionDepth, Stream.FRand());//  Stream.FRandRange(MinInsertionDepth, MaxInsertionDepth); //If a different scale distribution is wanted can change the way depth is randomized
-		auto InsertData = FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max(FVector(InsertPosition.X, InsertPosition.Y, InsertPosition.Z).Length() - VerticalSpreadDistance, 0.0001) / VerticalSpreadDistance, 4), Stream.GetUnitVector().GetAbs(), i, Type);
+		auto InsertData = FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max(T - .3, 0.000001), 1), Stream.GetUnitVector().GetAbs(), i, Type);
 		InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 	});
 }
@@ -316,7 +316,7 @@ void SpiralNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
 			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-			auto InsertData = FVoxelData(Stream.FRand(), Stream.GetUnitVector(), i, Type);
+			auto InsertData = FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max((T - .5) * 2, 0.000001), 3), Stream.GetUnitVector(), i, Type);
 			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 		});
 }

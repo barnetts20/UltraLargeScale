@@ -90,7 +90,7 @@ void AGalaxyActor::Initialize()
 			AsyncTask(ENamedThreads::GameThread, [this]()
 				{
 					InitializeNiagara();
-					InitializeVolumetric(Octree->CreateVolumeTextureFromOctree(128));
+					InitializeVolumetric(Octree->CreateVolumeTextureFromOctree(64));
 				});
 		});
 }
@@ -198,7 +198,7 @@ void AGalaxyActor::InitializeVolumetric(UVolumeTexture* InVolumeTexture) {
 	FRandomStream RandomStream(Seed);
 	DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), InVolumeTexture);
 	//DynamicMaterial->SetScalarParameterValue(FName("Density"), 20);
-	DynamicMaterial->SetScalarParameterValue(FName("MaxSteps"), 128);
+	DynamicMaterial->SetScalarParameterValue(FName("MaxSteps"), 64);
 	//DynamicMaterial->SetScalarParameterValue(FName("WarpAmount"), .2);
 	//DynamicMaterial->SetScalarParameterValue(FName("WarpFrequency"), .2);
 // Convert parent color to HSV for better color manipulation
