@@ -180,7 +180,7 @@ void GlobularNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
 			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-			auto InsertData = FVoxelData(FMath::Pow(InsertCoeff.Length(), 3.0), Stream.GetUnitVector().GetAbs(), i, Type); // May need to add some way to control typing. for instance galaxy tree could contain stars, blackholes, gas all at different depths
+			auto InsertData = FVoxelData(1, Stream.GetUnitVector().GetAbs(), i, Type); // May need to add some way to control typing. for instance galaxy tree could contain stars, blackholes, gas all at different depths
 			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 		});
 }
