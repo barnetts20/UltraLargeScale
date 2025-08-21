@@ -124,7 +124,6 @@ densitysampler.HueVarianceScale = HueVarianceScale;
 //Applies random offset to step size for the ray
 int3 randpos = int3(Parameters.SvPosition.xy, View.StateFrameIndexMod8);
 float rand = float(Rand3DPCG16(randpos).x) / 0xffff;
-float DitherFactor = .05;
 StepSize *= 1.0 + rand * DitherFactor;
 
 //Step Vector
@@ -168,11 +167,11 @@ for (int i = 0; i < MaxSteps; i++)
 
 // ---- ONE MORE ITERATION TO MARCH THE LEFTOVER PARTIAL STEP ----
 float leftover = saturate(FinalStepSize);
-if (leftover > 0.00001 && transmittance > 0.01)
+if (leftover > 0.00001 && transmittance > 0.001)
 {
     // --- STEP LEFTOVER DISTANCE ---
     CurPos += stepvector * (1.0 - leftover);
-    
+
     // --- SAMPLE ---
     float4 s = densitysampler.Sample(saturate(CurPos));
     
