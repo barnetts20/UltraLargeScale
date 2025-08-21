@@ -20,64 +20,7 @@ public:
 	FVoxelData(double InDensity, FVector InComposition, int InObjectId, int InTypeId = -1) : Density(InDensity), Composition(InComposition), ObjectId(InObjectId), TypeId(InTypeId) {};
 
 	double Density;
-	FVector Composition;
+	FVector Composition; // Density could be accumulated in alpha
 	int ObjectId;
 	int TypeId;
-};
-
-struct SVO_API FInt64Coordinate {
-public:
-	FInt64Coordinate() : X(0), Y(0), Z(0) {};
-	FInt64Coordinate(int64 InX, int64 InY, int64 InZ) : X(InX), Y(InY), Z(InZ) {};
-
-	int64 X;
-	int64 Y;
-	int64 Z;
-
-	// Addition
-	FInt64Coordinate operator+(const FInt64Coordinate& Other) const
-	{
-		return FInt64Coordinate(X + Other.X, Y + Other.Y, Z + Other.Z);
-	}
-
-	// Subtraction
-	FInt64Coordinate operator-(const FInt64Coordinate& Other) const
-	{
-		return FInt64Coordinate(X - Other.X, Y - Other.Y, Z - Other.Z);
-	}
-
-	// Negation
-	FInt64Coordinate operator-() const
-	{
-		return FInt64Coordinate(-X, -Y, -Z);
-	}
-
-	// Compound assignment (optional but useful)
-	FInt64Coordinate& operator+=(const FInt64Coordinate& Other)
-	{
-		X += Other.X;
-		Y += Other.Y;
-		Z += Other.Z;
-		return *this;
-	}
-
-	FInt64Coordinate& operator-=(const FInt64Coordinate& Other)
-	{
-		X -= Other.X;
-		Y -= Other.Y;
-		Z -= Other.Z;
-		return *this;
-	}
-
-	// Equality check (optional)
-	bool operator==(const FInt64Coordinate& Other) const
-	{
-		return X == Other.X && Y == Other.Y && Z == Other.Z;
-	}
-
-	bool operator!=(const FInt64Coordinate& Other) const
-	{
-		return !(*this == Other);
-	}
-
 };

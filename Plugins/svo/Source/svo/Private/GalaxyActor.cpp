@@ -24,9 +24,8 @@ void AGalaxyActor::Initialize()
 			//Populate Data into the tree
 			Octree = MakeShared<FOctree>(Extent);
 			FRandomStream Stream = FRandomStream(Seed);
-			this->Count = Stream.RandRange(100000, 400000); //TODO: should be configurable range at actor level
 			auto EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
-			int DepthRange = 8;
+			int DepthRange = 6;
 			int InsertOffset = 2;
 			double GlobularChance = .3;
 			if (Stream.FRand() < GlobularChance) {
@@ -36,9 +35,9 @@ void AGalaxyActor::Initialize()
 				GlobularGenerator->Rotation = FRotator(AxisRotation.X, AxisRotation.Y, AxisRotation.Z);
 				GlobularGenerator->EncodedTree = EncodedTree;
 				GlobularGenerator->DepthRange = DepthRange;
-				GlobularGenerator->HorizontalExtent = .9;/// *Extent;
-				GlobularGenerator->VerticalExtent = Stream.FRandRange(.1, .9);// *Extent;
-				GlobularGenerator->WarpAmount = FVector(Stream.FRandRange(.0, 1.1));
+				GlobularGenerator->HorizontalExtent = .8;/// *Extent;
+				GlobularGenerator->VerticalExtent = Stream.FRandRange(.4, .8);// *Extent;
+				GlobularGenerator->WarpAmount = FVector(Stream.FRandRange(.0, 1));
 				GlobularGenerator->InsertDepthOffset = InsertOffset;
 				GlobularGenerator->GenerateData(Octree);
 			}
@@ -265,7 +264,6 @@ void AGalaxyActor::BeginPlay()
 {
 	Super::BeginPlay();
 	GalaxyRealSpaceOrigin = GetActorLocation(); // <- Store initial spawn position
-	//Initialize();
 
 	bool debugDraw = false;
 

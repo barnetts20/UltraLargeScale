@@ -27,8 +27,8 @@ void AUniverseActor::Initialize()
 			Generator->Count = this->Count;
 			Generator->Falloff = .5;
 			Generator->Rotation = FRotator(0);
-			Generator->DepthRange = 4;
-			Generator->InsertDepthOffset = 10;
+			Generator->DepthRange = 8;
+			Generator->InsertDepthOffset = 5;
 			Generator->WarpAmount = FVector(1);
 			Generator->EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
 
@@ -146,6 +146,7 @@ void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InRefer
 		FVector normal = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
 		FMatrix RotationMatrix = FRotationMatrix::MakeFromZX(normal, FVector::ForwardVector);
 		NewGalaxy->AxisRotation = normal * 360;
+		NewGalaxy->Count = RandStream.RandRange(400000, 1000000);
 		NewGalaxy->Initialize();
 
 		SpawnedGalaxies.Add(InNode, TWeakObjectPtr<AGalaxyActor>(NewGalaxy));

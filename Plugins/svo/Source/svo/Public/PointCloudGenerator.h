@@ -26,8 +26,8 @@ public:
 	virtual void GenerateData(TSharedPtr<FOctree> InOctree) = 0;
 
 	// Applies noise derivative based point shifting
-	FInt64Coordinate ApplyNoise(FastNoise::SmartNode<> InNoise, double InDomainScale, int64 InExtent, FInt64Coordinate InSamplePosition, float& OutDensity);
-	FInt64Coordinate RotateCoordinate(FInt64Coordinate InCoordinate, FRotator InAxes);
+	FInt64Vector ApplyNoise(FastNoise::SmartNode<> InNoise, double InDomainScale, int64 InExtent, FInt64Vector InSamplePosition, float& OutDensity);
+	FInt64Vector RotateCoordinate(FInt64Vector InCoordinate, FRotator InAxes);
 
 	FRotator Rotation = FRotator(0.0, 0.0, 0.0);
 	FVector WarpAmount = FVector(1, 1, 1); // Controls how far we push points along the gradient

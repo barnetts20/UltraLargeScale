@@ -4,7 +4,7 @@
 #include "PointCloudGenerator.h"
 
 //Applies noise derivative offset to a sample position
-FInt64Coordinate PointCloudGenerator::ApplyNoise(FastNoise::SmartNode<> InNoise, double InDomainScale, int64 InExtent, FInt64Coordinate InSamplePosition, float& OutDensity)
+FInt64Vector PointCloudGenerator::ApplyNoise(FastNoise::SmartNode<> InNoise, double InDomainScale, int64 InExtent, FInt64Vector InSamplePosition, float& OutDensity)
 {
 	double ScaleFactor = InDomainScale / static_cast<double>(InExtent);
 	//Noise scaled sample position
@@ -48,10 +48,10 @@ FInt64Coordinate PointCloudGenerator::ApplyNoise(FastNoise::SmartNode<> InNoise,
 
 	//Back to int64 octree coordinates
 	OutDensity = (Output[13] + 1)/2;
-	auto InsertPosition = FInt64Coordinate(FX, FY, FZ);
+	auto InsertPosition = FInt64Vector(FX, FY, FZ);
 	return InsertPosition;
 }
-FInt64Coordinate PointCloudGenerator::RotateCoordinate(FInt64Coordinate InCoordinate, FRotator InRotation)
+FInt64Vector PointCloudGenerator::RotateCoordinate(FInt64Vector InCoordinate, FRotator InRotation)
 {
 	// Convert to FVector for rotation
 	FVector Position = FVector(
@@ -64,7 +64,7 @@ FInt64Coordinate PointCloudGenerator::RotateCoordinate(FInt64Coordinate InCoordi
 	FVector Rotated = Rotation.RotateVector(Position);
 
 	// Convert back to FInt64Coordinate (rounded)
-	return FInt64Coordinate(
+	return FInt64Vector(
 		FMath::RoundToInt64(Rotated.X),
 		FMath::RoundToInt64(Rotated.Y),
 		FMath::RoundToInt64(Rotated.Z)
@@ -90,7 +90,7 @@ void SimpleRandomGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 		int64 Y = FMath::RoundToInt64(Stream.FRandRange(-InOctree->Extent, InOctree->Extent));
 		int64 Z = FMath::RoundToInt64(Stream.FRandRange(-InOctree->Extent, InOctree->Extent));
 
-		auto InsertPosition = FInt64Coordinate(X, Y, Z);
+		auto InsertPosition = FInt64Vector(X, Y, Z);
 		int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
 		auto InsertData = FVoxelData(Stream.FRand(), Stream.GetUnitVector(), i, Type); //For now just placing the index in ObectId, will probably use it to map to object types
 		
@@ -117,7 +117,7 @@ void SimpleRandomNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			int64 Z = FMath::RoundToInt64(Stream.FRandRange(-InOctree->Extent, InOctree->Extent));
 
 			float OutDensity;
-			FInt64Coordinate InsertPosition = ApplyNoise(Noise, 1, InOctree->Extent, FInt64Coordinate(X, Y, Z), OutDensity);
+			FInt64Vector InsertPosition = ApplyNoise(Noise, 1, InOctree->Extent, FInt64Vector(X, Y, Z), OutDensity);
 
 			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
 			auto InsertData = FVoxelData(OutDensity, Stream.GetUnitVector(), i, Type);
@@ -144,7 +144,7 @@ void GlobularGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 		double Distance = FMath::Pow(Stream.FRand(), Falloff) * InOctree->Extent;
 
 		auto InsertVector = AxisScale * Direction * Distance;
-		FInt64Coordinate InsertPosition = FInt64Coordinate(FMath::RoundToInt64(InsertVector.X), FMath::RoundToInt64(InsertVector.Y), FMath::RoundToInt64(InsertVector.Z));
+		FInt64Vector InsertPosition = FInt64Vector(FMath::RoundToInt64(InsertVector.X), FMath::RoundToInt64(InsertVector.Y), FMath::RoundToInt64(InsertVector.Z));
 		InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
 		auto InsertDepth = Stream.FRandRange(MinInsertionDepth, MaxInsertionDepth);
@@ -175,7 +175,7 @@ void GlobularNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			auto InsertVector = InsertCoeff * Distance;
 
 			float OutDensity;
-			FInt64Coordinate InsertPosition = FInt64Coordinate(FMath::RoundToInt64(InsertVector.X), FMath::RoundToInt64(InsertVector.Y), FMath::RoundToInt64(InsertVector.Z));
+			FInt64Vector InsertPosition = FInt64Vector(FMath::RoundToInt64(InsertVector.X), FMath::RoundToInt64(InsertVector.Y), FMath::RoundToInt64(InsertVector.Z));
 			InsertPosition = ApplyNoise(Noise, 1, InOctree->Extent, InsertPosition, OutDensity);
 			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
@@ -239,7 +239,7 @@ void SpiralGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 		Y += JitterOffset.Y;
 		Z += JitterOffset.Z;
 
-		FInt64Coordinate InsertPosition(
+		FInt64Vector InsertPosition(
 			FMath::RoundToInt64(X), 
 			FMath::RoundToInt64(Y), 
 			FMath::RoundToInt64(Z)
@@ -307,7 +307,7 @@ void SpiralNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			Z += JitterOffset.Z;
 
 			float OutDensity;
-			FInt64Coordinate InsertPosition(
+			FInt64Vector InsertPosition(
 				FMath::RoundToInt64(X),
 				FMath::RoundToInt64(Y),
 				FMath::RoundToInt64(Z)
@@ -362,7 +362,7 @@ void BurstGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 		FVector3d WarpedPoint = FMath::Lerp(UniformPoint, FVector3d::ZeroVector, 1.0 - NoiseValue);
 
 		// Snap to voxel
-		auto Coord = FInt64Coordinate(
+		auto Coord = FInt64Vector(
 			FMath::RoundToInt64(WarpedPoint.X),
 			FMath::RoundToInt64(WarpedPoint.Y),
 			FMath::RoundToInt64(WarpedPoint.Z)
@@ -418,7 +418,7 @@ void BurstNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 
 			// Snap to voxel
 			float OutDensity;
-			auto InsertPosition = FInt64Coordinate(
+			auto InsertPosition = FInt64Vector(
 				FMath::RoundToInt64(WarpedPoint.X),
 				FMath::RoundToInt64(WarpedPoint.Y),
 				FMath::RoundToInt64(WarpedPoint.Z)

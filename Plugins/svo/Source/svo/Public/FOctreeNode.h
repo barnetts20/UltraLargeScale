@@ -15,22 +15,24 @@ class SVO_API FOctreeNode : public TSharedFromThis<FOctreeNode>
 {
 public:
 	TArray<uint8> Index;
+	int Depth;
+
 	TWeakPtr<FOctreeNode> Parent;
 	TSharedPtr<FOctreeNode> Children[8];
 	
-	FInt64Coordinate Center;
+	FInt64Vector Center;
 	int64 Extent;
-	int Depth;
+
 	FVoxelData Data = FVoxelData(); //Default constructor with 0 Density -1 ObectId
 
 	FOctreeNode() {
 		Index = TArray<uint8>();
-		Center = FInt64Coordinate();
+		Center = FInt64Vector();
 		Extent = 0;
 		Depth = Index.Num();
 	};
 
-	FOctreeNode(FInt64Coordinate InCenter, int64 InExtent, TArray<uint8> InIndex, TWeakPtr<FOctreeNode> InParent) {
+	FOctreeNode(FInt64Vector InCenter, int64 InExtent, TArray<uint8> InIndex, TWeakPtr<FOctreeNode> InParent) {
 		Index = InIndex;
 		Center = InCenter;
 		Extent = InExtent;
@@ -49,26 +51,21 @@ public:
 	TArray<double> DepthMaxDensities;
 	TSharedPtr<FOctreeNode> Root;
 
-	TSharedPtr<FOctreeNode> InsertPosition(FInt64Coordinate InPosition, int InDepth, FVoxelData InData) {
+	TSharedPtr<FOctreeNode> InsertPosition(FInt64Vector InPosition, int InDepth, FVoxelData InData) {
 		TSharedPtr<FOctreeNode> Current = Root;
 		int64 CurrentExtent = Extent;
 
 		// Calculate the leaf volume once (volume at target depth InDepth)
 		int64 LeafExtent = Extent >> InDepth; // Extent at target depth
-		int64 LeafVolume = LeafExtent;
-
 		for (int Depth = 0; Depth < InDepth; ++Depth) {
-			int64 CurrentVolume = CurrentExtent;
-
 			// Weight the contribution by volume ratio
-			double VolumeWeight = static_cast<double>(CurrentVolume) / static_cast<double>(LeafVolume);
+			double DensityWeight = static_cast<double>(CurrentExtent) / static_cast<double>(LeafExtent);
 
 			// Accumulate density weighted by volume
-			Current->Data.Density += InData.Density;// *VolumeWeight;
-			Current->Data.Composition += InData.Composition * InData.Density;// *VolumeWeight;
+			Current->Data.Density += InData.Density * DensityWeight;
+			Current->Data.Composition += InData.Composition * InData.Density * DensityWeight;
 
 			DepthMaxDensities[Depth] = FMath::Max(DepthMaxDensities[Depth], Current->Data.Density);
-
 
 			//Check/Set Max for layer
 			CurrentExtent /= 2;
@@ -84,7 +81,7 @@ public:
 				int64 OffsetY = ((ChildIndex & 2) ? 1 : -1) * CurrentExtent;
 				int64 OffsetZ = ((ChildIndex & 4) ? 1 : -1) * CurrentExtent;
 
-				FInt64Coordinate ChildCenter = FInt64Coordinate(
+				FInt64Vector ChildCenter = FInt64Vector(
 					Current->Center.X + OffsetX,
 					Current->Center.Y + OffsetY,
 					Current->Center.Z + OffsetZ
@@ -105,7 +102,7 @@ public:
 		return Current;
 	}
 	
-	TSharedPtr<FOctreeNode> InsertPosition(FInt64Coordinate InPosition, FVoxelData InData) {
+	TSharedPtr<FOctreeNode> InsertPosition(FInt64Vector InPosition, FVoxelData InData) {
 		return InsertPosition(InPosition, MaxDepth, InData);
 	}
 
@@ -165,16 +162,16 @@ public:
 		return Nodes;
 	}
 
-	void CollectNodesInRange(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, const FInt64Coordinate& InCenter, int64 InExtent, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
+	void CollectNodesInRange(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, const FInt64Vector& InCenter, int64 InExtent, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
 		if (!InNode.IsValid()) return;
 
 		//Query Bounds
-		const FInt64Coordinate QueryMin = InCenter - FInt64Coordinate(InExtent, InExtent, InExtent);
-		const FInt64Coordinate QueryMax = InCenter + FInt64Coordinate(InExtent, InExtent, InExtent);
+		const FInt64Vector QueryMin = InCenter - FInt64Vector(InExtent, InExtent, InExtent);
+		const FInt64Vector QueryMax = InCenter + FInt64Vector(InExtent, InExtent, InExtent);
 
 		//Node Bounds
-		const FInt64Coordinate NodeMin = InNode->Center - FInt64Coordinate(InNode->Extent, InNode->Extent, InNode->Extent);
-		const FInt64Coordinate NodeMax = InNode->Center + FInt64Coordinate(InNode->Extent, InNode->Extent, InNode->Extent);
+		const FInt64Vector NodeMin = InNode->Center - FInt64Vector(InNode->Extent, InNode->Extent, InNode->Extent);
+		const FInt64Vector NodeMax = InNode->Center + FInt64Vector(InNode->Extent, InNode->Extent, InNode->Extent);
 
 		// Early reject if node doesn't intersect the query bounds
 		const bool bIntersects =
@@ -205,7 +202,8 @@ public:
 			OutNodes.Add(InNode);
 		}
 	}
-	TArray<TSharedPtr<FOctreeNode>> GetNodesInRange(FInt64Coordinate InCenter, int64 InExtent, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
+
+	TArray<TSharedPtr<FOctreeNode>> GetNodesInRange(FInt64Vector InCenter, int64 InExtent, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
 		TArray<TSharedPtr<FOctreeNode>> Nodes;
 		if (Root.IsValid())
 		{
@@ -301,6 +299,7 @@ public:
 
 		return NewVolumeTexture;
 	}
+	
 	UVolumeTexture* SaveVolumeTextureAsAssetFromOctree(int32 Resolution, const FString& AssetPath, const FString& AssetName)
 	{
 		// This should be called instead of SaveVolumeTextureAsAsset
@@ -430,6 +429,6 @@ public:
 		Extent = InExtent;
 		MaxDepth = static_cast<int32>(FMath::Log2(static_cast<double>(Extent)));
 		DepthMaxDensities.SetNumZeroed(128, true);
-		Root = MakeShared<FOctreeNode>(FInt64Coordinate(), Extent, TArray<uint8>(), nullptr);
+		Root = MakeShared<FOctreeNode>(FInt64Vector(), Extent, TArray<uint8>(), nullptr);
 	}
 };

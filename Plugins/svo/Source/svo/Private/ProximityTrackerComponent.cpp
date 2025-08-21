@@ -23,7 +23,7 @@ void UProximityTrackerComponent::OnProximityUpdate()
     if (!UniverseActor || !UniverseActor->Initialized) return;
 	FVector WorldLocation = Owner->GetActorLocation();
 	FVector SampleLocation = WorldLocation - UniverseActor->GetActorLocation();
-	FInt64Coordinate SampleCoordinate = FInt64Coordinate(FMath::RoundToInt64(SampleLocation.X), FMath::RoundToInt64(SampleLocation.Y), FMath::RoundToInt64(SampleLocation.Z));
+    FInt64Vector SampleCoordinate = FInt64Vector(FMath::RoundToInt64(SampleLocation.X), FMath::RoundToInt64(SampleLocation.Y), FMath::RoundToInt64(SampleLocation.Z));
 
 	// Perform query
 	TArray<TSharedPtr<FOctreeNode>> NearbyNodes = UniverseActor->Octree->GetNodesInRange(SampleCoordinate, ScanExtent, -1, -1, 1);
