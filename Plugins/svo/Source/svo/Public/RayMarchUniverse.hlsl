@@ -1,4 +1,4 @@
-//Encapsulates density logic and helper functions
+// --- DENSITY SAMPLER STRUCT ENCAPSULATES SAMPLING LOGIC AND HELPER FUNCTIONS ---
 struct DensitySampler{
     Texture3D Tex;
     SamplerState TexSampler;
@@ -106,7 +106,7 @@ struct DensitySampler{
     }
 };
 
-//Setup density sampler
+// --- SETUP DENSITY SAMPLER ---
 DensitySampler densitysampler;
 densitysampler.Tex = Tex;
 densitysampler.TexSampler = TexSampler;
@@ -121,17 +121,17 @@ densitysampler.HotShift = HotShift;
 densitysampler.HueVariance = HueVariance;
 densitysampler.HueVarianceScale = HueVarianceScale;
 
-//Applies random offset to step size for the ray
+// --- DITHER/TEMPORAL NOISE - APPLIES RANDOM OFFSET TO THE STEP SIZE FOR THE RAY ---
 int3 randpos = int3(Parameters.SvPosition.xy, View.StateFrameIndexMod8);
 float rand = float(Rand3DPCG16(randpos).x) / 0xffff;
 StepSize *= 1.0 + rand * DitherFactor;
 
-//Step Vector
+// --- PRECALCULATE STEP VECTOR ---
 float3 stepvector = normalize(
     mul(Parameters.CameraVector, (float3x3)LWCToFloat(GetPrimitiveData(Parameters).WorldToLocal))
 ) * StepSize;
 
-//Controls near camera fade ranges
+// --- PROXIMITY FADE START END RANGES AS % OF RAYMARCH PROGRESS ---
 float ProximityFadeStart = 0.01;
 float ProximityFadeEnd   = 0.00;
 
@@ -158,11 +158,11 @@ for (int i = 0; i < MaxSteps; i++)
     volumeColor += temperatureColor * alpha * transmittance;
     transmittance *= 1.0 - alpha;
 
+    // --- EARLY TERMINATION CONDITION ---
+    if (transmittance < 0.001) break;
+
     // --- STEP ---
     CurPos += -stepvector;
-
-    if (transmittance < 0.001)
-        break;
 }
 
 // ---- ONE MORE ITERATION TO MARCH THE LEFTOVER PARTIAL STEP ----
@@ -191,5 +191,5 @@ if (leftover > 0.00001 && transmittance > 0.001)
     transmittance *= 1.0 - alpha;
 }
 
-//Emissive color in RBG transmittance in A
+// --- RETURN - EMISSIVE COLOR IN RGB - TRANSMITTANCE IN A ---
 return float4(volumeColor, transmittance);
