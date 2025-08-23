@@ -4,6 +4,7 @@
 #include <PointCloudGenerator.h>
 #include "Engine/VolumeTexture.h"
 #include <Kismet/GameplayStatics.h>
+#include "NiagaraSystemInstance.h"
 #include <AssetRegistry/AssetRegistryModule.h>
 
 void AGalaxyActor::Initialize()
@@ -25,8 +26,8 @@ void AGalaxyActor::Initialize()
 			Octree = MakeShared<FOctree>(Extent);
 			FRandomStream Stream = FRandomStream(Seed);
 			auto EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
-			int DepthRange = 6;
-			int InsertOffset = 2;
+			int DepthRange = 4;
+			int InsertOffset = 3;
 			double GlobularChance = .3;
 			if (Stream.FRand() < GlobularChance) {
 				auto GlobularGenerator = new GlobularNoiseGenerator(Seed);
@@ -86,151 +87,135 @@ void AGalaxyActor::Initialize()
 
 			//Pass the arrays back to the game thread to instantiate the particle system
 			//InitializeNiagara(Positions, Extents, Colors);
+			SpawnInstancedGalaxy();
+			//InitializeNiagara();
 			AsyncTask(ENamedThreads::GameThread, [this]()
 				{
-					InitializeNiagara();
 					InitializeVolumetric(Octree->CreateVolumeTextureFromOctree(64));
 				});
 		});
 }
 
+void AGalaxyActor::SpawnInstancedGalaxy()
+{
+	if (!InstancedStarMesh || Positions.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Cannot spawn galaxy - missing component or no position data"));
+		return;
+	}
+
+	// Create transforms array
+	TArray<FTransform> InstanceTransforms;
+	TArray<float> CustomDataArray;
+	InstanceTransforms.Reserve(Positions.Num());
+	CustomDataArray.Reserve(Positions.Num() * 3);
+	// Convert your data to transforms (in local space)
+	ParallelFor(Positions.Num(), [&](int32 Index)
+	{
+		//Need a struct to pack this up with color
+		FTransform InstanceTransform;
+		InstanceTransform.SetLocation(Positions[Index]);        // Local position relative to actor
+		InstanceTransform.SetRotation(FQuat::Identity);     // No rotation for now
+		InstanceTransform.SetScale3D(FVector(Extents[Index]));  // Uniform scale from extent
+		InstanceTransforms.Add(InstanceTransform);
+		CustomDataArray.Add(Colors[Index].R);
+		CustomDataArray.Add(Colors[Index].G);
+		CustomDataArray.Add(Colors[Index].B);
+	});
+
+	// Spawn all instances at once
+	AsyncTask(ENamedThreads::GameThread, [this, InstanceTransforms, CustomDataArray]()
+	{
+		// CRITICAL: Disable per-instance culling
+		InstancedStarMesh->bNeverDistanceCull = true;
+		UMaterialInterface* GasMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/MT_EmissiveColor.MT_EmissiveColor"));
+		UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(GasMaterial, this);
+		InstancedStarMesh->SetMaterial(0, DynamicMaterial);
+		//InstancedStarMesh->SetCustomData() Use this to encode color??
+		InstancedStarMesh->AddInstances(InstanceTransforms, false, false, false);
+		//InstancedStarMesh->SetCustomData(0, CustomDataArray);
+	});
+
+	UE_LOG(LogTemp, Log, TEXT("Spawned %d instanced stars"), Positions.Num());
+}
+
 void AGalaxyActor::InitializeNiagara()
 {
-	FSoftObjectPath NiagaraSystemPath(NiagaraPath);
-	PointCloudNiagara = Cast<UNiagaraSystem>(NiagaraSystemPath.TryLoad());
-	if (PointCloudNiagara)
+	AsyncTask(ENamedThreads::GameThread, [this]()
 	{
-		//SYSTEM IS SPAWNING WITH EITHER AN OFFSET AT THE SYSTEM LEVEL OR AT INSERTION OF POINTS IN A WAY THAT IS UNCENTERING IT
-		NiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
-			PointCloudNiagara,
-			GetRootComponent(),
-			NAME_None,
-			FVector::ZeroVector,
-			FRotator::ZeroRotator,
-			EAttachLocation::KeepWorldPosition,
-			true,
-			false
-		);
-
-		if (NiagaraComponent)
+		FSoftObjectPath NiagaraSystemPath(NiagaraPath);
+		PointCloudNiagara = Cast<UNiagaraSystem>(NiagaraSystemPath.TryLoad());
+		if (PointCloudNiagara)
 		{
-			NiagaraComponent->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+			//SYSTEM IS SPAWNING WITH EITHER AN OFFSET AT THE SYSTEM LEVEL OR AT INSERTION OF POINTS IN A WAY THAT IS UNCENTERING IT
+			NiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
+				PointCloudNiagara,
+				GetRootComponent(),
+				NAME_None,
+				FVector::ZeroVector,
+				FRotator::ZeroRotator,
+				EAttachLocation::KeepWorldPosition,
+				true,
+				false
+			);
 
-			// Set system bounds
-			FBox Bounds(FVector(-Extent), FVector(Extent));
-			NiagaraComponent->SetSystemFixedBounds(Bounds);
-			NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Extent);
-			//TODO::Proceduralize Dust cloud material
-			FRandomStream Stream = FRandomStream(Seed);
-			UMaterialInterface* GasMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/GasSpriteMaterial_Inst.GasSpriteMaterial_Inst"));
-			UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(GasMaterial, this);
-
-			FLinearColor SecondaryColor = FLinearColor(Stream.GetUnitVector());
-			DynamicMaterial->SetScalarParameterValue(FName("Extent"), Extent);
-
-			FLinearColor HsvParent = ParentColor.LinearRGBToHSV();
-
-			float Offset = Stream.FRandRange(20.f, 45.f);
-
-			FLinearColor Color1 = FLinearColor(HsvParent.R - Offset + 360.f, HsvParent.G, HsvParent.B);
-			FLinearColor Color2 = FLinearColor(HsvParent.R + Offset + 360.f, HsvParent.G, HsvParent.B);
-			//dm->SetScalarParameterValue(FName("RadialFalloff"), 4);
-
-			DynamicMaterial->SetVectorParameterValue(FName("Color1"), Color1.HSVToLinearRGB());
-			DynamicMaterial->SetVectorParameterValue(FName("Color2"), Color2.HSVToLinearRGB());
-			DynamicMaterial->SetVectorParameterValue(FName("PositionScaleOffset"), FVector4(Stream.FRandRange(-1,1), Stream.FRandRange(-1, 1), Stream.FRandRange(-1, 1), Stream.FRandRange(.75, 1.25)));
-			DynamicMaterial->SetScalarParameterValue(FName("BaseNoiseScale"), Stream.FRandRange(.5, 1.5));
-			DynamicMaterial->SetScalarParameterValue(FName("DistortionNoiseScale"), Stream.FRandRange(.1, .5));
-			DynamicMaterial->SetScalarParameterValue(FName("DistortionAmount"), Stream.FRandRange(.02, .5));
-			DynamicMaterial->SetScalarParameterValue(FName("ColorBalance"), Stream.FRandRange(1.5, 2.5));
-			DynamicMaterial->SetScalarParameterValue(FName("ParticleColorInfluence"), Stream.FRandRange(0, .6));
-			DynamicMaterial->SetScalarParameterValue(FName("OpacityMultiplier"), Stream.FRandRange(.005, .02));
-
-			//Select random volume textures here
-			TArray<UVolumeTexture*> NoiseTextures;
-			FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-
-			FARFilter Filter;
-			Filter.ClassPaths.Add(UVolumeTexture::StaticClass()->GetClassPathName());
-			Filter.PackagePaths.Add("/SVO/VolumeTextures");
-			Filter.bRecursivePaths = true;
-
-			TArray<FAssetData> AssetList;
-			AssetRegistryModule.Get().GetAssets(Filter, AssetList);
-
-			for (const FAssetData& Asset : AssetList)
+			if (NiagaraComponent)
 			{
-				UVolumeTexture* Tex = Cast<UVolumeTexture>(Asset.GetAsset());
-				if (Tex)
-				{
-					NoiseTextures.Add(Tex);
-				}
+				NiagaraComponent->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+				FBox Bounds(FVector(-Extent), FVector(Extent));
+				NiagaraComponent->SetSystemFixedBounds(Bounds);
+				NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Extent);
+				PopulatingNiagara = true;
 			}
-			DynamicMaterial->SetTextureParameterValue(FName("BaseNoise"), NoiseTextures[Stream.RandRange(0, NoiseTextures.Num() - 1)]);
-			DynamicMaterial->SetTextureParameterValue(FName("DistortionNoise"), NoiseTextures[Stream.RandRange(0, NoiseTextures.Num() - 1)]);
-			NiagaraComponent->SetVariableMaterial(FName("User.GasMaterial"), DynamicMaterial);
-			//
-			// 
-			//Async(EAsyncExecution::Thread, [this]()
-			//{
-					// Pass in user parameters (assuming Niagara system is setup to receive them)
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), Positions);
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), Colors);
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), Extents);
-
-					//AsyncTask(ENamedThreads::GameThread, [this, Positions = MoveTemp(Positions), Extents = MoveTemp(Extents), Colors = MoveTemp(Colors)]()
-					//{
-			NiagaraComponent->Activate(true);
-			NiagaraComponent->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-					//});
-			//});
-
 		}
-	}
+	});
 }
 
 void AGalaxyActor::InitializeVolumetric(UVolumeTexture* InVolumeTexture) {
-	UMaterialInterface* GasMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_VolumeRaymarch_Inst.MT_VolumeRaymarch_Inst"));
-	UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(GasMaterial, this);
+	AsyncTask(ENamedThreads::GameThread, [this, InVolumeTexture]()
+	{
+		UMaterialInterface* GasMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_GalaxyRaymarch_Inst.MT_GalaxyRaymarch_Inst"));
+		UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(GasMaterial, this);
 
-	//TODO: Configure material with the volume texture
-	FRandomStream RandomStream(Seed);
-	DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), InVolumeTexture);
-	//DynamicMaterial->SetScalarParameterValue(FName("Density"), 20);
-	DynamicMaterial->SetScalarParameterValue(FName("MaxSteps"), 64);
-	//DynamicMaterial->SetScalarParameterValue(FName("WarpAmount"), .2);
-	//DynamicMaterial->SetScalarParameterValue(FName("WarpFrequency"), .2);
-// Convert parent color to HSV for better color manipulation
-	FVector ColorVector(ParentColor.R, ParentColor.G, ParentColor.B);
-	FLinearColor ParentHSV = ParentColor.LinearRGBToHSV();
+		//TODO: Configure material with the volume texture
+		FRandomStream RandomStream(Seed);
+		DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), InVolumeTexture);
+		//DynamicMaterial->SetScalarParameterValue(FName("Density"), 20);
+		DynamicMaterial->SetScalarParameterValue(FName("MaxSteps"), 64);
+		//DynamicMaterial->SetScalarParameterValue(FName("WarpAmount"), .2);
+		//DynamicMaterial->SetScalarParameterValue(FName("WarpFrequency"), .2);
+		// Convert parent color to HSV for better color manipulation
+		FVector ColorVector(ParentColor.R, ParentColor.G, ParentColor.B);
+		FLinearColor ParentHSV = ParentColor.LinearRGBToHSV();
 
-	// Randomize hue shift (±30 degrees)
-	float HueShift = RandomStream.FRandRange(-30.0f, 30.0f);
-	float NewHue = FMath::Fmod(ParentHSV.R + HueShift + 360.0f, 360.0f);
+		// Randomize hue shift (±30 degrees)
+		float HueShift = RandomStream.FRandRange(-30.0f, 30.0f);
+		float NewHue = FMath::Fmod(ParentHSV.R + HueShift + 360.0f, 360.0f);
 
-	// Randomize saturation (0.7 to 1.3 of original)
-	float SaturationMultiplier = RandomStream.FRandRange(0.7f, 1.3f);
-	float NewSaturation = FMath::Clamp(ParentHSV.G * SaturationMultiplier, 0.0f, 1.0f);
+		// Randomize saturation (0.7 to 1.3 of original)
+		float SaturationMultiplier = RandomStream.FRandRange(0.7f, 1.3f);
+		float NewSaturation = FMath::Clamp(ParentHSV.G * SaturationMultiplier, 0.0f, 1.0f);
 
-	// Randomize brightness (0.8 to 1.5 of original for lighter variants)
-	float BrightnessMultiplier = RandomStream.FRandRange(0.8f, 1.5f);
-	float NewBrightness = FMath::Clamp(ParentHSV.B * BrightnessMultiplier, 0.0f, 1.0f);
+		// Randomize brightness (0.8 to 1.5 of original for lighter variants)
+		float BrightnessMultiplier = RandomStream.FRandRange(0.8f, 1.5f);
+		float NewBrightness = FMath::Clamp(ParentHSV.B * BrightnessMultiplier, 0.0f, 1.0f);
 
-	FLinearColor RandomizedHSV(NewHue, NewSaturation, NewBrightness, ParentColor.A);
-	FLinearColor LightColor = RandomizedHSV.HSVToLinearRGB();
+		FLinearColor RandomizedHSV(NewHue, NewSaturation, NewBrightness, ParentColor.A);
+		FLinearColor LightColor = RandomizedHSV.HSVToLinearRGB();
 
-	DynamicMaterial->SetVectorParameterValue(FName("LightColor"), RandomStream.GetUnitVector().GetAbs());
-	DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), ParentColor);
-	//Set up color variance etc
-	//
+		DynamicMaterial->SetVectorParameterValue(FName("LightColor"), RandomStream.GetUnitVector().GetAbs());
+		DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), ParentColor);
+		//Set up color variance etc
+		//
 
-	UStaticMesh* VolumetricMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals"));
-	VolumetricComponent = NewObject<UStaticMeshComponent>(this);
-	VolumetricComponent->SetStaticMesh(VolumetricMesh);
-	VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
-	VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-	VolumetricComponent->SetMaterial(0, DynamicMaterial);
-	VolumetricComponent->RegisterComponent();
+		UStaticMesh* VolumetricMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals"));
+		VolumetricComponent = NewObject<UStaticMeshComponent>(this);
+		VolumetricComponent->SetStaticMesh(VolumetricMesh);
+		VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
+		VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+		VolumetricComponent->SetMaterial(0, DynamicMaterial);
+		VolumetricComponent->RegisterComponent();
+	});
 }
 
 void AGalaxyActor::DebugDrawTree()
@@ -293,12 +278,56 @@ void AGalaxyActor::Tick(float DeltaTime)
 	}
 
 	double ParallaxRatio = (Universe ? Universe->SpeedScale : SpeedScale) / UnitScale;
-	FVector ActorOrigin = FVector::ZeroVector; // Replace with your origin if dynamic
 	FVector PlayerOffset = CurrentFrameOfReferenceLocation - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
 	FVector ParallaxOffset = PlayerOffset * (1.0 - ParallaxRatio);
-	//DrawDebugSphere(GetWorld(), GetActorLocation(), Extent, 34, FColor::Green, false, -1, 0, 24); //THIS SPHERE IS CORRECTLY LOCATED
 	SetActorLocation(GetActorLocation() + ParallaxOffset);
+
+	//TODO:: PROCESS NIAGARA CHUNKS UNTIL EMPTY
+	//if (PopulatingNiagara) {
+	//	if (Positions.Num() == 0)
+	//	{
+	//		PopulatingNiagara = false;
+	//		NiagaraComponent->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+	//		return;
+	//	}
+
+	//	// Determine how many elements to take this frame (end boundary)
+	//	int32 NumToProcess = FMath::Min(ChunkSize, Positions.Num());
+
+	//	// Clear previous chunk contents (optional, depends on processing needs)
+	//	TArray<FVector> PositionChunk;
+	//	TArray<float> ExtentChunk;
+	//	TArray<FLinearColor> ColorChunk;
+
+	//	PositionChunk.AddZeroed(NumToProcess);
+	//	ExtentChunk.AddZeroed(NumToProcess);
+	//	ColorChunk.AddZeroed(NumToProcess);
+	//	// Copy chunk from MasterArray into ChunkArray
+	//	ParallelFor(NumToProcess, [&](int32 Index)
+	//	{
+	//		PositionChunk[Index] = Positions[Index];
+	//		ExtentChunk[Index] = Extents[Index];
+	//		ColorChunk[Index] = Colors[Index];
+	//	});
+	//	//for (int32 i = 0; i < NumToProcess; ++i)
+	//	//{
+	//	//	PositionChunk[i] = Positions[i];
+	//	//	ExtentChunk[i] = Extents[i];
+	//	//	ColorChunk[i] = Colors[i];
+	//	//}
+	//	// Remove that chunk from MasterArray
+	//	Positions.RemoveAt(0, NumToProcess);
+	//	Extents.RemoveAt(0, NumToProcess);
+	//	Colors.RemoveAt(0, NumToProcess);
+
+	//	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), PositionChunk);
+	//	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), ColorChunk);
+	//	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), ExtentChunk);
+	//	
+	//	NiagaraComponent->ResetSystem();
+	//	NiagaraComponent->Activate(true);
+	//}
 	Super::Tick(DeltaTime);
 }
 

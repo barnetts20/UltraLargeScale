@@ -9,6 +9,7 @@
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraSystem.h"
 #include <UniverseActor.h>
+#include "Components/InstancedStaticMeshComponent.h"
 #include "GalaxyActor.generated.h"
 
 
@@ -23,6 +24,16 @@ public:
 		NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
 		USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
 		SetRootComponent(SceneRoot);
+		InstancedStarMesh = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("InstancedStarMesh"));
+		InstancedStarMesh->SetupAttachment(RootComponent);
+		InstancedStarMesh->bDisableCollision = true;
+		// Set default meshStarMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Plane"));
+		StarMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere"));
+		if (StarMesh)
+		{
+			
+			InstancedStarMesh->SetStaticMesh(StarMesh);
+		}
 	}
 
 	AUniverseActor* Universe;
@@ -56,10 +67,16 @@ public:
 
 	TSharedPtr<FOctree> Octree;
 
+
 	FString NiagaraPath;
+	int ChunkSize = 50000;
+	
 	class UNiagaraSystem* PointCloudNiagara;
 	class UNiagaraComponent* NiagaraComponent;
 	class UStaticMeshComponent* VolumetricComponent;
+
+	UInstancedStaticMeshComponent* InstancedStarMesh;
+	UStaticMesh* StarMesh;
 
 	FVector LastFrameOfReferenceLocation = FVector(0,0,0);
 	FVector CurrentFrameOfReferenceLocation;
@@ -69,11 +86,15 @@ public:
 	TArray<float> Extents;
 	TArray<FLinearColor> Colors;
 
+	int CurNiagaraIndex = 0;
+	bool PopulatingNiagara = false;
+
 	FLinearColor ParentColor = FLinearColor(1,1,1,0);
 	void Initialize();
 
 protected:
 	void InitializeNiagara();
+	void SpawnInstancedGalaxy();
 	void InitializeVolumetric(UVolumeTexture* InVolumeTexture);
 	void DebugDrawTree();
 	virtual void BeginPlay() override;
