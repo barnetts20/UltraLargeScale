@@ -4,6 +4,7 @@
 #include <PointCloudGenerator.h>
 #include "Engine/VolumeTexture.h"
 #include <Kismet/GameplayStatics.h>
+#include "NiagaraDataChannel.h"
 #include "NiagaraSystemInstance.h"
 #include <AssetRegistry/AssetRegistryModule.h>
 
@@ -19,6 +20,8 @@ void AGalaxyActor::Initialize()
 			}
 		}
 	}
+	FSoftObjectPath NiagaraSystemPath(NiagaraPath);
+	PointCloudNiagara = Cast<UNiagaraSystem>(NiagaraSystemPath.TryLoad());
 
 	Async(EAsyncExecution::Thread, [this]()
 		{
@@ -28,7 +31,7 @@ void AGalaxyActor::Initialize()
 			auto EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
 			int DepthRange = 4;
 			int InsertOffset = 3;
-			double GlobularChance = .3;
+			double GlobularChance = .0;
 			if (Stream.FRand() < GlobularChance) {
 				auto GlobularGenerator = new GlobularNoiseGenerator(Seed);
 				GlobularGenerator->Count = Count;
@@ -81,19 +84,57 @@ void AGalaxyActor::Initialize()
 				const TSharedPtr<FOctreeNode>& Leaf = Leaves[Index];
 				FRandomStream RandStream(Leaf->Data.ObjectId);
 				Positions[Index] = FVector(Leaf->Center.X, Leaf->Center.Y, Leaf->Center.Z);
-				Extents[Index] = static_cast<float>(Leaf->Extent);
+				Extents[Index] = static_cast<float>(Leaf->Extent * 2);
 				Colors[Index] = FLinearColor(Leaf->Data.Composition);
 			});
-
+			PopulatingNiagara = true;
+			
+			//NiagaraComponents.SetNumUninitialized(20, false);
 			//Pass the arrays back to the game thread to instantiate the particle system
 			//InitializeNiagara(Positions, Extents, Colors);
-			SpawnInstancedGalaxy();
+			//SpawnInstancedGalaxy();
 			//InitializeNiagara();
-			AsyncTask(ENamedThreads::GameThread, [this]()
-				{
-					InitializeVolumetric(Octree->CreateVolumeTextureFromOctree(64));
-				});
+			//AsyncTask(ENamedThreads::GameThread, [this]()
+			//	{
+			//		InitializeVolumetric(Octree->CreateVolumeTextureFromOctree(64));
+			//	});
 		});
+}
+
+void AGalaxyActor::ProcessNiagaraChunk()
+{
+	//TODO:: PROCESS NIAGARA CHUNKS UNTIL EMPTY
+	if (PopulatingNiagara) {
+		if (Positions.Num() == 0)
+		{
+			PopulatingNiagara = false;
+			return;
+		}
+
+		int32 NumToProcess = FMath::Min(ChunkSize, Positions.Num());
+		TArray<FVector> PositionChunk;
+		PositionChunk.AddZeroed(NumToProcess);
+
+		TArray<FLinearColor> ColorChunk;
+		ColorChunk.AddZeroed(NumToProcess);
+
+		TArray<float> ScaleChunk;
+		ScaleChunk.AddZeroed(NumToProcess);
+
+		ParallelFor(NumToProcess, [&](int32 Index)
+			{
+				PositionChunk[Index] = Positions[Index];
+				ColorChunk[Index] = Colors[Index];
+				ScaleChunk[Index] = Extents[Index];
+			});
+
+		Positions.RemoveAt(0, NumToProcess);
+		Colors.RemoveAt(0, NumToProcess);
+		Extents.RemoveAt(0, NumToProcess);
+
+		//Back to game thread
+		InitializeNiagara(PositionChunk, ColorChunk, ScaleChunk);
+	}
 }
 
 void AGalaxyActor::SpawnInstancedGalaxy()
@@ -104,11 +145,9 @@ void AGalaxyActor::SpawnInstancedGalaxy()
 		return;
 	}
 
-	// Create transforms array
-	TArray<FTransform> InstanceTransforms;
 	TArray<float> CustomDataArray;
-	InstanceTransforms.Reserve(Positions.Num());
-	CustomDataArray.Reserve(Positions.Num() * 3);
+	InstanceTransforms.SetNumUninitialized(Positions.Num());
+	CustomDataArray.SetNumUninitialized(Positions.Num() * 3);
 	// Convert your data to transforms (in local space)
 	ParallelFor(Positions.Num(), [&](int32 Index)
 	{
@@ -117,14 +156,14 @@ void AGalaxyActor::SpawnInstancedGalaxy()
 		InstanceTransform.SetLocation(Positions[Index]);        // Local position relative to actor
 		InstanceTransform.SetRotation(FQuat::Identity);     // No rotation for now
 		InstanceTransform.SetScale3D(FVector(Extents[Index]));  // Uniform scale from extent
-		InstanceTransforms.Add(InstanceTransform);
-		CustomDataArray.Add(Colors[Index].R);
-		CustomDataArray.Add(Colors[Index].G);
-		CustomDataArray.Add(Colors[Index].B);
+		InstanceTransforms[Index] = InstanceTransform;
+		CustomDataArray[Index] = Colors[Index].R;
+		CustomDataArray[Index+1] = Colors[Index].G;
+		CustomDataArray[Index+2] = Colors[Index].B;
 	});
 
 	// Spawn all instances at once
-	AsyncTask(ENamedThreads::GameThread, [this, InstanceTransforms, CustomDataArray]()
+	AsyncTask(ENamedThreads::GameThread, [this, CustomDataArray]()
 	{
 		// CRITICAL: Disable per-instance culling
 		InstancedStarMesh->bNeverDistanceCull = true;
@@ -132,6 +171,7 @@ void AGalaxyActor::SpawnInstancedGalaxy()
 		UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(GasMaterial, this);
 		InstancedStarMesh->SetMaterial(0, DynamicMaterial);
 		//InstancedStarMesh->SetCustomData() Use this to encode color??
+		//PopulatingNiagara = true;
 		InstancedStarMesh->AddInstances(InstanceTransforms, false, false, false);
 		//InstancedStarMesh->SetCustomData(0, CustomDataArray);
 	});
@@ -139,16 +179,13 @@ void AGalaxyActor::SpawnInstancedGalaxy()
 	UE_LOG(LogTemp, Log, TEXT("Spawned %d instanced stars"), Positions.Num());
 }
 
-void AGalaxyActor::InitializeNiagara()
+void AGalaxyActor::InitializeNiagara(TArray<FVector> Pos, TArray<FLinearColor> Col, TArray<float> Ext)
 {
-	AsyncTask(ENamedThreads::GameThread, [this]()
+	AsyncTask(ENamedThreads::GameThread, [this, Pos, Col, Ext]()
 	{
-		FSoftObjectPath NiagaraSystemPath(NiagaraPath);
-		PointCloudNiagara = Cast<UNiagaraSystem>(NiagaraSystemPath.TryLoad());
 		if (PointCloudNiagara)
 		{
-			//SYSTEM IS SPAWNING WITH EITHER AN OFFSET AT THE SYSTEM LEVEL OR AT INSERTION OF POINTS IN A WAY THAT IS UNCENTERING IT
-			NiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
+			NiagaraComponents.Add(UNiagaraFunctionLibrary::SpawnSystemAttached(
 				PointCloudNiagara,
 				GetRootComponent(),
 				NAME_None,
@@ -157,15 +194,20 @@ void AGalaxyActor::InitializeNiagara()
 				EAttachLocation::KeepWorldPosition,
 				true,
 				false
-			);
+			));
 
-			if (NiagaraComponent)
+			if (NiagaraComponents[EmitterChunkIndex])
 			{
-				NiagaraComponent->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+				NiagaraComponents[EmitterChunkIndex]->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
 				FBox Bounds(FVector(-Extent), FVector(Extent));
-				NiagaraComponent->SetSystemFixedBounds(Bounds);
-				NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Extent);
-				PopulatingNiagara = true;
+				NiagaraComponents[EmitterChunkIndex]->SetSystemFixedBounds(Bounds);
+				NiagaraComponents[EmitterChunkIndex]->SetVariableFloat(FName("MaxExtent"), Extent);
+				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponents[EmitterChunkIndex], FName("User.Positions"), Pos);
+				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponents[EmitterChunkIndex], FName("User.Colors"), Col);
+				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponents[EmitterChunkIndex], FName("User.Extents"), Ext);
+				NiagaraComponents[EmitterChunkIndex]->Activate(true);
+				NiagaraComponents[EmitterChunkIndex]->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+				EmitterChunkIndex++;
 			}
 		}
 	});
@@ -181,7 +223,7 @@ void AGalaxyActor::InitializeVolumetric(UVolumeTexture* InVolumeTexture) {
 		FRandomStream RandomStream(Seed);
 		DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), InVolumeTexture);
 		//DynamicMaterial->SetScalarParameterValue(FName("Density"), 20);
-		DynamicMaterial->SetScalarParameterValue(FName("MaxSteps"), 64);
+		//DynamicMaterial->SetScalarParameterValue(FName("MaxSteps"), 64);
 		//DynamicMaterial->SetScalarParameterValue(FName("WarpAmount"), .2);
 		//DynamicMaterial->SetScalarParameterValue(FName("WarpFrequency"), .2);
 		// Convert parent color to HSV for better color manipulation
@@ -203,8 +245,8 @@ void AGalaxyActor::InitializeVolumetric(UVolumeTexture* InVolumeTexture) {
 		FLinearColor RandomizedHSV(NewHue, NewSaturation, NewBrightness, ParentColor.A);
 		FLinearColor LightColor = RandomizedHSV.HSVToLinearRGB();
 
-		DynamicMaterial->SetVectorParameterValue(FName("LightColor"), RandomStream.GetUnitVector().GetAbs());
-		DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), ParentColor);
+		//DynamicMaterial->SetVectorParameterValue(FName("LightColor"), RandomStream.GetUnitVector().GetAbs());
+		//DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), ParentColor);
 		//Set up color variance etc
 		//
 
@@ -256,10 +298,24 @@ void AGalaxyActor::BeginPlay()
 		DebugDrawTree();
 	}
 
+	GetWorld()->GetTimerManager().SetTimer(
+		NiagaraChunkTimer,
+		FTimerDelegate::CreateLambda([this]()
+			{
+				// Dispatch actual work to background thread
+				Async(EAsyncExecution::Thread, [this]()
+					{
+						ProcessNiagaraChunk();
+					});
+			}),
+		0.05f, // Interval
+		true    // Repeating
+	);
 }
 
 void AGalaxyActor::Tick(float DeltaTime)
 {
+	Super::Tick(DeltaTime);
 	bool bHasReference = false;
 	if (const auto* World = GetWorld())
 	{
@@ -282,52 +338,5 @@ void AGalaxyActor::Tick(float DeltaTime)
 	LastFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
 	FVector ParallaxOffset = PlayerOffset * (1.0 - ParallaxRatio);
 	SetActorLocation(GetActorLocation() + ParallaxOffset);
-
-	//TODO:: PROCESS NIAGARA CHUNKS UNTIL EMPTY
-	//if (PopulatingNiagara) {
-	//	if (Positions.Num() == 0)
-	//	{
-	//		PopulatingNiagara = false;
-	//		NiagaraComponent->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-	//		return;
-	//	}
-
-	//	// Determine how many elements to take this frame (end boundary)
-	//	int32 NumToProcess = FMath::Min(ChunkSize, Positions.Num());
-
-	//	// Clear previous chunk contents (optional, depends on processing needs)
-	//	TArray<FVector> PositionChunk;
-	//	TArray<float> ExtentChunk;
-	//	TArray<FLinearColor> ColorChunk;
-
-	//	PositionChunk.AddZeroed(NumToProcess);
-	//	ExtentChunk.AddZeroed(NumToProcess);
-	//	ColorChunk.AddZeroed(NumToProcess);
-	//	// Copy chunk from MasterArray into ChunkArray
-	//	ParallelFor(NumToProcess, [&](int32 Index)
-	//	{
-	//		PositionChunk[Index] = Positions[Index];
-	//		ExtentChunk[Index] = Extents[Index];
-	//		ColorChunk[Index] = Colors[Index];
-	//	});
-	//	//for (int32 i = 0; i < NumToProcess; ++i)
-	//	//{
-	//	//	PositionChunk[i] = Positions[i];
-	//	//	ExtentChunk[i] = Extents[i];
-	//	//	ColorChunk[i] = Colors[i];
-	//	//}
-	//	// Remove that chunk from MasterArray
-	//	Positions.RemoveAt(0, NumToProcess);
-	//	Extents.RemoveAt(0, NumToProcess);
-	//	Colors.RemoveAt(0, NumToProcess);
-
-	//	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), PositionChunk);
-	//	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), ColorChunk);
-	//	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), ExtentChunk);
-	//	
-	//	NiagaraComponent->ResetSystem();
-	//	NiagaraComponent->Activate(true);
-	//}
-	Super::Tick(DeltaTime);
 }
 

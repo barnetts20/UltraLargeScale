@@ -8,6 +8,8 @@
 #include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraSystem.h"
+#include "NiagaraDataChannel.h"
+#include "NiagaraDataChannelAccessor.h"
 #include <UniverseActor.h>
 #include "Components/InstancedStaticMeshComponent.h"
 #include "GalaxyActor.generated.h"
@@ -24,10 +26,15 @@ public:
 		NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
 		USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
 		SetRootComponent(SceneRoot);
+
+		static ConstructorHelpers::FObjectFinder<UNiagaraDataChannelAsset> DataChannelAsset(TEXT("/svo/NDC_PositionColorScale.NDC_PositionColorScale"));
+		NiagaraDataAsset = DataChannelAsset.Object;
+		//UNiagaraDataChannelLibrary::WriteToNiagaraDataChannel(GetWorld(), NiagaraDataAsset, FNiagaraDataChannelSearchParameters::FNiagaraDataChannelSearchParameters(), NiagaraComponent, )
+		//Can still potentially use this for close by stars
 		InstancedStarMesh = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("InstancedStarMesh"));
 		InstancedStarMesh->SetupAttachment(RootComponent);
 		InstancedStarMesh->bDisableCollision = true;
-		// Set default meshStarMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Plane"));
+
 		StarMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere"));
 		if (StarMesh)
 		{
@@ -65,16 +72,21 @@ public:
 		"FwAAAAAAAACAPwAAgD8AAIC/DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA=="
 	};
 
+	int EmitterChunkIndex = 0;
 	TSharedPtr<FOctree> Octree;
 
 
 	FString NiagaraPath;
 	int ChunkSize = 50000;
 	
+	TObjectPtr<UNiagaraDataChannelAsset> NiagaraDataAsset;
+	TObjectPtr<UNiagaraDataChannelWriter> NiagaraDataWriter;
+
 	class UNiagaraSystem* PointCloudNiagara;
-	class UNiagaraComponent* NiagaraComponent;
+	TArray<UNiagaraComponent*> NiagaraComponents;
 	class UStaticMeshComponent* VolumetricComponent;
 
+	TArray<FTransform> InstanceTransforms;
 	UInstancedStaticMeshComponent* InstancedStarMesh;
 	UStaticMesh* StarMesh;
 
@@ -91,9 +103,12 @@ public:
 
 	FLinearColor ParentColor = FLinearColor(1,1,1,0);
 	void Initialize();
+	
+	FTimerHandle NiagaraChunkTimer;
+	void ProcessNiagaraChunk();
 
 protected:
-	void InitializeNiagara();
+	void InitializeNiagara(TArray<FVector> Pos, TArray<FLinearColor> Col, TArray<float> Ext);
 	void SpawnInstancedGalaxy();
 	void InitializeVolumetric(UVolumeTexture* InVolumeTexture);
 	void DebugDrawTree();
