@@ -57,10 +57,10 @@ void AUniverseActor::Initialize()
 				}
 			);
 
+			InitializeVolumetric();
 			//Pass the arrays back to the game thread to instantiate the particle system
 			AsyncTask(ENamedThreads::GameThread, [this, Positions = MoveTemp(Positions), Rotations = MoveTemp(Rotations), Extents = MoveTemp(Extents), Colors = MoveTemp(Colors)]()
 				{
-					InitializeVolumetric(Octree->CreateVolumeTextureFromOctree(64));
 					InitializeNiagara(Positions, Rotations, Extents, Colors);
 					Initialized = true;
 				}
@@ -68,22 +68,41 @@ void AUniverseActor::Initialize()
 		});
 }
 
-void AUniverseActor::InitializeVolumetric(UVolumeTexture* InVolumeTexture) {
-	UMaterialInterface* GasMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_UniverseRaymarch_Inst.MT_UniverseRaymarch_Inst"));
-	UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(GasMaterial, this);
-	
-	//TODO: Configure material with the volume texture
-	DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), InVolumeTexture);
-	//Set up color variance etc
-	//
+void AUniverseActor::InitializeVolumetric() {
+	int Resolution = 64;
+	TArray<uint8> TextureData = Octree->CreateVolumeDensityDataFromOctree(Resolution);
 
-	UStaticMesh* VolumetricMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals"));
-	VolumetricComponent = NewObject<UStaticMeshComponent>(this);
-	VolumetricComponent->SetStaticMesh(VolumetricMesh);
-	VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
-	VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-	VolumetricComponent->SetMaterial(0, DynamicMaterial);
-	VolumetricComponent->RegisterComponent();
+	AsyncTask(ENamedThreads::GameThread, [this, TextureData, Resolution]()
+	{
+		UVolumeTexture* NewVolumeTexture = NewObject<UVolumeTexture>(
+			GetTransientPackage(),
+			NAME_None,
+			RF_Transient
+		);
+
+		NewVolumeTexture->SRGB = false;
+		NewVolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
+		NewVolumeTexture->CompressionNone = true;
+		NewVolumeTexture->Filter = TF_Nearest;
+		NewVolumeTexture->AddressMode = TA_Clamp;
+		NewVolumeTexture->MipGenSettings = TMGS_NoMipmaps;
+		NewVolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
+		NewVolumeTexture->NeverStream = true;
+		NewVolumeTexture->Source.Init(Resolution, Resolution, Resolution, 1, ETextureSourceFormat::TSF_BGRA8, TextureData.GetData());
+		NewVolumeTexture->UpdateResource();
+		FlushRenderingCommands();
+
+		UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_UniverseRaymarch_Inst.MT_UniverseRaymarch_Inst")), this);
+
+		DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), NewVolumeTexture);
+
+		VolumetricComponent = NewObject<UStaticMeshComponent>(this);
+		VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));
+		VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
+		VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+		VolumetricComponent->SetMaterial(0, DynamicMaterial);
+		VolumetricComponent->RegisterComponent();
+	});
 }
 
 void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVector> InRotations, TArray<float> InExtents, TArray<FLinearColor> InColors)

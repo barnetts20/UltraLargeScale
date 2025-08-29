@@ -50,6 +50,8 @@ public:
 	int64 Extent; //Must be power of 2, eg 1024 2048 etc
 	TArray<double> DepthMaxDensities;
 	TSharedPtr<FOctreeNode> Root;
+	// In FOctree class, add a mutex
+	mutable FCriticalSection OctreeMutex;
 
 	TSharedPtr<FOctreeNode> InsertPosition(FInt64Vector InPosition, int InDepth, FVoxelData InData) {
 		TSharedPtr<FOctreeNode> Current = Root;
@@ -212,92 +214,63 @@ public:
 		return Nodes;
 	}
 
-	UVolumeTexture* CreateVolumeTextureFromOctree(int32 Resolution)
+	TArray<uint8> CreateVolumeDensityDataFromOctree(int32 Resolution) //Must be 16, 32, 64, 128, or 256
 	{
-		// Create the volume texture in memory (transient package)
-		UVolumeTexture* NewVolumeTexture = NewObject<UVolumeTexture>(
-			GetTransientPackage(),
-			NAME_None,
-			RF_Transient
-		);
-
-		// Get the octree data (same as in your original function)
+		// Get the octree data
 		const int TargetDepth = FMath::FloorLog2(Resolution);
 		TArray<TSharedPtr<FOctreeNode>> PopulatedNodes = this->GetPopulatedNodes(TargetDepth, TargetDepth, -1);
 		const float MaxDensityAtDepth = (DepthMaxDensities.IsValidIndex(TargetDepth) ? (float)DepthMaxDensities[TargetDepth] : 1.0f);
 		const int64 NodeExtentAtDepth = (this->Extent >> TargetDepth);
 		const int64 OctreeExtent = this->Extent;
 
-		// Build node map
-		TMap<FIntVector, TSharedPtr<FOctreeNode>> NodeMap;
-		for (const auto& Node : PopulatedNodes)
+		// Allocate flat zeroed array directly
+		const int64 TotalVoxels = static_cast<int64>(Resolution) * Resolution * Resolution;
+		const int64 BytesPerVoxel = 4; // BGRA8 = 4 bytes
+		const int64 TotalBytes = TotalVoxels * BytesPerVoxel;
+
+		TArray<uint8> TextureData;
+		TextureData.SetNumZeroed(TotalBytes);
+
+		// Fill the array directly in one loop
+		ParallelFor(PopulatedNodes.Num(), [&](int32 NodeIndex)
 		{
-			if (!Node.IsValid()) continue;
+			const auto& Node = PopulatedNodes[NodeIndex];
+			if (!Node.IsValid()) return;
+
+			// Calculate voxel coordinates
 			int32 VolumeX = static_cast<int32>((Node->Center.X + OctreeExtent) / (2 * NodeExtentAtDepth));
 			int32 VolumeY = static_cast<int32>((Node->Center.Y + OctreeExtent) / (2 * NodeExtentAtDepth));
 			int32 VolumeZ = static_cast<int32>((Node->Center.Z + OctreeExtent) / (2 * NodeExtentAtDepth));
 
-			if (VolumeX >= 0 && VolumeX < Resolution &&
-				VolumeY >= 0 && VolumeY < Resolution &&
-				VolumeZ >= 0 && VolumeZ < Resolution)
+			// Bounds check
+			if (VolumeX < 0 || VolumeX >= Resolution ||
+				VolumeY < 0 || VolumeY >= Resolution ||
+				VolumeZ < 0 || VolumeZ >= Resolution)
 			{
-				NodeMap.Add(FIntVector(VolumeX, VolumeY, VolumeZ), Node);
+				return;
 			}
-		}
 
-		// Create the query function that uses your actual data
-		auto QueryVoxel = [&NodeMap, MaxDensityAtDepth](const int32 X, const int32 Y, const int32 Z, void* ReturnValue)
+			// Calculate linear index and write directly
+			int64 VoxelIndex = (static_cast<int64>(VolumeZ) * Resolution * Resolution) +
+				(static_cast<int64>(VolumeY) * Resolution) + VolumeX;
+			int64 ByteIndex = VoxelIndex * BytesPerVoxel;
+
+			// Calculate density
+			uint8 DensityByte = 0;
+			if (MaxDensityAtDepth > 0.0f)
 			{
-				FIntVector Coord(X, Y, Z);
-				uint8* Voxel = static_cast<uint8*>(ReturnValue);
+				float Norm = static_cast<float>(Node->Data.Density) / MaxDensityAtDepth;
+				DensityByte = static_cast<uint8>(FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f));
+			}
 
-				if (auto* NodePtr = NodeMap.Find(Coord))
-				{
-					auto Node = *NodePtr;
-					uint8 DensityByte = 0;
-					if (MaxDensityAtDepth > 0.0f)
-					{
-						float Norm = static_cast<float>(Node->Data.Density) / MaxDensityAtDepth;
-						DensityByte = static_cast<uint8>(FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f));
-					}
-
-					FVector Composition = Node->Data.Composition.GetSafeNormal();
-					Voxel[0] = static_cast<uint8>(Composition.X * 255); // B
-					Voxel[1] = static_cast<uint8>(Composition.Y * 255); // G
-					Voxel[2] = static_cast<uint8>(Composition.Z * 255); // R
-					Voxel[3] = DensityByte; // A
-				}
-				else
-				{
-					Voxel[0] = 0;
-					Voxel[1] = 0;
-					Voxel[2] = 0;
-					Voxel[3] = 0;
-				}
-			};
-
-		// Set properties
-		NewVolumeTexture->SRGB = false;
-		NewVolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
-		NewVolumeTexture->Filter = TF_Nearest;
-		NewVolumeTexture->AddressMode = TA_Clamp;
-		NewVolumeTexture->MipGenSettings = TMGS_NoMipmaps;
-		NewVolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
-		NewVolumeTexture->NeverStream = true;
-
-		// Create the texture data
-		NewVolumeTexture->UpdateSourceFromFunction(
-			QueryVoxel,
-			Resolution,
-			Resolution,
-			Resolution,
-			ETextureSourceFormat::TSF_BGRA8
-		);
-
-		NewVolumeTexture->UpdateResource();
-		FlushRenderingCommands();
-
-		return NewVolumeTexture;
+			// Write voxel data directly
+			FVector Composition = Node->Data.Composition.GetSafeNormal();
+			TextureData[ByteIndex + 0] = static_cast<uint8>(Composition.X * 255); // B
+			TextureData[ByteIndex + 1] = static_cast<uint8>(Composition.Y * 255); // G
+			TextureData[ByteIndex + 2] = static_cast<uint8>(Composition.Z * 255); // R
+			TextureData[ByteIndex + 3] = DensityByte; // A
+		});
+		return TextureData;
 	}
 	
 	UVolumeTexture* SaveVolumeTextureAsAssetFromOctree(int32 Resolution, const FString& AssetPath, const FString& AssetName)

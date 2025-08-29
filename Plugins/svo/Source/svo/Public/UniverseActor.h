@@ -69,7 +69,7 @@ public:
 protected:
 	void Initialize();
 	void InitializeNiagara(TArray<FVector> InPositions, TArray<FVector> InRotations, TArray<float> InExtents, TArray<FLinearColor> InColors);
-	void InitializeVolumetric(UVolumeTexture* InVolumeTexture);
+	void InitializeVolumetric();
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
 };

@@ -79,6 +79,9 @@ void SimpleRandomGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 	MaxInsertionDepth = InOctree->MaxDepth;
 	MinInsertionDepth = FMath::Max(InOctree->MaxDepth - DepthRange, 1);
 
+	TArray<FInt64Vector> InsertPositions;
+	TArray<int32> InsertDepths;
+	TArray<FVoxelData> InsertPayloads;
 	ParallelFor(Count, [this, InOctree](int32 i)
 	{
 		// Generate unique stream per point
@@ -264,61 +267,70 @@ void SpiralNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 	VerticalSpreadDistance = InOctree->Extent * VerticalSpreadMax;
 	RadialDistance = InOctree->Extent - HorizontalSpreadDistance; //Radius
 	CenterDistance = CenterScale * RadialDistance; //Distance from center spiral begins
-
 	PitchAngleRadians = FMath::DegreesToRadians(PitchAngle);
 	MaxTheta = FMath::Loge(RadialDistance / CenterDistance) / FMath::Tan(PitchAngleRadians);
 
+	TArray<FInt64Vector> InsertPositions;
+	TArray<int32> InsertDepths;
+	TArray<FVoxelData> InsertPayloads;
+	InsertPositions.SetNumZeroed(Count);
+	InsertDepths.SetNumZeroed(Count);
+	InsertPayloads.SetNumZeroed(Count);
+
 	auto Noise = FastNoise::NewFromEncodedNodeTree(EncodedTree);
-	ParallelFor(Count, [this, InOctree, Noise](int32 i)
-		{
-			int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
-			FRandomStream Stream(HashedSeed);
+	ParallelFor(Count, [this, &InsertPositions, &InsertDepths, &InsertPayloads, Extent, Noise](int32 i)
+	{
+		int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
+		FRandomStream Stream(HashedSeed);
 
-			int32 ArmIndex = i % NumArms;
-			double ArmPhaseOffset = (2.0 * PI * ArmIndex) / NumArms;
-			double Lambda = 1; // tweak to tune central density
-			double T = (1 - FMath::Exp(-Stream.FRand() / Lambda)) / (1 - FMath::Exp(-1.0 / Lambda));
-			double BaseTheta = T * MaxTheta;
+		int32 ArmIndex = i % NumArms;
+		double ArmPhaseOffset = (2.0 * PI * ArmIndex) / NumArms;
+		double Lambda = 1; // tweak to tune central density
+		double T = (1 - FMath::Exp(-Stream.FRand() / Lambda)) / (1 - FMath::Exp(-1.0 / Lambda));
+		double BaseTheta = T * MaxTheta;
 
-			// Spiral equation
-			double Radius = CenterDistance * FMath::Exp(BaseTheta * FMath::Tan(PitchAngleRadians));
+		// Spiral equation
+		double Radius = CenterDistance * FMath::Exp(BaseTheta * FMath::Tan(PitchAngleRadians));
 
-			// Arm perturbation
-			double PerturbStrength = ArmContrast * 0.5;
-			double Perturb = PerturbStrength * FMath::Sin(BaseTheta * 2.0);
+		// Arm perturbation
+		double PerturbStrength = ArmContrast * 0.5;
+		double Perturb = PerturbStrength * FMath::Sin(BaseTheta * 2.0);
 
-			double FinalTheta = BaseTheta + ArmPhaseOffset + Perturb;
+		double FinalTheta = BaseTheta + ArmPhaseOffset + Perturb;
 
-			double X = Radius * FMath::Cos(FinalTheta);
-			double Y = Radius * FMath::Sin(FinalTheta);
-			double Z = 0;
+		double X = Radius * FMath::Cos(FinalTheta);
+		double Y = Radius * FMath::Sin(FinalTheta);
+		double Z = 0;
 
-			FVector JitterDirection = Stream.GetUnitVector();
-			double HorizontalFalloff = Stream.FRand() * FMath::Lerp(HorizontalSpreadMin, HorizontalSpreadMax, T);
-			double VerticalFalloff = Stream.FRand() * FMath::Lerp(VerticalSpreadMin, VerticalSpreadMax, T);
+		FVector JitterDirection = Stream.GetUnitVector();
+		double HorizontalFalloff = Stream.FRand() * FMath::Lerp(HorizontalSpreadMin, HorizontalSpreadMax, T);
+		double VerticalFalloff = Stream.FRand() * FMath::Lerp(VerticalSpreadMin, VerticalSpreadMax, T);
 
-			FVector JitterOffset;
-			JitterOffset.X = JitterDirection.X * InOctree->Extent * HorizontalFalloff;
-			JitterOffset.Y = JitterDirection.Y * InOctree->Extent * HorizontalFalloff;
-			JitterOffset.Z = JitterDirection.Z * InOctree->Extent * VerticalFalloff;
+		FVector JitterOffset;
+		JitterOffset.X = JitterDirection.X * Extent * HorizontalFalloff;
+		JitterOffset.Y = JitterDirection.Y * Extent * HorizontalFalloff;
+		JitterOffset.Z = JitterDirection.Z * Extent * VerticalFalloff;
 
-			X += JitterOffset.X;
-			Y += JitterOffset.Y;
-			Z += JitterOffset.Z;
+		X += JitterOffset.X;
+		Y += JitterOffset.Y;
+		Z += JitterOffset.Z;
 
-			float OutDensity;
-			FInt64Vector InsertPosition(
-				FMath::RoundToInt64(X),
-				FMath::RoundToInt64(Y),
-				FMath::RoundToInt64(Z)
-			);
-			InsertPosition = ApplyNoise(Noise, 2, InOctree->Extent, InsertPosition, OutDensity);
-			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
+		float OutDensity;
+		FInt64Vector InsertPosition(
+			FMath::RoundToInt64(X),
+			FMath::RoundToInt64(Y),
+			FMath::RoundToInt64(Z)
+		);
+		InsertPosition = ApplyNoise(Noise, 2, Extent, InsertPosition, OutDensity);
+		InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
-			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-			auto InsertData = FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max(T, 0.000001), 6), Stream.GetUnitVector(), i, Type);
-			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
-		});
+		InsertPositions[i] = InsertPosition;
+		InsertDepths[i] = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
+		InsertPayloads[i] = FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max(T, 0.000001), 6), Stream.GetUnitVector(), i, Type);
+	});
+	for (int i = 0; i < Count; i++) {
+		InOctree->InsertPosition(InsertPositions[i], InsertDepths[i], InsertPayloads[i]);
+	}
 }
 
 void BurstGenerator::GenerateData(TSharedPtr<FOctree> InOctree)

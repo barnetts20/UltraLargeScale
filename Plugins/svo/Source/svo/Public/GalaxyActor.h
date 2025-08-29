@@ -23,6 +23,9 @@ public:
 		NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
 		USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
 		SetRootComponent(SceneRoot);
+
+		FSoftObjectPath NiagaraSystemPath(NiagaraPath);
+		PointCloudNiagara = Cast<UNiagaraSystem>(NiagaraSystemPath.TryLoad());
 	}
 
 	AUniverseActor* Universe;
@@ -57,9 +60,11 @@ public:
 	TSharedPtr<FOctree> Octree;
 
 	FString NiagaraPath;
-	class UNiagaraSystem* PointCloudNiagara;
-	class UNiagaraComponent* NiagaraComponent;
-	class UStaticMeshComponent* VolumetricComponent;
+	UNiagaraSystem* PointCloudNiagara;
+	UNiagaraComponent* NiagaraComponent;
+	TArray<uint8> TextureData;
+	UVolumeTexture* VolumeTexture;
+	UStaticMeshComponent* VolumetricComponent;
 
 	FVector LastFrameOfReferenceLocation = FVector(0,0,0);
 	FVector CurrentFrameOfReferenceLocation;
@@ -74,7 +79,7 @@ public:
 
 protected:
 	void InitializeNiagara();
-	void InitializeVolumetric(UVolumeTexture* InVolumeTexture);
+	void InitializeVolumetric();
 	void DebugDrawTree();
 	virtual void BeginPlay() override;
 
