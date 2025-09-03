@@ -165,7 +165,9 @@ void GlobularNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 	auto Noise = FastNoise::NewFromEncodedNodeTree(EncodedTree);
 
 	ParallelFor(Count, [this, InOctree, Noise](int32 i)
-		{
+	{
+	//for (int i = 0; i < Count; i++)
+	//{
 			// Generate unique stream per point
 			int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
 			FRandomStream Stream(HashedSeed);
@@ -185,7 +187,8 @@ void GlobularNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
 			auto InsertData = FVoxelData(1, Stream.GetUnitVector().GetAbs(), i, Type); // May need to add some way to control typing. for instance galaxy tree could contain stars, blackholes, gas all at different depths
 			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
-		});
+	}
+	);
 }
 
 void SpiralGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
@@ -252,7 +255,7 @@ void SpiralGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 		auto InsertDepth = FMath::Lerp(MinInsertionDepth, MaxInsertionDepth, Stream.FRand());//  Stream.FRandRange(MinInsertionDepth, MaxInsertionDepth); //If a different scale distribution is wanted can change the way depth is randomized
 		auto InsertData = FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max(T - .3, 0.000001), 1), Stream.GetUnitVector().GetAbs(), i, Type);
 		InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
-	});
+	}, EParallelForFlags::BackgroundPriority);
 }
 void SpiralNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {
@@ -278,8 +281,10 @@ void SpiralNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 	InsertPayloads.SetNumZeroed(Count);
 
 	auto Noise = FastNoise::NewFromEncodedNodeTree(EncodedTree);
-	ParallelFor(Count, [this, &InsertPositions, &InsertDepths, &InsertPayloads, Extent, Noise](int32 i)
+	ParallelFor(Count, [this, &InsertPositions, &InsertDepths, &InsertPayloads, Extent, Noise, InOctree](int32 i)
 	{
+	//for(int i = 0; i < Count; i++)
+	//{
 		int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
 		FRandomStream Stream(HashedSeed);
 
@@ -324,13 +329,12 @@ void SpiralNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 		InsertPosition = ApplyNoise(Noise, 2, Extent, InsertPosition, OutDensity);
 		InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
-		InsertPositions[i] = InsertPosition;
-		InsertDepths[i] = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-		InsertPayloads[i] = FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max(T, 0.000001), 6), Stream.GetUnitVector(), i, Type);
-	});
-	for (int i = 0; i < Count; i++) {
-		InOctree->InsertPosition(InsertPositions[i], InsertDepths[i], InsertPayloads[i]);
+		//InsertPositions[i] = InsertPosition;
+		//InsertDepths[i] = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
+		//InsertPayloads[i] = FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max(T, 0.000001), 6), Stream.GetUnitVector(), i, Type);
+		InOctree->InsertPosition(InsertPosition, Stream.RandRange(MinInsertionDepth, MaxInsertionDepth), FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max(T, 0.000001), 6), Stream.GetUnitVector(), i, Type));
 	}
+	, EParallelForFlags::BackgroundPriority);
 }
 
 void BurstGenerator::GenerateData(TSharedPtr<FOctree> InOctree)

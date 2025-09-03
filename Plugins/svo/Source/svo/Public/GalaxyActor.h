@@ -59,6 +59,9 @@ public:
 
 	TSharedPtr<FOctree> Octree;
 
+	std::atomic<int32> InitializedComponents{ 0 };
+	EGalaxyState InitializationState = EGalaxyState::Initializing;
+
 	FString NiagaraPath;
 	UNiagaraSystem* PointCloudNiagara;
 	UNiagaraComponent* NiagaraComponent;
@@ -76,13 +79,16 @@ public:
 
 	FLinearColor ParentColor = FLinearColor(1,1,1,0);
 	void Initialize();
+	void MarkDestroying();
+	void DebugDrawTree();
 
 protected:
+
+	void InitializeData();
+	void FetchData();
 	void InitializeNiagara();
 	void InitializeVolumetric();
-	void DebugDrawTree();
+	bool TryCleanUpComponents();
 	virtual void BeginPlay() override;
-
-public:
 	virtual void Tick(float DeltaTime) override;
 };

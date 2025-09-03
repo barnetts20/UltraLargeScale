@@ -24,3 +24,11 @@ public:
 	int ObjectId;
 	int TypeId;
 };
+
+UENUM()
+enum class EGalaxyState : uint8
+{
+	Initializing,
+	Ready,
+	Destroying
+};

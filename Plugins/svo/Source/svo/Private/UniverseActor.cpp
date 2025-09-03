@@ -165,10 +165,9 @@ void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InRefer
 		FVector normal = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
 		FMatrix RotationMatrix = FRotationMatrix::MakeFromZX(normal, FVector::ForwardVector);
 		NewGalaxy->AxisRotation = normal * 360;
-		NewGalaxy->Count = RandStream.RandRange(400000, 1000000);
-		NewGalaxy->Initialize();
-
+		NewGalaxy->Count = RandStream.RandRange(150000, 250000);
 		SpawnedGalaxies.Add(InNode, TWeakObjectPtr<AGalaxyActor>(NewGalaxy));
+		NewGalaxy->Initialize();
 	}
 	else
 	{
@@ -178,29 +177,33 @@ void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InRefer
 
 void AUniverseActor::DestroyGalaxy(TSharedPtr<FOctreeNode> InNode)
 {
-	if (!InNode.IsValid())
+	AsyncTask(ENamedThreads::GameThread, [this, InNode]()
 	{
-		return;
-	}
-
-	TWeakObjectPtr<AGalaxyActor> GalaxyToDestroy;
-
-	// Find the actor in the map and remove the entry simultaneously.
-	if (SpawnedGalaxies.RemoveAndCopyValue(InNode, GalaxyToDestroy))
-	{
-		// Ensure the actor pointer is still valid before trying to destroy it.
-		if (GalaxyToDestroy.IsValid())
+		if (!InNode.IsValid())
 		{
-			UE_LOG(LogTemp, Log, TEXT("Destroying galaxy for node with ObjectId: %d"),
-				InNode->Data.ObjectId);
-			GalaxyToDestroy->Destroy();
+			return;
 		}
-		else
+
+		TWeakObjectPtr<AGalaxyActor> GalaxyToDestroy;
+
+		// Find the actor in the map and remove the entry simultaneously.
+		if (SpawnedGalaxies.RemoveAndCopyValue(InNode, GalaxyToDestroy))
 		{
-			UE_LOG(LogTemp, Warning, TEXT("Galaxy actor was already invalid for node with ObjectId: %d"),
-				InNode->Data.ObjectId);
+			// Ensure the actor pointer is still valid before trying to destroy it.
+			if (GalaxyToDestroy.IsValid())
+			{
+				UE_LOG(LogTemp, Log, TEXT("Destroying galaxy for node with ObjectId: %d"),
+					InNode->Data.ObjectId);
+				GalaxyToDestroy->MarkDestroying();
+				GalaxyToDestroy->Destroy();
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("Galaxy actor was already invalid for node with ObjectId: %d"),
+					InNode->Data.ObjectId);
+			}
 		}
-	}
+	});
 }
 
 void AUniverseActor::BeginPlay()

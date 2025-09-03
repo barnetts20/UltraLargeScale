@@ -92,7 +92,7 @@ public:
 				TArray<uint8> ChildIndexArray = Current->Index;
 				ChildIndexArray.Add(ChildIndex);
 
-				Current->Children[ChildIndex] = MakeShared<FOctreeNode>(
+				Current->Children[ChildIndex] = MakeShared<FOctreeNode, ESPMode::ThreadSafe>(
 					ChildCenter, CurrentExtent, ChildIndexArray, Current
 				);
 			}
