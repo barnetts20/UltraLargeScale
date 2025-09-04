@@ -63,7 +63,7 @@ void AGalaxyActor::InitializeData() {
 	FRandomStream Stream(Seed);
 	auto EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
 	int DepthRange = 3;
-	int InsertOffset = 5;
+	int InsertOffset = 6;
 	double GlobularChance = .3;
 
 	if (Stream.FRand() < GlobularChance)
@@ -102,7 +102,7 @@ void AGalaxyActor::InitializeData() {
 		double HorizontalWarp = Stream.FRandRange(.1, .7);
 		double VerticalWarp = Stream.FRandRange(.1, .7);
 
-		SpiralGenerator->WarpAmount = FVector(HorizontalWarp, HorizontalWarp, VerticalWarp);
+		SpiralGenerator->WarpAmount = FVector(HorizontalWarp, HorizontalWarp, HorizontalWarp);
 		SpiralGenerator->EncodedTree = EncodedTree;
 		SpiralGenerator->InsertDepthOffset = InsertOffset;
 		SpiralGenerator->GenerateData(Octree);
