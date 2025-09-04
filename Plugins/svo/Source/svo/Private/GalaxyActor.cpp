@@ -6,6 +6,13 @@
 #include <Kismet/GameplayStatics.h>
 #include <AssetRegistry/AssetRegistryModule.h>
 
+AGalaxyActor::AGalaxyActor()
+{
+	PrimaryActorTick.bCanEverTick = true;
+	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent")));
+	PointCloudNiagara = Cast<UNiagaraSystem>(FSoftObjectPath(NiagaraPath).TryLoad());
+}
+
 void AGalaxyActor::Initialize()
 {
 	// Set initial frame of reference position
@@ -21,24 +28,27 @@ void AGalaxyActor::Initialize()
 	}
 
 	Octree = MakeShared<FOctree>(Extent);
+
+	//Initialize parent thread, any initialize tasks should manage their own game thread segments
+	//By default, they will execute their logic on this thread
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this]()
-		{
-			double StartTime = FPlatformTime::Seconds();
+	{
+		double StartTime = FPlatformTime::Seconds();
 
-			InitializeData();
-			if (TryCleanUpComponents()) return;
-			FetchData();
-			if (TryCleanUpComponents()) return;
-			InitializeVolumetric();
-			if (TryCleanUpComponents()) return;
-			InitializeNiagara();
-			if (TryCleanUpComponents()) return;
+		InitializeData();
+		if (TryCleanUpComponents()) return; //Early exit if destroying
+		FetchData();
+		if (TryCleanUpComponents()) return; //Early exit if destroying
+		InitializeVolumetric();
+		if (TryCleanUpComponents()) return; //Early exit if destroying
+		InitializeNiagara();
+		if (TryCleanUpComponents()) return; //Early exit if destroying
 
-			InitializationState = EGalaxyState::Ready;
+		InitializationState = EGalaxyState::Ready;
 
-			double TotalDuration = FPlatformTime::Seconds() - StartTime;
-			UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Initialize total duration: %.3f seconds"), TotalDuration);
-		});
+		double TotalDuration = FPlatformTime::Seconds() - StartTime;
+		UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Initialize total duration: %.3f seconds"), TotalDuration);
+	});
 }
 
 bool AGalaxyActor::TryCleanUpComponents() {
@@ -56,9 +66,6 @@ void AGalaxyActor::MarkDestroying() {
 }
 
 void AGalaxyActor::InitializeData() {
-	// ---------------------
-	// Galaxy generation
-	// ---------------------
 	double StartTime = FPlatformTime::Seconds();
 	FRandomStream Stream(Seed);
 	auto EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
@@ -112,22 +119,19 @@ void AGalaxyActor::InitializeData() {
 }
 
 void AGalaxyActor::FetchData() {	
-	// ---------------------
-	// Fetch populated nodes
-	// ---------------------
 	double StartTime = FPlatformTime::Seconds();
 	TArray<TSharedPtr<FOctreeNode>> Nodes = Octree->GetPopulatedNodes(-1, -1, 1);
 	Positions.SetNumUninitialized(Nodes.Num());
 	Extents.SetNumUninitialized(Nodes.Num());
 	Colors.SetNumUninitialized(Nodes.Num());
 	ParallelFor(Nodes.Num(), [&](int32 Index)
-		{
-			const TSharedPtr<FOctreeNode>& Leaf = Nodes[Index];
-			FRandomStream RandStream(Leaf->Data.ObjectId);
-			Positions[Index] = FVector(Leaf->Center.X, Leaf->Center.Y, Leaf->Center.Z);
-			Extents[Index] = static_cast<float>(Leaf->Extent);
-			Colors[Index] = FLinearColor(Leaf->Data.Composition);
-		}, EParallelForFlags::BackgroundPriority);
+	{
+		const TSharedPtr<FOctreeNode>& Leaf = Nodes[Index];
+		FRandomStream RandStream(Leaf->Data.ObjectId);
+		Positions[Index] = FVector(Leaf->Center.X, Leaf->Center.Y, Leaf->Center.Z);
+		Extents[Index] = static_cast<float>(Leaf->Extent);
+		Colors[Index] = FLinearColor(Leaf->Data.Composition);
+	}, EParallelForFlags::BackgroundPriority);
 
 	double FetchDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("Node fetch + array population took: %.3f seconds"), FetchDuration);
@@ -135,9 +139,6 @@ void AGalaxyActor::FetchData() {
 
 void AGalaxyActor::InitializeNiagara()
 {
-	// ---------------------
-	// Initialize particle system
-	// ---------------------
 	double StartTime = FPlatformTime::Seconds();
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
@@ -153,10 +154,11 @@ void AGalaxyActor::InitializeNiagara()
 			true,
 			false
 		);
+		NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Extent), FVector(Extent)));
+		NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Extent);
+
 		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
-			NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Extent), FVector(Extent)));
-			NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Extent);
 			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), Positions);
 			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), Colors);
 			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), Extents);
@@ -176,101 +178,62 @@ void AGalaxyActor::InitializeNiagara()
 
 void AGalaxyActor::InitializeVolumetric()
 {
-	// ---------------------
-	// Initialize volumetric data
-	// ---------------------
 	double StartTime = FPlatformTime::Seconds();
 	int Resolution = 32;
 	TextureData = Octree->CreateVolumeDensityDataFromOctree(Resolution);
+	if (TryCleanUpComponents()) return; //Early exit if destroying
+
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, Resolution, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-		{
-			double SourceStart = FPlatformTime::Seconds();
+	{
+		double SourceStart = FPlatformTime::Seconds();
 
-			VolumeTexture = NewObject<UVolumeTexture>(
-				GetTransientPackage(),
-				NAME_None,
-				RF_Transient
-			);
+		VolumeTexture = NewObject<UVolumeTexture>(
+			GetTransientPackage(),
+			NAME_None,
+			RF_Transient
+		);
 
-			VolumeTexture->SRGB = false;
-			VolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
-			VolumeTexture->CompressionNone = true;
-			VolumeTexture->Filter = TF_Nearest;
-			VolumeTexture->AddressMode = TA_Clamp;
-			VolumeTexture->MipGenSettings = TMGS_NoMipmaps;
-			VolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
-			VolumeTexture->NeverStream = true;
-			VolumeTexture->DeferCompression = true;
-			VolumeTexture->UnlinkStreaming();
+		VolumeTexture->SRGB = false;
+		VolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
+		VolumeTexture->CompressionNone = true;
+		VolumeTexture->Filter = TF_Nearest;
+		VolumeTexture->AddressMode = TA_Clamp;
+		VolumeTexture->MipGenSettings = TMGS_NoMipmaps;
+		VolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
+		VolumeTexture->NeverStream = true;
+		VolumeTexture->DeferCompression = true;
+		VolumeTexture->UnlinkStreaming();
 
-			VolumeTexture->Source.Init(Resolution, Resolution, Resolution, 1, ETextureSourceFormat::TSF_BGRA8, TextureData.GetData());
-			
-			VolumeTexture->UpdateResource();
+		VolumeTexture->Source.Init(Resolution, Resolution, Resolution, 1, ETextureSourceFormat::TSF_BGRA8, TextureData.GetData());
+		VolumeTexture->UpdateResource();
 
-			UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(
-				LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_GalaxyRaymarch_Inst.MT_GalaxyRaymarch_Inst")),
-				this
-			);
-			DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), VolumeTexture);
+		UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(
+			LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_GalaxyRaymarch_Inst.MT_GalaxyRaymarch_Inst")),
+			this
+		);
 
-			VolumetricComponent = NewObject<UStaticMeshComponent>(this);
-			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));
-			VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
-			VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-			VolumetricComponent->SetMaterial(0, DynamicMaterial);
-			VolumetricComponent->RegisterComponent();
-			FlushRenderingCommands();
+		DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), VolumeTexture);
+		//TODO: Proceduralize material
 
-			double SourceDuration = FPlatformTime::Seconds() - SourceStart;
-			UE_LOG(LogTemp, Log, TEXT("VolumeTexture Source.Init & Update took: %.3f seconds"), SourceDuration);
+		VolumetricComponent = NewObject<UStaticMeshComponent>(this);
+		VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));
+		VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
+		VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+		VolumetricComponent->SetMaterial(0, DynamicMaterial);
+		VolumetricComponent->RegisterComponent();
+		FlushRenderingCommands();
 
-			CompletionPromise.SetValue();
-		});
+		double SourceDuration = FPlatformTime::Seconds() - SourceStart;
+		UE_LOG(LogTemp, Log, TEXT("VolumeTexture Source.Init & Update took: %.3f seconds"), SourceDuration);
+
+		CompletionPromise.SetValue();
+	});
 	CompletionFuture.Wait();
 
 	double VolumetricDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("Volumetric initialization took: %.3f seconds"), VolumetricDuration);
-}
-
-void AGalaxyActor::DebugDrawTree()
-{
-	if (!Octree.IsValid()) return;
-	TArray<TSharedPtr<FOctreeNode>> Leaves = Octree->GetLeafNodes();
-
-	for (auto& Node : Leaves)
-	{
-		FVector WorldCenter = FVector(
-			Node->Center.X, Node->Center.Y, Node->Center.Z
-		) + GetActorLocation();
-
-		float BoxExtent = Node->Extent;
-
-		DrawDebugBox(
-			GetWorld(),
-			WorldCenter,
-			FVector(BoxExtent),
-			FColor::Green,
-			true,
-			10.0f,
-			255,
-			1.0f
-		);
-	}
-}
-
-void AGalaxyActor::BeginPlay()
-{
-	Super::BeginPlay();
-	GalaxyRealSpaceOrigin = GetActorLocation(); // <- Store initial spawn position
-
-	bool debugDraw = false;
-
-	if (debugDraw) {
-		DebugDrawTree();
-	}
-
 }
 
 void AGalaxyActor::Tick(float DeltaTime)
@@ -297,8 +260,6 @@ void AGalaxyActor::Tick(float DeltaTime)
 	FVector PlayerOffset = CurrentFrameOfReferenceLocation - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
 	FVector ParallaxOffset = PlayerOffset * (1.0 - ParallaxRatio);
-	//DrawDebugSphere(GetWorld(), GetActorLocation(), Extent, 34, FColor::Green, false, -1, 0, 24); //THIS SPHERE IS CORRECTLY LOCATED
 	SetActorLocation(GetActorLocation() + ParallaxOffset);
 	Super::Tick(DeltaTime);
 }
-

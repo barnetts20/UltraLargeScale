@@ -18,77 +18,48 @@ class SVO_API AGalaxyActor : public AActor
 	GENERATED_BODY()
 
 public:
-	AGalaxyActor() {
-		PrimaryActorTick.bCanEverTick = true;
-		NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
-		USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
-		SetRootComponent(SceneRoot);
-
-		FSoftObjectPath NiagaraSystemPath(NiagaraPath);
-		PointCloudNiagara = Cast<UNiagaraSystem>(NiagaraSystemPath.TryLoad());
-	}
-
-	AUniverseActor* Universe;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
-	int Seed = 133780085;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
-	int64 Extent = 2147483648;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
-	double UnitScale = 1.0;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
-	double SpeedScale = 1.0;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
-	int Count = 500000;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
-	FVector AxisRotation = FVector::ZeroVector;
-
-	TArray<const char*> EncodedTrees = {
-		"DQAIAAAAAAAAQAcAAAAAAD8AAAAAAA==",
-		"FwAAAAAAAACAPwAAgD8AAIC/DwABAAAAAAAAQA0ACAAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAPwAAAAAA",
-		"FwAAAAAAmpmZPwAAAAAAAIA/DwABAAAAAAAAQA0ACAAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAPwAAAAAA",
-		"DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA==",
-		"FwAAAADAAACAPwAAgD8AAIC/EAAAAAA/DQAGAAAAAAAAQBcAAAAAAAAAgD8AAIC/AACAPwsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAAEbABMAzcxMPg0AAwAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAQA==",
-		"FwAAAAAAAACAPwAAgD8AAIC/DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA=="
-	};
-
-	TSharedPtr<FOctree> Octree;
-
-	std::atomic<int32> InitializedComponents{ 0 };
+	AGalaxyActor(); 
 	EGalaxyState InitializationState = EGalaxyState::Initializing;
+	AUniverseActor* Universe;	//Parent UniverseActor pointer
+	TSharedPtr<FOctree> Octree; //Octree data
 
-	FString NiagaraPath;
-	UNiagaraSystem* PointCloudNiagara;
-	UNiagaraComponent* NiagaraComponent;
-	TArray<uint8> TextureData;
-	UVolumeTexture* VolumeTexture;
-	UStaticMeshComponent* VolumetricComponent;
+	//Initialization parameters
+	int Seed = 133780085;
+	int64 Extent = 2147483648;
+	double UnitScale = 1.0;
+	double SpeedScale = 1.0;
+	int Count = 500000;
+	FVector AxisRotation = FVector::ZeroVector;
+	FLinearColor ParentColor = FLinearColor(1, 1, 1, 0);
+	TArray<const char*> EncodedTrees = { "DQAIAAAAAAAAQAcAAAAAAD8AAAAAAA==", "FwAAAAAAAACAPwAAgD8AAIC/DwABAAAAAAAAQA0ACAAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAPwAAAAAA", "FwAAAAAAmpmZPwAAAAAAAIA/DwABAAAAAAAAQA0ACAAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAPwAAAAAA", "DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA==", "FwAAAADAAACAPwAAgD8AAIC/EAAAAAA/DQAGAAAAAAAAQBcAAAAAAAAAgD8AAIC/AACAPwsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAAEbABMAzcxMPg0AAwAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAQA==", "FwAAAAAAAACAPwAAgD8AAIC/DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA==" };
 
-	FVector LastFrameOfReferenceLocation = FVector(0,0,0);
-	FVector CurrentFrameOfReferenceLocation;
-	FVector GalaxyRealSpaceOrigin;
-
+	//Niagara Data and Component
 	TArray<FVector> Positions;
 	TArray<float> Extents;
 	TArray<FLinearColor> Colors;
 
-	FLinearColor ParentColor = FLinearColor(1,1,1,0);
-	void Initialize();
-	void MarkDestroying();
-	void DebugDrawTree();
+	FString NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
+	UNiagaraSystem* PointCloudNiagara;
+	UNiagaraComponent* NiagaraComponent;
+
+	//Volume Data and Component
+	TArray<uint8> TextureData;
+	UVolumeTexture* VolumeTexture;
+	UStaticMeshComponent* VolumetricComponent;
+
+	//Parallax
+	FVector LastFrameOfReferenceLocation = FVector(0,0,0);
+	FVector CurrentFrameOfReferenceLocation;
+
+	void Initialize();				//Kick of async initialization of system
+	void MarkDestroying();			//Call externally before destroying
 
 protected:
-
-	void InitializeData();
-	void FetchData();
-	void InitializeNiagara();
-	void InitializeVolumetric();
-	bool TryCleanUpComponents();
-	virtual void BeginPlay() override;
+	void InitializeData();			//Initialize the octree data for the galaxy
+	void FetchData();				//Fetch the data for the particle system
+	void InitializeNiagara();		//Initialize the particle system
+	void InitializeVolumetric();	//Fetch the volume density data, create a volume texture, initialize the volumetric component
+	bool TryCleanUpComponents();	//Check early exit condition, destroy niagara and volumetric components and return true if early exit 
+	
 	virtual void Tick(float DeltaTime) override;
 };
