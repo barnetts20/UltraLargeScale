@@ -10,91 +10,140 @@ AUniverseActor::AUniverseActor()
 {
 	PrimaryActorTick.bCanEverTick = true;
 	USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
+	PointCloudNiagara = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/NG_UniverseCloud.NG_UniverseCloud"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
 	SetRootComponent(SceneRoot);
 }
 
 void AUniverseActor::Initialize()
 {
-	Async(EAsyncExecution::Thread, [this]()
+	// Set initial frame of reference position
+	if (const auto* World = GetWorld())
+	{
+		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
 		{
-			//Populate Data into the tree
-			Octree = MakeShared<FOctree>(Extent);
-			
-			//Proceduralize
-			FRandomStream Stream(Seed);
-			auto Generator = new GlobularNoiseGenerator(Seed);
-			Generator->Count = this->Count;
-			Generator->Falloff = .5;
-			Generator->Rotation = FRotator(0);
-			Generator->DepthRange = 8;
-			Generator->InsertDepthOffset = 5;
-			Generator->WarpAmount = FVector(1);
-			Generator->EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
+			if (APawn* Pawn = Controller->GetPawn())
+			{
+				LastFrameOfReferenceLocation = Pawn->GetActorLocation();
+			}
+		}
+	}
 
-			//Finally populate data into the tree
-			Generator->GenerateData(Octree);
+	Octree = MakeShared<FOctree>(Extent);
 
-			//Extract data from the tree and construct niagara arrays
-			TArray<TSharedPtr<FOctreeNode>> Leaves = Octree->GetPopulatedNodes(-1, -1, 1);
-			TArray<FVector> Positions;
-			TArray<FVector> Rotations;
-			TArray<float> Extents;
-			TArray<FLinearColor> Colors;
-			Positions.SetNumUninitialized(Leaves.Num());
-			Rotations.SetNumUninitialized(Leaves.Num());
-			Extents.SetNumUninitialized(Leaves.Num());
-			Colors.SetNumUninitialized(Leaves.Num());
+	Async(EAsyncExecution::Thread, [this]()
+	{
+		double StartTime = FPlatformTime::Seconds();
 
-			ParallelFor(Leaves.Num(), [&](int32 Index)
-				{
-					const TSharedPtr<FOctreeNode>& Leaf = Leaves[Index];
-					FRandomStream RandStream(Leaf->Data.ObjectId);
-					Rotations[Index] = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
-					Positions[Index] = FVector(Leaf->Center.X, Leaf->Center.Y, Leaf->Center.Z);
-					Extents[Index] = static_cast<float>(Leaf->Extent * 2);
-					Colors[Index] = FLinearColor(Leaf->Data.Composition);
-				}
-			);
+		InitializeData();
+		if (TryCleanUpComponents()) return; //Early exit if destroying
+		FetchData();
+		if (TryCleanUpComponents()) return; //Early exit if destroying
+		InitializeVolumetric();
+		if (TryCleanUpComponents()) return; //Early exit if destroying
+		InitializeNiagara();
+		if (TryCleanUpComponents()) return; //Early exit if destroying
 
-			InitializeVolumetric();
-			//Pass the arrays back to the game thread to instantiate the particle system
-			AsyncTask(ENamedThreads::GameThread, [this, Positions = MoveTemp(Positions), Rotations = MoveTemp(Rotations), Extents = MoveTemp(Extents), Colors = MoveTemp(Colors)]()
-				{
-					InitializeNiagara(Positions, Rotations, Extents, Colors);
-					Initialized = true;
-				}
-			);
-		});
+		InitializationState = ELifecycleState::Ready;
+
+		double TotalDuration = FPlatformTime::Seconds() - StartTime;
+		UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Initialize total duration: %.3f seconds"), TotalDuration);
+	});
 }
 
-void AUniverseActor::InitializeVolumetric() {
-	int Resolution = 64;
-	TArray<uint8> TextureData = Octree->CreateVolumeDensityDataFromOctree(Resolution);
-
-	AsyncTask(ENamedThreads::GameThread, [this, TextureData, Resolution]()
+bool AUniverseActor::TryCleanUpComponents() {
+	if (InitializationState != ELifecycleState::Destroying) return false;
+	AsyncTask(ENamedThreads::GameThread, [this]()
 	{
-		UVolumeTexture* NewVolumeTexture = NewObject<UVolumeTexture>(
+		if (VolumetricComponent) VolumetricComponent->DestroyComponent();
+		if (NiagaraComponent) NiagaraComponent->DestroyComponent();
+	});
+	return true;
+}
+
+void AUniverseActor::MarkDestroying() {
+	InitializationState = ELifecycleState::Destroying;
+}
+
+void AUniverseActor::InitializeData() {
+	double StartTime = FPlatformTime::Seconds();
+	FRandomStream Stream(Seed);
+	auto Generator = new GlobularNoiseGenerator(Seed);
+	Generator->Count = this->Count;
+	Generator->Falloff = .5;
+	Generator->Rotation = FRotator(0);
+	Generator->DepthRange = 8;
+	Generator->InsertDepthOffset = 5;
+	Generator->WarpAmount = FVector(1);
+	Generator->EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
+	Generator->GenerateData(Octree);
+	double GenDuration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Universe generation took: %.3f seconds"), GenDuration);
+}
+
+void AUniverseActor::FetchData() {
+	double StartTime = FPlatformTime::Seconds();
+	TArray<TSharedPtr<FOctreeNode>> Nodes = Octree->GetPopulatedNodes(-1, -1, 1);
+	Positions.SetNumUninitialized(Nodes.Num());
+	Rotations.SetNumUninitialized(Nodes.Num());
+	Extents.SetNumUninitialized(Nodes.Num());
+	Colors.SetNumUninitialized(Nodes.Num());
+
+	ParallelFor(Nodes.Num(), [&](int32 Index)
+	{
+		const TSharedPtr<FOctreeNode>& Node = Nodes[Index];
+		FRandomStream RandStream(Node->Data.ObjectId);
+		Rotations[Index] = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
+		Positions[Index] = FVector(Node->Center.X, Node->Center.Y, Node->Center.Z);
+		Extents[Index] = static_cast<float>(Node->Extent * 2);
+		Colors[Index] = FLinearColor(Node->Data.Composition);
+	}, EParallelForFlags::BackgroundPriority);
+
+	double FetchDuration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Node fetch + array population took: %.3f seconds"), FetchDuration);
+}
+
+void AUniverseActor::InitializeVolumetric()
+{
+	double StartTime = FPlatformTime::Seconds();
+	int Resolution = 64;
+	TextureData = Octree->CreateVolumeDensityDataFromOctree(Resolution);
+	if (TryCleanUpComponents()) return; //Early exit if destroying
+
+	TPromise<void> CompletionPromise;
+	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
+	AsyncTask(ENamedThreads::GameThread, [this, Resolution, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
+	{
+		double SourceStart = FPlatformTime::Seconds();
+
+		VolumeTexture = NewObject<UVolumeTexture>(
 			GetTransientPackage(),
 			NAME_None,
 			RF_Transient
 		);
 
-		NewVolumeTexture->SRGB = false;
-		NewVolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
-		NewVolumeTexture->CompressionNone = true;
-		NewVolumeTexture->Filter = TF_Nearest;
-		NewVolumeTexture->AddressMode = TA_Clamp;
-		NewVolumeTexture->MipGenSettings = TMGS_NoMipmaps;
-		NewVolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
-		NewVolumeTexture->NeverStream = true;
-		NewVolumeTexture->Source.Init(Resolution, Resolution, Resolution, 1, ETextureSourceFormat::TSF_BGRA8, TextureData.GetData());
-		NewVolumeTexture->UpdateResource();
+		VolumeTexture->SRGB = false;
+		VolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
+		VolumeTexture->CompressionNone = true;
+		VolumeTexture->Filter = TF_Nearest;
+		VolumeTexture->AddressMode = TA_Clamp;
+		VolumeTexture->MipGenSettings = TMGS_NoMipmaps;
+		VolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
+		VolumeTexture->NeverStream = true;
+		VolumeTexture->DeferCompression = true;
+		VolumeTexture->UnlinkStreaming();
+
+		VolumeTexture->Source.Init(Resolution, Resolution, Resolution, 1, ETextureSourceFormat::TSF_BGRA8, TextureData.GetData());
+		VolumeTexture->UpdateResource();
 		FlushRenderingCommands();
 
-		UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_UniverseRaymarch_Inst.MT_UniverseRaymarch_Inst")), this);
+		UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(
+			LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_UniverseRaymarch_Inst.MT_UniverseRaymarch_Inst")),
+			this
+		);
 
-		DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), NewVolumeTexture);
+		DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), VolumeTexture);
+		//TODO: Proceduralize material
 
 		VolumetricComponent = NewObject<UStaticMeshComponent>(this);
 		VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));
@@ -102,13 +151,25 @@ void AUniverseActor::InitializeVolumetric() {
 		VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
 		VolumetricComponent->SetMaterial(0, DynamicMaterial);
 		VolumetricComponent->RegisterComponent();
+
+
+		double SourceDuration = FPlatformTime::Seconds() - SourceStart;
+		UE_LOG(LogTemp, Log, TEXT("AUniverseActor::VolumeTexture Source.Init & Update took: %.3f seconds"), SourceDuration);
+
+		CompletionPromise.SetValue();
 	});
+	CompletionFuture.Wait();
+
+	double VolumetricDuration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Volumetric initialization took: %.3f seconds"), VolumetricDuration);
 }
 
-void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVector> InRotations, TArray<float> InExtents, TArray<FLinearColor> InColors)
+void AUniverseActor::InitializeNiagara()
 {
-	PointCloudNiagara = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/NG_UniverseCloud.NG_UniverseCloud"));
-	if (PointCloudNiagara)
+	double StartTime = FPlatformTime::Seconds();
+	TPromise<void> CompletionPromise;
+	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
+	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 	{
 		NiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
 			PointCloudNiagara,
@@ -117,25 +178,34 @@ void AUniverseActor::InitializeNiagara(TArray<FVector> InPositions, TArray<FVect
 			FVector::ZeroVector,
 			FRotator::ZeroRotator,
 			EAttachLocation::SnapToTarget,
-			true, 
+			true,
 			false
 		);
+		NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Extent), FVector(Extent)));
 
-		if (NiagaraComponent)
+		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
-			NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Extent), FVector(Extent)));
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), InPositions);
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Rotations"), InRotations);
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), InColors);
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), InExtents);
-			NiagaraComponent->Activate(true);
-		}
-	}
+			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), Positions);
+			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Rotations"), Rotations);
+			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), Colors);
+			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), Extents);
+
+			AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
+			{
+				NiagaraComponent->Activate(true);
+				CompletionPromise.SetValue();
+			});
+		});
+	});
+	CompletionFuture.Wait();
+
+	double TotalDuration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeNiagara total duration: %.3f seconds"), TotalDuration);
 }
 
 void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InReferencePosition)
 {
-	if (!InNode.IsValid() || !GalaxyActorClass || SpawnedGalaxies.Contains(InNode) || !Initialized)
+	if (!InNode.IsValid() || !GalaxyActorClass || SpawnedGalaxies.Contains(InNode) || InitializationState != ELifecycleState::Ready)
 	{
 		return;
 	}

@@ -19,6 +19,8 @@ public:
 	// Sets default values for this actor's properties
 	AUniverseActor();
 
+	ELifecycleState InitializationState = ELifecycleState::Initializing;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
 	int Seed = 133780085;
 
@@ -37,24 +39,30 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
 	int Count = 2000000; //TODO: NIAGARA STREAMING, ASYNC POINT GENERATION IN BATCHES TO OPTIMIZE LOAD TIME/STREAMING
 
-	bool Initialized = false;
 	TSharedPtr<FOctree> Octree;
 
-	//Parallax tracking locations
-	FVector LastFrameOfReferenceLocation;
-	FVector CurrentFrameOfReferenceLocation;
-
-	//Subcomponents
+	//Niagara Data and Component
+	TArray<FVector> Positions;
+	TArray<FVector> Rotations;
+	TArray<float> Extents;
+	TArray<FLinearColor> Colors;
 	UNiagaraSystem* PointCloudNiagara;
 	UNiagaraComponent* NiagaraComponent;
+
+	//Volumetric
+	TArray<uint8> TextureData;
+	UVolumeTexture* VolumeTexture;
 	UStaticMeshComponent* VolumetricComponent;
-	UVolumeTexture* DensityVolumeTexture;
 
 	//Managed galaxy actors
 	TSubclassOf<AGalaxyActor> GalaxyActorClass;
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
 	void SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InReferencePosition);
 	void DestroyGalaxy(TSharedPtr<FOctreeNode> InNode);
+
+	//Parallax tracking locations
+	FVector LastFrameOfReferenceLocation;
+	FVector CurrentFrameOfReferenceLocation;
 
 	//Noise formulas
 	TArray<const char*> EncodedTrees = {
@@ -68,8 +76,12 @@ public:
 
 protected:
 	void Initialize();
-	void InitializeNiagara(TArray<FVector> InPositions, TArray<FVector> InRotations, TArray<float> InExtents, TArray<FLinearColor> InColors);
+	bool TryCleanUpComponents();
+	void MarkDestroying();
+	void InitializeData();
+	void FetchData();
 	void InitializeVolumetric();
+	void InitializeNiagara();
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
 };

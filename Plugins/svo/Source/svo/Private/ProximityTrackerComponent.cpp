@@ -20,7 +20,7 @@ void UProximityTrackerComponent::OnProximityUpdate()
 	// Get current position in universe space
 	AActor* Owner = GetOwner();
 	if (!Owner) return;
-    if (!UniverseActor || !UniverseActor->Initialized) return;
+    if (!UniverseActor || UniverseActor->InitializationState != ELifecycleState::Ready) return;
 	FVector WorldLocation = Owner->GetActorLocation();
 	FVector SampleLocation = WorldLocation - UniverseActor->GetActorLocation();
     FInt64Vector SampleCoordinate = FInt64Vector(FMath::RoundToInt64(SampleLocation.X), FMath::RoundToInt64(SampleLocation.Y), FMath::RoundToInt64(SampleLocation.Z));

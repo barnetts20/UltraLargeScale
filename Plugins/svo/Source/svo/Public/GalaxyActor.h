@@ -19,7 +19,7 @@ class SVO_API AGalaxyActor : public AActor
 
 public:
 	AGalaxyActor(); 
-	EGalaxyState InitializationState = EGalaxyState::Initializing;
+	ELifecycleState InitializationState = ELifecycleState::Initializing;
 	AUniverseActor* Universe;	//Parent UniverseActor pointer
 	TSharedPtr<FOctree> Octree; //Octree data
 
@@ -57,8 +57,8 @@ public:
 protected:
 	void InitializeData();			//Initialize the octree data for the galaxy
 	void FetchData();				//Fetch the data for the particle system
-	void InitializeNiagara();		//Initialize the particle system
 	void InitializeVolumetric();	//Fetch the volume density data, create a volume texture, initialize the volumetric component
+	void InitializeNiagara();		//Initialize the particle system
 	bool TryCleanUpComponents();	//Check early exit condition, destroy niagara and volumetric components and return true if early exit 
 	
 	virtual void Tick(float DeltaTime) override;

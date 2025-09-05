@@ -26,7 +26,7 @@ public:
 };
 
 UENUM()
-enum class EGalaxyState : uint8
+enum class ELifecycleState : uint8
 {
 	Initializing,
 	Ready,

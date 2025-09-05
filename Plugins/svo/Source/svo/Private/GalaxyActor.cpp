@@ -44,7 +44,7 @@ void AGalaxyActor::Initialize()
 		InitializeNiagara();
 		if (TryCleanUpComponents()) return; //Early exit if destroying
 
-		InitializationState = EGalaxyState::Ready;
+		InitializationState = ELifecycleState::Ready;
 
 		double TotalDuration = FPlatformTime::Seconds() - StartTime;
 		UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Initialize total duration: %.3f seconds"), TotalDuration);
@@ -52,7 +52,7 @@ void AGalaxyActor::Initialize()
 }
 
 bool AGalaxyActor::TryCleanUpComponents() {
-	if (InitializationState != EGalaxyState::Destroying) return false;
+	if (InitializationState != ELifecycleState::Destroying) return false;
 	AsyncTask(ENamedThreads::GameThread, [this]()
 	{
 		if (VolumetricComponent) VolumetricComponent->DestroyComponent();
@@ -62,7 +62,7 @@ bool AGalaxyActor::TryCleanUpComponents() {
 }
 
 void AGalaxyActor::MarkDestroying() {
-	InitializationState = EGalaxyState::Destroying;
+	InitializationState = ELifecycleState::Destroying;
 }
 
 void AGalaxyActor::InitializeData() {
@@ -115,7 +115,7 @@ void AGalaxyActor::InitializeData() {
 		SpiralGenerator->GenerateData(Octree);
 	}
 	double GenDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("Galaxy generation took: %.3f seconds"), GenDuration);
+	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Galaxy generation took: %.3f seconds"), GenDuration);
 }
 
 void AGalaxyActor::FetchData() {	
@@ -134,7 +134,68 @@ void AGalaxyActor::FetchData() {
 	}, EParallelForFlags::BackgroundPriority);
 
 	double FetchDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("Node fetch + array population took: %.3f seconds"), FetchDuration);
+	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Node fetch + array population took: %.3f seconds"), FetchDuration);
+}
+
+void AGalaxyActor::InitializeVolumetric()
+{
+	double StartTime = FPlatformTime::Seconds();
+	int Resolution = 64;
+	TextureData = Octree->CreateVolumeDensityDataFromOctree(Resolution);
+	if (TryCleanUpComponents()) return; //Early exit if destroying
+
+	TPromise<void> CompletionPromise;
+	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
+	AsyncTask(ENamedThreads::GameThread, [this, Resolution, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
+		{
+			double SourceStart = FPlatformTime::Seconds();
+
+			VolumeTexture = NewObject<UVolumeTexture>(
+				GetTransientPackage(),
+				NAME_None,
+				RF_Transient
+			);
+
+			VolumeTexture->SRGB = false;
+			VolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
+			VolumeTexture->CompressionNone = true;
+			VolumeTexture->Filter = TF_Nearest;
+			VolumeTexture->AddressMode = TA_Clamp;
+			VolumeTexture->MipGenSettings = TMGS_NoMipmaps;
+			VolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
+			VolumeTexture->NeverStream = true;
+			VolumeTexture->DeferCompression = true;
+			VolumeTexture->UnlinkStreaming();
+
+			VolumeTexture->Source.Init(Resolution, Resolution, Resolution, 1, ETextureSourceFormat::TSF_BGRA8, TextureData.GetData());
+			VolumeTexture->UpdateResource();
+			FlushRenderingCommands();
+
+			UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(
+				LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_GalaxyRaymarch_Inst.MT_GalaxyRaymarch_Inst")),
+				this
+			);
+
+			DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), VolumeTexture);
+			//TODO: Proceduralize material
+
+			VolumetricComponent = NewObject<UStaticMeshComponent>(this);
+			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));
+			VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
+			VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+			VolumetricComponent->SetMaterial(0, DynamicMaterial);
+			VolumetricComponent->RegisterComponent();
+
+
+			double SourceDuration = FPlatformTime::Seconds() - SourceStart;
+			UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::VolumeTexture Source.Init & Update took: %.3f seconds"), SourceDuration);
+
+			CompletionPromise.SetValue();
+		});
+	CompletionFuture.Wait();
+
+	double VolumetricDuration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Volumetric initialization took: %.3f seconds"), VolumetricDuration);
 }
 
 void AGalaxyActor::InitializeNiagara()
@@ -174,66 +235,6 @@ void AGalaxyActor::InitializeNiagara()
 
 	double TotalDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeNiagara total duration: %.3f seconds"), TotalDuration);
-}
-
-void AGalaxyActor::InitializeVolumetric()
-{
-	double StartTime = FPlatformTime::Seconds();
-	int Resolution = 64;
-	TextureData = Octree->CreateVolumeDensityDataFromOctree(Resolution);
-	if (TryCleanUpComponents()) return; //Early exit if destroying
-
-	TPromise<void> CompletionPromise;
-	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	AsyncTask(ENamedThreads::GameThread, [this, Resolution, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-	{
-		double SourceStart = FPlatformTime::Seconds();
-
-		VolumeTexture = NewObject<UVolumeTexture>(
-			GetTransientPackage(),
-			NAME_None,
-			RF_Transient
-		);
-
-		VolumeTexture->SRGB = false;
-		VolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
-		VolumeTexture->CompressionNone = true;
-		VolumeTexture->Filter = TF_Nearest;
-		VolumeTexture->AddressMode = TA_Clamp;
-		VolumeTexture->MipGenSettings = TMGS_NoMipmaps;
-		VolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
-		VolumeTexture->NeverStream = true;
-		VolumeTexture->DeferCompression = true;
-		VolumeTexture->UnlinkStreaming();
-
-		VolumeTexture->Source.Init(Resolution, Resolution, Resolution, 1, ETextureSourceFormat::TSF_BGRA8, TextureData.GetData());
-		VolumeTexture->UpdateResource();
-
-		UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(
-			LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_GalaxyRaymarch_Inst.MT_GalaxyRaymarch_Inst")),
-			this
-		);
-
-		DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), VolumeTexture);
-		//TODO: Proceduralize material
-
-		VolumetricComponent = NewObject<UStaticMeshComponent>(this);
-		VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));
-		VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
-		VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-		VolumetricComponent->SetMaterial(0, DynamicMaterial);
-		VolumetricComponent->RegisterComponent();
-		FlushRenderingCommands();
-
-		double SourceDuration = FPlatformTime::Seconds() - SourceStart;
-		UE_LOG(LogTemp, Log, TEXT("VolumeTexture Source.Init & Update took: %.3f seconds"), SourceDuration);
-
-		CompletionPromise.SetValue();
-	});
-	CompletionFuture.Wait();
-
-	double VolumetricDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("Volumetric initialization took: %.3f seconds"), VolumetricDuration);
 }
 
 void AGalaxyActor::Tick(float DeltaTime)
