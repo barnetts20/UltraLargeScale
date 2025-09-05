@@ -179,7 +179,7 @@ void AGalaxyActor::InitializeNiagara()
 void AGalaxyActor::InitializeVolumetric()
 {
 	double StartTime = FPlatformTime::Seconds();
-	int Resolution = 32;
+	int Resolution = 64;
 	TextureData = Octree->CreateVolumeDensityDataFromOctree(Resolution);
 	if (TryCleanUpComponents()) return; //Early exit if destroying
 
