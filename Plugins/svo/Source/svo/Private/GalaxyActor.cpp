@@ -73,47 +73,11 @@ void AGalaxyActor::InitializeData() {
 	int InsertOffset = 6;
 	double GlobularChance = .3;
 
-	if (Stream.FRand() < GlobularChance)
-	{
-		auto GlobularGenerator = new GlobularNoiseGenerator(Seed);
-		GlobularGenerator->Count = Count;
-		GlobularGenerator->Falloff = Stream.FRandRange(.5, 1.5);
-		GlobularGenerator->Rotation = FRotator(AxisRotation.X, AxisRotation.Y, AxisRotation.Z);
-		GlobularGenerator->EncodedTree = EncodedTree;
-		GlobularGenerator->DepthRange = DepthRange;
-		GlobularGenerator->HorizontalExtent = .8;
-		GlobularGenerator->VerticalExtent = Stream.FRandRange(.4, .8);
-		GlobularGenerator->WarpAmount = FVector(Stream.FRandRange(.0, 1));
-		GlobularGenerator->InsertDepthOffset = InsertOffset;
-		GlobularGenerator->GenerateData(Octree);
-	}
-	else
-	{
-		auto SpiralGenerator = new SpiralNoiseGenerator(Seed);
-		SpiralGenerator->Count = Count;
-		SpiralGenerator->Rotation = FRotator(AxisRotation.X, AxisRotation.Y, AxisRotation.Z);
-		SpiralGenerator->DepthRange = DepthRange;
-		SpiralGenerator->NumArms = Stream.RandRange(2, 8);
-		SpiralGenerator->PitchAngle = Stream.FRandRange(5, 40);
-		SpiralGenerator->ArmContrast = Stream.FRandRange(.2, .8);
-		SpiralGenerator->RadialFalloff = Stream.FRandRange(1.5, 3);
-		SpiralGenerator->CenterScale = Stream.FRandRange(.01, .02);
+	auto Generator = new GalaxyGenerator(Seed);
+	Generator->DepthRange = 6;
+	Generator->InsertDepthOffset = 5;
+	Generator->GenerateData(Octree);
 
-		double SpreadMin = Stream.FRandRange(.01, .03);
-		double SpreadMax = Stream.FRandRange(.15, .3);
-		SpiralGenerator->HorizontalSpreadMin = SpreadMin;
-		SpiralGenerator->HorizontalSpreadMax = SpreadMax;
-		SpiralGenerator->VerticalSpreadMin = SpreadMin;
-		SpiralGenerator->VerticalSpreadMax = SpreadMax;
-
-		double HorizontalWarp = Stream.FRandRange(.1, .7);
-		double VerticalWarp = Stream.FRandRange(.1, .7);
-
-		SpiralGenerator->WarpAmount = FVector(HorizontalWarp, HorizontalWarp, HorizontalWarp);
-		SpiralGenerator->EncodedTree = EncodedTree;
-		SpiralGenerator->InsertDepthOffset = InsertOffset;
-		SpiralGenerator->GenerateData(Octree);
-	}
 	double GenDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Galaxy generation took: %.3f seconds"), GenDuration);
 }
@@ -126,11 +90,11 @@ void AGalaxyActor::FetchData() {
 	Colors.SetNumUninitialized(Nodes.Num());
 	ParallelFor(Nodes.Num(), [&](int32 Index)
 	{
-		const TSharedPtr<FOctreeNode>& Leaf = Nodes[Index];
-		FRandomStream RandStream(Leaf->Data.ObjectId);
-		Positions[Index] = FVector(Leaf->Center.X, Leaf->Center.Y, Leaf->Center.Z);
-		Extents[Index] = static_cast<float>(Leaf->Extent);
-		Colors[Index] = FLinearColor(Leaf->Data.Composition);
+		const TSharedPtr<FOctreeNode>& Node = Nodes[Index];
+		FRandomStream RandStream(Node->Data.ObjectId);
+		Positions[Index] = FVector(Node->Center.X, Node->Center.Y, Node->Center.Z);
+		Extents[Index] = static_cast<float>(Node->Extent);
+		Colors[Index] = FLinearColor(Node->Data.Composition);
 	}, EParallelForFlags::BackgroundPriority);
 
 	double FetchDuration = FPlatformTime::Seconds() - StartTime;
@@ -178,6 +142,22 @@ void AGalaxyActor::InitializeVolumetric()
 
 			DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), VolumeTexture);
 			//TODO: Proceduralize material
+			//AmbientColor
+			FRandomStream Stream(Seed);
+
+			DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), ParentColor);
+			DynamicMaterial->SetVectorParameterValue(FName("CoolShift"), FLinearColor(Stream.FRandRange(0,6), Stream.FRandRange(0, 6), Stream.FRandRange(0, 6), 1));
+			DynamicMaterial->SetVectorParameterValue(FName("HotShift"), FLinearColor(Stream.FRandRange(0, 6), Stream.FRandRange(0, 6), Stream.FRandRange(0, 6), 1));
+			DynamicMaterial->SetScalarParameterValue(FName("HueVariance"), Stream.FRandRange(0,.5));
+			DynamicMaterial->SetScalarParameterValue(FName("HueVarianceScale"), Stream.FRandRange(.5, 3));
+			DynamicMaterial->SetScalarParameterValue(FName("SaturationVariance"), Stream.FRandRange(0, .5));
+			DynamicMaterial->SetScalarParameterValue(FName("TemperatureInfluence"), Stream.FRandRange(2, 8));
+			DynamicMaterial->SetScalarParameterValue(FName("TemperatureScale"), Stream.FRandRange(1, 6));
+			DynamicMaterial->SetScalarParameterValue(FName("Density"), Stream.FRandRange(0.1, .5));
+			DynamicMaterial->SetScalarParameterValue(FName("WarpAmount"), Stream.FRandRange(0.02, .15));
+			DynamicMaterial->SetScalarParameterValue(FName("WarpScale"), Stream.FRandRange(0.5, 2));
+
+			//NoiseDomainOffset
 
 			VolumetricComponent = NewObject<UStaticMeshComponent>(this);
 			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));

@@ -155,6 +155,29 @@ public:
 	//const char* EncodedTree = "FwAAAAAAAACAPwAAgD8AAIC/DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA==";
 };
 
+class SVO_API GalaxyGenerator : public PointCloudGenerator {
+public:
+	GalaxyGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
+
+	double MaxRadius;
+	double GalaxyRadius;
+	double BulgeRadius;
+	double VoidRadius;
+
+	int NumArms;
+
+	TArray<FVector> GeneratedPoints;
+
+	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
+
+	void GenerateCluster(TArray<FVector>& InGeneratedPoints, FVector InClusterCenter, FVector InClusterRadius, int InCount);
+	void GenerateBulge(TArray<FVector>& InGeneratedPoints, int InCount);
+	void GenerateDisc(TArray<FVector>& InGeneratedPoints, int InCount);
+	void GenerateArms(TArray<FVector>& InGeneratedPoints, int InCount);
+	void ApplyTwist(TArray<FVector>& InGeneratedPoints, double InTwistStrength);
+	void GenerateBackground(TArray<FVector>& InGeneratedPoints, int InCount);
+};
+
 class SVO_API BurstGenerator : public PointCloudGenerator
 {
 public:

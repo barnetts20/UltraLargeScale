@@ -231,7 +231,7 @@ void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InRefer
 		NewGalaxy->SpeedScale = SpeedScale;
 		NewGalaxy->UnitScale = GalaxyUnitScale;
 		FRandomStream RandStream(InNode->Data.ObjectId);
-		NewGalaxy->ParentColor = FLinearColor(InNode->Data.Composition.GetSafeNormal());
+		NewGalaxy->ParentColor = FLinearColor(InNode->Data.Composition);
 		FVector normal = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
 		FMatrix RotationMatrix = FRotationMatrix::MakeFromZX(normal, FVector::ForwardVector);
 		NewGalaxy->AxisRotation = normal * 360;
@@ -308,4 +308,3 @@ void AUniverseActor::Tick(float DeltaTime)
 	SetActorLocation(GetActorLocation() + ParallaxOffset);
 	Super::Tick(DeltaTime);
 }
-
