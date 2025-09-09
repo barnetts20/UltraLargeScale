@@ -467,23 +467,24 @@ void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 	MinInsertionDepth = FMath::Max(1, MaxInsertionDepth - DepthRange);
 
 	MaxRadius = InOctree->Extent;
-	GalaxyRadius = MaxRadius * .3; //Galaxy proper radius
+	GalaxyRadius = MaxRadius * .5; //Galaxy proper radius
 	BulgeRadius = GalaxyRadius * .3; //Central bulge radius
 	VoidRadius = BulgeRadius * .1; //Central void
 	NumArms = 2;
-	double TwistFactor = 8; // Need work unifying original functionality with center spiral tightening
 
-	int NumDiscPoints = 100000;
-	int NumArmPoints = 300000;
-	int NumBulgePoints = 300000;
-	int NumBackgroundPoints = 100000;
+	double TwistFactor = 6; // Need work unifying original functionality with center spiral tightening
+
+	int NumDiscPoints = 200000;
+	int NumArmPoints = 200000;
+	int NumBulgePoints = 600000;
+	int NumBackgroundPoints = 200000;
 
 	//Can tune these to create different classes maybe
 	GenerateArms(GeneratedPoints, NumArmPoints);
 	ApplyTwist(GeneratedPoints, TwistFactor);
 	GenerateBulge(GeneratedPoints, NumBulgePoints);
 	GenerateDisc(GeneratedPoints, NumDiscPoints);
-	GenerateBackground(GeneratedPoints, NumBackgroundPoints);
+	//GenerateBackground(GeneratedPoints, NumBackgroundPoints);
 
 	//May want to apply noise to some components
 
@@ -498,7 +499,9 @@ void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 				FMath::RoundToInt64(GeneratedPoints[i].Z)
 			);
 			FVoxelData Data(1, FVector(1, 1, 1), i, (InsertPosition != FInt64Vector(0,0,0) ? 1 : 2)); 
+			if (InsertPosition.Size() < VoidRadius) InsertPosition = FInt64Vector::ZeroValue;
 			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
+
 			InOctree->InsertPosition(InsertPosition, Stream.RandRange(MinInsertionDepth, MaxInsertionDepth), Data); //Need to make insert accummulate density for repeated inserts, and then we can use the zero vectors to populate the black hole
 	});
 }
@@ -528,10 +531,9 @@ void GalaxyGenerator::GenerateCluster(TArray<FVector>& InGeneratedPoints, FVecto
 			);
 
 			FVector P = InClusterCenter + Offset;
-
+			double size = P.Length();
 			// Bounds + void checks
-			//TODO Calc size once
-			if (P.Size() > MaxRadius || P.Size() < VoidRadius)
+			if (size > MaxRadius)
 			{
 				// If invalid, push to center (or mark)
 				InGeneratedPoints[StartIndex + i] = FVector::ZeroVector;
@@ -545,74 +547,118 @@ void GalaxyGenerator::GenerateCluster(TArray<FVector>& InGeneratedPoints, FVecto
 
 void GalaxyGenerator::GenerateBulge(TArray<FVector>& InGeneratedPoints, int NumBulgePoints)
 {
-	int NumClusters = 8;  // tweakable
-	int StarsPerCluster = NumBulgePoints / NumClusters;
-	FRandomStream Stream(Seed + 42);
+	InGeneratedPoints.Reserve(InGeneratedPoints.Num() + NumBulgePoints);
+	double a = BulgeRadius * 0.3;  // scale radius
+	FRandomStream Stream(Seed + 99);
 
-	for (int c = 0; c < NumClusters; c++)
+	// Per-axis scaling
+	double AxisX = BulgeRadius * 1.0;
+	double AxisY = BulgeRadius * 1.0;
+	double AxisZ = BulgeRadius * 0.4;
+
+	// Soft truncation parameters
+	double SoftTruncationRadius = BulgeRadius;// *1.5; // where soft falloff begins
+	double BMaxRadius = GalaxyRadius; // absolute maximum
+
+	for (int i = 0; i < NumBulgePoints; i++)
 	{
-		// Pick a cluster center near the origin
-		FVector ClusterCenter(
-			Stream.FRandRange(-BulgeRadius * .5, BulgeRadius * .5),
-			Stream.FRandRange(-BulgeRadius * .5, BulgeRadius * .5),
-			Stream.FRandRange(-BulgeRadius * .25, BulgeRadius * .25)
-		);
+		// 1. Sample Hernquist radius
+		double u = FMath::Clamp(Stream.FRand(), KINDA_SMALL_NUMBER, 1.0 - KINDA_SMALL_NUMBER);
+		double sqrtu = FMath::Sqrt(u);
+		double r = (a * sqrtu) / (1.0 - sqrtu); // maps uniform [0,1] → Hernquist PDF
 
-		// Cluster radius (slightly varied, smaller than bulge)
-		FVector ClusterRadius(
-			BulgeRadius * Stream.FRandRange(0.3, .5),
-			BulgeRadius * Stream.FRandRange(0.3, .5),
-			BulgeRadius * Stream.FRandRange(0.3, .5)
-		);
+		// 2. Apply soft truncation with probabilistic acceptance
+		if (r > SoftTruncationRadius)
+		{
+			if (r > BMaxRadius)
+			{
+				// Hard limit - resample this point
+				i--;
+				continue;
+			}
 
-		GenerateCluster(InGeneratedPoints, ClusterCenter, ClusterRadius, StarsPerCluster);
+			// Soft truncation zone - probabilistic acceptance
+			double excessRadius = r - SoftTruncationRadius;
+			double truncationZone = BMaxRadius - SoftTruncationRadius;
+			double falloffFactor = excessRadius / truncationZone; // 0 to 1
+
+			// Exponential falloff probability
+			double acceptanceProbability = FMath::Exp(-3.0 * falloffFactor * falloffFactor);
+
+			if (Stream.FRand() > acceptanceProbability)
+			{
+				// Reject this point and try again
+				i--;
+				continue;
+			}
+		}
+
+		// 3. Sample isotropic direction
+		double z = Stream.FRandRange(-1.0, 1.0);
+		double phi = Stream.FRandRange(0.0, 2.0 * PI);
+		double xy = FMath::Sqrt(1.0 - z * z);
+		FVector dir(xy * FMath::Cos(phi), xy * FMath::Sin(phi), z);
+
+		// 4. Scale per axis
+		FVector P;
+		P.X = dir.X * r * (AxisX / BulgeRadius);
+		P.Y = dir.Y * r * (AxisY / BulgeRadius);
+		P.Z = dir.Z * r * (AxisZ / BulgeRadius);
+
+		InGeneratedPoints.Add(P);
 	}
 }
 
 void GalaxyGenerator::GenerateDisc(TArray<FVector>& InGeneratedPoints, int NumDiskPoints)
 {
-	FVector Center(0, 0, 0);
-	FVector Radius(GalaxyRadius, GalaxyRadius, GalaxyRadius * 0.1); // wide + thin
 
-	GenerateCluster(InGeneratedPoints, Center, Radius, NumDiskPoints);
+	FVector Radius(GalaxyRadius, GalaxyRadius, GalaxyRadius * 0.2); // wide + thin
+
+	GenerateCluster(InGeneratedPoints, FVector::ZeroVector, Radius, NumDiskPoints);
 }
 
 void GalaxyGenerator::GenerateArms(TArray<FVector>& InGeneratedPoints, int NumArmPoints)
 {
-	int ClustersPerArm = 60; // tweakable
-	int StarsPerCluster = (NumArmPoints / NumArms) / ClustersPerArm; // tweakable
-	float ArmSpread = 0.3f;   // jitter around arm line
+	int ClustersPerArm = 60;
+	int StarsPerCluster = (NumArmPoints / NumArms) / ClustersPerArm;
+	float ArmSpreadFactor = 0.25f;   // fractional spread
+	double Rd = GalaxyRadius * 0.3;  // disk scale length
+
+	FRandomStream Stream(Seed + 1337);
 
 	for (int ArmIndex = 0; ArmIndex < NumArms; ArmIndex++)
 	{
 		// Base angle for this arm
-		double Angle = (2.0 * PI * ArmIndex) / NumArms;
-		FVector ArmDir(FMath::Cos(Angle), FMath::Sin(Angle), 0);
+		double BaseAngle = (2.0 * PI * ArmIndex) / NumArms;
+		FVector ArmDir(FMath::Cos(BaseAngle), FMath::Sin(BaseAngle), 0);
 
 		for (int c = 0; c < ClustersPerArm; c++)
 		{
-			// Radius along the arm line
-			double T = (double)c / (ClustersPerArm - 1); // 0 → 1
-			//double Dist = FMath::Lerp(VoidRadius + .5 * ArmSpread * GalaxyRadius, GalaxyRadius, T);
-			double Dist = FMath::Lerp(BulgeRadius * .5, GalaxyRadius, T);
-
-			// Center of this cluster
+			// Exponential radial distribution
+			double u = Stream.FRand();
+			double Dist = -Rd * FMath::Loge(1.0 - u);
+			//Dist = FMath::Clamp(Dist, BulgeRadius * 0.9, GalaxyRadius);
+			Dist = FMath::Clamp(Dist, 0, GalaxyRadius);
+			// Cluster center (straight line, twist will curl later)
 			FVector Center = ArmDir * Dist;
 
-			// Cluster radius grows with distance
+			// Thickness scaling: base + grows with radius
+			double BaseWidth = MaxRadius * 0.05;       // 2% of radius
+			double WidthScale = MaxRadius * 0.25;      // growth factor
+			double ArmWidth = BaseWidth + WidthScale * (Dist / GalaxyRadius);
+
 			FVector Radius(
-				Dist * ArmSpread,
-				Dist * ArmSpread,
-				Dist * ArmSpread * .2 // thin in Z
+				ArmWidth * ArmSpreadFactor,
+				ArmWidth * ArmSpreadFactor,
+				ArmWidth * 0.2 * ArmSpreadFactor // keep thin vertically
 			);
 
-			// Add jitter so arms aren’t too perfect
+			// Add jitter
 			FVector Jitter(
-				FMath::FRandRange(-Radius.X * 0.5, Radius.X * 0.5),
-				FMath::FRandRange(-Radius.Y * 0.5, Radius.Y * 0.5),
-				FMath::FRandRange(-Radius.Z * 0.5, Radius.Z * 0.5)
+				Stream.FRandRange(-Radius.X, Radius.X),
+				Stream.FRandRange(-Radius.Y, Radius.Y),
+				Stream.FRandRange(-Radius.Z, Radius.Z)
 			);
-
 			Center += Jitter;
 
 			GenerateCluster(InGeneratedPoints, Center, Radius, StarsPerCluster);
@@ -623,26 +669,28 @@ void GalaxyGenerator::GenerateArms(TArray<FVector>& InGeneratedPoints, int NumAr
 void GalaxyGenerator::ApplyTwist(TArray<FVector>& InGeneratedPoints, double InTwistStrength)
 {
 	double BaseTwistStrength = InTwistStrength;
-	double CoreRadius = 0.1;           // fraction of galaxy radius considered core
-	double MaxCoreTwist = 6.0;         // extra radians of twist near center
+	double CoreRadius = .01;           // fraction of galaxy radius considered core
+	double MaxCoreTwist = 4.0;         // extra radians of twist near center
 
 	ParallelFor(InGeneratedPoints.Num(), [&](int32 i)
 		{
-			FVector P = InGeneratedPoints[i];
+			FVector P = InGeneratedPoints[i];// *FVector(1, 1, .1);
 
-			double rXY = P.Length();// FMath::Sqrt(P.X * P.X + P.Y * P.Y);
+			double rXY = P.Length();
+			//double rXY = FMath::Sqrt(P.X * P.X + P.Y * P.Y);
 			if (rXY < KINDA_SMALL_NUMBER)
 				return;
 
 			double theta = FMath::Atan2(P.Y, P.X);
-			double normalizedRadius = FMath::Clamp(rXY / GalaxyRadius, 0.0, 1.0);
+			double normalizedRadius = FMath::Clamp(rXY / MaxRadius, 0.0, 1.0);
 
 			// Normal outer twist
 			double baseDelta = BaseTwistStrength * normalizedRadius;
 
 			// Extra inner twist: smooth saturating function
-			double coreBoost = MaxCoreTwist * (1.0 - FMath::Exp((CoreRadius / (normalizedRadius + 1e-4))));
-
+			
+			double coreBoost = MaxCoreTwist * -FMath::Exp((CoreRadius / FMath::Max(FMath::Pow(normalizedRadius, 2), 1e-4)));// Need this to only ramp up on an inner well defined part of the spiral
+			//double coreBoost = 0;
 			// Total twist
 			double deltaTheta = baseDelta + coreBoost;
 
@@ -656,5 +704,5 @@ void GalaxyGenerator::ApplyTwist(TArray<FVector>& InGeneratedPoints, double InTw
 
 void GalaxyGenerator::GenerateBackground(TArray<FVector>& InGeneratedPoints, int NumBackgroundPoints)
 {
-	GenerateCluster(InGeneratedPoints, FVector(0), FVector(MaxRadius, MaxRadius, MaxRadius * .6), NumBackgroundPoints);
+	GenerateCluster(InGeneratedPoints, FVector(0), FVector(MaxRadius, MaxRadius, MaxRadius * .75), NumBackgroundPoints);
 }
