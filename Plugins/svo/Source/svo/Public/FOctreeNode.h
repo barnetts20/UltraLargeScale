@@ -100,6 +100,7 @@ public:
 			Current = Current->Children[ChildIndex];
 		}
 
+		InData.Density += Current->Data.Density;
 		Current->Data = InData;
 		return Current;
 	}
