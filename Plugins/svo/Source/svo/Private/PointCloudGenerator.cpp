@@ -51,6 +51,7 @@ FInt64Vector PointCloudGenerator::ApplyNoise(FastNoise::SmartNode<> InNoise, dou
 	auto InsertPosition = FInt64Vector(FX, FY, FZ);
 	return InsertPosition;
 }
+
 FInt64Vector PointCloudGenerator::RotateCoordinate(FInt64Vector InCoordinate, FRotator InRotation)
 {
 	// Convert to FVector for rotation
@@ -69,6 +70,12 @@ FInt64Vector PointCloudGenerator::RotateCoordinate(FInt64Vector InCoordinate, FR
 		FMath::RoundToInt64(Rotated.Y),
 		FMath::RoundToInt64(Rotated.Z)
 	);
+}
+
+FVector PointCloudGenerator::RotateCoordinate(FVector InCoordinate, FRotator InRotation)
+{
+	// Apply rotation around the origin
+	return Rotation.RotateVector(InCoordinate);
 }
 
 void SimpleRandomGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
@@ -447,7 +454,7 @@ void BurstNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			InsertPosition = ApplyNoise(DistortionNoise, 6, InOctree->Extent, InsertPosition, OutDensity);
 			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
-			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
+			int32 InsertDepth = MaxInsertionDepth;// GalaxyGenerator::ChooseDepth(Stream.FRand());
 			FVoxelData Data(OutDensity, Stream.GetUnitVector(), i, Type);
 
 			InOctree->InsertPosition(InsertPosition, InsertDepth, Data);
@@ -455,66 +462,188 @@ void BurstNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 }
 
 void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
-{
-	//TODO: Proceduralize
-	 
-	//Randomize class and use for parameter bounds? 
+{	 
+	//TODO: Randomize class and use for parameter bounds
 	//Glob - E0 E3 E5 E7 S0
 	//Spiral - Sa Sb Sc
 	//Spiral barred - SBa SBb SBc
+	//Can be handled externally when the generator is spawned... would need to create randomization bounds for each type, roll a type based on probability then use bounds to proceduralize
 
 	MaxInsertionDepth = FMath::Max(1, InOctree->MaxDepth - InsertDepthOffset);
 	MinInsertionDepth = FMath::Max(1, MaxInsertionDepth - DepthRange);
 
 	MaxRadius = InOctree->Extent;
-	GalaxyRadius = MaxRadius * .5; //Galaxy proper radius
-	BulgeRadius = GalaxyRadius * .4; //Central bulge radius
-	VoidRadius = BulgeRadius * .1; //Central void
-	NumArms = 6;
-
-	double TwistFactor = 6; // Need work unifying original functionality with center spiral tightening
-
-	int NumDiscPoints = 100000;
-	int NumArmPoints = 300000;
-	int NumBulgePoints = 300000;
-	int NumBackgroundPoints = 100000;
+	GalaxyRadius = MaxRadius * GalaxyRatio; //Galaxy proper radius
+	BulgeRadius = GalaxyRadius * BulgeRatio; //Central bulge radius
+	VoidRadius = BulgeRadius * VoidRatio; //Central void
 
 	//Can tune these to create different classes maybe
-	GenerateArms(GeneratedPoints, NumArmPoints);
-	ApplyTwist(GeneratedPoints, TwistFactor);
-	GenerateBulge(GeneratedPoints, NumBulgePoints);
-	GenerateDisc(GeneratedPoints, NumDiscPoints);
-	GenerateBackground(GeneratedPoints, NumBackgroundPoints);
+	GenerateArms();
+	ApplyTwist();
+	GenerateBulge();
+	GenerateDisc();
+	GenerateBackground();
 
-	//May want to apply noise to some components
+	//TODO: May want to apply noise to some components
+	//TODO: Might be worth while to create a specific gas distribution and explicitly insert it at the desired depth for the volume texture
 
-	//Might be worth while to create a specific gas distribution and insert it at the desired depth for the volume texture
-
-	ParallelFor(GeneratedPoints.Num(), [this, InOctree](int32 i)
+	//Accumulate Zero Vectors and Void stars into black hole
+	FVoxelData BlackHole;
+	BlackHole.ObjectId = INT32_MAX;
+	BlackHole.TypeId = 3;
+	
+	ParallelFor(GeneratedData.Num(), [this, InOctree, &BlackHole](int32 i)
 	{
 			FRandomStream Stream(i);
-			auto InsertPosition = FInt64Vector(
-				FMath::RoundToInt64(GeneratedPoints[i].X),
-				FMath::RoundToInt64(GeneratedPoints[i].Y),
-				FMath::RoundToInt64(GeneratedPoints[i].Z)
-			);
-			FVoxelData Data(1, FVector(1, 1, 1), i, 1);
-			if (InsertPosition == FInt64Vector::ZeroValue || InsertPosition.Size() < VoidRadius) {
-				Data.TypeId = 2;
-				InOctree->InsertPosition(InsertPosition, Stream.RandRange(MinInsertionDepth, MaxInsertionDepth), Data); //Should insert at different depth for black hole
+			FPointData InsertData = GeneratedData[i];
+
+			if (InsertData.Position.Size() < VoidRadius) { //Any insert failures or nodes within void radius get fed to the black hole
+				BlackHole.Density += InsertData.Data.Density;
+				BlackHole.Composition += InsertData.Data.Composition;
 			}
 			else {
-				InsertPosition = RotateCoordinate(InsertPosition, Rotation);
-				InOctree->InsertPosition(InsertPosition, Stream.RandRange(MinInsertionDepth, MaxInsertionDepth), Data); //Need to make insert accummulate density for repeated inserts, and then we can use the zero vectors to populate the black hole
+				InsertData.Position = RotateCoordinate(InsertData.Position, Rotation);
+				InOctree->InsertPosition(InsertData.GetInt64Position(), InsertData.InsertDepth, InsertData.Data); //Need to make insert accummulate density for repeated inserts, and then we can use the zero vectors to populate the black hole
 			}
 	});
+	BlackHole.Density = 1; // Should be accumulated below but that affects gas distribution, hard setting for now, can switch back if we do an explicit gas population stage
+
+	//TODO: calculate black hole size based on solar mass density and figure out the depth, for now inserting at min depth
+	InOctree->InsertPosition(FInt64Vector::ZeroValue, MinInsertionDepth, BlackHole); //Should insert at different depth for black hole
 }
 
-
-void GalaxyGenerator::GenerateCluster(TArray<FVector>& InGeneratedPoints, FVector InClusterCenter, FVector InClusterRadius, int InCount)
+void GalaxyGenerator::GenerateBulge()
 {
-	int32 StartIndex = InGeneratedPoints.Num();
-	InGeneratedPoints.AddUninitialized(InCount);
+	GeneratedData.Reserve(GeneratedData.Num() + BulgeNumPoints);
+	
+	FVector AxisBounds = BulgeAxisScale * BulgeRadius;
+	double a = BulgeRadius * BulgeRadiusScale;  // scale radius
+	double SoftTruncationRadius = BulgeRadius * BulgeTruncationScale;
+
+	FRandomStream Stream(Seed + 99);
+	for (int i = 0; i < BulgeNumPoints; i++)
+	{
+		FPointData InsertData;
+		InsertData.Data.ObjectId = i;
+		InsertData.Data.TypeId = 1;
+		InsertData.Data.Density = Stream.FRandRange(.5, 1.5) * BulgeBaseDensity;
+		InsertData.InsertDepth = ChooseDepth(Stream.FRand(), BulgeDepthBias);
+
+		// 1. Sample Hernquist radius
+		double sqrtu = FMath::Sqrt(FMath::Clamp(Stream.FRand(), KINDA_SMALL_NUMBER, 1.0 - KINDA_SMALL_NUMBER));
+		double r = (a * sqrtu) / (1.0 - sqrtu); // maps uniform [0,1] → Hernquist PDF
+
+		// 2. Apply soft truncation with probabilistic acceptance
+		if (r > SoftTruncationRadius)
+		{
+			if (r > MaxRadius) //Failed points get fed to the black hole
+			{
+				InsertData.Position = FVector::ZeroVector;
+				GeneratedData.Add(InsertData);
+				continue;
+			}
+
+			// Soft truncation zone - probabilistic acceptance
+			double excessRadius = r - SoftTruncationRadius;
+			double truncationZone = MaxRadius - SoftTruncationRadius;
+			double falloffFactor = excessRadius / truncationZone; // 0 to 1
+			// Exponential falloff probability
+			double acceptanceProbability = FMath::Exp(-3.0 * FMath::Pow(falloffFactor, BulgeAcceptanceExponent));
+
+			if (Stream.FRand() > acceptanceProbability) //Failed points get fed to the black hole
+			{
+				InsertData.Position = FVector::ZeroVector;
+				GeneratedData.Add(InsertData);
+				continue;
+			}
+		}
+
+		// 3. Sample isotropic direction
+		double z = Stream.FRandRange(-1.0, 1.0);
+		double phi = Stream.FRandRange(0.0, 2.0 * PI);
+		double xy = FMath::Sqrt(1.0 - z * z);
+		FVector dir(xy * FMath::Cos(phi), xy * FMath::Sin(phi), z);
+
+		// 4. Scale per axis
+		FVector P;
+		P.X = dir.X * r * (AxisBounds.X / BulgeRadius);
+		P.Y = dir.Y * r * (AxisBounds.Y / BulgeRadius);
+		P.Z = dir.Z * r * (AxisBounds.Z / BulgeRadius);
+
+		InsertData.Position = P;
+		GeneratedData.Add(InsertData);
+	}
+}
+
+void GalaxyGenerator::GenerateArms()
+{
+	int StarsPerCluster = (ArmNumPoints / ArmNumArms) / ArmClusters;
+	double Rd = GalaxyRadius;
+	double BaseWidth = GalaxyRadius * ArmClusterRadiusMin;
+	double WidthScale = GalaxyRadius * ArmClusterRadiusMax;
+	FRandomStream Stream(Seed + 1337);
+	for (int ArmIndex = 0; ArmIndex < ArmNumArms; ArmIndex++)
+	{
+		double BaseAngle = (2.0 * PI * ArmIndex) / ArmNumArms;
+		FVector ArmDir(FMath::Cos(BaseAngle), FMath::Sin(BaseAngle), 0);
+		for (int c = 0; c < ArmClusters; c++)
+		{
+			double u = Stream.FRand();
+			double Dist = -Rd * FMath::Loge(1.0 - u);
+			Dist = FMath::Clamp(Dist, BulgeRadius * ArmStartRatio, GalaxyRadius);
+			Dist = FMath::Clamp(Dist, 0, GalaxyRadius);
+			FVector Center = ArmDir * Dist;
+			double ArmWidth = BaseWidth + WidthScale * (Dist / GalaxyRadius);
+			FVector Radius(
+				ArmWidth * ArmSpreadFactor,
+				ArmWidth * ArmSpreadFactor,
+				ArmWidth * ArmHeightRatio * ArmSpreadFactor
+			);
+			FVector Jitter(
+				Stream.FRandRange(-Radius.X, Radius.X) * ArmIncoherence,
+				Stream.FRandRange(-Radius.Y, Radius.Y) * ArmIncoherence,
+				Stream.FRandRange(-Radius.Z, Radius.Z) * ArmIncoherence
+			);
+			Center += Jitter;
+			double DensityCoef = FMath::Pow(Center.Length() / GalaxyRadius, ArmRadialDensityExponent) * ArmRadialDensityMultiplier + ArmRadialBaseDensity;
+			GenerateCluster(Center, Radius, StarsPerCluster, ArmBaseDensity * DensityCoef, ArmDepthBias);
+		}
+	}
+}
+
+void GalaxyGenerator::ApplyTwist()
+{
+	ParallelFor(GeneratedData.Num(), [&](int32 i)
+		{
+			FVector P = GeneratedData[i].Position;
+			double rXY = P.Length();
+			if (rXY < KINDA_SMALL_NUMBER) return;
+			double theta = FMath::Atan2(P.Y, P.X);
+			double normalizedRadius = FMath::Clamp(rXY / MaxRadius, 0.0, 1.0);
+			double baseDelta = TwistStrength * normalizedRadius;
+			double coreBoost = TwistCoreStrength * -FMath::Exp((TwistCoreRadius / FMath::Max(FMath::Pow(normalizedRadius, TwistCoreTwistExponent), 1e-4)));// Need this to only ramp up on an inner well defined part of the spiral
+			double deltaTheta = baseDelta + coreBoost;
+			double newTheta = theta + deltaTheta;
+
+			GeneratedData[i].Position.X = rXY * FMath::Cos(newTheta);
+			GeneratedData[i].Position.Y = rXY * FMath::Sin(newTheta);
+		}, EParallelForFlags::BackgroundPriority);
+}
+
+void GalaxyGenerator::GenerateDisc()
+{
+	GenerateCluster(FVector::ZeroVector, FVector(GalaxyRadius, GalaxyRadius, GalaxyRadius * DiscHeightRatio), DiscNumPoints, DiscBaseDensity, DiscDepthBias);
+}
+
+void GalaxyGenerator::GenerateBackground()
+{
+	GenerateCluster(FVector(0), FVector(MaxRadius, MaxRadius, MaxRadius * BackgroundHeightRatio), BackgroundNumPoints, BackgroundBaseDensity, BackgroundDepthBias);
+}
+
+void GalaxyGenerator::GenerateCluster(FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity, double InDepthBias) //add falloff or curve param
+{
+	int32 StartIndex = GeneratedData.Num();
+	GeneratedData.AddUninitialized(InCount);
 
 	ParallelFor(InCount, [&](int32 i)
 		{
@@ -537,177 +666,29 @@ void GalaxyGenerator::GenerateCluster(TArray<FVector>& InGeneratedPoints, FVecto
 
 			FVector P = InClusterCenter + Offset;
 			double size = P.Length();
-			// Bounds + void checks
-			if (size > MaxRadius)
-			{
-				// If invalid, push to center (or mark)
-				InGeneratedPoints[StartIndex + i] = FVector::ZeroVector;
-			}
-			else
-			{
-				InGeneratedPoints[StartIndex + i] = P;
-			}
+
+			FPointData InsertData;
+			InsertData.Position = (size < MaxRadius ? P : FVector::ZeroVector);
+			InsertData.InsertDepth = ChooseDepth(Stream.FRand(), InDepthBias);
+			InsertData.Data = FVoxelData(InBaseDensity * Stream.FRandRange(.5, 1.5), Stream.GetUnitVector(), i, 1);
+
+			GeneratedData[StartIndex + i] = InsertData;
 		}, EParallelForFlags::BackgroundPriority);
 }
 
-void GalaxyGenerator::GenerateBulge(TArray<FVector>& InGeneratedPoints, int NumBulgePoints)
+int GalaxyGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
 {
-	InGeneratedPoints.Reserve(InGeneratedPoints.Num() + NumBulgePoints);
-	double a = BulgeRadius * 0.3;  // scale radius
-	FRandomStream Stream(Seed + 99);
-
-	// Per-axis scaling
-	double AxisX = BulgeRadius * 1.0;
-	double AxisY = BulgeRadius * 1.0;
-	double AxisZ = BulgeRadius * 0.6;
-
-	// Soft truncation parameters
-	double SoftTruncationRadius = BulgeRadius;// *1.5; // where soft falloff begins
-	double BMaxRadius = GalaxyRadius; // absolute maximum
-
-	for (int i = 0; i < NumBulgePoints; i++)
+	double biasedSample = FMath::Clamp(FMath::Pow(InRandomSample, InDepthBias),0,1);
+	double cumulative = 0.0;
+	int chosenDepth = 6;
+	for (int d = 0; d < 7; ++d)
 	{
-		// 1. Sample Hernquist radius
-		double u = FMath::Clamp(Stream.FRand(), KINDA_SMALL_NUMBER, 1.0 - KINDA_SMALL_NUMBER);
-		double sqrtu = FMath::Sqrt(u);
-		double r = (a * sqrtu) / (1.0 - sqrtu); // maps uniform [0,1] → Hernquist PDF
-
-		// 2. Apply soft truncation with probabilistic acceptance
-		if (r > SoftTruncationRadius)
+		cumulative += DepthProb[d];
+		if (biasedSample <= cumulative)
 		{
-			if (r > BMaxRadius)
-			{
-				// Hard limit - resample this point
-				//i--;
-				continue;
-			}
-
-			// Soft truncation zone - probabilistic acceptance
-			double excessRadius = r - SoftTruncationRadius;
-			double truncationZone = BMaxRadius - SoftTruncationRadius;
-			double falloffFactor = excessRadius / truncationZone; // 0 to 1
-
-			// Exponential falloff probability
-			double acceptanceProbability = FMath::Exp(-3.0 * falloffFactor * falloffFactor);
-
-			if (Stream.FRand() > acceptanceProbability)
-			{
-				// Reject this point and try again
-				//i--;
-				continue;
-			}
-		}
-
-		// 3. Sample isotropic direction
-		double z = Stream.FRandRange(-1.0, 1.0);
-		double phi = Stream.FRandRange(0.0, 2.0 * PI);
-		double xy = FMath::Sqrt(1.0 - z * z);
-		FVector dir(xy * FMath::Cos(phi), xy * FMath::Sin(phi), z);
-
-		// 4. Scale per axis
-		FVector P;
-		P.X = dir.X * r * (AxisX / BulgeRadius);
-		P.Y = dir.Y * r * (AxisY / BulgeRadius);
-		P.Z = dir.Z * r * (AxisZ / BulgeRadius);
-
-		InGeneratedPoints.Add(P);
-	}
-}
-
-void GalaxyGenerator::GenerateDisc(TArray<FVector>& InGeneratedPoints, int NumDiskPoints)
-{
-
-	FVector Radius(GalaxyRadius, GalaxyRadius, GalaxyRadius * 0.05); // wide + thin
-
-	GenerateCluster(InGeneratedPoints, FVector::ZeroVector, Radius, NumDiskPoints);
-}
-
-void GalaxyGenerator::GenerateArms(TArray<FVector>& InGeneratedPoints, int NumArmPoints)
-{
-	int ClustersPerArm = 120;
-	int StarsPerCluster = (NumArmPoints / NumArms) / ClustersPerArm;
-	float ArmSpreadFactor = 0.25f;   // fractional spread
-	double Rd = GalaxyRadius;  // disk scale length
-
-	FRandomStream Stream(Seed + 1337);
-
-	for (int ArmIndex = 0; ArmIndex < NumArms; ArmIndex++)
-	{
-		// Base angle for this arm
-		double BaseAngle = (2.0 * PI * ArmIndex) / NumArms;
-		FVector ArmDir(FMath::Cos(BaseAngle), FMath::Sin(BaseAngle), 0);
-
-		for (int c = 0; c < ClustersPerArm; c++)
-		{
-			// Exponential radial distribution
-			double u = Stream.FRand();
-			double Dist = -Rd * FMath::Loge(1.0 - u);
-			//Dist = FMath::Clamp(Dist, BulgeRadius * 0.9, GalaxyRadius);
-			Dist = FMath::Clamp(Dist, 0, GalaxyRadius);
-			// Cluster center (straight line, twist will curl later)
-			FVector Center = ArmDir * Dist;
-
-			// Thickness scaling: base + grows with radius
-			double BaseWidth = GalaxyRadius * 0.05;       // 2% of radius
-			double WidthScale = GalaxyRadius * 0.25;      // growth factor
-			double ArmWidth = BaseWidth + WidthScale * (Dist / GalaxyRadius);
-
-			FVector Radius(
-				ArmWidth * ArmSpreadFactor,
-				ArmWidth * ArmSpreadFactor,
-				ArmWidth * 0.2 * ArmSpreadFactor // keep thin vertically
-			);
-			double JitterCoef = 6;
-			// Add jitter
-			FVector Jitter(
-				Stream.FRandRange(-Radius.X, Radius.X) * JitterCoef,
-				Stream.FRandRange(-Radius.Y, Radius.Y) * JitterCoef,
-				Stream.FRandRange(-Radius.Z, Radius.Z) * JitterCoef
-			);
-			Center += Jitter;
-
-			GenerateCluster(InGeneratedPoints, Center, Radius, StarsPerCluster);
+			chosenDepth = d;
+			break;
 		}
 	}
-}
-
-void GalaxyGenerator::ApplyTwist(TArray<FVector>& InGeneratedPoints, double InTwistStrength)
-{
-	double BaseTwistStrength = InTwistStrength;
-	double CoreRadius = .003;           // fraction of galaxy radius considered core
-	double MaxCoreTwist = 4.0;         // extra radians of twist near center
-
-	ParallelFor(InGeneratedPoints.Num(), [&](int32 i)
-		{
-			FVector P = InGeneratedPoints[i];// *FVector(1, 1, .1);
-
-			double rXY = P.Length();
-			//double rXY = FMath::Sqrt(P.X * P.X + P.Y * P.Y);
-			if (rXY < KINDA_SMALL_NUMBER)
-				return;
-
-			double theta = FMath::Atan2(P.Y, P.X);
-			double normalizedRadius = FMath::Clamp(rXY / MaxRadius, 0.0, 1.0);
-
-			// Normal outer twist
-			double baseDelta = BaseTwistStrength * normalizedRadius;
-
-			// Extra inner twist: smooth saturating function
-			
-			double coreBoost = MaxCoreTwist * -FMath::Exp((CoreRadius / FMath::Max(FMath::Pow(normalizedRadius, 2), 1e-4)));// Need this to only ramp up on an inner well defined part of the spiral
-			//double coreBoost = 0;
-			// Total twist
-			double deltaTheta = baseDelta + coreBoost;
-
-			double newTheta = theta + deltaTheta;
-
-			InGeneratedPoints[i].X = rXY * FMath::Cos(newTheta);
-			InGeneratedPoints[i].Y = rXY * FMath::Sin(newTheta);
-
-		}, EParallelForFlags::BackgroundPriority);
-}
-
-void GalaxyGenerator::GenerateBackground(TArray<FVector>& InGeneratedPoints, int NumBackgroundPoints)
-{
-	GenerateCluster(InGeneratedPoints, FVector(0), FVector(MaxRadius, MaxRadius, MaxRadius * .75), NumBackgroundPoints);
+	return FMath::Clamp(MaxInsertionDepth-chosenDepth, MinInsertionDepth, MaxInsertionDepth);
 }

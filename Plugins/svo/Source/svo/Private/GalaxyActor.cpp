@@ -69,13 +69,10 @@ void AGalaxyActor::InitializeData() {
 	double StartTime = FPlatformTime::Seconds();
 	FRandomStream Stream(Seed);
 	auto EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
-	int DepthRange = 3;
-	int InsertOffset = 6;
-	double GlobularChance = .3;
 
 	auto Generator = new GalaxyGenerator(Seed);
-	Generator->DepthRange = 6;
-	Generator->InsertDepthOffset = 5;
+	Generator->DepthRange = 7; //With seven levels, assuming our smallest star is say 1/2 the size of the sun, we can cover the vast majority of potential realistic star scales
+	Generator->InsertDepthOffset = 7; //Controlls the depth above max depth the smallest stars will be generated in
 	Generator->GenerateData(Octree);
 
 	double GenDuration = FPlatformTime::Seconds() - StartTime;
@@ -104,7 +101,7 @@ void AGalaxyActor::FetchData() {
 void AGalaxyActor::InitializeVolumetric()
 {
 	double StartTime = FPlatformTime::Seconds();
-	int Resolution = 64;
+	int Resolution = 32;
 	TextureData = Octree->CreateVolumeDensityDataFromOctree(Resolution);
 	if (TryCleanUpComponents()) return; //Early exit if destroying
 
@@ -145,17 +142,17 @@ void AGalaxyActor::InitializeVolumetric()
 			//AmbientColor
 			FRandomStream Stream(Seed);
 
-			DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), ParentColor);
-			DynamicMaterial->SetVectorParameterValue(FName("CoolShift"), FLinearColor(Stream.FRandRange(0,6), Stream.FRandRange(0, 6), Stream.FRandRange(0, 6), 1));
-			DynamicMaterial->SetVectorParameterValue(FName("HotShift"), FLinearColor(Stream.FRandRange(0, 6), Stream.FRandRange(0, 6), Stream.FRandRange(0, 6), 1));
-			DynamicMaterial->SetScalarParameterValue(FName("HueVariance"), Stream.FRandRange(0,.5));
-			DynamicMaterial->SetScalarParameterValue(FName("HueVarianceScale"), Stream.FRandRange(.5, 3));
-			DynamicMaterial->SetScalarParameterValue(FName("SaturationVariance"), Stream.FRandRange(0, .5));
-			DynamicMaterial->SetScalarParameterValue(FName("TemperatureInfluence"), Stream.FRandRange(2, 8));
-			DynamicMaterial->SetScalarParameterValue(FName("TemperatureScale"), Stream.FRandRange(1, 6));
+			//DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), ParentColor);
+			//DynamicMaterial->SetVectorParameterValue(FName("CoolShift"), FLinearColor(Stream.FRandRange(0,6), Stream.FRandRange(0, 6), Stream.FRandRange(0, 6), 1));
+			//DynamicMaterial->SetVectorParameterValue(FName("HotShift"), FLinearColor(Stream.FRandRange(0, 6), Stream.FRandRange(0, 6), Stream.FRandRange(0, 6), 1));
+			//DynamicMaterial->SetScalarParameterValue(FName("HueVariance"), Stream.FRandRange(0,.5));
+			//DynamicMaterial->SetScalarParameterValue(FName("HueVarianceScale"), Stream.FRandRange(.5, 3));
+			//DynamicMaterial->SetScalarParameterValue(FName("SaturationVariance"), Stream.FRandRange(0, .5));
+			//DynamicMaterial->SetScalarParameterValue(FName("TemperatureInfluence"), Stream.FRandRange(2, 8));
+			//DynamicMaterial->SetScalarParameterValue(FName("TemperatureScale"), Stream.FRandRange(1, 6));
 			//DynamicMaterial->SetScalarParameterValue(FName("Density"), Stream.FRandRange(0.1, .5));
 			//DynamicMaterial->SetScalarParameterValue(FName("WarpAmount"), Stream.FRandRange(0.02, .15));
-			DynamicMaterial->SetScalarParameterValue(FName("WarpScale"), Stream.FRandRange(0.5, 2));
+			//DynamicMaterial->SetScalarParameterValue(FName("WarpScale"), Stream.FRandRange(0.5, 2));
 
 			//NoiseDomainOffset
 
@@ -163,6 +160,7 @@ void AGalaxyActor::InitializeVolumetric()
 			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));
 			VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
 			VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+			VolumetricComponent->SetRelativeLocation(FVector(0.0f, 0.0f, .02 * Extent)); //Bump up slightly to account for insertion offset
 			VolumetricComponent->SetMaterial(0, DynamicMaterial);
 			VolumetricComponent->RegisterComponent();
 

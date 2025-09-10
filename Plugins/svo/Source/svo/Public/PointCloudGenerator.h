@@ -9,6 +9,15 @@
 /**
  * 
  */
+struct SVO_API FPointData {
+	FVector Position;
+	int InsertDepth;
+	FVoxelData Data;
+	FInt64Vector GetInt64Position() {
+		return FInt64Vector(FMath::RoundToInt64(Position.X), FMath::RoundToInt64(Position.Y), FMath::RoundToInt64(Position.Z));
+	}
+};
+
 class SVO_API PointCloudGenerator
 {
 public:
@@ -28,6 +37,8 @@ public:
 	// Applies noise derivative based point shifting
 	FInt64Vector ApplyNoise(FastNoise::SmartNode<> InNoise, double InDomainScale, int64 InExtent, FInt64Vector InSamplePosition, float& OutDensity);
 	FInt64Vector RotateCoordinate(FInt64Vector InCoordinate, FRotator InAxes);
+
+	FVector RotateCoordinate(FVector InCoordinate, FRotator InRotation);
 
 	FRotator Rotation = FRotator(0.0, 0.0, 0.0);
 	FVector WarpAmount = FVector(1, 1, 1); // Controls how far we push points along the gradient
@@ -164,18 +175,77 @@ public:
 	double BulgeRadius;
 	double VoidRadius;
 
-	int NumArms;
+	//Base Params - control overall sizes
+	double GalaxyRatio = .33;
+	double BulgeRatio = .75;
+	double VoidRatio = .05;
 
-	TArray<FVector> GeneratedPoints;
+	//Twist Params - Alters the behavior of the twist pass
+	double TwistStrength = 4;
+	double TwistCoreRadius = .1;
+	double TwistCoreTwistExponent = 1;
+	double TwistCoreStrength = 4;
+
+	//Arm Params - changes arm appearance
+	int ArmNumPoints = 200000; //Total arm points to generate
+	int ArmNumArms = 4; //Number of arms
+	int ArmClusters = 124; //Number of clusters per arm
+	double ArmDepthBias = .2; //Smaller number = more large stars, larger number = more small stars, at 1 it will use a basic stellar size distribution table
+	double ArmBaseDensity = 4; //Base density factor
+	double ArmSpreadFactor = .25; //Base cluster scale
+	double ArmClusterRadiusMin = .05; //Cluster scale ramp start  
+	double ArmClusterRadiusMax = .3; //Cluster scale ramp end
+	double ArmStartRatio = .5; //Where will the arm start relative to the bulge
+	double ArmHeightRatio = .25; //Height squish
+	double ArmIncoherence = 6; //Height value = more scattered arms
+	double ArmRadialDensityExponent = 2; //Density falloff towards center
+	double ArmRadialDensityMultiplier = 8; //Density multiplier as points are further from center
+	double ArmRadialBaseDensity = .5; //Min radial density multiplier
+
+	//Bulge Params - Controls the galactic bulge
+	int BulgeNumPoints = 300000;
+	double BulgeBaseDensity = 2;
+	double BulgeDepthBias = .33;
+	double BulgeRadiusScale = .33;
+	double BulgeTruncationScale = 1;
+	double BulgeAcceptanceExponent = 2;
+	FVector BulgeAxisScale = FVector(1, 1, .6);
+
+	//Disc Params - Controls the non spiral disc
+	int DiscNumPoints = 100000;
+	double DiscBaseDensity = 1;
+	double DiscDepthBias = 1;
+	double DiscHeightRatio = .1;
+
+	//Background Params - Controls the background halo 
+	int BackgroundNumPoints = 200000;
+	double BackgroundBaseDensity = 1;
+	double BackgroundDepthBias = 1;
+	double BackgroundHeightRatio = .8;
+
+	TArray<FPointData> GeneratedData;
+	
+	// depth probabilities for depths 0..6 (sum = 1.0)
+	static constexpr double DepthProb[7] = {
+		0.7246688105348869,
+		0.18633259810092362,
+		0.060410870884541834,
+		0.019585801723497227,
+		0.006349910596145782,
+		0.0020587038073948565,
+		0.0005933043526099457
+	};
 
 	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
 
-	void GenerateCluster(TArray<FVector>& InGeneratedPoints, FVector InClusterCenter, FVector InClusterRadius, int InCount);
-	void GenerateBulge(TArray<FVector>& InGeneratedPoints, int InCount);
-	void GenerateDisc(TArray<FVector>& InGeneratedPoints, int InCount);
-	void GenerateArms(TArray<FVector>& InGeneratedPoints, int InCount);
-	void ApplyTwist(TArray<FVector>& InGeneratedPoints, double InTwistStrength);
-	void GenerateBackground(TArray<FVector>& InGeneratedPoints, int InCount);
+	void GenerateBulge();
+	void GenerateDisc();
+	void GenerateArms();
+	void ApplyTwist();
+	void GenerateBackground();
+
+	void GenerateCluster(FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity = 1, double InDepthBias = 1);
+	int ChooseDepth(double InRandomSample, double InDepthBias);
 };
 
 class SVO_API BurstGenerator : public PointCloudGenerator
