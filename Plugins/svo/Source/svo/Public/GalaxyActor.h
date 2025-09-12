@@ -8,6 +8,7 @@
 #include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraSystem.h"
+#include "PointCloudGenerator.h"
 #include <UniverseActor.h>
 #include "GalaxyActor.generated.h"
 
@@ -22,7 +23,7 @@ public:
 	ELifecycleState InitializationState = ELifecycleState::Initializing;
 	AUniverseActor* Universe;	//Parent UniverseActor pointer
 	TSharedPtr<FOctree> Octree; //Octree data
-
+	GalaxyGenerator GalaxyGenerator;
 	//Initialization parameters
 	int Seed = 133780085;
 	int64 Extent = 2147483648;
@@ -62,4 +63,5 @@ protected:
 	bool TryCleanUpComponents();	//Check early exit condition, destroy niagara and volumetric components and return true if early exit 
 	
 	virtual void Tick(float DeltaTime) override;
+
 };

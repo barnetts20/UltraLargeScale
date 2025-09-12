@@ -402,6 +402,7 @@ void BurstGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 		InOctree->InsertPosition(Coord, InsertDepth, Data);
 	});
 }
+
 void BurstNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {
 	if (!InOctree) return;
@@ -461,6 +462,7 @@ void BurstNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 		});
 }
 
+//BEGIN GALAXY GENERATOR
 void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {	 
 	//TODO: Randomize class and use for parameter bounds
@@ -479,10 +481,17 @@ void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 
 	//Can tune these to create different classes maybe
 	GenerateArms();
+	//if (IsDestroying) return;
 	ApplyTwist();
+	//if (IsDestroying) return;
+	GenerateClusters();
+	//if (IsDestroying) return;
 	GenerateBulge();
+	//if (IsDestroying) return;
 	GenerateDisc();
+	//if (IsDestroying) return;
 	GenerateBackground();
+	//if (IsDestroying) return;
 
 	//TODO: May want to apply noise to some components
 	//TODO: Might be worth while to create a specific gas distribution and explicitly insert it at the desired depth for the volume texture
@@ -514,74 +523,138 @@ void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 
 void GalaxyGenerator::GenerateBulge()
 {
-	GeneratedData.Reserve(GeneratedData.Num() + GalaxyParams.BulgeNumPoints);
-	
-	FVector AxisBounds = GalaxyParams.BulgeAxisScale * BulgeRadius;
-	double a = BulgeRadius * GalaxyParams.BulgeRadiusScale;  // scale radius
-	double SoftTruncationRadius = BulgeRadius * GalaxyParams.BulgeTruncationScale;
+	const int32 NumPoints = GalaxyParams.BulgeNumPoints;
+	GeneratedData.Reserve(GeneratedData.Num() + NumPoints);
 
-	FRandomStream Stream(Seed + 99);
-	for (int i = 0; i < GalaxyParams.BulgeNumPoints; i++)
-	{
-		FPointData InsertData;
-		InsertData.Data.ObjectId = i;
-		InsertData.Data.TypeId = 1;
-		InsertData.Data.Density = Stream.FRandRange(.5, 1.5) * GalaxyParams.BulgeBaseDensity;
-		InsertData.InsertDepth = ChooseDepth(Stream.FRand(), GalaxyParams.BulgeDepthBias);
+	// Pre-allocate space for thread-safe insertion
+	const int32 StartIndex = GeneratedData.Num();
+	GeneratedData.AddUninitialized(NumPoints);
 
-		// 1. Sample Hernquist radius
-		double sqrtu = FMath::Sqrt(FMath::Clamp(Stream.FRand(), KINDA_SMALL_NUMBER, 1.0 - KINDA_SMALL_NUMBER));
-		double r = (a * sqrtu) / (1.0 - sqrtu); // maps uniform [0,1] → Hernquist PDF
+	// Cache frequently used values
+	const FVector AxisBounds = GalaxyParams.BulgeAxisScale * BulgeRadius;
+	const double a = BulgeRadius * GalaxyParams.BulgeRadiusScale;
+	const double SoftTruncationRadius = BulgeRadius * GalaxyParams.BulgeTruncationScale;
+	const double TruncationZone = MaxRadius - SoftTruncationRadius;
+	const double AxisScaleX = AxisBounds.X / BulgeRadius;
+	const double AxisScaleY = AxisBounds.Y / BulgeRadius;
+	const double AxisScaleZ = AxisBounds.Z / BulgeRadius;
 
-		// 2. Apply soft truncation with probabilistic acceptance
-		if (r > SoftTruncationRadius)
+	ParallelFor(NumPoints, [&](int32 i)
 		{
-			if (r > MaxRadius) //Failed points get fed to the black hole
+			// Each thread gets its own random stream with unique seed
+			FRandomStream Stream(Seed + 99 + i);
+
+			FPointData& InsertData = GeneratedData[StartIndex + i];
+			InsertData.Data.ObjectId = i;
+			InsertData.Data.TypeId = 1;
+			InsertData.Data.Density = Stream.FRandRange(0.5f, 1.5f) * GalaxyParams.BulgeBaseDensity;
+			InsertData.InsertDepth = ChooseDepth(Stream.FRand(), GalaxyParams.BulgeDepthBias);
+
+			// 1. Sample Hernquist radius
+			double sqrtu = FMath::Sqrt(FMath::Clamp(Stream.FRand(), KINDA_SMALL_NUMBER, 1.0 - KINDA_SMALL_NUMBER));
+			double r = (a * sqrtu) / (1.0 - sqrtu);
+
+			// 2. Apply soft truncation with probabilistic acceptance
+			if (r > SoftTruncationRadius)
 			{
-				InsertData.Position = FVector::ZeroVector;
-				GeneratedData.Add(InsertData);
-				continue;
+				if (r > MaxRadius) // Failed points get fed to the black hole
+				{
+					InsertData.Position = FVector::ZeroVector;
+					return;
+				}
+
+				// Soft truncation zone - probabilistic acceptance
+				double excessRadius = r - SoftTruncationRadius;
+				double falloffFactor = excessRadius / TruncationZone; // 0 to 1
+
+				// Exponential falloff probability
+				double acceptanceProbability = FMath::Exp(-3.0 * FMath::Pow(falloffFactor, GalaxyParams.BulgeAcceptanceExponent));
+				if (Stream.FRand() > acceptanceProbability) // Failed points get fed to the black hole
+				{
+					InsertData.Position = FVector::ZeroVector;
+					return;
+				}
 			}
 
-			// Soft truncation zone - probabilistic acceptance
-			double excessRadius = r - SoftTruncationRadius;
-			double truncationZone = MaxRadius - SoftTruncationRadius;
-			double falloffFactor = excessRadius / truncationZone; // 0 to 1
-			// Exponential falloff probability
-			double acceptanceProbability = FMath::Exp(-3.0 * FMath::Pow(falloffFactor, GalaxyParams.BulgeAcceptanceExponent));
+			// 3. Sample isotropic direction
+			double z = Stream.FRandRange(-1.0, 1.0);
+			double phi = Stream.FRandRange(0.0, 2.0 * PI);
+			double xy = FMath::Sqrt(1.0 - z * z);
+			FVector dir(xy * FMath::Cos(phi), xy * FMath::Sin(phi), z);
 
-			if (Stream.FRand() > acceptanceProbability) //Failed points get fed to the black hole
-			{
-				InsertData.Position = FVector::ZeroVector;
-				GeneratedData.Add(InsertData);
-				continue;
-			}
-		}
+			// 4. Scale per axis
+			FVector P;
+			P.X = dir.X * r * AxisScaleX;
+			P.Y = dir.Y * r * AxisScaleY;
+			P.Z = dir.Z * r * AxisScaleZ;
 
-		// 3. Sample isotropic direction
-		double z = Stream.FRandRange(-1.0, 1.0);
-		double phi = Stream.FRandRange(0.0, 2.0 * PI);
-		double xy = FMath::Sqrt(1.0 - z * z);
-		FVector dir(xy * FMath::Cos(phi), xy * FMath::Sin(phi), z);
-
-		// 4. Scale per axis
-		FVector P;
-		P.X = dir.X * r * (AxisBounds.X / BulgeRadius);
-		P.Y = dir.Y * r * (AxisBounds.Y / BulgeRadius);
-		P.Z = dir.Z * r * (AxisBounds.Z / BulgeRadius);
-
-		InsertData.Position = P;
-		GeneratedData.Add(InsertData);
-	}
+			InsertData.Position = P;
+		});
 }
 
 void GalaxyGenerator::GenerateClusters()
 {
-	int PointsPerCluster = GalaxyParams.ClusterNumPoints / GalaxyParams.ClusterNumClusters;
+	// Exit if no clusters or points are requested to avoid division by zero.
+	if (GalaxyParams.ClusterNumClusters <= 0 || GalaxyParams.ClusterNumPoints <= 0)
+	{
+		return;
+	}
 
-	for (int i = 0; i < GalaxyParams.ClusterNumClusters; i++) {
+	const int PointsPerCluster = GalaxyParams.ClusterNumPoints / GalaxyParams.ClusterNumClusters;
+	if (PointsPerCluster <= 0)
+	{
+		return;
+	}
 
-		//TODO randomize clusters
+	// Use a unique seed for this generation pass for reproducible randomness.
+	FRandomStream Stream(Seed + 2024);
+
+	for (int i = 0; i < GalaxyParams.ClusterNumClusters; i++)
+	{
+		// 1. Determine the cluster's central position.
+		// We generate a random point within a unit sphere and then scale it.
+		// Using a cubic root on the random sample ensures a uniform spatial distribution.
+		const double u = Stream.FRand();
+		const double Dist = GalaxyRadius * FMath::Pow(u, 1.0 / 3.0);
+
+		// Get a random isotropic direction.
+		const double z = Stream.FRandRange(-1.0, 1.0);
+		const double phi = Stream.FRandRange(0.0, 2.0 * PI);
+		const double xy = FMath::Sqrt(1.0 - z * z);
+		const FVector Dir(xy * FMath::Cos(phi), xy * FMath::Sin(phi), z);
+
+		FVector Center = Dir * Dist;
+
+		// Apply axis scaling to shape the overall irregular galaxy (e.g., making it flatter or more elongated).
+		Center.X *= GalaxyParams.ClusterAxisScale.X;
+		Center.Y *= GalaxyParams.ClusterAxisScale.Y;
+		Center.Z *= GalaxyParams.ClusterAxisScale.Z;
+
+		// 2. Determine the cluster's radius.
+		const double DistFromOrigin = Center.Length();
+		const double NormalizedDist = FMath::Clamp(DistFromOrigin / GalaxyRadius, 0.0, 1.0);
+
+		// Interpolate between the min and max scale based on the cluster's distance from the galactic center.
+		const double BaseRadiusScale = FMath::Lerp(GalaxyParams.ClusterMinScale, GalaxyParams.ClusterMaxScale, NormalizedDist);
+		const double ClusterRadiusVal = GalaxyRadius * BaseRadiusScale;
+
+		FVector Radius(
+			ClusterRadiusVal * GalaxyParams.ClusterSpreadFactor,
+			ClusterRadiusVal * GalaxyParams.ClusterSpreadFactor,
+			ClusterRadiusVal * GalaxyParams.ClusterSpreadFactor
+		);
+
+		// 3. Apply jitter (incoherence) to the final position for a more natural look.
+		// This is done after calculating the radius to prevent jitter from affecting cluster size.
+		const FVector Jitter(
+			Stream.FRandRange(-Radius.X, Radius.X) * GalaxyParams.ClusterIncoherence,
+			Stream.FRandRange(-Radius.Y, Radius.Y) * GalaxyParams.ClusterIncoherence,
+			Stream.FRandRange(-Radius.Z, Radius.Z) * GalaxyParams.ClusterIncoherence
+		);
+		Center += Jitter;
+
+		// 5. Generate the actual cluster of points.
+		GenerateCluster(Center, Radius, PointsPerCluster, GalaxyParams.ClusterBaseDensity, GalaxyParams.ClusterDepthBias);
 	}
 }
 
@@ -626,6 +699,7 @@ void GalaxyGenerator::ApplyTwist()
 	ParallelFor(GeneratedData.Num(), [&](int32 i)
 		{
 			FVector P = GeneratedData[i].Position;
+			//double rXY = (P * FVector(1,1,0)).Length();
 			double rXY = P.Length();
 			if (rXY < KINDA_SMALL_NUMBER) return;
 			double theta = FMath::Atan2(P.Y, P.X);
@@ -702,3 +776,60 @@ int GalaxyGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
 	}
 	return FMath::Clamp(MaxInsertionDepth-chosenDepth, MinInsertionDepth, MaxInsertionDepth);
 }
+
+void GalaxyGenerator::MarkDestroying()
+{
+	IsDestroying = true;
+}
+
+GalaxyParams GalaxyParamFactory::GenerateParams()
+{
+	GalaxyParams Params = SelectRandomGalaxyType();
+
+	//PROCEDURALIZE PARAMS
+	// TODO
+	//PROCEDURALIZE PARAMS
+
+	return Params;
+}
+
+GalaxyParams GalaxyParamFactory::SelectRandomGalaxyType()
+{
+	TArray<TPair<float, GalaxyParams*>> GalaxyWeights = {
+		{0.02f, &E0}, 
+		{0.04f, &E3}, 
+		{0.04f, &E5}, 
+		{0.03f, &E7},
+		{0.22f, &S0},
+		{0.15f, &Sa}, 
+		{0.20f, &Sb}, 
+		{0.15f, &Sc},
+		{0.04f, &SBa}, 
+		{0.04f, &SBb}, 
+		{0.03f, &SBc},
+		{0.04f, &Irr}
+	};
+	FRandomStream Stream(Seed + 69);
+	float RandomValue = Stream.FRand();
+	float CumulativeWeight = 0.0f;
+
+	for (const auto& WeightPair : GalaxyWeights)
+	{
+		CumulativeWeight += WeightPair.Key;
+		if (RandomValue <= CumulativeWeight)
+		{
+			return *WeightPair.Value;
+		}
+	}
+
+	return Sb; // Fallback to most common type
+}
+
+
+//END GALAXY GENERATOR
+
+//BEGIN UNIVERSE GENERATOR
+//TODO: IMPLEMENT
+//END UNIVERSE GENERATOR
+
+

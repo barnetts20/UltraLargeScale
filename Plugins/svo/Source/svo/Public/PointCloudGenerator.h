@@ -166,11 +166,15 @@ public:
 	//const char* EncodedTree = "FwAAAAAAAACAPwAAgD8AAIC/DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA==";
 };
 
+
+/// <summary>
+///	GALAXY GENERATION
+/// </summary>
 struct SVO_API GalaxyParams {
 	//Base Params - control overall sizes
 	double GalaxyRatio = .33;
 	double BulgeRatio = .75;
-	double VoidRatio = .025;
+	double VoidRatio = .033;
 
 	//Twist Params - Alters the behavior of the twist pass
 	double TwistStrength = 4;
@@ -179,11 +183,11 @@ struct SVO_API GalaxyParams {
 	double TwistCoreStrength = 4;
 
 	//Arm Params - changes arm appearance
-	int ArmNumPoints = 300000; //Total arm points to generate
+	int ArmNumPoints = 75000; //Total arm points to generate
 	int ArmNumArms = 4; //Number of arms
 	int ArmClusters = 124; //Number of clusters per arm
 	double ArmDepthBias = .5; //Smaller number = more large stars, larger number = more small stars, at 1 it will use a basic stellar size distribution table
-	double ArmBaseDensity = 4; //Base density factor
+	double ArmBaseDensity = 3; //Base density factor
 	double ArmSpreadFactor = .25; //Base cluster scale
 	double ArmClusterRadiusMin = .05; //Cluster scale ramp start  
 	double ArmClusterRadiusMax = .3; //Cluster scale ramp end
@@ -195,7 +199,7 @@ struct SVO_API GalaxyParams {
 	double ArmRadialBaseDensity = .5; //Min radial density multiplier
 
 	//Bulge Params - Controls the galactic bulge
-	int BulgeNumPoints = 300000;
+	int BulgeNumPoints = 75000;
 	double BulgeBaseDensity = 2;
 	double BulgeDepthBias = .75;
 	double BulgeRadiusScale = .33;
@@ -204,31 +208,195 @@ struct SVO_API GalaxyParams {
 	FVector BulgeAxisScale = FVector(1, 1, .6);
 
 	//Cluster Params
-	int ClusterNumPoints = 0;
-	int ClusterNumClusters = 0;
+	int ClusterNumPoints = 50000;
+	int ClusterNumClusters = 128;
 	FVector ClusterAxisScale = FVector(1, 1, 1);
-	double ClusterSpreadFactor = .25;
-	double ClusterMinScale = .1;
-	double ClusterMaxScale = .3;
-	double ClusterIncoherence = 6;
+	double ClusterSpreadFactor = .35;
+	double ClusterMinScale = .3;
+	double ClusterMaxScale = .7;
+	double ClusterIncoherence = 3;
+	double ClusterBaseDensity = 1;
+	double ClusterDepthBias = 1;
 
 	//Disc Params - Controls the non spiral disc
-	int DiscNumPoints = 200000;
-	double DiscBaseDensity = 20;
+	int DiscNumPoints = 50000;
+	double DiscBaseDensity = 1;
 	double DiscDepthBias = 1;
 	double DiscHeightRatio = .1;
 
 	//Background Params - Controls the background halo 
-	int BackgroundNumPoints = 200000;
+	int BackgroundNumPoints = 50000;
 	double BackgroundBaseDensity = 10;
 	double BackgroundDepthBias = 1;
 	double BackgroundHeightRatio = .8;
+
+	//Volume Material Params
+	FLinearColor VolumeAmbientColor;		//DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), ParentColor);
+	FLinearColor VolumeCoolShift;			//DynamicMaterial->SetVectorParameterValue(FName("CoolShift"), FLinearColor(Stream.FRandRange(0,6), Stream.FRandRange(0, 6), Stream.FRandRange(0, 6), 1));
+	FLinearColor VolumeHotShift;			//DynamicMaterial->SetVectorParameterValue(FName("HotShift"), FLinearColor(Stream.FRandRange(0, 6), Stream.FRandRange(0, 6), Stream.FRandRange(0, 6), 1));
+	double VolumeHueVariance;				//DynamicMaterial->SetScalarParameterValue(FName("HueVariance"), Stream.FRandRange(0,.5));
+	double VolumeHueVarianceScale;			//DynamicMaterial->SetScalarParameterValue(FName("HueVarianceScale"), Stream.FRandRange(.5, 3));
+	double VolumeSaturationVariance;		//DynamicMaterial->SetScalarParameterValue(FName("SaturationVariance"), Stream.FRandRange(0, .5));
+	double VolumeTemperatureInfluence;		//DynamicMaterial->SetScalarParameterValue(FName("TemperatureInfluence"), Stream.FRandRange(2, 8));
+	double VolumeTemepratureScale;			//DynamicMaterial->SetScalarParameterValue(FName("TemperatureScale"), Stream.FRandRange(1, 6));
+	double VolumeDensity;					//DynamicMaterial->SetScalarParameterValue(FName("Density"), Stream.FRandRange(0.1, .5));
+	double VolumeWarpAmount;				//DynamicMaterial->SetScalarParameterValue(FName("WarpAmount"), Stream.FRandRange(0.02, .15));
+	double VolumeWarpScale;					//DynamicMaterial->SetScalarParameterValue(FName("WarpScale"), Stream.FRandRange(0.5, 2));
+	UVolumeTexture* VolumeNoise;
+};
+
+class SVO_API GalaxyParamFactory {
+public:
+	int Seed = 666;
+	//Galaxy archtypes
+	GalaxyParams E0;
+	GalaxyParams E3;
+	GalaxyParams E5;
+	GalaxyParams E7;
+	GalaxyParams S0;
+	GalaxyParams Sa;
+	GalaxyParams Sb;
+	GalaxyParams Sc;
+	GalaxyParams SBa;
+	GalaxyParams SBb;
+	GalaxyParams SBc;
+	GalaxyParams Irr;
+
+	GalaxyParamFactory() {
+		E0.ArmNumPoints = 0;
+		E0.DiscNumPoints = 0;
+		E0.BulgeNumPoints = 300000;
+		E0.BulgeBaseDensity = 3;
+		E0.BulgeDepthBias = .2;
+		E0.BackgroundBaseDensity = 20;
+		E0.BulgeAxisScale = FVector(1);
+		E0.GalaxyRatio = .4;
+		E0.BulgeRatio = 1.5;
+		E0.BackgroundNumPoints = 100000;
+
+		E3.ArmNumPoints = 0;
+		E3.DiscNumPoints = 0;
+		E3.BulgeNumPoints = 300000;
+		E3.BulgeBaseDensity = 3;
+		E3.BulgeDepthBias = .2;
+		E3.BackgroundBaseDensity = 50;
+		E3.BulgeAxisScale = FVector(1, 1, .7);
+		E3.GalaxyRatio = .3;
+		E3.BulgeRatio = 1.25;
+		E3.BackgroundNumPoints = 100000;
+
+		E5.ArmNumPoints = 0;
+		E5.DiscNumPoints = 50000;
+		E5.DiscHeightRatio = .3;
+		E5.DiscDepthBias = 1.2;
+		E5.DiscBaseDensity = 3;
+		E5.BulgeNumPoints = 200000;
+		E5.BulgeBaseDensity = 3;
+		E5.BulgeDepthBias = .2;
+		E5.BackgroundBaseDensity = 20;
+		E5.BulgeAxisScale = FVector(1, 1, .7);
+		E5.GalaxyRatio = .3;
+		E5.BulgeRatio = 1.25;
+		E5.BackgroundNumPoints = 100000;
+
+		E7.ArmNumPoints = 0;
+		E7.DiscNumPoints = 100000;
+		E7.DiscDepthBias = .8;
+		E7.DiscHeightRatio = .2;
+		E7.DiscBaseDensity = 3;
+		E7.BulgeNumPoints = 200000;
+		E7.BulgeBaseDensity = 3;
+		E7.BulgeDepthBias = .2;
+		E7.BackgroundBaseDensity = 20;
+		E7.BulgeAxisScale = FVector(1, 1, .6);
+		E7.GalaxyRatio = .3;
+		E7.BulgeRatio = 1.25;
+		E7.BackgroundNumPoints = 100000;
+
+		S0.ArmNumPoints = 0;
+		S0.DiscNumPoints = 200000;
+		S0.DiscDepthBias = .3;
+		S0.DiscHeightRatio = .1;
+		S0.BulgeNumPoints = 100000;
+		S0.BulgeBaseDensity = 3;
+		S0.BulgeDepthBias = .2;
+		S0.BackgroundBaseDensity = 20;
+		S0.BulgeAxisScale = FVector(1, 1, .5);
+		S0.GalaxyRatio = .3;
+		S0.BulgeRatio = 1.25;
+		S0.BackgroundNumPoints = 100000;
+
+		Sa.TwistStrength = 4;
+		Sa.TwistCoreStrength = 4;
+		Sa.ArmNumArms = 2;
+		Sa.ArmClusterRadiusMin = .15;
+		Sa.ArmClusterRadiusMax = .4;
+		Sa.ArmIncoherence = 3;
+		Sa.ArmStartRatio = 0;
+
+		Sb.TwistStrength = 12;
+		Sb.ArmNumArms = 2;
+		Sb.ArmIncoherence = 6;
+		Sb.ArmStartRatio = 0;
+
+		Sc.TwistStrength = 8;
+		Sc.ArmNumArms = 4;
+		Sc.ArmIncoherence = 8;
+		Sc.ArmStartRatio = 0;
+		Sc.TwistCoreRadius = .02;
+
+		SBa.BulgeRatio = .35;
+		SBa.BulgeAxisScale = FVector(1, .3, .3);
+		SBa.TwistStrength = 4;
+		SBa.TwistCoreStrength = 0;
+		SBa.ArmNumArms = 2;
+		SBa.ArmClusterRadiusMin = .05;
+		SBa.ArmClusterRadiusMax = .4;
+		SBa.ArmIncoherence = 2;
+		SBa.ArmHeightRatio = .5;
+		SBa.ArmStartRatio = 0.0;
+
+		SBb.BulgeAxisScale = FVector(1, .3, .3);
+		SBb.TwistStrength = 6;
+		SBb.TwistCoreStrength = 0;
+		SBb.ArmNumArms = 2;
+		SBb.ArmClusterRadiusMin = .05;
+		SBb.ArmClusterRadiusMax = .25;
+		SBb.ArmIncoherence = 8;
+		SBb.ArmHeightRatio = .5;
+		SBb.ArmStartRatio = 0;
+
+		SBc.BulgeAxisScale = FVector(1, 1, 1);
+		SBc.TwistStrength = 12;
+		SBc.TwistCoreStrength = 0;
+		SBc.ArmNumArms = 2;
+		SBc.ArmClusterRadiusMin = .05;
+		SBc.ArmClusterRadiusMax = .3;
+		SBc.ArmIncoherence = 8;
+		SBc.ArmHeightRatio = .5;
+		SBc.ArmStartRatio = 0;
+
+		Irr.BulgeNumPoints = 0;
+		Irr.ArmNumPoints = 0;
+		Irr.DiscNumPoints = 0;
+		Irr.BackgroundNumPoints = 100000;
+		Irr.BackgroundBaseDensity = 0.3;
+		Irr.ClusterNumPoints = 300000;
+		Irr.ClusterIncoherence = 4;
+		Irr.ClusterNumClusters = 128;
+		Irr.ClusterDepthBias = .75;
+	};
+
+	GalaxyParams GenerateParams();
+	GalaxyParams SelectRandomGalaxyType();
 };
 
 class SVO_API GalaxyGenerator : public PointCloudGenerator {
 public:
+	GalaxyGenerator() : PointCloudGenerator(69) {};
 	GalaxyGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
 
+	bool IsDestroying = false;
 	double MaxRadius;
 	double GalaxyRadius;
 	double BulgeRadius;
@@ -260,9 +428,9 @@ public:
 	void GenerateClusters();
 	void GenerateDisc();
 	void GenerateBackground();
-
 	void GenerateCluster(FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity = 1, double InDepthBias = 1);
 	int ChooseDepth(double InRandomSample, double InDepthBias);
+	void MarkDestroying();
 };
 
 class SVO_API BurstGenerator : public PointCloudGenerator
