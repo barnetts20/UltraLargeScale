@@ -166,6 +166,65 @@ public:
 	//const char* EncodedTree = "FwAAAAAAAACAPwAAgD8AAIC/DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA==";
 };
 
+struct SVO_API GalaxyParams {
+	//Base Params - control overall sizes
+	double GalaxyRatio = .33;
+	double BulgeRatio = .75;
+	double VoidRatio = .025;
+
+	//Twist Params - Alters the behavior of the twist pass
+	double TwistStrength = 4;
+	double TwistCoreRadius = .01;
+	double TwistCoreTwistExponent = 1;
+	double TwistCoreStrength = 4;
+
+	//Arm Params - changes arm appearance
+	int ArmNumPoints = 300000; //Total arm points to generate
+	int ArmNumArms = 4; //Number of arms
+	int ArmClusters = 124; //Number of clusters per arm
+	double ArmDepthBias = .5; //Smaller number = more large stars, larger number = more small stars, at 1 it will use a basic stellar size distribution table
+	double ArmBaseDensity = 4; //Base density factor
+	double ArmSpreadFactor = .25; //Base cluster scale
+	double ArmClusterRadiusMin = .05; //Cluster scale ramp start  
+	double ArmClusterRadiusMax = .3; //Cluster scale ramp end
+	double ArmStartRatio = .5; //Where will the arm start relative to the bulge
+	double ArmHeightRatio = .5; //Height squish
+	double ArmIncoherence = 6; //Height value = more scattered arms
+	double ArmRadialDensityExponent = 2; //Density falloff towards center
+	double ArmRadialDensityMultiplier = 8; //Density multiplier as points are further from center
+	double ArmRadialBaseDensity = .5; //Min radial density multiplier
+
+	//Bulge Params - Controls the galactic bulge
+	int BulgeNumPoints = 300000;
+	double BulgeBaseDensity = 2;
+	double BulgeDepthBias = .75;
+	double BulgeRadiusScale = .33;
+	double BulgeTruncationScale = 1;
+	double BulgeAcceptanceExponent = 2;
+	FVector BulgeAxisScale = FVector(1, 1, .6);
+
+	//Cluster Params
+	int ClusterNumPoints = 0;
+	int ClusterNumClusters = 0;
+	FVector ClusterAxisScale = FVector(1, 1, 1);
+	double ClusterSpreadFactor = .25;
+	double ClusterMinScale = .1;
+	double ClusterMaxScale = .3;
+	double ClusterIncoherence = 6;
+
+	//Disc Params - Controls the non spiral disc
+	int DiscNumPoints = 200000;
+	double DiscBaseDensity = 20;
+	double DiscDepthBias = 1;
+	double DiscHeightRatio = .1;
+
+	//Background Params - Controls the background halo 
+	int BackgroundNumPoints = 200000;
+	double BackgroundBaseDensity = 10;
+	double BackgroundDepthBias = 1;
+	double BackgroundHeightRatio = .8;
+};
+
 class SVO_API GalaxyGenerator : public PointCloudGenerator {
 public:
 	GalaxyGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
@@ -175,53 +234,7 @@ public:
 	double BulgeRadius;
 	double VoidRadius;
 
-	//Base Params - control overall sizes
-	double GalaxyRatio = .33;
-	double BulgeRatio = .75;
-	double VoidRatio = .05;
-
-	//Twist Params - Alters the behavior of the twist pass
-	double TwistStrength = 4;
-	double TwistCoreRadius = .1;
-	double TwistCoreTwistExponent = 1;
-	double TwistCoreStrength = 4;
-
-	//Arm Params - changes arm appearance
-	int ArmNumPoints = 200000; //Total arm points to generate
-	int ArmNumArms = 4; //Number of arms
-	int ArmClusters = 124; //Number of clusters per arm
-	double ArmDepthBias = .2; //Smaller number = more large stars, larger number = more small stars, at 1 it will use a basic stellar size distribution table
-	double ArmBaseDensity = 4; //Base density factor
-	double ArmSpreadFactor = .25; //Base cluster scale
-	double ArmClusterRadiusMin = .05; //Cluster scale ramp start  
-	double ArmClusterRadiusMax = .3; //Cluster scale ramp end
-	double ArmStartRatio = .5; //Where will the arm start relative to the bulge
-	double ArmHeightRatio = .25; //Height squish
-	double ArmIncoherence = 6; //Height value = more scattered arms
-	double ArmRadialDensityExponent = 2; //Density falloff towards center
-	double ArmRadialDensityMultiplier = 8; //Density multiplier as points are further from center
-	double ArmRadialBaseDensity = .5; //Min radial density multiplier
-
-	//Bulge Params - Controls the galactic bulge
-	int BulgeNumPoints = 300000;
-	double BulgeBaseDensity = 2;
-	double BulgeDepthBias = .33;
-	double BulgeRadiusScale = .33;
-	double BulgeTruncationScale = 1;
-	double BulgeAcceptanceExponent = 2;
-	FVector BulgeAxisScale = FVector(1, 1, .6);
-
-	//Disc Params - Controls the non spiral disc
-	int DiscNumPoints = 100000;
-	double DiscBaseDensity = 1;
-	double DiscDepthBias = 1;
-	double DiscHeightRatio = .1;
-
-	//Background Params - Controls the background halo 
-	int BackgroundNumPoints = 200000;
-	double BackgroundBaseDensity = 1;
-	double BackgroundDepthBias = 1;
-	double BackgroundHeightRatio = .8;
+	GalaxyParams GalaxyParams;
 
 	TArray<FPointData> GeneratedData;
 	
@@ -238,10 +251,14 @@ public:
 
 	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
 
-	void GenerateBulge();
-	void GenerateDisc();
+	//TODO: need optimization pass, should be using mostly parallel fors on background priority thread
+	//No rejection repeats, just feed rejected to black hole
+
 	void GenerateArms();
 	void ApplyTwist();
+	void GenerateBulge();
+	void GenerateClusters();
+	void GenerateDisc();
 	void GenerateBackground();
 
 	void GenerateCluster(FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity = 1, double InDepthBias = 1);

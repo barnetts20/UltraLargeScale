@@ -72,7 +72,138 @@ void AGalaxyActor::InitializeData() {
 
 	auto Generator = new GalaxyGenerator(Seed);
 	Generator->DepthRange = 7; //With seven levels, assuming our smallest star is say 1/2 the size of the sun, we can cover the vast majority of potential realistic star scales
-	Generator->InsertDepthOffset = 7; //Controlls the depth above max depth the smallest stars will be generated in
+	Generator->InsertDepthOffset = 9; //Controlls the depth above max depth the smallest stars will be generated in
+
+	//TODO: Configure galaxy archtypes, then later we can randomize around them
+	GalaxyParams E0;
+	E0.ArmNumPoints = 0;
+	E0.DiscNumPoints = 0;
+	E0.BulgeNumPoints = 700000;
+	E0.BulgeBaseDensity = 3;
+	E0.BulgeDepthBias = .2;
+	E0.BackgroundBaseDensity = 20;
+	E0.BulgeAxisScale = FVector(1);
+	E0.GalaxyRatio = .4;
+	E0.BulgeRatio = 1.5;
+	E0.BackgroundNumPoints = 300000;
+
+	GalaxyParams E3;
+	E3.ArmNumPoints = 0;
+	E3.DiscNumPoints = 0;
+	E3.BulgeNumPoints = 700000;
+	E3.BulgeBaseDensity = 3;
+	E3.BulgeDepthBias = .2;
+	E3.BackgroundBaseDensity = 50;
+	E3.BulgeAxisScale = FVector(1,1,.7);
+	E3.GalaxyRatio = .3;
+	E3.BulgeRatio = 1.25;
+	E3.BackgroundNumPoints = 300000;
+	
+	GalaxyParams E5;
+	E5.ArmNumPoints = 0;
+	E5.DiscNumPoints = 200000;
+	E5.DiscHeightRatio = .3;
+	E5.DiscDepthBias = 1.2;
+	E5.DiscBaseDensity = 3;
+	E5.BulgeNumPoints = 500000;
+	E5.BulgeBaseDensity = 3;
+	E5.BulgeDepthBias = .2;
+	E5.BackgroundBaseDensity = 20;
+	E5.BulgeAxisScale = FVector(1, 1, .7);
+	E5.GalaxyRatio = .3;
+	E5.BulgeRatio = 1.25;
+	E5.BackgroundNumPoints = 300000;
+
+	GalaxyParams E7; 
+	E7.ArmNumPoints = 0;
+	E7.DiscNumPoints = 300000;
+	E7.DiscDepthBias = .8;
+	E7.DiscHeightRatio = .2;
+	E7.DiscBaseDensity = 3;
+	E7.BulgeNumPoints = 400000;
+	E7.BulgeBaseDensity = 3; 
+	E7.BulgeDepthBias = .2;
+	E7.BackgroundBaseDensity = 20;
+	E7.BulgeAxisScale = FVector(1, 1, .6);
+	E7.GalaxyRatio = .3;
+	E7.BulgeRatio = 1.25;
+	E7.BackgroundNumPoints = 300000;
+
+	GalaxyParams S0;
+	S0.ArmNumPoints = 0;
+	S0.DiscNumPoints = 400000;
+	S0.DiscDepthBias = .3;
+	S0.DiscHeightRatio = .1;
+	S0.BulgeNumPoints = 300000;
+	S0.BulgeBaseDensity = 3;
+	S0.BulgeDepthBias = .2;
+	S0.BackgroundBaseDensity = 20;
+	S0.BulgeAxisScale = FVector(1, 1, .5);
+	S0.GalaxyRatio = .3;
+	S0.BulgeRatio = 1.25;
+	S0.BackgroundNumPoints = 300000;
+
+	GalaxyParams Sa;
+	Sa.TwistStrength = 4;
+	Sa.TwistCoreStrength = 4;
+	Sa.ArmNumArms = 2;
+	Sa.ArmClusterRadiusMin = .15;
+	Sa.ArmClusterRadiusMax = .4;
+	Sa.ArmIncoherence = 3;
+	Sa.ArmStartRatio = 0;
+
+	GalaxyParams Sb;
+	Sb.TwistStrength = 12;
+	Sb.ArmNumArms = 2;
+	Sb.ArmIncoherence = 6;
+	Sb.ArmStartRatio = 0;
+
+	GalaxyParams Sc;
+	Sc.TwistStrength = 8;
+	Sc.ArmNumArms = 4;
+	Sc.ArmIncoherence = 8;
+	Sc.ArmStartRatio = 0;
+
+	//Sc.TwistCoreTwistExponent = .3;
+	Sc.TwistCoreRadius = .02;
+
+	GalaxyParams SBa;
+	SBa.BulgeRatio = .35;
+	SBa.BulgeAxisScale = FVector(1, .3, .3);
+	SBa.TwistStrength = 4;
+	SBa.TwistCoreStrength = 0;
+	SBa.ArmNumArms = 2;
+	SBa.ArmClusterRadiusMin = .05;
+	SBa.ArmClusterRadiusMax = .4;
+	SBa.ArmIncoherence = 2;
+	SBa.ArmHeightRatio = .5;
+	SBa.ArmStartRatio = 0.0;
+
+	GalaxyParams SBb; 
+	SBb.BulgeAxisScale = FVector(1, .3, .3);
+	SBb.TwistStrength = 6;
+	SBb.TwistCoreStrength = 0;
+	SBb.ArmNumArms = 2;
+	SBb.ArmClusterRadiusMin = .05;
+	SBb.ArmClusterRadiusMax = .25;
+	SBb.ArmIncoherence = 8;
+	SBb.ArmHeightRatio = .5;
+	SBb.ArmStartRatio = 0;
+
+	GalaxyParams SBc;
+	SBc.BulgeAxisScale = FVector(1, 1, 1);
+	SBc.TwistStrength = 12;
+	SBc.TwistCoreStrength = 0;
+	SBc.ArmNumArms = 2;
+	SBc.ArmClusterRadiusMin = .05;
+	SBc.ArmClusterRadiusMax = .3;
+	SBc.ArmIncoherence = 8;
+	SBc.ArmHeightRatio = .5;
+	SBc.ArmStartRatio = 0;
+	
+	GalaxyParams Irr; //Probably need a special case for this since it would be cluster based
+
+	Generator->GalaxyParams = S0;
 	Generator->GenerateData(Octree);
 
 	double GenDuration = FPlatformTime::Seconds() - StartTime;
@@ -101,7 +232,7 @@ void AGalaxyActor::FetchData() {
 void AGalaxyActor::InitializeVolumetric()
 {
 	double StartTime = FPlatformTime::Seconds();
-	int Resolution = 32;
+	int Resolution = 64;
 	TextureData = Octree->CreateVolumeDensityDataFromOctree(Resolution);
 	if (TryCleanUpComponents()) return; //Early exit if destroying
 
