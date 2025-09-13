@@ -51,7 +51,6 @@ FInt64Vector PointCloudGenerator::ApplyNoise(FastNoise::SmartNode<> InNoise, dou
 	auto InsertPosition = FInt64Vector(FX, FY, FZ);
 	return InsertPosition;
 }
-
 FInt64Vector PointCloudGenerator::RotateCoordinate(FInt64Vector InCoordinate, FRotator InRotation)
 {
 	// Convert to FVector for rotation
@@ -71,13 +70,13 @@ FInt64Vector PointCloudGenerator::RotateCoordinate(FInt64Vector InCoordinate, FR
 		FMath::RoundToInt64(Rotated.Z)
 	);
 }
-
 FVector PointCloudGenerator::RotateCoordinate(FVector InCoordinate, FRotator InRotation)
 {
 	// Apply rotation around the origin
 	return Rotation.RotateVector(InCoordinate);
 }
 
+//Example Generators
 void SimpleRandomGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {
 	if (!InOctree) return;
@@ -134,7 +133,6 @@ void SimpleRandomNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 		});
 }
-
 void GlobularGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {
 	if (!InOctree) return;
@@ -201,7 +199,6 @@ void GlobularNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 	}
 	);
 }
-
 void SpiralGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {
 	if (!InOctree) return;
@@ -294,8 +291,6 @@ void SpiralNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 	auto Noise = FastNoise::NewFromEncodedNodeTree(EncodedTree);
 	ParallelFor(Count, [this, &InsertPositions, &InsertDepths, &InsertPayloads, Extent, Noise, InOctree](int32 i)
 	{
-	//for(int i = 0; i < Count; i++)
-	//{
 		int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
 		FRandomStream Stream(HashedSeed);
 
@@ -341,14 +336,10 @@ void SpiralNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 		InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 		FLinearColor Color = FLinearColor::MakeRandomSeededColor(i);
 		FVector Composition(Color.R, Color.G, Color.B);
-		//InsertPositions[i] = InsertPosition;
-		//InsertDepths[i] = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-		//InsertPayloads[i] = FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max(T, 0.000001), 6), Stream.GetUnitVector(), i, Type);
 		InOctree->InsertPosition(InsertPosition, Stream.RandRange(MinInsertionDepth, MaxInsertionDepth), FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max(T, 0.000001), 6), Composition, i, Type));
 	}
 	, EParallelForFlags::BackgroundPriority);
 }
-
 void BurstGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {
 	if (!InOctree) return;
@@ -461,15 +452,174 @@ void BurstNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 		});
 }
 
-
 //BEGIN GALAXY GENERATOR
+//Param Factory - Randomization Bounds are controlled here
+GalaxyParams GalaxyParamFactory::GenerateParams()
+{
+	// 0  1  2  3  4  5  6  7  8   9   10  11
+	// E0 E3 E5 E7 S0 Sa Sb Sc SBa SBb SBc Irr
+	int TypeIndex = SelectGalaxyTypeIndex();
+
+	GalaxyParams Params;// = *GalaxyWeights[TypeIndex].Value;
+	switch (TypeIndex) {
+	case 0: // E0
+		Params = BoundedRandomizeParams(E0_Min, E0_Max);
+		break;
+	case 1: // E3
+		Params = BoundedRandomizeParams(E3_Min, E3_Max);
+		break;
+	case 2: // E5
+		Params = BoundedRandomizeParams(E5_Min, E5_Max);
+		break;
+	case 3: // E7
+		Params = BoundedRandomizeParams(E7_Min, E7_Max);
+		break;
+	case 4: // S0
+		Params = BoundedRandomizeParams(S0_Min, S0_Max);
+		break;
+	case 5: // Sa
+		Params = BoundedRandomizeParams(Sa_Min, Sa_Max);
+		break;
+	case 6: // Sb 
+		Params = BoundedRandomizeParams(Sb_Min, Sb_Max);
+		break;
+	case 7: // Sc
+		Params = BoundedRandomizeParams(Sc_Min, Sc_Max);
+		break;
+	case 8: // SBa
+		Params = BoundedRandomizeParams(SBa_Min, SBa_Max);
+		break;
+	case 9: // SBb
+		Params = BoundedRandomizeParams(SBb_Min, SBb_Max);
+		break;
+	case 10: // SBc
+		Params = BoundedRandomizeParams(SBc_Min, SBc_Max);
+		break;
+	case 11: // Irr
+		Params = BoundedRandomizeParams(Irr_Min, Irr_Max);
+		break;
+	}
+
+	return Params;
+}
+GalaxyParams GalaxyParamFactory::BoundedRandomizeParams(GalaxyParams MinParams, GalaxyParams MaxParams) {
+	FRandomStream Stream(Seed + 666);
+	GalaxyParams Params;
+
+	//Arm
+	Params.ArmBaseDensity = Stream.FRandRange(MinParams.ArmBaseDensity, MaxParams.ArmBaseDensity);
+	Params.ArmClusterRadiusMax = Stream.FRandRange(MinParams.ArmClusterRadiusMax, MaxParams.ArmClusterRadiusMax);
+	Params.ArmClusterRadiusMin = Stream.FRandRange(MinParams.ArmClusterRadiusMin, MaxParams.ArmClusterRadiusMin);
+	Params.ArmClusters = Stream.RandRange(MinParams.ArmClusters, MaxParams.ArmClusters);
+	Params.ArmDepthBias = Stream.FRandRange(MinParams.ArmDepthBias, MaxParams.ArmDepthBias);
+	Params.ArmHeightRatio = Stream.FRandRange(MinParams.ArmHeightRatio, MaxParams.ArmHeightRatio);
+	Params.ArmIncoherence = Stream.FRandRange(MinParams.ArmIncoherence, MaxParams.ArmIncoherence);
+	Params.ArmNumArms = Stream.RandRange(MinParams.ArmNumArms, MaxParams.ArmNumArms);
+	Params.ArmNumPoints = Stream.RandRange(MinParams.ArmNumPoints, MaxParams.ArmNumPoints);
+	Params.ArmRadialDensityExponent = Stream.FRandRange(MinParams.ArmRadialDensityExponent, MaxParams.ArmRadialDensityExponent);
+	Params.ArmRadialDensityMultiplier = Stream.FRandRange(MinParams.ArmRadialDensityMultiplier, MaxParams.ArmRadialDensityMultiplier);
+	Params.ArmSpreadFactor = Stream.FRandRange(MinParams.ArmSpreadFactor, MaxParams.ArmSpreadFactor);
+	Params.ArmStartRatio = Stream.FRandRange(MinParams.ArmStartRatio, MaxParams.ArmStartRatio);
+
+	//Background
+	Params.BackgroundBaseDensity = Stream.FRandRange(MinParams.BackgroundBaseDensity, MaxParams.BackgroundBaseDensity);
+	Params.BackgroundDepthBias = Stream.FRandRange(MinParams.BackgroundDepthBias, MaxParams.BackgroundDepthBias);
+	Params.BackgroundHeightRatio = Stream.FRandRange(MinParams.BackgroundHeightRatio, MaxParams.BackgroundHeightRatio);
+	Params.BackgroundNumPoints = Stream.RandRange(MinParams.BackgroundNumPoints, MaxParams.BackgroundNumPoints);
+
+	//Bulge
+	Params.BulgeAcceptanceExponent = Stream.FRandRange(MinParams.BulgeAcceptanceExponent, MaxParams.BulgeAcceptanceExponent);
+	Params.BulgeAxisScale = FVector(Stream.FRandRange(MinParams.BulgeAxisScale.X, MaxParams.BulgeAxisScale.X), Stream.FRandRange(MinParams.BulgeAxisScale.Y, MaxParams.BulgeAxisScale.Y), Stream.FRandRange(MinParams.BulgeAxisScale.Z, MaxParams.BulgeAxisScale.Z));
+	Params.BulgeBaseDensity = Stream.FRandRange(MinParams.BulgeBaseDensity, MaxParams.BulgeBaseDensity);
+	Params.BulgeDepthBias = Stream.FRandRange(MinParams.BulgeDepthBias, MaxParams.BulgeDepthBias);
+	Params.BulgeNumPoints = Stream.RandRange(MinParams.BulgeNumPoints, MaxParams.BulgeNumPoints);
+	Params.BulgeRadiusScale = Stream.FRandRange(MinParams.BulgeRadiusScale, MaxParams.BulgeRadiusScale);
+	Params.BulgeRatio = Stream.FRandRange(MinParams.BulgeRatio, MaxParams.BulgeRatio);
+	Params.BulgeTruncationScale = Stream.FRandRange(MinParams.BulgeTruncationScale, MaxParams.BulgeTruncationScale);
+
+	//ere
+	//Cluster
+	Params.ClusterAxisScale = FVector(Stream.FRandRange(MinParams.ClusterAxisScale.X, MaxParams.ClusterAxisScale.X), Stream.FRandRange(MinParams.ClusterAxisScale.Y, MaxParams.ClusterAxisScale.Y), Stream.FRandRange(MinParams.ClusterAxisScale.Z, MaxParams.ClusterAxisScale.Z));
+	Params.ClusterBaseDensity = Stream.FRandRange(MinParams.ClusterBaseDensity, MaxParams.ClusterBaseDensity);
+	Params.ClusterDepthBias = Stream.FRandRange(MinParams.ClusterDepthBias, MaxParams.ClusterDepthBias);
+	Params.ClusterIncoherence = Stream.FRandRange(MinParams.ClusterIncoherence, MaxParams.ClusterIncoherence);
+	Params.ClusterMaxScale = Stream.FRandRange(MinParams.ClusterMaxScale, MaxParams.ClusterMaxScale);
+	Params.ClusterMinScale = Stream.FRandRange(MinParams.ClusterMinScale, MaxParams.ClusterMinScale);
+	Params.ClusterNumClusters = Stream.RandRange(MinParams.ClusterNumClusters, MaxParams.ClusterNumClusters);
+	Params.ClusterNumPoints = Stream.RandRange(MinParams.ClusterNumPoints, MaxParams.ClusterNumPoints);
+	Params.ClusterSpreadFactor = Stream.FRandRange(MinParams.ClusterSpreadFactor, MaxParams.ClusterSpreadFactor);
+
+	//Disc
+	Params.DiscBaseDensity = Stream.FRandRange(MinParams.DiscBaseDensity, MaxParams.DiscBaseDensity);
+	Params.DiscDepthBias = Stream.FRandRange(MinParams.DiscDepthBias, MaxParams.DiscDepthBias);
+	Params.DiscHeightRatio = Stream.FRandRange(MinParams.DiscHeightRatio, MaxParams.DiscHeightRatio);
+	Params.DiscNumPoints = Stream.RandRange(MinParams.DiscNumPoints, MaxParams.DiscNumPoints);
+
+	//Twist
+	Params.TwistCoreRadius = Stream.FRandRange(MinParams.TwistCoreRadius, MaxParams.TwistCoreRadius);
+	Params.TwistCoreStrength = Stream.FRandRange(MinParams.TwistCoreStrength, MaxParams.TwistCoreStrength);
+	Params.TwistCoreTwistExponent = Stream.FRandRange(MinParams.TwistCoreTwistExponent, MaxParams.TwistCoreTwistExponent);
+	Params.TwistStrength = Stream.FRandRange(MinParams.TwistStrength, MaxParams.TwistStrength);
+
+	//Void
+	Params.VoidRatio = Stream.FRandRange(MinParams.VoidRatio, MaxParams.VoidRatio);
+
+
+	//Volume
+	Params.VolumeAmbientColor = FLinearColor(
+		Stream.FRandRange(Volume_Min.VolumeAmbientColor.R, Volume_Max.VolumeAmbientColor.R),
+		Stream.FRandRange(Volume_Min.VolumeAmbientColor.G, Volume_Max.VolumeAmbientColor.G),
+		Stream.FRandRange(Volume_Min.VolumeAmbientColor.B, Volume_Max.VolumeAmbientColor.B)
+	);
+	Params.VolumeCoolShift = FLinearColor(
+		Stream.FRandRange(Volume_Min.VolumeCoolShift.R, Volume_Max.VolumeCoolShift.R),
+		Stream.FRandRange(Volume_Min.VolumeCoolShift.G, Volume_Max.VolumeCoolShift.G),
+		Stream.FRandRange(Volume_Min.VolumeCoolShift.B, Volume_Max.VolumeCoolShift.B)
+	);
+	Params.VolumeHotShift = FLinearColor(
+		Stream.FRandRange(Volume_Min.VolumeHotShift.R, Volume_Max.VolumeHotShift.R),
+		Stream.FRandRange(Volume_Min.VolumeHotShift.G, Volume_Max.VolumeHotShift.G),
+		Stream.FRandRange(Volume_Min.VolumeHotShift.B, Volume_Max.VolumeHotShift.B)
+	);
+	Params.VolumeNoise = NoisePaths[Stream.RandRange(0, 3)];
+	Params.VolumeDensity = Stream.FRandRange(Volume_Min.VolumeDensity, Volume_Max.VolumeDensity);
+	Params.VolumeHueVariance = Stream.FRandRange(Volume_Min.VolumeHueVariance, Volume_Max.VolumeHueVariance);
+	Params.VolumeHueVarianceScale = Stream.FRandRange(Volume_Min.VolumeHueVarianceScale, Volume_Max.VolumeHueVarianceScale);
+	Params.VolumeSaturationVariance = Stream.FRandRange(Volume_Min.VolumeSaturationVariance, Volume_Max.VolumeSaturationVariance);
+	Params.VolumeTemperatureScale = Stream.FRandRange(Volume_Min.VolumeTemperatureScale, Volume_Max.VolumeTemperatureScale);
+	Params.VolumeTemperatureInfluence = Stream.FRandRange(Volume_Min.VolumeTemperatureInfluence, Volume_Max.VolumeTemperatureInfluence);
+	Params.VolumeWarpAmount = Stream.FRandRange(Volume_Min.VolumeWarpAmount, Volume_Max.VolumeWarpAmount);
+	Params.VolumeWarpScale = Stream.FRandRange(Volume_Min.VolumeWarpScale, Volume_Max.VolumeWarpScale);
+
+	return Params;
+}
+int GalaxyParamFactory::SelectGalaxyTypeIndex()
+{
+	FRandomStream Stream(Seed + 69);
+	float RandomValue = Stream.FRand();
+	float CumulativeWeight = 0.0f;
+
+	for (int i = 0; i < GalaxyWeights.Num(); i++)
+	{
+		CumulativeWeight += GalaxyWeights[i].Key;
+		if (RandomValue <= CumulativeWeight)
+		{
+			return i;
+		}
+	}
+
+	return 7; // Fallback to most common type
+}
+
+//Galaxy Generator - Generates and inserts the data
 void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {	 
-	//TODO: Randomize class and use for parameter bounds
 	//Glob - E0 E3 E5 E7 S0
 	//Spiral - Sa Sb Sc
 	//Spiral barred - SBa SBb SBc
-	//Can be handled externally when the generator is spawned... would need to create randomization bounds for each type, roll a type based on probability then use bounds to proceduralize
+	//Irregular - Irr
+	// 0  1  2  3  4  5  6  7  8   9   10  11
+	// E0 E3 E5 E7 S0 Sa Sb Sc SBa SBb SBc Irr
 
 	MaxInsertionDepth = FMath::Max(1, InOctree->MaxDepth - InsertDepthOffset);
 	MinInsertionDepth = FMath::Max(1, MaxInsertionDepth - DepthRange);
@@ -541,12 +691,13 @@ void GalaxyGenerator::GenerateBulge()
 	ParallelFor(NumPoints, [&](int32 i)
 		{
 			// Each thread gets its own random stream with unique seed
-			FRandomStream Stream(Seed + 99 + i);
+			FRandomStream Stream((Seed + 99) * 1664525U + i * 1013904223U);
 
 			FPointData& InsertData = GeneratedData[StartIndex + i];
 			InsertData.Data.ObjectId = i;
 			InsertData.Data.TypeId = 1;
 			InsertData.Data.Density = Stream.FRandRange(0.5f, 1.5f) * GalaxyParams.BulgeBaseDensity;
+			InsertData.Data.Composition = Stream.GetUnitVector();
 			InsertData.InsertDepth = ChooseDepth(Stream.FRand(), GalaxyParams.BulgeDepthBias);
 
 			// 1. Sample Hernquist radius
@@ -586,6 +737,8 @@ void GalaxyGenerator::GenerateBulge()
 			P.X = dir.X * r * AxisScaleX;
 			P.Y = dir.Y * r * AxisScaleY;
 			P.Z = dir.Z * r * AxisScaleZ;
+
+			P += Stream.GetUnitVector() * Stream.FRand() * BulgeRadius * GalaxyParams.BulgeJitter;
 
 			InsertData.Position = P;
 		});
@@ -652,7 +805,7 @@ void GalaxyGenerator::GenerateClusters()
 		Center += Jitter;
 
 		// 5. Generate the actual cluster of points.
-		GenerateCluster(Center, Radius, PointsPerCluster, GalaxyParams.ClusterBaseDensity, GalaxyParams.ClusterDepthBias);
+		GenerateCluster(i + 987654, Center, Radius, PointsPerCluster, GalaxyParams.ClusterBaseDensity, GalaxyParams.ClusterDepthBias);
 	}
 }
 void GalaxyGenerator::GenerateArms()
@@ -686,7 +839,7 @@ void GalaxyGenerator::GenerateArms()
 			);
 			Center += Jitter;
 			double DensityCoef = FMath::Pow(Center.Length() / GalaxyRadius, GalaxyParams.ArmRadialDensityExponent) * GalaxyParams.ArmRadialDensityMultiplier + GalaxyParams.ArmRadialBaseDensity;
-			GenerateCluster(Center, Radius, StarsPerCluster, GalaxyParams.ArmBaseDensity * DensityCoef, GalaxyParams.ArmDepthBias);
+			GenerateCluster(ArmIndex + c + 123, Center, Radius, StarsPerCluster, GalaxyParams.ArmBaseDensity * DensityCoef, GalaxyParams.ArmDepthBias);
 		}
 	}
 }
@@ -711,20 +864,20 @@ void GalaxyGenerator::ApplyTwist()
 }
 void GalaxyGenerator::GenerateDisc()
 {
-	GenerateCluster(FVector::ZeroVector, FVector(GalaxyRadius, GalaxyRadius, GalaxyRadius * GalaxyParams.DiscHeightRatio), GalaxyParams.DiscNumPoints, GalaxyParams.DiscBaseDensity, GalaxyParams.DiscDepthBias);
+	GenerateCluster(Seed + 999, FVector::ZeroVector, FVector(GalaxyRadius, GalaxyRadius, GalaxyRadius * GalaxyParams.DiscHeightRatio), GalaxyParams.DiscNumPoints, GalaxyParams.DiscBaseDensity, GalaxyParams.DiscDepthBias);
 }
 void GalaxyGenerator::GenerateBackground()
 {
-	GenerateCluster(FVector::ZeroVector, FVector(MaxRadius, MaxRadius, MaxRadius * GalaxyParams.BackgroundHeightRatio), GalaxyParams.BackgroundNumPoints, GalaxyParams.BackgroundBaseDensity, GalaxyParams.BackgroundDepthBias);
+	GenerateCluster(Seed + 123456789, FVector::ZeroVector, FVector(MaxRadius, MaxRadius, MaxRadius * GalaxyParams.BackgroundHeightRatio), GalaxyParams.BackgroundNumPoints, GalaxyParams.BackgroundBaseDensity, GalaxyParams.BackgroundDepthBias);
 }
-void GalaxyGenerator::GenerateCluster(FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity, double InDepthBias) //add falloff or curve param
+void GalaxyGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity, double InDepthBias) //add falloff or curve param
 {
 	int32 StartIndex = GeneratedData.Num();
 	GeneratedData.AddUninitialized(InCount);
 
 	ParallelFor(InCount, [&](int32 i)
 		{
-			FRandomStream Stream(Seed ^ (StartIndex + i)); // unique seed per point
+			FRandomStream Stream(InSeed ^ (StartIndex + i)); // unique seed per point
 
 			auto Gaussian = [&](FRandomStream& Rand)
 				{
@@ -771,151 +924,6 @@ int GalaxyGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
 void GalaxyGenerator::MarkDestroying()
 {
 	IsDestroying = true;
-}
-
-GalaxyParams GalaxyParamFactory::GenerateParams()
-{
-	// 0  1  2  3  4  5  6  7  8   9   10  11
-	// E0 E3 E5 E7 S0 Sa Sb Sc SBa SBb SBc Irr
-	int TypeIndex = SelectGalaxyTypeIndex(); 
-
-	GalaxyParams Params;// = *GalaxyWeights[TypeIndex].Value;
-	switch (TypeIndex) {
-		case 0: // E0
-			Params = BoundedRandomizeParams(E0_Min, E0_Max);
-			break;
-		case 1: // E3
-			Params = BoundedRandomizeParams(E3_Min, E3_Max);
-			break;
-		case 2: // E5
-			Params = BoundedRandomizeParams(E5_Min, E5_Max);
-			break;
-		case 3: // E7
-			Params = BoundedRandomizeParams(E7_Min, E7_Max);
-			break;
-		case 4: // S0
-			Params = BoundedRandomizeParams(S0_Min, S0_Max);
-			break;
-		case 5: // Sa
-			Params = BoundedRandomizeParams(Sa_Min, Sa_Max);
-			break;
-		case 6: // Sb 
-			Params = BoundedRandomizeParams(Sb_Min, Sb_Max);
-			break;
-		case 7: // Sc
-			Params = BoundedRandomizeParams(Sc_Min, Sc_Max);
-			break;
-		case 8: // SBa
-			Params = BoundedRandomizeParams(SBa_Min, SBa_Max);
-			break;
-		case 9: // SBb
-			Params = BoundedRandomizeParams(SBb_Min, SBb_Max);
-			break;
-		case 10: // SBc
-			Params = BoundedRandomizeParams(SBc_Min, SBc_Max);
-			break;
-		case 11: // Irr
-			Params = BoundedRandomizeParams(Irr_Min, Irr_Max);
-			break;
-	}
-
-	return Params;
-}
-GalaxyParams GalaxyParamFactory::BoundedRandomizeParams(GalaxyParams MinParams, GalaxyParams MaxParams) {
-	FRandomStream Stream(Seed + 666);
-	GalaxyParams Params;
-	
-	//Arm
-	Params.ArmBaseDensity = Stream.FRandRange(MinParams.ArmBaseDensity, MaxParams.ArmBaseDensity);
-	Params.ArmClusterRadiusMax = Stream.FRandRange(MinParams.ArmClusterRadiusMax, MaxParams.ArmClusterRadiusMax);
-	Params.ArmClusterRadiusMin = Stream.FRandRange(MinParams.ArmClusterRadiusMin, MaxParams.ArmClusterRadiusMin);
-	Params.ArmClusters = Stream.RandRange(MinParams.ArmClusters, MaxParams.ArmClusters);
-	Params.ArmDepthBias = Stream.FRandRange(MinParams.ArmDepthBias, MaxParams.ArmDepthBias);
-	Params.ArmHeightRatio = Stream.FRandRange(MinParams.ArmHeightRatio, MaxParams.ArmHeightRatio);
-	Params.ArmIncoherence = Stream.FRandRange(MinParams.ArmIncoherence, MaxParams.ArmIncoherence);
-	Params.ArmNumArms = Stream.RandRange(MinParams.ArmNumArms, MaxParams.ArmNumArms);
-	Params.ArmNumPoints = Stream.RandRange(MinParams.ArmNumPoints, MaxParams.ArmNumPoints);
-	Params.ArmRadialDensityExponent = Stream.FRandRange(MinParams.ArmRadialDensityExponent, MaxParams.ArmRadialDensityExponent);
-	Params.ArmRadialDensityMultiplier = Stream.FRandRange(MinParams.ArmRadialDensityMultiplier, MaxParams.ArmRadialDensityMultiplier);
-	Params.ArmSpreadFactor = Stream.FRandRange(MinParams.ArmSpreadFactor, MaxParams.ArmSpreadFactor);
-	Params.ArmStartRatio = Stream.FRandRange(MinParams.ArmStartRatio, MaxParams.ArmStartRatio);
-
-	//Background
-	Params.BackgroundBaseDensity = Stream.FRandRange(MinParams.BackgroundBaseDensity, MaxParams.BackgroundBaseDensity);
-	Params.BackgroundDepthBias = Stream.FRandRange(MinParams.BackgroundDepthBias, MaxParams.BackgroundDepthBias);
-	Params.BackgroundHeightRatio = Stream.FRandRange(MinParams.BackgroundHeightRatio, MaxParams.BackgroundHeightRatio);
-	Params.BackgroundNumPoints = Stream.RandRange(MinParams.BackgroundNumPoints, MaxParams.BackgroundNumPoints);
-	
-	//Bulge
-	Params.BulgeAcceptanceExponent = Stream.FRandRange(MinParams.BulgeAcceptanceExponent, MaxParams.BulgeAcceptanceExponent);
-	Params.BulgeAxisScale = FVector(Stream.FRandRange(MinParams.BulgeAxisScale.X, MaxParams.BulgeAxisScale.X), Stream.FRandRange(MinParams.BulgeAxisScale.Y, MaxParams.BulgeAxisScale.Y), Stream.FRandRange(MinParams.BulgeAxisScale.Z, MaxParams.BulgeAxisScale.Z));
-	Params.BulgeBaseDensity = Stream.FRandRange(MinParams.BulgeBaseDensity, MaxParams.BulgeBaseDensity);
-	Params.BulgeDepthBias = Stream.FRandRange(MinParams.BulgeDepthBias, MaxParams.BulgeDepthBias);
-	Params.BulgeNumPoints = Stream.RandRange(MinParams.BulgeNumPoints, MaxParams.BulgeNumPoints);
-	Params.BulgeRadiusScale = Stream.FRandRange(MinParams.BulgeRadiusScale, MaxParams.BulgeRadiusScale);
-	Params.BulgeRatio = Stream.FRandRange(MinParams.BulgeRatio, MaxParams.BulgeRatio);
-	Params.BulgeTruncationScale = Stream.FRandRange(MinParams.BulgeTruncationScale, MaxParams.BulgeTruncationScale);
-
-	//ere
-	//Cluster
-	Params.ClusterAxisScale = FVector(Stream.FRandRange(MinParams.ClusterAxisScale.X, MaxParams.ClusterAxisScale.X), Stream.FRandRange(MinParams.ClusterAxisScale.Y, MaxParams.ClusterAxisScale.Y), Stream.FRandRange(MinParams.ClusterAxisScale.Z, MaxParams.ClusterAxisScale.Z));
-	Params.ClusterBaseDensity = Stream.FRandRange(MinParams.ClusterBaseDensity, MaxParams.ClusterBaseDensity);
-	Params.ClusterDepthBias = Stream.FRandRange(MinParams.ClusterDepthBias, MaxParams.ClusterDepthBias);
-	Params.ClusterIncoherence = Stream.FRandRange(MinParams.ClusterIncoherence, MaxParams.ClusterIncoherence);
-	Params.ClusterMaxScale = Stream.FRandRange(MinParams.ClusterMaxScale, MaxParams.ClusterMaxScale);
-	Params.ClusterMinScale = Stream.FRandRange(MinParams.ClusterMinScale, MaxParams.ClusterMinScale);
-	Params.ClusterNumClusters = Stream.RandRange(MinParams.ClusterNumClusters, MaxParams.ClusterNumClusters);
-	Params.ClusterNumPoints = Stream.RandRange(MinParams.ClusterNumPoints, MaxParams.ClusterNumPoints);
-	Params.ClusterSpreadFactor = Stream.FRandRange(MinParams.ClusterSpreadFactor, MaxParams.ClusterSpreadFactor);
-
-	//Disc
-	Params.DiscBaseDensity = Stream.FRandRange(MinParams.DiscBaseDensity, MaxParams.DiscBaseDensity);
-	Params.DiscDepthBias = Stream.FRandRange(MinParams.DiscDepthBias, MaxParams.DiscDepthBias);
-	Params.DiscHeightRatio = Stream.FRandRange(MinParams.DiscHeightRatio, MaxParams.DiscHeightRatio);
-	Params.DiscNumPoints = Stream.RandRange(MinParams.DiscNumPoints, MaxParams.DiscNumPoints);
-
-	//Twist
-	Params.TwistCoreRadius = Stream.FRandRange(MinParams.TwistCoreRadius, MaxParams.TwistCoreRadius);
-	Params.TwistCoreStrength = Stream.FRandRange(MinParams.TwistCoreStrength, MaxParams.TwistCoreStrength);
-	Params.TwistCoreTwistExponent = Stream.FRandRange(MinParams.TwistCoreTwistExponent, MaxParams.TwistCoreTwistExponent);
-	Params.TwistStrength = Stream.FRandRange(MinParams.TwistStrength, MaxParams.TwistStrength);
-
-	//Void
-	Params.VoidRatio = Stream.FRandRange(MinParams.VoidRatio, MaxParams.VoidRatio);
-
-	//Volume
-	Params.VolumeAmbientColor; // Need a strategy for colors... could use a basket maybe
-	Params.VolumeCoolShift;    // Need a strategy for colors... could use a basket maybe
-	Params.VolumeHotShift;     // Need a strategy for colors... could use a basket maybe
-	Params.VolumeNoise; // Randomly select path from list?
-
-	Params.VolumeDensity = Stream.FRandRange(MinParams.VolumeDensity, MaxParams.VolumeDensity);
-	Params.VolumeHueVariance = Stream.FRandRange(MinParams.VolumeHueVariance, MaxParams.VolumeHueVariance);
-	Params.VolumeHueVarianceScale = Stream.FRandRange(MinParams.VolumeHueVarianceScale, MaxParams.VolumeHueVarianceScale);
-	Params.VolumeSaturationVariance = Stream.FRandRange(MinParams.VolumeSaturationVariance, MaxParams.VolumeSaturationVariance);
-	Params.VolumeTemepratureScale = Stream.FRandRange(MinParams.VolumeTemepratureScale, MaxParams.VolumeTemepratureScale);
-	Params.VolumeTemperatureInfluence = Stream.FRandRange(MinParams.VolumeTemperatureInfluence, MaxParams.VolumeTemperatureInfluence);
-	Params.VolumeWarpAmount = Stream.FRandRange(MinParams.VolumeWarpAmount, MaxParams.VolumeWarpAmount);
-	Params.VolumeWarpScale = Stream.FRandRange(MinParams.VolumeWarpScale, MaxParams.VolumeWarpScale);
-
-	return Params;
-}
-int GalaxyParamFactory::SelectGalaxyTypeIndex()
-{
-	FRandomStream Stream(Seed + 69);
-	float RandomValue = Stream.FRand();
-	float CumulativeWeight = 0.0f;
-
-	for (int i = 0; i < GalaxyWeights.Num(); i++)
-	{
-		CumulativeWeight += GalaxyWeights[i].Key;
-		if (RandomValue <= CumulativeWeight)
-		{
-			return i;
-		}
-	}
-
-	return 7; // Fallback to most common type
 }
 //END GALAXY GENERATOR
 

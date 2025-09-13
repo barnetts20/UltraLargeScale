@@ -35,6 +35,8 @@ void AGalaxyActor::Initialize()
 	{
 		double StartTime = FPlatformTime::Seconds();
 
+		FPlatformProcess::Sleep(0.1f);
+		if (TryCleanUpComponents()) return; //Early exit if destroying
 		InitializeData();
 		if (TryCleanUpComponents()) return; //Early exit if destroying
 		FetchData();
@@ -144,21 +146,24 @@ void AGalaxyActor::InitializeVolumetric()
 			);
 
 			DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), VolumeTexture);
-			//TODO: Proceduralize material
-			//AmbientColor
-			FRandomStream Stream(Seed);
 
-			//DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), ParentColor);
-			//DynamicMaterial->SetVectorParameterValue(FName("CoolShift"), FLinearColor(Stream.FRandRange(0,6), Stream.FRandRange(0, 6), Stream.FRandRange(0, 6), 1));
-			//DynamicMaterial->SetVectorParameterValue(FName("HotShift"), FLinearColor(Stream.FRandRange(0, 6), Stream.FRandRange(0, 6), Stream.FRandRange(0, 6), 1));
-			//DynamicMaterial->SetScalarParameterValue(FName("HueVariance"), Stream.FRandRange(0,.5));
-			//DynamicMaterial->SetScalarParameterValue(FName("HueVarianceScale"), Stream.FRandRange(.5, 3));
-			//DynamicMaterial->SetScalarParameterValue(FName("SaturationVariance"), Stream.FRandRange(0, .5));
-			//DynamicMaterial->SetScalarParameterValue(FName("TemperatureInfluence"), Stream.FRandRange(2, 8));
-			//DynamicMaterial->SetScalarParameterValue(FName("TemperatureScale"), Stream.FRandRange(1, 6));
-			//DynamicMaterial->SetScalarParameterValue(FName("Density"), Stream.FRandRange(0.1, .5));
-			//DynamicMaterial->SetScalarParameterValue(FName("WarpAmount"), Stream.FRandRange(0.02, .15));
-			//DynamicMaterial->SetScalarParameterValue(FName("WarpScale"), Stream.FRandRange(0.5, 2));
+
+			UVolumeTexture* NoiseTexture = LoadObject<UVolumeTexture>(nullptr, *GalaxyGenerator.GalaxyParams.VolumeNoise);
+			if (VolumeTexture)
+			{
+				DynamicMaterial->SetTextureParameterValue(FName("NoiseTexture"), NoiseTexture);
+			}
+			DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), GalaxyGenerator.GalaxyParams.VolumeAmbientColor);
+			DynamicMaterial->SetVectorParameterValue(FName("CoolShift"), GalaxyGenerator.GalaxyParams.VolumeCoolShift);
+			DynamicMaterial->SetVectorParameterValue(FName("HotShift"), GalaxyGenerator.GalaxyParams.VolumeHotShift);
+			DynamicMaterial->SetScalarParameterValue(FName("HueVariance"), GalaxyGenerator.GalaxyParams.VolumeHueVariance);
+			DynamicMaterial->SetScalarParameterValue(FName("HueVarianceScale"), GalaxyGenerator.GalaxyParams.VolumeHueVarianceScale);
+			DynamicMaterial->SetScalarParameterValue(FName("SaturationVariance"), GalaxyGenerator.GalaxyParams.VolumeSaturationVariance);
+			DynamicMaterial->SetScalarParameterValue(FName("TemperatureInfluence"), GalaxyGenerator.GalaxyParams.VolumeTemperatureInfluence);
+			DynamicMaterial->SetScalarParameterValue(FName("TemperatureScale"), GalaxyGenerator.GalaxyParams.VolumeTemperatureScale);
+			DynamicMaterial->SetScalarParameterValue(FName("Density"), GalaxyGenerator.GalaxyParams.VolumeDensity);
+			DynamicMaterial->SetScalarParameterValue(FName("WarpAmount"), GalaxyGenerator.GalaxyParams.VolumeWarpAmount);
+			DynamicMaterial->SetScalarParameterValue(FName("WarpScale"), GalaxyGenerator.GalaxyParams.VolumeWarpScale);
 
 			//NoiseDomainOffset
 
