@@ -247,6 +247,7 @@ struct SVO_API GalaxyParams {
 
 class SVO_API GalaxyParamFactory {
 public:
+
 	int Seed = 666;
 	//Galaxy archtypes
 	GalaxyParams E0;
@@ -262,6 +263,34 @@ public:
 	GalaxyParams SBc;
 	GalaxyParams Irr;
 
+	GalaxyParams E0_Min;
+	GalaxyParams E3_Min;
+	GalaxyParams E5_Min;
+	GalaxyParams E7_Min;
+	GalaxyParams S0_Min;
+	GalaxyParams Sa_Min;
+	GalaxyParams Sb_Min;
+	GalaxyParams Sc_Min;
+	GalaxyParams SBa_Min;
+	GalaxyParams SBb_Min;
+	GalaxyParams SBc_Min;
+	GalaxyParams Irr_Min;
+
+	GalaxyParams E0_Max;
+	GalaxyParams E3_Max;
+	GalaxyParams E5_Max;
+	GalaxyParams E7_Max;
+	GalaxyParams S0_Max;
+	GalaxyParams Sa_Max;
+	GalaxyParams Sb_Max;
+	GalaxyParams Sc_Max;
+	GalaxyParams SBa_Max;
+	GalaxyParams SBb_Max;
+	GalaxyParams SBc_Max;
+	GalaxyParams Irr_Max;
+
+	TArray<TPair<float, GalaxyParams*>> GalaxyWeights = {{0.02f, &E0}, {0.04f, &E3}, {0.04f, &E5}, {0.03f, &E7}, {0.22f, &S0}, {0.15f, &Sa}, {0.15f, &Sb}, {0.20f, &Sc}, {0.04f, &SBa}, {0.04f, &SBb}, {0.03f, &SBc}, {0.04f, &Irr}};
+
 	GalaxyParamFactory() {
 		E0.ArmNumPoints = 0;
 		E0.DiscNumPoints = 0;
@@ -273,6 +302,9 @@ public:
 		E0.GalaxyRatio = .4;
 		E0.BulgeRatio = 1.5;
 		E0.BackgroundNumPoints = 100000;
+		E0_Min = E0;
+		E0_Max = E0;
+		//TODO: Bounds
 
 		E3.ArmNumPoints = 0;
 		E3.DiscNumPoints = 0;
@@ -284,6 +316,9 @@ public:
 		E3.GalaxyRatio = .3;
 		E3.BulgeRatio = 1.25;
 		E3.BackgroundNumPoints = 100000;
+		E3_Min = E3;
+		E3_Max = E3;
+		//TODO: Bounds
 
 		E5.ArmNumPoints = 0;
 		E5.DiscNumPoints = 50000;
@@ -298,6 +333,9 @@ public:
 		E5.GalaxyRatio = .3;
 		E5.BulgeRatio = 1.25;
 		E5.BackgroundNumPoints = 100000;
+		E5_Min = E5;
+		E5_Max = E5;
+		//TODO: Bounds
 
 		E7.ArmNumPoints = 0;
 		E7.DiscNumPoints = 100000;
@@ -312,6 +350,9 @@ public:
 		E7.GalaxyRatio = .3;
 		E7.BulgeRatio = 1.25;
 		E7.BackgroundNumPoints = 100000;
+		E7_Min = E7;
+		E7_Max = E7;
+		//TODO: Bounds
 
 		S0.ArmNumPoints = 0;
 		S0.DiscNumPoints = 200000;
@@ -325,6 +366,9 @@ public:
 		S0.GalaxyRatio = .3;
 		S0.BulgeRatio = 1.25;
 		S0.BackgroundNumPoints = 100000;
+		S0_Min = S0;
+		S0_Max = S0;
+		//TODO: Bounds
 
 		Sa.TwistStrength = 4;
 		Sa.TwistCoreStrength = 4;
@@ -333,17 +377,26 @@ public:
 		Sa.ArmClusterRadiusMax = .4;
 		Sa.ArmIncoherence = 3;
 		Sa.ArmStartRatio = 0;
+		Sa_Min = Sa;
+		Sa_Max = Sa;
+		//TODO: Bounds
 
 		Sb.TwistStrength = 12;
 		Sb.ArmNumArms = 2;
 		Sb.ArmIncoherence = 6;
 		Sb.ArmStartRatio = 0;
+		Sb_Min = Sb;
+		Sb_Max = Sb;
+		//TODO: Bounds
 
 		Sc.TwistStrength = 8;
 		Sc.ArmNumArms = 4;
 		Sc.ArmIncoherence = 8;
 		Sc.ArmStartRatio = 0;
 		Sc.TwistCoreRadius = .02;
+		Sc_Min = Sc;
+		Sc_Max = Sc;
+		//TODO: Bounds
 
 		SBa.BulgeRatio = .35;
 		SBa.BulgeAxisScale = FVector(1, .3, .3);
@@ -355,6 +408,9 @@ public:
 		SBa.ArmIncoherence = 2;
 		SBa.ArmHeightRatio = .5;
 		SBa.ArmStartRatio = 0.0;
+		SBa_Min = SBa;
+		SBa_Max = SBa;
+		//TODO: Bounds
 
 		SBb.BulgeAxisScale = FVector(1, .3, .3);
 		SBb.TwistStrength = 6;
@@ -365,6 +421,9 @@ public:
 		SBb.ArmIncoherence = 8;
 		SBb.ArmHeightRatio = .5;
 		SBb.ArmStartRatio = 0;
+		SBb_Min = SBb;
+		SBb_Max = SBb;
+		//TODO: Bounds
 
 		SBc.BulgeAxisScale = FVector(1, 1, 1);
 		SBc.TwistStrength = 12;
@@ -375,20 +434,27 @@ public:
 		SBc.ArmIncoherence = 8;
 		SBc.ArmHeightRatio = .5;
 		SBc.ArmStartRatio = 0;
+		SBc_Min = SBc;
+		SBc_Max = SBc;
+		//TODO: Bounds
 
 		Irr.BulgeNumPoints = 0;
 		Irr.ArmNumPoints = 0;
 		Irr.DiscNumPoints = 0;
 		Irr.BackgroundNumPoints = 100000;
-		Irr.BackgroundBaseDensity = 0.3;
+		Irr.BackgroundBaseDensity = 0.5;
 		Irr.ClusterNumPoints = 300000;
 		Irr.ClusterIncoherence = 4;
 		Irr.ClusterNumClusters = 128;
 		Irr.ClusterDepthBias = .75;
+		Irr_Min = Irr;
+		Irr_Max = Irr;
+		//TODO: Bounds
 	};
 
 	GalaxyParams GenerateParams();
-	GalaxyParams SelectRandomGalaxyType();
+	GalaxyParams BoundedRandomizeParams(GalaxyParams MinParams, GalaxyParams MaxParams);
+	int SelectGalaxyTypeIndex();
 };
 
 class SVO_API GalaxyGenerator : public PointCloudGenerator {
