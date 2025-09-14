@@ -107,7 +107,8 @@ void AUniverseActor::InitializeVolumetric()
 {
 	double StartTime = FPlatformTime::Seconds();
 	int Resolution = 64;
-	TextureData = Octree->CreateVolumeDensityDataFromOctree(Resolution);
+	auto SampleTextureData = Octree->CreateVolumeDensityDataFromOctree(Resolution);
+	TextureData = Octree->UpscaleVolumeDensityData(SampleTextureData, Resolution, 256);
 	if (TryCleanUpComponents()) return; //Early exit if destroying
 
 	TPromise<void> CompletionPromise;
@@ -133,7 +134,7 @@ void AUniverseActor::InitializeVolumetric()
 		VolumeTexture->DeferCompression = true;
 		VolumeTexture->UnlinkStreaming();
 
-		VolumeTexture->Source.Init(Resolution, Resolution, Resolution, 1, ETextureSourceFormat::TSF_BGRA8, TextureData.GetData());
+		VolumeTexture->Source.Init(256, 256, 256, 1, ETextureSourceFormat::TSF_BGRA8, TextureData.GetData());
 		VolumeTexture->UpdateResource();
 		FlushRenderingCommands();
 

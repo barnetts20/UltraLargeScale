@@ -908,7 +908,7 @@ void GalaxyGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, FVect
 			FPointData InsertData;
 			InsertData.Position = (size < MaxRadius ? P : FVector::ZeroVector);
 			InsertData.InsertDepth = ChooseDepth(Stream.FRand(), InDepthBias);
-			InsertData.Data = FVoxelData(InBaseDensity * Stream.FRandRange(.5, 1.5), Stream.GetUnitVector(), i, 1);
+			InsertData.Data = FVoxelData(InBaseDensity * Stream.FRandRange(.5, 1.5), Stream.GetUnitVector(), i + StartIndex, 1);
 
 			GeneratedData[StartIndex + i] = InsertData;
 		}, EParallelForFlags::BackgroundPriority);
@@ -940,29 +940,106 @@ void UniverseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {
 	MaxInsertionDepth = FMath::Max(1, InOctree->MaxDepth - InsertDepthOffset);
 	MinInsertionDepth = FMath::Max(1, MaxInsertionDepth - DepthRange);
+
 	FRandomStream Stream(Seed + 4713);
-	//TODO first random select a point then filter against noise
 	auto Noise = FastNoise::NewFromEncodedNodeTree(UniverseParams.EncodedTree);
-	for (int i = 0; i < UniverseParams.Count; i++) {
-		FVector InsertPosition = Stream.GetUnitVector() * Stream.FRand() * UniverseParams.Extent;
-		double Density = Stream.FRand();
 
-		//Flip density to indicate dark matter maybe?
-		if(!ApplyNoiseSelective(Noise, Density, 1, UniverseParams.Extent, InsertPosition)) Density *= -1;
-		//Not sure what to do with it though
-		FPointData Data;
-		Data.InsertDepth = ChooseDepth(Stream.FRand(), 1);
-		Data.Position = InsertPosition;
-		Data.Data.Density = Density;
-		Data.Data.Composition = Stream.GetUnitVector();
-		Data.Data.ObjectId = 1;
-		Data.Data.TypeId = (Density >= 0 ? 1 : 2); //Points that failed the density filter added in as type 2, use for dark matter maybe?
-		GeneratedData.Add(Data);
+	int Remaining = UniverseParams.Count;
+	int ClusterIndex = 0;
+
+	while (Remaining > 0)
+	{
+		// Pick candidate cluster center
+		FVector ClusterCenter(
+			Stream.FRandRange(-UniverseParams.Extent, UniverseParams.Extent),
+			Stream.FRandRange(-UniverseParams.Extent, UniverseParams.Extent),
+			Stream.FRandRange(-UniverseParams.Extent, UniverseParams.Extent)
+		);
+
+		// Filter against noise
+		double NoiseVal = Stream.FRand();
+		if (!ApplyNoiseSelective(Noise, NoiseVal, 1, UniverseParams.Extent, ClusterCenter))
+		{
+			continue; // reject cluster, try again
+		}
+
+		// Cluster size (1000–5000 but capped by Remaining)
+		int ClusterCount = FMath::Clamp(
+			Stream.RandRange(10, 40) * (1 + (1-NoiseVal)),
+			1,
+			Remaining
+		);
+
+		// Cluster radius as fraction of extent (scaleable)
+		double RadiusScale = Stream.FRandRange(0.01, 0.02) * (1 + (1 - NoiseVal)); // 1–5% of universe extent
+		FVector ClusterRadius(
+			UniverseParams.Extent * RadiusScale,
+			UniverseParams.Extent * RadiusScale,
+			UniverseParams.Extent * RadiusScale
+		);
+
+		// Noise controls density weight
+		double BaseDensity = FMath::Clamp(NoiseVal, 0.1, 1.0);
+
+		// Spawn the cluster
+		GenerateCluster(
+			ClusterIndex, // unique seed
+			ClusterCenter,
+			ClusterRadius,
+			ClusterCount,
+			BaseDensity,
+			NoiseVal + .1 // depth bias
+		);
+
+		Remaining -= ClusterCount;
+		ClusterIndex++;
 	}
 
-	for (auto Data : GeneratedData) {
-		if(Data.Data.TypeId == 1) InOctree->InsertPosition(Data.GetInt64Position(), Data.InsertDepth, Data.Data);
+	// Insert final data into octree
+	for (auto& Data : GeneratedData)
+	{
+		if (Data.Data.TypeId == 1 && Data.Position != FVector::ZeroVector)
+		{
+			InOctree->InsertPosition(Data.GetInt64Position(), Data.InsertDepth, Data.Data);
+		}
 	}
+}
+
+
+void UniverseGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity, double InDepthBias) //add falloff or curve param
+{
+	int32 StartIndex = GeneratedData.Num();
+	GeneratedData.AddUninitialized(InCount);
+
+	ParallelFor(InCount, [&](int32 i)
+		{
+			FRandomStream Stream(InSeed ^ (StartIndex + i)); // unique seed per point
+
+			auto Gaussian = [&](FRandomStream& Rand)
+				{
+					double U1 = FMath::Max(Rand.FRand(), KINDA_SMALL_NUMBER);
+					double U2 = Rand.FRand();
+					double R = FMath::Sqrt(-2.0 * FMath::Loge(U1));
+					double Theta = 2.0 * PI * U2;
+					return R * FMath::Cos(Theta);
+				};
+
+			FVector Offset(
+				Gaussian(Stream) * InClusterRadius.X,
+				Gaussian(Stream) * InClusterRadius.Y,
+				Gaussian(Stream) * InClusterRadius.Z
+			);
+
+			FVector P = InClusterCenter + Offset;
+			double size = P.Length();
+
+			FPointData InsertData;
+			InsertData.Position = (size < UniverseParams.Extent ? P : FVector::ZeroVector);
+			InsertData.InsertDepth = ChooseDepth(Stream.FRand(), InDepthBias);
+			InsertData.Data = FVoxelData(InBaseDensity * Stream.FRandRange(.5, 1.5), FVector(Stream.FRandRange(.2,1.2), Stream.FRandRange(.2, 1.2), Stream.FRandRange(.2, 1.2)), i + StartIndex, 1);
+
+			GeneratedData[StartIndex + i] = InsertData;
+		}, EParallelForFlags::BackgroundPriority);
 }
 
 int UniverseGenerator::ChooseDepth(double InRandomSample, double InDepthBias)

@@ -274,6 +274,187 @@ public:
 		return TextureData;
 	}
 	
+	TArray<uint8> UpscaleVolumeDensityDataUint8(
+		const TArray<uint8>& InData,
+		int32 InRes,     // input resolution (e.g. 64)
+		int32 OutRes     // output resolution (e.g. 256)
+	)
+	{
+		check(InRes > 1 && OutRes > InRes);
+
+		const int32 InVoxels = InRes * InRes * InRes;
+		const int32 OutVoxels = OutRes * OutRes * OutRes;
+		const int32 BytesPerVoxel = 4;
+
+		check(InData.Num() == InVoxels * BytesPerVoxel);
+
+		TArray<uint8> OutData;
+		OutData.SetNumZeroed(OutVoxels * BytesPerVoxel);
+
+		float scale = float(InRes - 1) / float(OutRes - 1);
+
+		auto Sample = [&](int32 x, int32 y, int32 z, int32 channel) -> float
+			{
+				int32 index = (x + y * InRes + z * InRes * InRes) * BytesPerVoxel + channel;
+				return float(InData[index]) / 255.0f; // normalize to [0,1] for interpolation
+			};
+
+		auto Write = [&](int32 x, int32 y, int32 z, const float* values)
+			{
+				int32 index = (x + y * OutRes + z * OutRes * OutRes) * BytesPerVoxel;
+				for (int c = 0; c < BytesPerVoxel; ++c)
+				{
+					OutData[index + c] = uint8(FMath::Clamp(values[c] * 255.0f, 0.0f, 255.0f));
+				}
+			};
+
+		for (int32 z = 0; z < OutRes; ++z)
+		{
+			float fz = z * scale;
+			int32 z0 = FMath::FloorToInt(fz);
+			int32 z1 = FMath::Min(z0 + 1, InRes - 1);
+			float tz = fz - z0;
+
+			for (int32 y = 0; y < OutRes; ++y)
+			{
+				float fy = y * scale;
+				int32 y0 = FMath::FloorToInt(fy);
+				int32 y1 = FMath::Min(y0 + 1, InRes - 1);
+				float ty = fy - y0;
+
+				for (int32 x = 0; x < OutRes; ++x)
+				{
+					float fx = x * scale;
+					int32 x0 = FMath::FloorToInt(fx);
+					int32 x1 = FMath::Min(x0 + 1, InRes - 1);
+					float tx = fx - x0;
+
+					float values[4] = { 0,0,0,0 };
+
+					for (int c = 0; c < BytesPerVoxel; ++c)
+					{
+						// Fetch 8 neighbors for this channel
+						float c000 = Sample(x0, y0, z0, c);
+						float c100 = Sample(x1, y0, z0, c);
+						float c010 = Sample(x0, y1, z0, c);
+						float c110 = Sample(x1, y1, z0, c);
+						float c001 = Sample(x0, y0, z1, c);
+						float c101 = Sample(x1, y0, z1, c);
+						float c011 = Sample(x0, y1, z1, c);
+						float c111 = Sample(x1, y1, z1, c);
+
+						// Trilinear interpolation
+						float c00 = FMath::Lerp(c000, c100, tx);
+						float c10 = FMath::Lerp(c010, c110, tx);
+						float c01 = FMath::Lerp(c001, c101, tx);
+						float c11 = FMath::Lerp(c011, c111, tx);
+						float c0 = FMath::Lerp(c00, c10, ty);
+						float c1 = FMath::Lerp(c01, c11, ty);
+						values[c] = FMath::Lerp(c0, c1, tz);
+					}
+
+					Write(x, y, z, values);
+				}
+			}
+		}
+
+		return OutData;
+	}
+
+	TArray<uint8> UpscaleVolumeDensityData(
+		const TArray<uint8>& InData,
+		int32 InRes,     // input resolution (e.g. 64)
+		int32 OutRes     // output resolution (e.g. 256)
+	)
+	{
+		check(InRes > 1 && OutRes > InRes);
+
+		const int32 InVoxels = InRes * InRes * InRes;
+		const int32 OutVoxels = OutRes * OutRes * OutRes;
+		const int32 BytesPerVoxel = 4;
+
+		check(InData.Num() == InVoxels * BytesPerVoxel);
+
+		TArray<uint8> OutData;
+		OutData.SetNumZeroed(OutVoxels * BytesPerVoxel);
+
+		const float Scale = float(InRes - 1) / float(OutRes - 1);
+		const int32 OutSlice = OutRes * OutRes;
+		const int32 InSlice = InRes * InRes;
+
+		auto Sample = [&](int32 x, int32 y, int32 z, int32 channel) -> float
+			{
+				int32 index = (x + y * InRes + z * InSlice) * BytesPerVoxel + channel;
+				return float(InData[index]) / 255.0f; // normalize [0,1]
+			};
+
+		auto Write = [&](int32 x, int32 y, int32 z, const float* values)
+			{
+				int32 index = (x + y * OutRes + z * OutSlice) * BytesPerVoxel;
+				for (int c = 0; c < BytesPerVoxel; ++c)
+				{
+					OutData[index + c] = uint8(FMath::Clamp(values[c] * 255.0f, 0.0f, 255.0f));
+				}
+			};
+
+		ParallelFor(
+			OutRes,
+			[&](int32 z)
+			{
+				float fz = z * Scale;
+				int32 z0 = FMath::FloorToInt(fz);
+				int32 z1 = FMath::Min(z0 + 1, InRes - 1);
+				float tz = fz - z0;
+
+				for (int32 y = 0; y < OutRes; y++)
+				{
+					float fy = y * Scale;
+					int32 y0 = FMath::FloorToInt(fy);
+					int32 y1 = FMath::Min(y0 + 1, InRes - 1);
+					float ty = fy - y0;
+
+					for (int32 x = 0; x < OutRes; x++)
+					{
+						float fx = x * Scale;
+						int32 x0 = FMath::FloorToInt(fx);
+						int32 x1 = FMath::Min(x0 + 1, InRes - 1);
+						float tx = fx - x0;
+
+						float values[4] = { 0,0,0,0 };
+
+						for (int c = 0; c < BytesPerVoxel; ++c)
+						{
+							// 8 neighbors
+							float c000 = Sample(x0, y0, z0, c);
+							float c100 = Sample(x1, y0, z0, c);
+							float c010 = Sample(x0, y1, z0, c);
+							float c110 = Sample(x1, y1, z0, c);
+							float c001 = Sample(x0, y0, z1, c);
+							float c101 = Sample(x1, y0, z1, c);
+							float c011 = Sample(x0, y1, z1, c);
+							float c111 = Sample(x1, y1, z1, c);
+
+							// Trilinear interpolation
+							float c00 = FMath::Lerp(c000, c100, tx);
+							float c10 = FMath::Lerp(c010, c110, tx);
+							float c01 = FMath::Lerp(c001, c101, tx);
+							float c11 = FMath::Lerp(c011, c111, tx);
+							float c0 = FMath::Lerp(c00, c10, ty);
+							float c1 = FMath::Lerp(c01, c11, ty);
+							values[c] = FMath::Lerp(c0, c1, tz);
+						}
+
+						Write(x, y, z, values);
+					}
+				}
+			},
+			EParallelForFlags::BackgroundPriority
+		);
+
+		return OutData;
+	}
+
+
 	UVolumeTexture* SaveVolumeTextureAsAssetFromOctree(int32 Resolution, const FString& AssetPath, const FString& AssetName)
 	{
 		// This should be called instead of SaveVolumeTextureAsAsset

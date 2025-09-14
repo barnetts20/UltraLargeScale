@@ -75,7 +75,7 @@ void AGalaxyActor::InitializeData() {
 
 	GalaxyGenerator.Seed = Seed;
 	GalaxyGenerator.DepthRange = 7; //With seven levels, assuming our smallest star is say 1/2 the size of the sun, we can cover the vast majority of potential realistic star scales
-	GalaxyGenerator.InsertDepthOffset = 10; //Controlls the depth above max depth the smallest stars will be generated in
+	GalaxyGenerator.InsertDepthOffset = 8; //Controlls the depth above max depth the smallest stars will be generated in
 
 	GalaxyParamFactory GalaxyParamGen;
 	GalaxyParamGen.Seed = this->Seed;
@@ -110,7 +110,8 @@ void AGalaxyActor::InitializeVolumetric()
 {
 	double StartTime = FPlatformTime::Seconds();
 	int Resolution = 64;
-	TextureData = Octree->CreateVolumeDensityDataFromOctree(Resolution);
+	const TArray<uint8> SampleTextureData = Octree->CreateVolumeDensityDataFromOctree(Resolution);
+	TextureData = Octree->UpscaleVolumeDensityData(SampleTextureData, Resolution, 256);
 	if (TryCleanUpComponents()) return; //Early exit if destroying
 
 	TPromise<void> CompletionPromise;
@@ -136,7 +137,7 @@ void AGalaxyActor::InitializeVolumetric()
 			VolumeTexture->DeferCompression = true;
 			VolumeTexture->UnlinkStreaming();
 
-			VolumeTexture->Source.Init(Resolution, Resolution, Resolution, 1, ETextureSourceFormat::TSF_BGRA8, TextureData.GetData());
+			VolumeTexture->Source.Init(256, 256, 256, 1, ETextureSourceFormat::TSF_BGRA8, TextureData.GetData());
 			VolumeTexture->UpdateResource();
 			FlushRenderingCommands();
 
@@ -171,7 +172,7 @@ void AGalaxyActor::InitializeVolumetric()
 			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));
 			VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
 			VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-			VolumetricComponent->SetRelativeLocation(FVector(0.0f, 0.0f, .02 * Extent)); //Bump up slightly to account for insertion offset
+			//VolumetricComponent->SetRelativeLocation(FVector(0.0f, 0.0f, .02 * Extent)); //Bump up slightly to account for insertion offset
 			VolumetricComponent->SetMaterial(0, DynamicMaterial);
 			VolumetricComponent->RegisterComponent();
 
