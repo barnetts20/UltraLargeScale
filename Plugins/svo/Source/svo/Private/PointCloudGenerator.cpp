@@ -4,7 +4,7 @@
 #include "PointCloudGenerator.h"
 
 //Applies noise derivative offset to a sample position
-FInt64Vector PointCloudGenerator::ApplyNoise(FastNoise::SmartNode<> InNoise, double InDomainScale, int64 InExtent, FInt64Vector InSamplePosition, float& OutDensity)
+FInt64Vector PointCloudGenerator::ApplyNoiseDerivative(FastNoise::SmartNode<> InNoise, double InDomainScale, int64 InExtent, FInt64Vector InSamplePosition, float& OutDensity)
 {
 	double ScaleFactor = InDomainScale / static_cast<double>(InExtent);
 	//Noise scaled sample position
@@ -50,6 +50,14 @@ FInt64Vector PointCloudGenerator::ApplyNoise(FastNoise::SmartNode<> InNoise, dou
 	OutDensity = (Output[13] + 1)/2;
 	auto InsertPosition = FInt64Vector(FX, FY, FZ);
 	return InsertPosition;
+}
+bool PointCloudGenerator::ApplyNoiseSelective(FastNoise::SmartNode<> InNoise, double InDensity, double InDomainScale, int64 InExtent, FVector InSamplePosition)
+{
+	double ScaleFactor = InDomainScale / static_cast<double>(InExtent);
+	double NX = static_cast<double>(InSamplePosition.X) * ScaleFactor;
+	double NY = static_cast<double>(InSamplePosition.Y) * ScaleFactor;
+	double NZ = static_cast<double>(InSamplePosition.Z) * ScaleFactor;
+	return (InDensity >= InNoise->GenSingle3D(NX, NY, NZ, Seed + 80085));
 }
 FInt64Vector PointCloudGenerator::RotateCoordinate(FInt64Vector InCoordinate, FRotator InRotation)
 {
@@ -126,7 +134,7 @@ void SimpleRandomNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			int64 Z = FMath::RoundToInt64(Stream.FRandRange(-InOctree->Extent, InOctree->Extent));
 
 			float OutDensity;
-			FInt64Vector InsertPosition = ApplyNoise(Noise, 1, InOctree->Extent, FInt64Vector(X, Y, Z), OutDensity);
+			FInt64Vector InsertPosition = ApplyNoiseDerivative(Noise, 1, InOctree->Extent, FInt64Vector(X, Y, Z), OutDensity);
 
 			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
 			auto InsertData = FVoxelData(OutDensity, Stream.GetUnitVector(), i, Type);
@@ -186,7 +194,7 @@ void GlobularNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 
 			float OutDensity;
 			FInt64Vector InsertPosition = FInt64Vector(FMath::RoundToInt64(InsertVector.X), FMath::RoundToInt64(InsertVector.Y), FMath::RoundToInt64(InsertVector.Z));
-			InsertPosition = ApplyNoise(Noise, 1, InOctree->Extent, InsertPosition, OutDensity);
+			InsertPosition = ApplyNoiseDerivative(Noise, 1, InOctree->Extent, InsertPosition, OutDensity);
 			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
 			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
@@ -332,7 +340,7 @@ void SpiralNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			FMath::RoundToInt64(Y),
 			FMath::RoundToInt64(Z)
 		);
-		InsertPosition = ApplyNoise(Noise, 2, Extent, InsertPosition, OutDensity);
+		InsertPosition = ApplyNoiseDerivative(Noise, 2, Extent, InsertPosition, OutDensity);
 		InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 		FLinearColor Color = FLinearColor::MakeRandomSeededColor(i);
 		FVector Composition(Color.R, Color.G, Color.B);
@@ -442,7 +450,7 @@ void BurstNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 				FMath::RoundToInt64(WarpedPoint.Y),
 				FMath::RoundToInt64(WarpedPoint.Z)
 			);
-			InsertPosition = ApplyNoise(DistortionNoise, 6, InOctree->Extent, InsertPosition, OutDensity);
+			InsertPosition = ApplyNoiseDerivative(DistortionNoise, 6, InOctree->Extent, InsertPosition, OutDensity);
 			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
 			int32 InsertDepth = MaxInsertionDepth;// GalaxyGenerator::ChooseDepth(Stream.FRand());
@@ -919,7 +927,7 @@ int GalaxyGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
 			break;
 		}
 	}
-	return FMath::Clamp(MaxInsertionDepth-chosenDepth, MinInsertionDepth, MaxInsertionDepth);
+	return FMath::Clamp(MaxInsertionDepth - chosenDepth, MinInsertionDepth, MaxInsertionDepth);
 }
 void GalaxyGenerator::MarkDestroying()
 {
@@ -928,7 +936,49 @@ void GalaxyGenerator::MarkDestroying()
 //END GALAXY GENERATOR
 
 //BEGIN UNIVERSE GENERATOR
-//TODO: IMPLEMENT
+void UniverseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
+{
+	MaxInsertionDepth = FMath::Max(1, InOctree->MaxDepth - InsertDepthOffset);
+	MinInsertionDepth = FMath::Max(1, MaxInsertionDepth - DepthRange);
+	FRandomStream Stream(Seed + 4713);
+	//TODO first random select a point then filter against noise
+	auto Noise = FastNoise::NewFromEncodedNodeTree(UniverseParams.EncodedTree);
+	for (int i = 0; i < UniverseParams.Count; i++) {
+		FVector InsertPosition = Stream.GetUnitVector() * Stream.FRand() * UniverseParams.Extent;
+		double Density = Stream.FRand();
+
+		//Flip density to indicate dark matter maybe?
+		if(!ApplyNoiseSelective(Noise, Density, 1, UniverseParams.Extent, InsertPosition)) Density *= -1;
+		//Not sure what to do with it though
+		FPointData Data;
+		Data.InsertDepth = ChooseDepth(Stream.FRand(), 1);
+		Data.Position = InsertPosition;
+		Data.Data.Density = Density;
+		Data.Data.Composition = Stream.GetUnitVector();
+		Data.Data.ObjectId = 1;
+		Data.Data.TypeId = (Density >= 0 ? 1 : 2); //Points that failed the density filter added in as type 2, use for dark matter maybe?
+		GeneratedData.Add(Data);
+	}
+
+	for (auto Data : GeneratedData) {
+		if(Data.Data.TypeId == 1) InOctree->InsertPosition(Data.GetInt64Position(), Data.InsertDepth, Data.Data);
+	}
+}
+
+int UniverseGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
+{
+	double biasedSample = FMath::Clamp(FMath::Pow(InRandomSample, InDepthBias), 0, 1);
+	double cumulative = 0.0;
+	int chosenDepth = 6;
+	for (int d = 0; d < 7; ++d)
+	{
+		cumulative += DepthProb[d];
+		if (biasedSample <= cumulative)
+		{
+			chosenDepth = d;
+			break;
+		}
+	}
+	return FMath::Clamp(MaxInsertionDepth - chosenDepth, MinInsertionDepth, MaxInsertionDepth);
+}
 //END UNIVERSE GENERATOR
-
-

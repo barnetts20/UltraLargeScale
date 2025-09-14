@@ -35,7 +35,9 @@ public:
 	virtual void GenerateData(TSharedPtr<FOctree> InOctree) = 0;
 
 	// Applies noise derivative based point shifting
-	FInt64Vector ApplyNoise(FastNoise::SmartNode<> InNoise, double InDomainScale, int64 InExtent, FInt64Vector InSamplePosition, float& OutDensity);
+	FInt64Vector ApplyNoiseDerivative(FastNoise::SmartNode<> InNoise, double InDomainScale, int64 InExtent, FInt64Vector InSamplePosition, float& OutDensity);
+	bool ApplyNoiseSelective(FastNoise::SmartNode<> InNoise, double InDensity, double InDomainScale, int64 InExtent, FVector InSamplePosition);
+	
 	FInt64Vector RotateCoordinate(FInt64Vector InCoordinate, FRotator InAxes);
 
 	FVector RotateCoordinate(FVector InCoordinate, FRotator InRotation);
@@ -278,34 +280,22 @@ public:
 	GalaxyParams SBc;
 	GalaxyParams Irr;
 
-	GalaxyParams E0_Min;
-	GalaxyParams E3_Min;
-	GalaxyParams E5_Min;
-	GalaxyParams E7_Min;
-	GalaxyParams S0_Min;
-	GalaxyParams Sa_Min;
-	GalaxyParams Sb_Min;
-	GalaxyParams Sc_Min;
-	GalaxyParams SBa_Min;
-	GalaxyParams SBb_Min;
-	GalaxyParams SBc_Min;
-	GalaxyParams Irr_Min;
+	//Bounds
+	GalaxyParams E0_Min;  GalaxyParams E0_Max;
+	GalaxyParams E3_Min;  GalaxyParams E3_Max;
+	GalaxyParams E5_Min;  GalaxyParams E5_Max;
+	GalaxyParams E7_Min;  GalaxyParams E7_Max;
+	GalaxyParams S0_Min;  GalaxyParams S0_Max;
+	GalaxyParams Sa_Min;  GalaxyParams Sa_Max;
+	GalaxyParams Sb_Min;  GalaxyParams Sb_Max;
+	GalaxyParams Sc_Min;  GalaxyParams Sc_Max;
+	GalaxyParams SBa_Min; GalaxyParams SBa_Max;
+	GalaxyParams SBb_Min; GalaxyParams SBb_Max;
+	GalaxyParams SBc_Min; GalaxyParams SBc_Max;
+	GalaxyParams Irr_Min; GalaxyParams Irr_Max;
 
-	GalaxyParams E0_Max;
-	GalaxyParams E3_Max;
-	GalaxyParams E5_Max;
-	GalaxyParams E7_Max;
-	GalaxyParams S0_Max;
-	GalaxyParams Sa_Max;
-	GalaxyParams Sb_Max;
-	GalaxyParams Sc_Max;
-	GalaxyParams SBa_Max;
-	GalaxyParams SBb_Max;
-	GalaxyParams SBc_Max;
-	GalaxyParams Irr_Max;
-
-	GalaxyParams Volume_Min;
-	GalaxyParams Volume_Max;
+	//Stand alone volume material bounds
+	GalaxyParams Volume_Min; GalaxyParams Volume_Max;
 
 	TArray<TPair<float, GalaxyParams*>> GalaxyWeights = {{0.02f, &E0}, {0.04f, &E3}, {0.04f, &E5}, {0.03f, &E7}, {0.22f, &S0}, {0.15f, &Sa}, {0.15f, &Sb}, {0.20f, &Sc}, {0.04f, &SBa}, {0.04f, &SBb}, {0.03f, &SBc}, {0.04f, &Irr}};
 	TArray<const char*> NoisePaths = { "/svo/VolumeTextures/VT_PerlinWorley_Balanced", "/svo/VolumeTextures/VT_Gradient_l5_256", "/svo/VolumeTextures/VT_Gradient_Turbulence_l5_256", "/svo/VolumeTextures/VT_Voronoi_l5_256" };
@@ -1420,6 +1410,24 @@ public:
 };
 
 //TODO: BUILD UNIVERSE GENERATOR
-//class SVO_API UniverseParams {};
+struct SVO_API UniverseParams {
+	int Count = 2000000;
+	double Extent = 2147483648;
+	const char* EncodedTree = "HgAdABcAAAAAAAAAgD8AAIA/AAAAABkAEAAAAAA/FwAAAAAAzczMPQAAAAAAAIA/HwAXAJqZmT4AAIA/AAAAAAAAgD8gAA0ABgAAAAAAAEALAAEAAAAAAAAAAQAAAAAAAAAAAACAPwAAAAA/AAAAAAAAmpmZPgAAAAAAAM3MzD0AAAAAPwAAAIA/ARsAJAACAAAA//8BAAAAAIA/AAAAgD8AAAAAAA==";
+};
 //class SVO_API UniverseParamFactory {};
-//class SVO_API UniverseGenerator : public PointCloudGenerator {};
+class SVO_API UniverseGenerator : public PointCloudGenerator {
+public:
+	UniverseGenerator() : PointCloudGenerator(8647) {};
+	UniverseGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
+
+	UniverseParams UniverseParams;
+	// depth probabilities for depths 0..6 (sum = 1.0)
+	static constexpr double DepthProb[7] = {0.25,0.35,0.20,0.10,0.05,0.04,0.01};
+
+	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
+
+	int ChooseDepth(double InRandomSample, double InDepthBias);
+
+	TArray<FPointData> GeneratedData;
+};

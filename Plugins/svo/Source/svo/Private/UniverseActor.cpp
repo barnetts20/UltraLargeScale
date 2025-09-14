@@ -68,14 +68,14 @@ void AUniverseActor::MarkDestroying() {
 void AUniverseActor::InitializeData() {
 	double StartTime = FPlatformTime::Seconds();
 	FRandomStream Stream(Seed);
-	auto Generator = new GlobularNoiseGenerator(Seed);
-	Generator->Count = this->Count;
-	Generator->Falloff = .5;
+	auto Generator = new UniverseGenerator(Seed);// new GlobularNoiseGenerator(Seed);
+	UniverseParams UniverseParams;
+	//TODO: Proceduralize universe params
+	Generator->UniverseParams = UniverseParams;
+	Generator->UniverseParams.Extent = Extent;
 	Generator->Rotation = FRotator(0);
-	Generator->DepthRange = 8;
-	Generator->InsertDepthOffset = 5;
-	Generator->WarpAmount = FVector(1);
-	Generator->EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
+	Generator->DepthRange = 7;
+	Generator->InsertDepthOffset = 6;
 	Generator->GenerateData(Octree);
 	double GenDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Universe generation took: %.3f seconds"), GenDuration);
