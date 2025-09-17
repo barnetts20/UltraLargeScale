@@ -4,16 +4,6 @@
 
 #include "CoreMinimal.h"
 
-/**
- * 
- */
-class SVO_API DataTypes
-{
-public:
-	DataTypes();
-	~DataTypes();
-};
-
 struct SVO_API FVoxelData {
 public:
 	FVoxelData() : Density(0.0), Composition(0, 0, 0), ObjectId(-1), TypeId(-1) {};
@@ -23,6 +13,15 @@ public:
 	FVector Composition; // Density could be accumulated in alpha
 	int ObjectId;
 	int TypeId;
+};
+
+struct SVO_API FPointData {
+	FVector Position;
+	int InsertDepth;
+	FVoxelData Data;
+	FInt64Vector GetInt64Position() {
+		return FInt64Vector(FMath::RoundToInt64(Position.X), FMath::RoundToInt64(Position.Y), FMath::RoundToInt64(Position.Z));
+	}
 };
 
 UENUM()

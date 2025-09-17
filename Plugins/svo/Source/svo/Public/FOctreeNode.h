@@ -8,6 +8,7 @@
 #include "RHIResources.h"       // For FRHITexture3D
 #include "RHIUtilities.h"   
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "FastNoise/FastNoise.h"
 #include "Engine/VolumeTexture.h"
 #include "CoreMinimal.h"
 
@@ -215,14 +216,24 @@ public:
 		return Nodes;
 	}
 
-	TArray<uint8> CreateVolumeDensityDataFromOctree(int32 Resolution) //Must be 16, 32, 64, 128, or 256
+	FOctree(int64 InExtent) {
+		Extent = InExtent;
+		MaxDepth = static_cast<int32>(FMath::Log2(static_cast<double>(Extent)));
+		DepthMaxDensities.SetNumZeroed(128, true);
+		Root = MakeShared<FOctreeNode>(FInt64Vector(), Extent, TArray<uint8>(), nullptr);
+	}
+};
+
+class SVO_API FOctreeTextureProcessor {
+public:
+	static TArray<uint8> GenerateVolumeMipDataFromOctree(TSharedPtr<FOctree> InOctree, int32 Resolution)
 	{
 		// Get the octree data
 		const int TargetDepth = FMath::FloorLog2(Resolution);
-		TArray<TSharedPtr<FOctreeNode>> PopulatedNodes = this->GetPopulatedNodes(TargetDepth, TargetDepth, -1);
-		const float MaxDensityAtDepth = (DepthMaxDensities.IsValidIndex(TargetDepth) ? (float)DepthMaxDensities[TargetDepth] : 1.0f);
-		const int64 NodeExtentAtDepth = (this->Extent >> TargetDepth);
-		const int64 OctreeExtent = this->Extent;
+		TArray<TSharedPtr<FOctreeNode>> PopulatedNodes = InOctree->GetPopulatedNodes(TargetDepth, TargetDepth, -1);
+		const float MaxDensityAtDepth = (InOctree->DepthMaxDensities.IsValidIndex(TargetDepth) ? (float)InOctree->DepthMaxDensities[TargetDepth] : 1.0f);
+		const int64 NodeExtentAtDepth = (InOctree->Extent >> TargetDepth);
+		const int64 OctreeExtent = InOctree->Extent;
 
 		// Allocate flat zeroed array directly
 		const int64 TotalVoxels = static_cast<int64>(Resolution) * Resolution * Resolution;
@@ -234,146 +245,61 @@ public:
 
 		// Fill the array directly in one loop
 		ParallelFor(PopulatedNodes.Num(), [&](int32 NodeIndex)
-		{
-			const auto& Node = PopulatedNodes[NodeIndex];
-			if (!Node.IsValid()) return;
-
-			// Calculate voxel coordinates
-			int32 VolumeX = static_cast<int32>((Node->Center.X + OctreeExtent) / (2 * NodeExtentAtDepth));
-			int32 VolumeY = static_cast<int32>((Node->Center.Y + OctreeExtent) / (2 * NodeExtentAtDepth));
-			int32 VolumeZ = static_cast<int32>((Node->Center.Z + OctreeExtent) / (2 * NodeExtentAtDepth));
-
-			// Bounds check
-			if (VolumeX < 0 || VolumeX >= Resolution ||
-				VolumeY < 0 || VolumeY >= Resolution ||
-				VolumeZ < 0 || VolumeZ >= Resolution)
 			{
-				return;
-			}
+				const auto& Node = PopulatedNodes[NodeIndex];
+				if (!Node.IsValid()) return;
 
-			// Calculate linear index and write directly
-			int64 VoxelIndex = (static_cast<int64>(VolumeZ) * Resolution * Resolution) +
-				(static_cast<int64>(VolumeY) * Resolution) + VolumeX;
-			int64 ByteIndex = VoxelIndex * BytesPerVoxel;
+				// Calculate voxel coordinates
+				int32 VolumeX = static_cast<int32>((Node->Center.X + OctreeExtent) / (2 * NodeExtentAtDepth));
+				int32 VolumeY = static_cast<int32>((Node->Center.Y + OctreeExtent) / (2 * NodeExtentAtDepth));
+				int32 VolumeZ = static_cast<int32>((Node->Center.Z + OctreeExtent) / (2 * NodeExtentAtDepth));
 
-			// Calculate density
-			uint8 DensityByte = 0;
-			if (MaxDensityAtDepth > 0.0f)
-			{
-				float Norm = static_cast<float>(Node->Data.Density) / MaxDensityAtDepth;
-				DensityByte = static_cast<uint8>(FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f));
-			}
+				// Bounds check
+				if (VolumeX < 0 || VolumeX >= Resolution ||
+					VolumeY < 0 || VolumeY >= Resolution ||
+					VolumeZ < 0 || VolumeZ >= Resolution)
+				{
+					return;
+				}
 
-			// Write voxel data directly
-			FVector Composition = Node->Data.Composition.GetSafeNormal();
-			TextureData[ByteIndex + 0] = static_cast<uint8>(Composition.X * 255); // B
-			TextureData[ByteIndex + 1] = static_cast<uint8>(Composition.Y * 255); // G
-			TextureData[ByteIndex + 2] = static_cast<uint8>(Composition.Z * 255); // R
-			TextureData[ByteIndex + 3] = DensityByte; // A
-		});
+				// Calculate linear index and write directly
+				int64 VoxelIndex = (static_cast<int64>(VolumeZ) * Resolution * Resolution) +
+					(static_cast<int64>(VolumeY) * Resolution) + VolumeX;
+				int64 ByteIndex = VoxelIndex * BytesPerVoxel;
+
+				// Calculate density
+				uint8 DensityByte = 0;
+				if (MaxDensityAtDepth > 0.0f)
+				{
+					float Norm = static_cast<float>(Node->Data.Density) / MaxDensityAtDepth;
+					DensityByte = static_cast<uint8>(FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f));
+				}
+
+				// Write voxel data directly
+				FVector Composition = Node->Data.Composition.GetSafeNormal();
+				TextureData[ByteIndex + 0] = static_cast<uint8>(Composition.X * 255); // B
+				TextureData[ByteIndex + 1] = static_cast<uint8>(Composition.Y * 255); // G
+				TextureData[ByteIndex + 2] = static_cast<uint8>(Composition.Z * 255); // R
+				TextureData[ByteIndex + 3] = DensityByte; // A
+			});
 		return TextureData;
 	}
-	
-	TArray<uint8> UpscaleVolumeDensityDataUint8(
-		const TArray<uint8>& InData,
-		int32 InRes,     // input resolution (e.g. 64)
-		int32 OutRes     // output resolution (e.g. 256)
-	)
+
+	static TArray<uint8> UpscaleVolumeDensityData(const TArray<uint8>& InMipData, int32 InRes, int32 OutRes, FastNoise::SmartNode<> InNoise = FastNoise::NewFromEncodedNodeTree("AAAAAAAA"), double InDomainScale = 1, FVector InDomainOffset = FVector(0, 0, 0), double InNoiseEffect = 1, int InSeed = 69)
 	{
+		bool HasNoise = false;
+		float NoiseEffect = 1;
+		TArray<float> NoiseData;
+		NoiseData.SetNumUninitialized(OutRes * OutRes * OutRes);
+		InNoise->GenUniformGrid3D(NoiseData.GetData(), 0, 0, 0, OutRes, OutRes, OutRes, 1, InSeed);
+
 		check(InRes > 1 && OutRes > InRes);
 
 		const int32 InVoxels = InRes * InRes * InRes;
 		const int32 OutVoxels = OutRes * OutRes * OutRes;
 		const int32 BytesPerVoxel = 4;
 
-		check(InData.Num() == InVoxels * BytesPerVoxel);
-
-		TArray<uint8> OutData;
-		OutData.SetNumZeroed(OutVoxels * BytesPerVoxel);
-
-		float scale = float(InRes - 1) / float(OutRes - 1);
-
-		auto Sample = [&](int32 x, int32 y, int32 z, int32 channel) -> float
-			{
-				int32 index = (x + y * InRes + z * InRes * InRes) * BytesPerVoxel + channel;
-				return float(InData[index]) / 255.0f; // normalize to [0,1] for interpolation
-			};
-
-		auto Write = [&](int32 x, int32 y, int32 z, const float* values)
-			{
-				int32 index = (x + y * OutRes + z * OutRes * OutRes) * BytesPerVoxel;
-				for (int c = 0; c < BytesPerVoxel; ++c)
-				{
-					OutData[index + c] = uint8(FMath::Clamp(values[c] * 255.0f, 0.0f, 255.0f));
-				}
-			};
-
-		for (int32 z = 0; z < OutRes; ++z)
-		{
-			float fz = z * scale;
-			int32 z0 = FMath::FloorToInt(fz);
-			int32 z1 = FMath::Min(z0 + 1, InRes - 1);
-			float tz = fz - z0;
-
-			for (int32 y = 0; y < OutRes; ++y)
-			{
-				float fy = y * scale;
-				int32 y0 = FMath::FloorToInt(fy);
-				int32 y1 = FMath::Min(y0 + 1, InRes - 1);
-				float ty = fy - y0;
-
-				for (int32 x = 0; x < OutRes; ++x)
-				{
-					float fx = x * scale;
-					int32 x0 = FMath::FloorToInt(fx);
-					int32 x1 = FMath::Min(x0 + 1, InRes - 1);
-					float tx = fx - x0;
-
-					float values[4] = { 0,0,0,0 };
-
-					for (int c = 0; c < BytesPerVoxel; ++c)
-					{
-						// Fetch 8 neighbors for this channel
-						float c000 = Sample(x0, y0, z0, c);
-						float c100 = Sample(x1, y0, z0, c);
-						float c010 = Sample(x0, y1, z0, c);
-						float c110 = Sample(x1, y1, z0, c);
-						float c001 = Sample(x0, y0, z1, c);
-						float c101 = Sample(x1, y0, z1, c);
-						float c011 = Sample(x0, y1, z1, c);
-						float c111 = Sample(x1, y1, z1, c);
-
-						// Trilinear interpolation
-						float c00 = FMath::Lerp(c000, c100, tx);
-						float c10 = FMath::Lerp(c010, c110, tx);
-						float c01 = FMath::Lerp(c001, c101, tx);
-						float c11 = FMath::Lerp(c011, c111, tx);
-						float c0 = FMath::Lerp(c00, c10, ty);
-						float c1 = FMath::Lerp(c01, c11, ty);
-						values[c] = FMath::Lerp(c0, c1, tz);
-					}
-
-					Write(x, y, z, values);
-				}
-			}
-		}
-
-		return OutData;
-	}
-
-	TArray<uint8> UpscaleVolumeDensityData(
-		const TArray<uint8>& InData,
-		int32 InRes,     // input resolution (e.g. 64)
-		int32 OutRes     // output resolution (e.g. 256)
-	)
-	{
-		check(InRes > 1 && OutRes > InRes);
-
-		const int32 InVoxels = InRes * InRes * InRes;
-		const int32 OutVoxels = OutRes * OutRes * OutRes;
-		const int32 BytesPerVoxel = 4;
-
-		check(InData.Num() == InVoxels * BytesPerVoxel);
+		check(InMipData.Num() == InVoxels * BytesPerVoxel);
 
 		TArray<uint8> OutData;
 		OutData.SetNumZeroed(OutVoxels * BytesPerVoxel);
@@ -385,7 +311,7 @@ public:
 		auto Sample = [&](int32 x, int32 y, int32 z, int32 channel) -> float
 			{
 				int32 index = (x + y * InRes + z * InSlice) * BytesPerVoxel + channel;
-				return float(InData[index]) / 255.0f; // normalize [0,1]
+				return float(InMipData[index]) / 255.0f; // normalize [0,1]
 			};
 
 		auto Write = [&](int32 x, int32 y, int32 z, const float* values)
@@ -421,29 +347,38 @@ public:
 						float tx = fx - x0;
 
 						float values[4] = { 0,0,0,0 };
-
+						float noise = NoiseData[x + y * OutRes + z * OutSlice];
 						for (int c = 0; c < BytesPerVoxel; ++c)
 						{
-							// 8 neighbors
+							// 8 neighbors, and apply noise pre filter
 							float c000 = Sample(x0, y0, z0, c);
+							c000 += c000 * NoiseData[x0 + y0 * OutRes + z0 * OutSlice] * InNoiseEffect;
 							float c100 = Sample(x1, y0, z0, c);
+							c100 += c100 * NoiseData[x1 + y0 * OutRes + z0 * OutSlice] * InNoiseEffect;
 							float c010 = Sample(x0, y1, z0, c);
+							c010 += c010 * NoiseData[x0 + y1 * OutRes + z0 * OutSlice] * InNoiseEffect;
 							float c110 = Sample(x1, y1, z0, c);
+							c110 += c110 * NoiseData[x1 + y1 * OutRes + z0 * OutSlice] * InNoiseEffect;
 							float c001 = Sample(x0, y0, z1, c);
+							c001 += c001 * NoiseData[x0 + y0 * OutRes + z1 * OutSlice] * InNoiseEffect;
 							float c101 = Sample(x1, y0, z1, c);
+							c101 += c101 * NoiseData[x1 + y0 * OutRes + z1 * OutSlice] * InNoiseEffect;
 							float c011 = Sample(x0, y1, z1, c);
+							c011 += c011 * NoiseData[x0 + y1 * OutRes + z1 * OutSlice] * InNoiseEffect;
 							float c111 = Sample(x1, y1, z1, c);
+							c111 += c111 * NoiseData[x1 + y1 * OutRes + z1 * OutSlice] * InNoiseEffect;
 
 							// Trilinear interpolation
 							float c00 = FMath::Lerp(c000, c100, tx);
 							float c10 = FMath::Lerp(c010, c110, tx);
 							float c01 = FMath::Lerp(c001, c101, tx);
 							float c11 = FMath::Lerp(c011, c111, tx);
+
 							float c0 = FMath::Lerp(c00, c10, ty);
 							float c1 = FMath::Lerp(c01, c11, ty);
+
 							values[c] = FMath::Lerp(c0, c1, tz);
 						}
-
 						Write(x, y, z, values);
 					}
 				}
@@ -454,12 +389,41 @@ public:
 		return OutData;
 	}
 
+	static UVolumeTexture* GenerateVolumeTextureFromMipData(const TArray<uint8>& InMipData, int32 InResolution) {
+		UVolumeTexture* VolumeTexture;
 
-	UVolumeTexture* SaveVolumeTextureAsAssetFromOctree(int32 Resolution, const FString& AssetPath, const FString& AssetName)
+		VolumeTexture = NewObject<UVolumeTexture>(
+			GetTransientPackage(),
+			NAME_None,
+			RF_Transient
+		);
+
+		VolumeTexture->SRGB = false;
+		VolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
+		VolumeTexture->CompressionNone = true;
+		VolumeTexture->Filter = TF_Nearest;
+		VolumeTexture->AddressMode = TA_Clamp;
+		VolumeTexture->MipGenSettings = TMGS_NoMipmaps;
+		VolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
+		VolumeTexture->NeverStream = true;
+		VolumeTexture->DeferCompression = true;
+		VolumeTexture->UnlinkStreaming();
+
+		VolumeTexture->Source.Init(InResolution, InResolution, InResolution, 1, ETextureSourceFormat::TSF_BGRA8, InMipData.GetData());
+		VolumeTexture->UpdateResource();
+		FlushRenderingCommands();
+
+		return VolumeTexture;
+	}
+
+	static UTexture2D* GeneratePsuedoVolumeTextureFromMipData(const TArray<uint8>& InMipData, int32 InResolution) {
+		//TODO: Implement async safe psuedovolume texture generation
+		//reference: https://peterleontev.com/blog/efficient_construction_of_textures/
+		return nullptr;
+	}
+
+	static void SaveVolumeTextureAsAsset(UVolumeTexture* InSaveTexture, const FString& AssetPath, const FString& AssetName)
 	{
-		// This should be called instead of SaveVolumeTextureAsAsset
-		// and should recreate the volume texture with proper Source data
-
 		FString CleanAssetPath = AssetPath;
 		if (CleanAssetPath.EndsWith(TEXT("/")))
 		{
@@ -472,91 +436,8 @@ public:
 		if (!Package)
 		{
 			UE_LOG(LogTemp, Error, TEXT("Failed to create package"));
-			return nullptr;
+			return;
 		}
-
-		UVolumeTexture* NewVolumeTexture = NewObject<UVolumeTexture>(
-			Package,
-			*AssetName,
-			RF_Public | RF_Standalone
-		);
-
-		// Get the octree data (same as in CreateVolumeTextureFromOctreeSimple)
-		const int TargetDepth = FMath::FloorLog2(Resolution);
-		TArray<TSharedPtr<FOctreeNode>> PopulatedNodes = this->GetPopulatedNodes(TargetDepth, TargetDepth, -1);
-		const float MaxDensityAtDepth = (DepthMaxDensities.IsValidIndex(TargetDepth) ? (float)DepthMaxDensities[TargetDepth] : 1.0f);
-		const int64 NodeExtentAtDepth = (this->Extent >> TargetDepth);
-		const int64 OctreeExtent = this->Extent;
-
-		// Build node map
-		TMap<FIntVector, TSharedPtr<FOctreeNode>> NodeMap;
-		for (const auto& Node : PopulatedNodes)
-		{
-			if (!Node.IsValid()) continue;
-			int32 VolumeX = static_cast<int32>((Node->Center.X + OctreeExtent) / (2 * NodeExtentAtDepth));
-			int32 VolumeY = static_cast<int32>((Node->Center.Y + OctreeExtent) / (2 * NodeExtentAtDepth));
-			int32 VolumeZ = static_cast<int32>((Node->Center.Z + OctreeExtent) / (2 * NodeExtentAtDepth));
-
-			if (VolumeX >= 0 && VolumeX < Resolution &&
-				VolumeY >= 0 && VolumeY < Resolution &&
-				VolumeZ >= 0 && VolumeZ < Resolution)
-			{
-				NodeMap.Add(FIntVector(VolumeX, VolumeY, VolumeZ), Node);
-			}
-		}
-
-		// Create the query function that uses your actual data
-		auto QueryVoxel = [&NodeMap, MaxDensityAtDepth](const int32 X, const int32 Y, const int32 Z, void* ReturnValue)
-			{
-				FIntVector Coord(X, Y, Z);
-				uint8* Voxel = static_cast<uint8*>(ReturnValue);
-
-				if (auto* NodePtr = NodeMap.Find(Coord))
-				{
-					auto Node = *NodePtr;
-					uint8 DensityByte = 0;
-					if (MaxDensityAtDepth > 0.0f)
-					{
-						float Norm = static_cast<float>(Node->Data.Density) / MaxDensityAtDepth;
-						DensityByte = static_cast<uint8>(FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f));
-					}
-
-					FVector Composition = Node->Data.Composition.GetSafeNormal();
-					Voxel[0] = static_cast<uint8>(Composition.X * 255); // B
-					Voxel[1] = static_cast<uint8>(Composition.Y * 255); // G
-					Voxel[2] = static_cast<uint8>(Composition.Z * 255); // R
-					Voxel[3] = DensityByte; // A
-				}
-				else
-				{
-					Voxel[0] = 0;
-					Voxel[1] = 0;
-					Voxel[2] = 0;
-					Voxel[3] = 0;
-				}
-			};
-
-		// Set properties
-		NewVolumeTexture->SRGB = false;
-		NewVolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
-		NewVolumeTexture->Filter = TF_Nearest;
-		NewVolumeTexture->AddressMode = TA_Clamp;
-		NewVolumeTexture->MipGenSettings = TMGS_NoMipmaps;
-		NewVolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
-		NewVolumeTexture->NeverStream = true;
-
-		// This creates proper Source data that can be saved
-		NewVolumeTexture->UpdateSourceFromFunction(
-			QueryVoxel,
-			Resolution,
-			Resolution,
-			Resolution,
-			ETextureSourceFormat::TSF_BGRA8
-		);
-
-		NewVolumeTexture->UpdateResource();
-		FlushRenderingCommands();
-
 		Package->MarkPackageDirty();
 
 		// Save
@@ -566,7 +447,7 @@ public:
 		SaveArgs.Error = GError;
 		SaveArgs.SaveFlags = SAVE_NoError;
 
-		bool bSaved = UPackage::SavePackage(Package, NewVolumeTexture, *PackageFileName, SaveArgs);
+		bool bSaved = UPackage::SavePackage(Package, InSaveTexture, *PackageFileName, SaveArgs);
 
 		if (bSaved)
 		{
@@ -576,14 +457,5 @@ public:
 		{
 			UE_LOG(LogTemp, Error, TEXT("Failed to save volume texture"));
 		}
-
-		return NewVolumeTexture;
-	}
-
-	FOctree(int64 InExtent) {
-		Extent = InExtent;
-		MaxDepth = static_cast<int32>(FMath::Log2(static_cast<double>(Extent)));
-		DepthMaxDensities.SetNumZeroed(128, true);
-		Root = MakeShared<FOctreeNode>(FInt64Vector(), Extent, TArray<uint8>(), nullptr);
 	}
 };

@@ -12,7 +12,6 @@ UProximityTrackerComponent::UProximityTrackerComponent()
 	// ...
 }
 
-
 void UProximityTrackerComponent::OnProximityUpdate()
 {
 	if (!UniverseActor) return;
@@ -95,7 +94,6 @@ void UProximityTrackerComponent::DebugDrawNode(TSharedPtr<FOctreeNode> InNode)
     );
 }
 
-// Called when the game starts
 void UProximityTrackerComponent::BeginPlay()
 {
     Super::BeginPlay();
@@ -121,8 +119,6 @@ void UProximityTrackerComponent::BeginPlay()
     }
 }
 
-
-// Called every frame
 void UProximityTrackerComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);

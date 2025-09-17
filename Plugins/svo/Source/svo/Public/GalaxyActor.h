@@ -9,6 +9,7 @@
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraSystem.h"
 #include "PointCloudGenerator.h"
+#include "FastNoise/FastNoise.h"
 #include <UniverseActor.h>
 #include "GalaxyActor.generated.h"
 

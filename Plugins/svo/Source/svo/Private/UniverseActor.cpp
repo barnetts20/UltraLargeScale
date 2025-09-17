@@ -75,7 +75,7 @@ void AUniverseActor::InitializeData() {
 	Generator->UniverseParams.Extent = Extent;
 	Generator->Rotation = FRotator(0);
 	Generator->DepthRange = 7;
-	Generator->InsertDepthOffset = 6;
+	Generator->InsertDepthOffset = 5;
 	Generator->GenerateData(Octree);
 	double GenDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Universe generation took: %.3f seconds"), GenDuration);
@@ -95,7 +95,7 @@ void AUniverseActor::FetchData() {
 		FRandomStream RandStream(Node->Data.ObjectId);
 		Rotations[Index] = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
 		Positions[Index] = FVector(Node->Center.X, Node->Center.Y, Node->Center.Z);
-		Extents[Index] = static_cast<float>(Node->Extent * 2);
+		Extents[Index] = static_cast<float>(Node->Extent * 2) * RandStream.FRandRange(.5, 1);
 		Colors[Index] = FLinearColor(Node->Data.Composition);
 	}, EParallelForFlags::BackgroundPriority);
 
@@ -107,42 +107,22 @@ void AUniverseActor::InitializeVolumetric()
 {
 	double StartTime = FPlatformTime::Seconds();
 	int Resolution = 64;
-	auto SampleTextureData = Octree->CreateVolumeDensityDataFromOctree(Resolution);
-	TextureData = Octree->UpscaleVolumeDensityData(SampleTextureData, Resolution, 256);
+	auto SampleTextureData = FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, Resolution);
+	TextureData = FOctreeTextureProcessor::UpscaleVolumeDensityData(SampleTextureData, Resolution, 256); // can add noise here
 	if (TryCleanUpComponents()) return; //Early exit if destroying
 
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	AsyncTask(ENamedThreads::GameThread, [this, Resolution, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
+	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 	{
 		double SourceStart = FPlatformTime::Seconds();
-
-		VolumeTexture = NewObject<UVolumeTexture>(
-			GetTransientPackage(),
-			NAME_None,
-			RF_Transient
-		);
-
-		VolumeTexture->SRGB = false;
-		VolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
-		VolumeTexture->CompressionNone = true;
-		VolumeTexture->Filter = TF_Nearest;
-		VolumeTexture->AddressMode = TA_Clamp;
-		VolumeTexture->MipGenSettings = TMGS_NoMipmaps;
-		VolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
-		VolumeTexture->NeverStream = true;
-		VolumeTexture->DeferCompression = true;
-		VolumeTexture->UnlinkStreaming();
-
-		VolumeTexture->Source.Init(256, 256, 256, 1, ETextureSourceFormat::TSF_BGRA8, TextureData.GetData());
-		VolumeTexture->UpdateResource();
-		FlushRenderingCommands();
 
 		UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(
 			LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_UniverseRaymarch_Inst.MT_UniverseRaymarch_Inst")),
 			this
 		);
 
+		VolumeTexture = FOctreeTextureProcessor::GenerateVolumeTextureFromMipData(TextureData, 256);
 		DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), VolumeTexture);
 		//TODO: Proceduralize material
 
@@ -151,6 +131,7 @@ void AUniverseActor::InitializeVolumetric()
 		VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
 		VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
 		VolumetricComponent->SetMaterial(0, DynamicMaterial);
+		VolumetricComponent->TranslucencySortPriority = 0;
 		VolumetricComponent->RegisterComponent();
 
 
@@ -182,6 +163,7 @@ void AUniverseActor::InitializeNiagara()
 			true,
 			false
 		);
+		NiagaraComponent->TranslucencySortPriority = 0;
 		NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Extent), FVector(Extent)));
 
 		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable

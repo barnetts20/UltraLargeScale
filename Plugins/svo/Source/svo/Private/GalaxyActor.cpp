@@ -35,7 +35,7 @@ void AGalaxyActor::Initialize()
 	{
 		double StartTime = FPlatformTime::Seconds();
 
-		FPlatformProcess::Sleep(0.1f);
+		FPlatformProcess::Sleep(0.5f);
 		if (TryCleanUpComponents()) return; //Early exit if destroying
 		InitializeData();
 		if (TryCleanUpComponents()) return; //Early exit if destroying
@@ -46,6 +46,7 @@ void AGalaxyActor::Initialize()
 		InitializeNiagara();
 		if (TryCleanUpComponents()) return; //Early exit if destroying
 
+		VolumetricComponent->SetVisibility(true);
 		InitializationState = ELifecycleState::Ready;
 
 		double TotalDuration = FPlatformTime::Seconds() - StartTime;
@@ -98,7 +99,7 @@ void AGalaxyActor::FetchData() {
 		const TSharedPtr<FOctreeNode>& Node = Nodes[Index];
 		FRandomStream RandStream(Node->Data.ObjectId);
 		Positions[Index] = FVector(Node->Center.X, Node->Center.Y, Node->Center.Z);
-		Extents[Index] = static_cast<float>(Node->Extent);
+		Extents[Index] = static_cast<float>(Node->Extent * 2) * RandStream.FRandRange(.5,1);
 		Colors[Index] = FLinearColor(Node->Data.Composition);
 	}, EParallelForFlags::BackgroundPriority);
 
@@ -109,51 +110,36 @@ void AGalaxyActor::FetchData() {
 void AGalaxyActor::InitializeVolumetric()
 {
 	double StartTime = FPlatformTime::Seconds();
-	int Resolution = 64;
-	const TArray<uint8> SampleTextureData = Octree->CreateVolumeDensityDataFromOctree(Resolution);
-	TextureData = Octree->UpscaleVolumeDensityData(SampleTextureData, Resolution, 256);
-	if (TryCleanUpComponents()) return; //Early exit if destroying
+	
+	int Resolution = 32;
+
+	FastNoise::SmartNode<> Noise = FastNoise::NewFromEncodedNodeTree("EwDhetQ/FwAAAAAAAACAPwAAgL8AAIA/DQADAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA==");
+	auto SeedOffset = FastNoise::New<FastNoise::SeedOffset>();
+	SeedOffset->SetSource(Noise);
+	SeedOffset->SetOffset(Seed);
+	auto ScaleNoise = FastNoise::New<FastNoise::DomainScale>();
+	ScaleNoise->SetSource(SeedOffset);
+	ScaleNoise->SetScale(1);
+
+	const TArray<uint8> SampleTextureData = FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, Resolution);
+	TextureData = FOctreeTextureProcessor::UpscaleVolumeDensityData(SampleTextureData, Resolution, 256, ScaleNoise, 1, FVector::ZeroVector, 1.33, Seed);
+	if (TryCleanUpComponents()) return;
 
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	AsyncTask(ENamedThreads::GameThread, [this, Resolution, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
+	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
 			double SourceStart = FPlatformTime::Seconds();
-
-			VolumeTexture = NewObject<UVolumeTexture>(
-				GetTransientPackage(),
-				NAME_None,
-				RF_Transient
-			);
-
-			VolumeTexture->SRGB = false;
-			VolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
-			VolumeTexture->CompressionNone = true;
-			VolumeTexture->Filter = TF_Nearest;
-			VolumeTexture->AddressMode = TA_Clamp;
-			VolumeTexture->MipGenSettings = TMGS_NoMipmaps;
-			VolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
-			VolumeTexture->NeverStream = true;
-			VolumeTexture->DeferCompression = true;
-			VolumeTexture->UnlinkStreaming();
-
-			VolumeTexture->Source.Init(256, 256, 256, 1, ETextureSourceFormat::TSF_BGRA8, TextureData.GetData());
-			VolumeTexture->UpdateResource();
-			FlushRenderingCommands();
-
 			UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(
 				LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_GalaxyRaymarch_Inst.MT_GalaxyRaymarch_Inst")),
 				this
 			);
+			VolumeTexture = FOctreeTextureProcessor::GenerateVolumeTextureFromMipData(TextureData, 256);
+			UVolumeTexture* NoiseTexture = LoadObject<UVolumeTexture>(nullptr, *GalaxyGenerator.GalaxyParams.VolumeNoise);
 
 			DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), VolumeTexture);
-
-
-			UVolumeTexture* NoiseTexture = LoadObject<UVolumeTexture>(nullptr, *GalaxyGenerator.GalaxyParams.VolumeNoise);
-			if (VolumeTexture)
-			{
-				DynamicMaterial->SetTextureParameterValue(FName("NoiseTexture"), NoiseTexture);
-			}
+			DynamicMaterial->SetTextureParameterValue(FName("NoiseTexture"), NoiseTexture);
+			
 			DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), GalaxyGenerator.GalaxyParams.VolumeAmbientColor);
 			DynamicMaterial->SetVectorParameterValue(FName("CoolShift"), GalaxyGenerator.GalaxyParams.VolumeCoolShift);
 			DynamicMaterial->SetVectorParameterValue(FName("HotShift"), GalaxyGenerator.GalaxyParams.VolumeHotShift);
@@ -166,16 +152,14 @@ void AGalaxyActor::InitializeVolumetric()
 			DynamicMaterial->SetScalarParameterValue(FName("WarpAmount"), GalaxyGenerator.GalaxyParams.VolumeWarpAmount);
 			DynamicMaterial->SetScalarParameterValue(FName("WarpScale"), GalaxyGenerator.GalaxyParams.VolumeWarpScale);
 
-			//NoiseDomainOffset
-
 			VolumetricComponent = NewObject<UStaticMeshComponent>(this);
+			VolumetricComponent->SetVisibility(false);
 			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));
 			VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
 			VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-			//VolumetricComponent->SetRelativeLocation(FVector(0.0f, 0.0f, .02 * Extent)); //Bump up slightly to account for insertion offset
 			VolumetricComponent->SetMaterial(0, DynamicMaterial);
+			VolumetricComponent->TranslucencySortPriority = 1;
 			VolumetricComponent->RegisterComponent();
-
 
 			double SourceDuration = FPlatformTime::Seconds() - SourceStart;
 			UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::VolumeTexture Source.Init & Update took: %.3f seconds"), SourceDuration);
@@ -207,6 +191,7 @@ void AGalaxyActor::InitializeNiagara()
 		);
 		NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Extent), FVector(Extent)));
 		NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Extent);
+		NiagaraComponent->TranslucencySortPriority = 1;
 
 		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
