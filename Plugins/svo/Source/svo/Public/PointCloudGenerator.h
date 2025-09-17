@@ -342,6 +342,7 @@ public:
 	void GenerateClusters();
 	void GenerateDisc();
 	void GenerateBackground();
+	void ApplyRotation();
 	void GenerateCluster(int InSeed, FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity = 1, double InDepthBias = 1);
 	int ChooseDepth(double InRandomSample, double InDepthBias);
 	void MarkDestroying();

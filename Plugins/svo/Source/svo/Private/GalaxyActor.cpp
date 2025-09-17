@@ -77,7 +77,7 @@ void AGalaxyActor::InitializeData() {
 	GalaxyGenerator.Seed = Seed;
 	GalaxyGenerator.DepthRange = 7; //With seven levels, assuming our smallest star is say 1/2 the size of the sun, we can cover the vast majority of potential realistic star scales
 	GalaxyGenerator.InsertDepthOffset = 8; //Controlls the depth above max depth the smallest stars will be generated in
-
+	GalaxyGenerator.Rotation = FRotator(Stream.FRandRange(-45, 45), Stream.FRandRange(-45, 45), Stream.FRandRange(-45, 45));
 	GalaxyParamFactory GalaxyParamGen;
 	GalaxyParamGen.Seed = this->Seed;
 

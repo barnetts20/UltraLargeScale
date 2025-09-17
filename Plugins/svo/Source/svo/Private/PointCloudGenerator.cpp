@@ -873,8 +873,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sa_Max.ArmClusters = 256;
 	Sa_Min.ArmDepthBias = .4;
 	Sa_Max.ArmDepthBias = .6;
-	Sa_Min.ArmHeightRatio = .15;
-	Sa_Max.ArmHeightRatio = .5;
+	Sa_Min.ArmHeightRatio = .2;
+	Sa_Max.ArmHeightRatio = .8;
 	Sa_Min.ArmIncoherence = 3;
 	Sa_Max.ArmIncoherence = 8;
 	Sa_Min.ArmNumArms = 2;
@@ -974,8 +974,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sb_Max.ArmClusters = 256;
 	Sb_Min.ArmDepthBias = .4;
 	Sb_Max.ArmDepthBias = .6;
-	Sb_Min.ArmHeightRatio = .15;
-	Sb_Max.ArmHeightRatio = .5;
+	Sb_Min.ArmHeightRatio = .2;
+	Sb_Max.ArmHeightRatio = .8;
 	Sb_Min.ArmIncoherence = 5;
 	Sb_Max.ArmIncoherence = 10;
 	Sb_Min.ArmNumArms = 2;
@@ -1076,8 +1076,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sc_Max.ArmClusters = 256;
 	Sc_Min.ArmDepthBias = .4;
 	Sc_Max.ArmDepthBias = .6;
-	Sc_Min.ArmHeightRatio = .15;
-	Sc_Max.ArmHeightRatio = .5;
+	Sc_Min.ArmHeightRatio = .2;
+	Sc_Max.ArmHeightRatio = .8;
 	Sc_Min.ArmIncoherence = 2;
 	Sc_Max.ArmIncoherence = 6;
 	Sc_Min.ArmNumArms = 3;
@@ -1183,8 +1183,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBa_Max.ArmClusters = 256;
 	SBa_Min.ArmDepthBias = .4;
 	SBa_Max.ArmDepthBias = .6;
-	SBa_Min.ArmHeightRatio = .15;
-	SBa_Max.ArmHeightRatio = .5;
+	SBa_Min.ArmHeightRatio = .2;
+	SBa_Max.ArmHeightRatio = .8;
 	SBa_Min.ArmIncoherence = 3;
 	SBa_Max.ArmIncoherence = 8;
 	SBa_Min.ArmNumArms = 2;
@@ -1289,8 +1289,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBb_Max.ArmClusters = 256;
 	SBb_Min.ArmDepthBias = .4;
 	SBb_Max.ArmDepthBias = .6;
-	SBb_Min.ArmHeightRatio = .15;
-	SBb_Max.ArmHeightRatio = .5;
+	SBb_Min.ArmHeightRatio = .2;
+	SBb_Max.ArmHeightRatio = .8;
 	SBb_Min.ArmIncoherence = 5;
 	SBb_Max.ArmIncoherence = 10;
 	SBb_Min.ArmNumArms = 2;
@@ -1395,8 +1395,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBc_Max.ArmClusters = 256;
 	SBc_Min.ArmDepthBias = .4;
 	SBc_Max.ArmDepthBias = .6;
-	SBc_Min.ArmHeightRatio = .15;
-	SBc_Max.ArmHeightRatio = .5;
+	SBc_Min.ArmHeightRatio = .2;
+	SBc_Max.ArmHeightRatio = .8;
 	SBc_Min.ArmIncoherence = 6;
 	SBc_Max.ArmIncoherence = 12;
 	SBc_Min.ArmNumArms = 2;
@@ -1709,7 +1709,8 @@ void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 	//if (IsDestroying) return;
 	GenerateBackground();
 	//if (IsDestroying) return;
-
+	ApplyRotation();
+	//if (IsDestroying) return;
 	//TODO: Might be worth while to create a specific gas distribution and explicitly insert it at the desired depth for the volume texture
 
 	//Accumulate Zero Vectors and Void stars into black hole
@@ -1942,6 +1943,14 @@ void GalaxyGenerator::GenerateDisc()
 void GalaxyGenerator::GenerateBackground()
 {
 	GenerateCluster(Seed + 123456789, FVector::ZeroVector, FVector(MaxRadius, MaxRadius, MaxRadius * GalaxyParams.BackgroundHeightRatio), GalaxyParams.BackgroundNumPoints, GalaxyParams.BackgroundBaseDensity, GalaxyParams.BackgroundDepthBias);
+}
+
+void GalaxyGenerator::ApplyRotation() {
+	ParallelFor(GeneratedData.Num(), [&](int32 i)
+		{
+			GeneratedData[i].Position = RotateCoordinate(GeneratedData[i].Position, Rotation);
+		}
+	);
 }
 
 void GalaxyGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity, double InDepthBias) //add falloff or curve param
