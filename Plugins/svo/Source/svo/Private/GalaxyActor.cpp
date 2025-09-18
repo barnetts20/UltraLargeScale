@@ -35,7 +35,7 @@ void AGalaxyActor::Initialize()
 	{
 		double StartTime = FPlatformTime::Seconds();
 
-		FPlatformProcess::Sleep(0.5f);
+		//FPlatformProcess::Sleep(0.5f);
 		if (TryCleanUpComponents()) return; //Early exit if destroying
 		InitializeData();
 		if (TryCleanUpComponents()) return; //Early exit if destroying

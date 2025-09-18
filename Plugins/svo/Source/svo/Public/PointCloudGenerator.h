@@ -2,7 +2,7 @@
 
 #pragma once
 #include <DataTypes.h>
-#include <FOctreeNode.h>
+#include <FOctree.h>
 #include "FastNoise/FastNoise.h"
 #include "CoreMinimal.h"
 
@@ -199,15 +199,16 @@ struct SVO_API GalaxyParams {
 	int ArmClusters = 124; //Number of clusters per arm
 	double ArmDepthBias = .5; //Smaller number = more large stars, larger number = more small stars, at 1 it will use a basic stellar size distribution table
 	double ArmBaseDensity = 3; //Base density factor
-	double ArmSpreadFactor = .25; //Base cluster scale
 	double ArmClusterRadiusMin = .05; //Cluster scale ramp start  
 	double ArmClusterRadiusMax = .3; //Cluster scale ramp end
+	double ArmSpreadMin = .05; //Base cluster scale
+	double ArmSpreadMax = .3; //Height value = more scattered arms
 	double ArmStartRatio = .5; //Where will the arm start relative to the bulge
 	double ArmHeightRatio = .5; //Height squish
-	double ArmIncoherence = 6; //Height value = more scattered arms
+	double ArmProgressExponent = 1;
 	double ArmRadialDensityExponent = 2; //Density falloff towards center
-	double ArmRadialDensityMultiplier = 8; //Density multiplier as points are further from center
-	double ArmRadialBaseDensity = .5; //Min radial density multiplier
+	double ArmRadialDensityMax = 8; //Density multiplier as points are further from center
+	double ArmRadialDensityMin = .5; //Min radial density multiplier
 
 	//Bulge Params - Controls the galactic bulge
 	int BulgeNumPoints = 75000;

@@ -847,7 +847,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sa.ArmNumArms = 2;
 	Sa.ArmClusterRadiusMin = .15;
 	Sa.ArmClusterRadiusMax = .4;
-	Sa.ArmIncoherence = 3;
+	Sa.ArmSpreadMax = 3;
 	Sa.ArmStartRatio = 0;
 #pragma endregion
 #pragma region Sa Bounds
@@ -865,30 +865,32 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sa_Max.DiscNumPoints = 100000;
 	Sa_Min.ArmBaseDensity = 1;
 	Sa_Max.ArmBaseDensity = 4;
-	Sa_Min.ArmClusterRadiusMax = .15;
-	Sa_Max.ArmClusterRadiusMax = .45;
 	Sa_Min.ArmClusterRadiusMin = .025;
 	Sa_Max.ArmClusterRadiusMin = .1;
-	Sa_Min.ArmClusters = 64;
+	Sa_Min.ArmClusterRadiusMax = .15;
+	Sa_Max.ArmClusterRadiusMax = .45;
+	Sa_Min.ArmSpreadMin = .05;
+	Sa_Max.ArmSpreadMin = .15;
+	Sa_Min.ArmSpreadMax = .2;
+	Sa_Max.ArmSpreadMax = .5;
+	Sa_Min.ArmProgressExponent = .5;
+	Sa_Max.ArmProgressExponent = 2;
+	Sa_Min.ArmClusters = 128;
 	Sa_Max.ArmClusters = 256;
 	Sa_Min.ArmDepthBias = .4;
 	Sa_Max.ArmDepthBias = .6;
 	Sa_Min.ArmHeightRatio = .2;
 	Sa_Max.ArmHeightRatio = .8;
-	Sa_Min.ArmIncoherence = 3;
-	Sa_Max.ArmIncoherence = 8;
 	Sa_Min.ArmNumArms = 2;
 	Sa_Max.ArmNumArms = 2;
 	Sa_Min.ArmNumPoints = 75000;
 	Sa_Max.ArmNumPoints = 125000;
-	Sa_Min.ArmRadialBaseDensity = .1;
-	Sa_Max.ArmRadialBaseDensity = 1;
+	Sa_Min.ArmRadialDensityMin = .1;
+	Sa_Max.ArmRadialDensityMin = 1;
 	Sa_Min.ArmRadialDensityExponent = 1;
 	Sa_Max.ArmRadialDensityExponent = 3;
-	Sa_Min.ArmRadialDensityMultiplier = 2;
-	Sa_Max.ArmRadialDensityMultiplier = 12;
-	Sa_Min.ArmSpreadFactor = .25;
-	Sa_Max.ArmSpreadFactor = .5;
+	Sa_Min.ArmRadialDensityMax = 2;
+	Sa_Max.ArmRadialDensityMax = 12;
 	Sa_Min.ArmStartRatio = .25;
 	Sa_Max.ArmStartRatio = .5;
 	Sa_Min.TwistCoreRadius = .005;
@@ -948,7 +950,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 #pragma region Sb Archtype
 	Sb.TwistStrength = 12;
 	Sb.ArmNumArms = 2;
-	Sb.ArmIncoherence = 6;
+	Sb.ArmSpreadMax = 6;
 	Sb.ArmStartRatio = 0;
 #pragma endregion
 #pragma region Sb Bounds
@@ -966,30 +968,32 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sb_Max.DiscNumPoints = 100000;
 	Sb_Min.ArmBaseDensity = 1;
 	Sb_Max.ArmBaseDensity = 4;
-	Sb_Min.ArmClusterRadiusMax = .15;
-	Sb_Max.ArmClusterRadiusMax = .45;
 	Sb_Min.ArmClusterRadiusMin = .025;
 	Sb_Max.ArmClusterRadiusMin = .1;
-	Sb_Min.ArmClusters = 64;
+	Sb_Min.ArmClusterRadiusMax = .15;
+	Sb_Max.ArmClusterRadiusMax = .45;
+	Sb_Min.ArmSpreadMin = .05;
+	Sb_Max.ArmSpreadMin = .15;
+	Sb_Min.ArmSpreadMax = .2;
+	Sb_Max.ArmSpreadMax = .5;
+	Sb_Min.ArmProgressExponent = .5;
+	Sb_Max.ArmProgressExponent = 2;
+	Sb_Min.ArmClusters = 128;
 	Sb_Max.ArmClusters = 256;
 	Sb_Min.ArmDepthBias = .4;
 	Sb_Max.ArmDepthBias = .6;
 	Sb_Min.ArmHeightRatio = .2;
 	Sb_Max.ArmHeightRatio = .8;
-	Sb_Min.ArmIncoherence = 5;
-	Sb_Max.ArmIncoherence = 10;
 	Sb_Min.ArmNumArms = 2;
 	Sb_Max.ArmNumArms = 2;
 	Sb_Min.ArmNumPoints = 100000;
 	Sb_Max.ArmNumPoints = 150000;
-	Sb_Min.ArmRadialBaseDensity = .1;
-	Sb_Max.ArmRadialBaseDensity = 1;
+	Sb_Min.ArmRadialDensityMin = .1;
+	Sb_Max.ArmRadialDensityMin = 1;
 	Sb_Min.ArmRadialDensityExponent = 1;
 	Sb_Max.ArmRadialDensityExponent = 3;
-	Sb_Min.ArmRadialDensityMultiplier = 2;
-	Sb_Max.ArmRadialDensityMultiplier = 12;
-	Sb_Min.ArmSpreadFactor = .25;
-	Sb_Max.ArmSpreadFactor = .5;
+	Sb_Min.ArmRadialDensityMax = 2;
+	Sb_Max.ArmRadialDensityMax = 12;
 	Sb_Min.ArmStartRatio = .25;
 	Sb_Max.ArmStartRatio = .5;
 	Sb_Min.TwistCoreRadius = .01;
@@ -1049,7 +1053,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 #pragma region Sc Archtype
 	Sc.TwistStrength = 8;
 	Sc.ArmNumArms = 4;
-	Sc.ArmIncoherence = 8;
+	Sc.ArmSpreadMax = 8;
 	Sc.ArmStartRatio = 0;
 	Sc.TwistCoreRadius = .02;
 #pragma endregion
@@ -1068,30 +1072,32 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sc_Max.DiscNumPoints = 100000;
 	Sc_Min.ArmBaseDensity = 1;
 	Sc_Max.ArmBaseDensity = 4;
-	Sc_Min.ArmClusterRadiusMax = .15;
-	Sc_Max.ArmClusterRadiusMax = .45;
 	Sc_Min.ArmClusterRadiusMin = .025;
 	Sc_Max.ArmClusterRadiusMin = .1;
-	Sc_Min.ArmClusters = 64;
+	Sc_Min.ArmClusterRadiusMax = .15;
+	Sc_Max.ArmClusterRadiusMax = .45;
+	Sc_Min.ArmSpreadMin = .05;
+	Sc_Max.ArmSpreadMin = .15;
+	Sc_Min.ArmSpreadMax = .2;
+	Sc_Max.ArmSpreadMax = .5;
+	Sc_Min.ArmProgressExponent = .5;
+	Sc_Max.ArmProgressExponent = 2;
+	Sc_Min.ArmClusters = 128;
 	Sc_Max.ArmClusters = 256;
 	Sc_Min.ArmDepthBias = .4;
 	Sc_Max.ArmDepthBias = .6;
 	Sc_Min.ArmHeightRatio = .2;
 	Sc_Max.ArmHeightRatio = .8;
-	Sc_Min.ArmIncoherence = 2;
-	Sc_Max.ArmIncoherence = 6;
 	Sc_Min.ArmNumArms = 3;
 	Sc_Max.ArmNumArms = 8;
 	Sc_Min.ArmNumPoints = 100000;
 	Sc_Max.ArmNumPoints = 200000;
-	Sc_Min.ArmRadialBaseDensity = .1;
-	Sc_Max.ArmRadialBaseDensity = 1;
+	Sc_Min.ArmRadialDensityMin = .1;
+	Sc_Max.ArmRadialDensityMin = 1;
 	Sc_Min.ArmRadialDensityExponent = 1;
 	Sc_Max.ArmRadialDensityExponent = 3;
-	Sc_Min.ArmRadialDensityMultiplier = 2;
-	Sc_Max.ArmRadialDensityMultiplier = 12;
-	Sc_Min.ArmSpreadFactor = .25;
-	Sc_Max.ArmSpreadFactor = .5;
+	Sc_Min.ArmRadialDensityMax = 2;
+	Sc_Max.ArmRadialDensityMax = 12;
 	Sc_Min.ArmStartRatio = .25;
 	Sc_Max.ArmStartRatio = .5;
 	Sc_Min.TwistCoreRadius = .01;
@@ -1156,7 +1162,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBa.ArmNumArms = 2;
 	SBa.ArmClusterRadiusMin = .05;
 	SBa.ArmClusterRadiusMax = .4;
-	SBa.ArmIncoherence = 2;
+	SBa.ArmSpreadMax = 2;
 	SBa.ArmHeightRatio = .5;
 	SBa.ArmStartRatio = 0.0;
 #pragma endregion
@@ -1175,30 +1181,32 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBa_Max.DiscNumPoints = 100000;
 	SBa_Min.ArmBaseDensity = 1;
 	SBa_Max.ArmBaseDensity = 4;
-	SBa_Min.ArmClusterRadiusMax = .15;
-	SBa_Max.ArmClusterRadiusMax = .45;
 	SBa_Min.ArmClusterRadiusMin = .025;
 	SBa_Max.ArmClusterRadiusMin = .1;
-	SBa_Min.ArmClusters = 64;
+	SBa_Min.ArmClusterRadiusMax = .15;
+	SBa_Max.ArmClusterRadiusMax = .45;
+	SBa_Min.ArmSpreadMin = .05;
+	SBa_Max.ArmSpreadMin = .15;
+	SBa_Min.ArmSpreadMax = .2;
+	SBa_Max.ArmSpreadMax = .5;
+	SBa_Min.ArmProgressExponent = .5;
+	SBa_Max.ArmProgressExponent = 2;
+	SBa_Min.ArmClusters = 128;
 	SBa_Max.ArmClusters = 256;
 	SBa_Min.ArmDepthBias = .4;
 	SBa_Max.ArmDepthBias = .6;
 	SBa_Min.ArmHeightRatio = .2;
 	SBa_Max.ArmHeightRatio = .8;
-	SBa_Min.ArmIncoherence = 3;
-	SBa_Max.ArmIncoherence = 8;
 	SBa_Min.ArmNumArms = 2;
 	SBa_Max.ArmNumArms = 2;
 	SBa_Min.ArmNumPoints = 100000;
 	SBa_Max.ArmNumPoints = 200000;
-	SBa_Min.ArmRadialBaseDensity = .1;
-	SBa_Max.ArmRadialBaseDensity = 1;
+	SBa_Min.ArmRadialDensityMin = .1;
+	SBa_Max.ArmRadialDensityMin = 1;
 	SBa_Min.ArmRadialDensityExponent = 1;
 	SBa_Max.ArmRadialDensityExponent = 3;
-	SBa_Min.ArmRadialDensityMultiplier = 2;
-	SBa_Max.ArmRadialDensityMultiplier = 12;
-	SBa_Min.ArmSpreadFactor = .25;
-	SBa_Max.ArmSpreadFactor = .5;
+	SBa_Min.ArmRadialDensityMax = 2;
+	SBa_Max.ArmRadialDensityMax = 12;
 	SBa_Min.ArmStartRatio = 0;
 	SBa_Max.ArmStartRatio = 0.2;
 	SBa_Min.TwistCoreRadius = .005;
@@ -1262,7 +1270,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBb.ArmNumArms = 2;
 	SBb.ArmClusterRadiusMin = .05;
 	SBb.ArmClusterRadiusMax = .25;
-	SBb.ArmIncoherence = 8;
+	SBb.ArmSpreadMax = 8;
 	SBb.ArmHeightRatio = .5;
 	SBb.ArmStartRatio = 0;
 #pragma endregion
@@ -1281,30 +1289,32 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBb_Max.DiscNumPoints = 100000;
 	SBb_Min.ArmBaseDensity = 1;
 	SBb_Max.ArmBaseDensity = 4;
-	SBb_Min.ArmClusterRadiusMax = .15;
-	SBb_Max.ArmClusterRadiusMax = .45;
 	SBb_Min.ArmClusterRadiusMin = .025;
 	SBb_Max.ArmClusterRadiusMin = .1;
-	SBb_Min.ArmClusters = 64;
+	SBb_Min.ArmClusterRadiusMax = .15;
+	SBb_Max.ArmClusterRadiusMax = .45;
+	SBb_Min.ArmSpreadMin = .05;
+	SBb_Max.ArmSpreadMin = .15;
+	SBb_Min.ArmSpreadMax = .2;
+	SBb_Max.ArmSpreadMax = .5;
+	SBb_Min.ArmProgressExponent = .5;
+	SBb_Max.ArmProgressExponent = 2;
+	SBb_Min.ArmClusters = 128;
 	SBb_Max.ArmClusters = 256;
 	SBb_Min.ArmDepthBias = .4;
 	SBb_Max.ArmDepthBias = .6;
 	SBb_Min.ArmHeightRatio = .2;
 	SBb_Max.ArmHeightRatio = .8;
-	SBb_Min.ArmIncoherence = 5;
-	SBb_Max.ArmIncoherence = 10;
 	SBb_Min.ArmNumArms = 2;
 	SBb_Max.ArmNumArms = 2;
 	SBb_Min.ArmNumPoints = 100000;
 	SBb_Max.ArmNumPoints = 200000;
-	SBb_Min.ArmRadialBaseDensity = .1;
-	SBb_Max.ArmRadialBaseDensity = 1;
+	SBb_Min.ArmRadialDensityMin = .1;
+	SBb_Max.ArmRadialDensityMin = 1;
 	SBb_Min.ArmRadialDensityExponent = 1;
 	SBb_Max.ArmRadialDensityExponent = 3;
-	SBb_Min.ArmRadialDensityMultiplier = 2;
-	SBb_Max.ArmRadialDensityMultiplier = 12;
-	SBb_Min.ArmSpreadFactor = .25;
-	SBb_Max.ArmSpreadFactor = .5;
+	SBb_Min.ArmRadialDensityMax = 2;
+	SBb_Max.ArmRadialDensityMax = 12;
 	SBb_Min.ArmStartRatio = 0;
 	SBb_Max.ArmStartRatio = .1;
 	SBb_Min.TwistCoreRadius = 01;
@@ -1368,7 +1378,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBc.ArmNumArms = 2;
 	SBc.ArmClusterRadiusMin = .05;
 	SBc.ArmClusterRadiusMax = .3;
-	SBc.ArmIncoherence = 8;
+	SBc.ArmSpreadMax = 8;
 	SBc.ArmHeightRatio = .5;
 	SBc.ArmStartRatio = 0;
 #pragma endregion
@@ -1387,30 +1397,32 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBc_Max.DiscNumPoints = 100000;
 	SBc_Min.ArmBaseDensity = 2;
 	SBc_Max.ArmBaseDensity = 4;
-	SBc_Min.ArmClusterRadiusMax = .15;
-	SBc_Max.ArmClusterRadiusMax = .45;
 	SBc_Min.ArmClusterRadiusMin = .025;
 	SBc_Max.ArmClusterRadiusMin = .1;
-	SBc_Min.ArmClusters = 64;
+	SBc_Min.ArmClusterRadiusMax = .15;
+	SBc_Max.ArmClusterRadiusMax = .45;
+	SBc_Min.ArmSpreadMin = .05;
+	SBc_Max.ArmSpreadMin = .15;
+	SBc_Min.ArmSpreadMax = .2;
+	SBc_Max.ArmSpreadMax = .5;
+	SBc_Min.ArmProgressExponent = .5;
+	SBc_Max.ArmProgressExponent = 2;
+	SBc_Min.ArmClusters = 128;
 	SBc_Max.ArmClusters = 256;
 	SBc_Min.ArmDepthBias = .4;
 	SBc_Max.ArmDepthBias = .6;
 	SBc_Min.ArmHeightRatio = .2;
 	SBc_Max.ArmHeightRatio = .8;
-	SBc_Min.ArmIncoherence = 6;
-	SBc_Max.ArmIncoherence = 12;
 	SBc_Min.ArmNumArms = 2;
 	SBc_Max.ArmNumArms = 2;
 	SBc_Min.ArmNumPoints = 100000;
 	SBc_Max.ArmNumPoints = 200000;
-	SBc_Min.ArmRadialBaseDensity = .1;
-	SBc_Max.ArmRadialBaseDensity = 1;
+	SBc_Min.ArmRadialDensityMin = .1;
+	SBc_Max.ArmRadialDensityMin = 1;
 	SBc_Min.ArmRadialDensityExponent = 1;
 	SBc_Max.ArmRadialDensityExponent = 3;
-	SBc_Min.ArmRadialDensityMultiplier = 2;
-	SBc_Max.ArmRadialDensityMultiplier = 12;
-	SBc_Min.ArmSpreadFactor = .25;
-	SBc_Max.ArmSpreadFactor = .5;
+	SBc_Min.ArmRadialDensityMax = 2;
+	SBc_Max.ArmRadialDensityMax = 12;
 	SBc_Min.ArmStartRatio = 0;
 	SBc_Max.ArmStartRatio = .1;
 	SBc_Min.TwistCoreRadius = 01;
@@ -1580,12 +1592,12 @@ GalaxyParams GalaxyParamFactory::BoundedRandomizeParams(GalaxyParams MinParams, 
 	Params.ArmClusters = Stream.RandRange(MinParams.ArmClusters, MaxParams.ArmClusters);
 	Params.ArmDepthBias = Stream.FRandRange(MinParams.ArmDepthBias, MaxParams.ArmDepthBias);
 	Params.ArmHeightRatio = Stream.FRandRange(MinParams.ArmHeightRatio, MaxParams.ArmHeightRatio);
-	Params.ArmIncoherence = Stream.FRandRange(MinParams.ArmIncoherence, MaxParams.ArmIncoherence);
+	Params.ArmSpreadMax = Stream.FRandRange(MinParams.ArmSpreadMax, MaxParams.ArmSpreadMax);
 	Params.ArmNumArms = Stream.RandRange(MinParams.ArmNumArms, MaxParams.ArmNumArms);
 	Params.ArmNumPoints = Stream.RandRange(MinParams.ArmNumPoints, MaxParams.ArmNumPoints);
 	Params.ArmRadialDensityExponent = Stream.FRandRange(MinParams.ArmRadialDensityExponent, MaxParams.ArmRadialDensityExponent);
-	Params.ArmRadialDensityMultiplier = Stream.FRandRange(MinParams.ArmRadialDensityMultiplier, MaxParams.ArmRadialDensityMultiplier);
-	Params.ArmSpreadFactor = Stream.FRandRange(MinParams.ArmSpreadFactor, MaxParams.ArmSpreadFactor);
+	Params.ArmRadialDensityMax = Stream.FRandRange(MinParams.ArmRadialDensityMax, MaxParams.ArmRadialDensityMax);
+	Params.ArmSpreadMin = Stream.FRandRange(MinParams.ArmSpreadMin, MaxParams.ArmSpreadMin);
 	Params.ArmStartRatio = Stream.FRandRange(MinParams.ArmStartRatio, MaxParams.ArmStartRatio);
 
 	//Background
@@ -1718,20 +1730,21 @@ void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 	BlackHole.ObjectId = INT32_MAX;
 	BlackHole.TypeId = 1;
 	
-	ParallelFor(GeneratedData.Num(), [this, InOctree, &BlackHole](int32 i)
-		{
-			FRandomStream Stream(i);
-			FPointData InsertData = GeneratedData[i];
+	//ParallelFor(GeneratedData.Num(), [this, InOctree, &BlackHole](int32 i)
+	//	{
+	for (int i = 0; i < GeneratedData.Num(); i++){
+		FPointData InsertData = GeneratedData[i];
 
-			if (InsertData.Position.Size() < VoidRadius) { //Any insert failures or nodes within void radius get fed to the black hole
-				BlackHole.Density += InsertData.Data.Density;
-				BlackHole.Composition += InsertData.Data.Composition;
-			}
-			else {
-				InsertData.Position = RotateCoordinate(InsertData.Position, Rotation);
-				InOctree->InsertPosition(InsertData.GetInt64Position(), InsertData.InsertDepth, InsertData.Data); //Need to make insert accummulate density for repeated inserts, and then we can use the zero vectors to populate the black hole
-			}
-		});
+		if (InsertData.Position.Size() < VoidRadius) { //Any insert failures or nodes within void radius get fed to the black hole
+			BlackHole.Density += InsertData.Data.Density;
+			BlackHole.Composition += InsertData.Data.Composition;
+		}
+		else {
+			InsertData.Position = RotateCoordinate(InsertData.Position, Rotation);
+			InOctree->InsertPosition(InsertData.GetInt64Position(), InsertData.InsertDepth, InsertData.Data); //Need to make insert accummulate density for repeated inserts, and then we can use the zero vectors to populate the black hole
+		}
+	}
+	//	});
 
 	BlackHole.Density = 1; // Should be accumulated below but that affects gas distribution, hard setting for now, can switch back if we do an explicit gas population stage
 
@@ -1881,10 +1894,19 @@ void GalaxyGenerator::GenerateClusters()
 
 void GalaxyGenerator::GenerateArms()
 {
-	int StarsPerCluster = (GalaxyParams.ArmNumPoints / GalaxyParams.ArmNumArms) / GalaxyParams.ArmClusters;
-	double Rd = GalaxyRadius;
-	double BaseWidth = GalaxyRadius * GalaxyParams.ArmClusterRadiusMin;
-	double WidthScale = GalaxyRadius * GalaxyParams.ArmClusterRadiusMax;
+	int StarsPerCluster = (GalaxyParams.ArmNumPoints / GalaxyParams.ArmNumArms) / GalaxyParams.ArmClusters; // should have some degree of randomization
+	double MinScale = GalaxyRadius * GalaxyParams.ArmClusterRadiusMin;
+	double MaxScale = GalaxyRadius * GalaxyParams.ArmClusterRadiusMax;
+	double MinJitter = GalaxyRadius * GalaxyParams.ArmSpreadMin;
+	double MaxJitter = GalaxyRadius * GalaxyParams.ArmSpreadMax;
+
+	double MinScaleVariance = .5;
+	double MaxScaleVariance = 1.5;
+	double MinJitterVariance = .5;
+	double MaxJitterVariance = 1.5;
+
+	double ProgressExponent = GalaxyParams.ArmProgressExponent;
+
 	FRandomStream Stream(Seed + 1337);
 	for (int ArmIndex = 0; ArmIndex < GalaxyParams.ArmNumArms; ArmIndex++)
 	{
@@ -1892,24 +1914,19 @@ void GalaxyGenerator::GenerateArms()
 		FVector ArmDir(FMath::Cos(BaseAngle), FMath::Sin(BaseAngle), 0);
 		for (int c = 0; c < GalaxyParams.ArmClusters; c++)
 		{
-			double u = Stream.FRand();
-			double Dist = -Rd * FMath::Loge(1.0 - u);
-			Dist = FMath::Clamp(Dist, BulgeRadius * GalaxyParams.ArmStartRatio, GalaxyRadius);
-			Dist = FMath::Clamp(Dist, 0, GalaxyRadius);
-			FVector Center = ArmDir * Dist;
-			double ArmWidth = BaseWidth + WidthScale * (Dist / GalaxyRadius);
+			double Dist = FMath::Clamp(-GalaxyRadius * FMath::Loge(1.0 - Stream.FRand()), FMath::Max(0,BulgeRadius * GalaxyParams.ArmStartRatio), GalaxyRadius);
+			double Progress = Dist / GalaxyRadius;
+			double ExpProgress = FMath::Pow(Progress, ProgressExponent);
+			FVector Center = ArmDir * Dist + FMath::Lerp(MinJitter, MaxJitter, ExpProgress) * Stream.GetUnitVector() * Stream.FRandRange(MinJitterVariance, MaxJitterVariance);
+			double ArmWidth = FMath::Lerp(MinScale,MaxScale, ExpProgress) * Stream.FRandRange(MinScaleVariance, MaxScaleVariance);
+			
 			FVector Radius(
-				ArmWidth * GalaxyParams.ArmSpreadFactor,
-				ArmWidth * GalaxyParams.ArmSpreadFactor,
-				ArmWidth * GalaxyParams.ArmHeightRatio * GalaxyParams.ArmSpreadFactor
+				ArmWidth,
+				ArmWidth,
+				ArmWidth * GalaxyParams.ArmHeightRatio
 			);
-			FVector Jitter(
-				Stream.FRandRange(-Radius.X, Radius.X) * GalaxyParams.ArmIncoherence,
-				Stream.FRandRange(-Radius.Y, Radius.Y) * GalaxyParams.ArmIncoherence,
-				Stream.FRandRange(-Radius.Z, Radius.Z) * GalaxyParams.ArmIncoherence
-			);
-			Center += Jitter;
-			double DensityCoef = FMath::Pow(Center.Length() / GalaxyRadius, GalaxyParams.ArmRadialDensityExponent) * GalaxyParams.ArmRadialDensityMultiplier + GalaxyParams.ArmRadialBaseDensity;
+
+			double DensityCoef = FMath::Lerp(GalaxyParams.ArmRadialDensityMin, GalaxyParams.ArmRadialDensityMax, FMath::Pow(Progress, GalaxyParams.ArmRadialDensityExponent)); //todo: May need a look
 			GenerateCluster(ArmIndex + c + 123, Center, Radius, StarsPerCluster, GalaxyParams.ArmBaseDensity * DensityCoef, GalaxyParams.ArmDepthBias);
 		}
 	}
