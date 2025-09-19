@@ -110,22 +110,19 @@ void AUniverseActor::InitializeVolumetric()
 	auto SampleTextureData = FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, Resolution);
 	TextureData = FOctreeTextureProcessor::UpscaleVolumeDensityData(SampleTextureData, Resolution, 256); // can add noise here
 	if (TryCleanUpComponents()) return; //Early exit if destroying
-	
-	UTexture2D* PsuedoVolumeTexture = FOctreeTextureProcessor::GeneratePsuedoVolumeTextureFromMipData(TextureData, 256);
 
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise), psv = MoveTemp(PsuedoVolumeTexture), std = MoveTemp(SampleTextureData)]() mutable
+	UTexture2D* PsuedoVolumeTexture = FOctreeTextureProcessor::GeneratePsuedoVolumeTextureFromMipData(TextureData, 256); //Async texture generation
+	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise), PsuedoVolumeTexture]() mutable
 	{
 		double SourceStart = FPlatformTime::Seconds();
-		FOctreeTextureProcessor::SaveTexture2DAsAsset(std, 4096, 4096, "/svo/Generated/", "PsuedoTest");
 		UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(
-			LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_UniverseRaymarch_Inst.MT_UniverseRaymarch_Inst")),
+			LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_UniverseRaymarchPsuedoVolume_Inst.MT_UniverseRaymarchPsuedoVolume_Inst")),
 			this
 		);
 
-		VolumeTexture = FOctreeTextureProcessor::GenerateVolumeTextureFromMipData(TextureData, 256);
-		DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), VolumeTexture);
+		DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), PsuedoVolumeTexture);
 
 		//TODO: Proceduralize material
 

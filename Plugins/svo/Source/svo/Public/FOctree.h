@@ -414,137 +414,6 @@ public:
 		return VolumeTexture;
 	}
 
-	static UTexture2D* GeneratePsuedoVolumeTextureFromMipData(const TArray<uint8>& InMipData, int32 InResolution)
-	{
-		const int32 BytesPerVoxel = 4; 
-		const int64 InVoxels = int64(InResolution) * InResolution * InResolution;
-		if (InMipData.Num() != InVoxels * BytesPerVoxel)
-		{
-			UE_LOG(LogTemp, Error, TEXT("Size mismatch"));
-			return nullptr;
-		}
-
-		// --- 1) Pack slices into 2D OutData (thread safe) ---
-		int32 tilesPerSide = FMath::CeilToInt(FMath::Sqrt((float)InResolution));
-		int32 OutWidth = tilesPerSide * InResolution;
-		int32 OutHeight = tilesPerSide * InResolution;
-		const int64 OutBytes = int64(OutWidth) * OutHeight * BytesPerVoxel;
-
-		TArray<uint8> OutData;
-		OutData.SetNumZeroed(OutBytes);
-
-		const int32 InSlicePixels = InResolution * InResolution;
-		const int32 OutRowBytes = OutWidth * BytesPerVoxel;
-		const int32 InRowBytes = InResolution * BytesPerVoxel;
-
-		ParallelFor(InResolution, [&](int32 z)
-			{
-				const int32 tileX = z % tilesPerSide;
-				const int32 tileY = z / tilesPerSide;
-				const int32 destTileOriginX = tileX * InResolution;
-				const int32 destTileOriginY = tileY * InResolution;
-				const int64 srcSliceBase = int64(z) * InSlicePixels * BytesPerVoxel;
-
-				for (int32 y = 0; y < InResolution; ++y)
-				{
-					const int32 destY = destTileOriginY + y;
-					const int64 destRowBase = int64(destY) * OutRowBytes + int64(destTileOriginX) * BytesPerVoxel;
-					const int64 srcRowBase = srcSliceBase + int64(y) * InRowBytes;
-					FMemory::Memcpy(&OutData[destRowBase], &InMipData[srcRowBase], size_t(InRowBytes));
-				}
-			}, EParallelForFlags::BackgroundPriority);
-
-		// --- 2) Create dummy UTexture2D on GameThread (with 1x1 mip) ---
-		UTexture2D* DummyTexture = nullptr;
-		FEvent* DummyDoneEvent = FPlatformProcess::GetSynchEventFromPool(true);
-		DummyDoneEvent->Reset();
-
-		AsyncTask(ENamedThreads::GameThread, [OutWidth, OutHeight, &DummyTexture, DummyDoneEvent]()
-			{
-				DummyTexture = NewObject<UTexture2D>(GetTransientPackage(), NAME_None, RF_Transient);
-				if (!DummyTexture) { DummyDoneEvent->Trigger(); return; }
-
-				DummyTexture->NeverStream = true;
-
-				FTexturePlatformData* PlatformData = new FTexturePlatformData();
-				PlatformData->SizeX = 1;
-				PlatformData->SizeY = 1;
-				PlatformData->PixelFormat = PF_B8G8R8A8;
-
-				FTexture2DMipMap* Mip = new FTexture2DMipMap();
-				Mip->SizeX = 1; Mip->SizeY = 1;
-
-				void* LockedPtr = Mip->BulkData.Lock(LOCK_READ_WRITE);
-				void* ReallocPtr = Mip->BulkData.Realloc(1 * 1 * GPixelFormats[PF_B8G8R8A8].BlockBytes);
-				if (ReallocPtr) { FMemory::Memzero(ReallocPtr, GPixelFormats[PF_B8G8R8A8].BlockBytes); }
-				Mip->BulkData.Unlock();
-
-				PlatformData->Mips.Add(Mip);
-				DummyTexture->SetPlatformData(PlatformData);
-
-				DummyTexture->SRGB = false;
-				DummyTexture->CompressionSettings = TC_VectorDisplacementmap;
-				DummyTexture->CompressionNone = true;
-				DummyTexture->Filter = TF_Nearest;
-				DummyTexture->MipGenSettings = TMGS_NoMipmaps;
-				DummyTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
-				DummyTexture->NeverStream = true;
-				DummyTexture->DeferCompression = true;
-				DummyTexture->UnlinkStreaming();
-
-				DummyTexture->UpdateResource();
-
-				DummyDoneEvent->Trigger();
-			});
-		DummyDoneEvent->Wait();
-		FPlatformProcess::ReturnSynchEventToPool(DummyDoneEvent);
-
-		if (!DummyTexture)
-		{
-			UE_LOG(LogTemp, Error, TEXT("Failed to create dummy texture"));
-			return nullptr;
-		}
-
-		// --- 3) Create RHI texture asynchronously ---
-		void* MipData[1] = { OutData.GetData() };
-		FGraphEventRef CompletionEvent;
-		FTexture2DRHIRef RHITex = RHIAsyncCreateTexture2D(
-			OutWidth, OutHeight,
-			PF_B8G8R8A8,
-			1,
-			TexCreate_ShaderResource,
-			ERHIAccess::SRVMask,
-			MipData,
-			1,
-			TEXT("MyAsyncTexture"),
-			CompletionEvent
-		);
-		if (CompletionEvent.IsValid()) { CompletionEvent->Wait(); }
-
-		FRHITexture* RHITexture = RHITex.GetReference();
-		if (!RHITexture)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("Async RHI texture creation failed"));
-			return nullptr;
-		}
-
-		// --- 4) Link RHI texture to dummy texture on render thread ---
-		FEvent* LinkDoneEvent = FPlatformProcess::GetSynchEventFromPool(true);
-		LinkDoneEvent->Reset();
-
-		ENQUEUE_RENDER_COMMAND(LinkTextureCmd)([DummyTexture, RHITexture, LinkDoneEvent](FRHICommandListImmediate& RHICmdList)
-			{
-				RHIUpdateTextureReference(DummyTexture->TextureReference.TextureReferenceRHI, static_cast<FTexture2DRHIRef>(RHITexture));
-				DummyTexture->RefreshSamplerStates();
-				LinkDoneEvent->Trigger();
-			});
-
-		LinkDoneEvent->Wait();
-		FPlatformProcess::ReturnSynchEventToPool(LinkDoneEvent);
-
-		return DummyTexture;
-	}
-
 	static void SaveVolumeTextureAsAsset(UVolumeTexture* InSaveTexture, const FString& AssetPath, const FString& AssetName)
 	{
 		FString CleanAssetPath = AssetPath;
@@ -581,89 +450,113 @@ public:
 			UE_LOG(LogTemp, Error, TEXT("Failed to save volume texture"));
 		}
 	}
-	
-	static UTexture2D* SaveTexture2DAsAsset(
-		const TArray<uint8>& MipData,
-		int32 Width,
-		int32 Height,
-		const FString& AssetPath,
-		const FString& AssetName
-	)
-	{
-		// Basic validation
-		const uint32 BytesPerPixel = GPixelFormats[PF_B8G8R8A8].BlockBytes;
-		const uint64 ExpectedBytes = uint64(Width) * Height * BytesPerPixel;
-		if ((uint64)MipData.Num() != ExpectedBytes)
+
+	static UTexture2D* GeneratePsuedoVolumeTextureFromMipData(const TArray<uint8>&InMipData, int32 InResolution) {
+		const int32 BytesPerVoxel = 4;
+		const int64 InVoxels = int64(InResolution) * InResolution * InResolution;
+		if (InMipData.Num() != InVoxels * BytesPerVoxel)
 		{
-			UE_LOG(LogTemp, Error, TEXT("SaveTexture2DAsAsset_InitFlow: MipData size mismatch %d != %llu"), MipData.Num(), ExpectedBytes);
+			UE_LOG(LogTemp, Error, TEXT("Size mismatch"));
 			return nullptr;
 		}
 
-		// Package
-		FString CleanPath = AssetPath;
-		if (CleanPath.EndsWith(TEXT("/"))) CleanPath.LeftChopInline(1);
-		const FString PackageName = CleanPath + TEXT("/") + AssetName;
-		UPackage* Package = CreatePackage(*PackageName);
-		if (!Package)
+		// --- 1) Pack slices into 2D OutData (thread safe) ---
+		// ... (This section is unchanged)
+		int32 tilesPerSide = FMath::CeilToInt(FMath::Sqrt((float)InResolution));
+		int32 OutWidth = tilesPerSide * InResolution;
+		int32 OutHeight = tilesPerSide * InResolution;
+		const int64 OutBytes = int64(OutWidth) * OutHeight * BytesPerVoxel;
+		TArray<uint8> OutData;
+		OutData.SetNumZeroed(OutBytes);
+		const int32 InSlicePixels = InResolution * InResolution;
+		const int32 OutRowBytes = OutWidth * BytesPerVoxel;
+		const int32 InRowBytes = InResolution * BytesPerVoxel;
+
+		ParallelFor(InResolution, [&](int32 z)
+			{
+				const int32 tileX = z % tilesPerSide;
+				const int32 tileY = z / tilesPerSide;
+				const int32 destTileOriginX = tileX * InResolution;
+				const int32 destTileOriginY = tileY * InResolution;
+				const int64 srcSliceBase = int64(z) * InSlicePixels * BytesPerVoxel;
+
+				for (int32 y = 0; y < InResolution; ++y)
+				{
+					const int32 destY = destTileOriginY + y;
+					const int64 destRowBase = int64(destY) * OutRowBytes + int64(destTileOriginX) * BytesPerVoxel;
+					const int64 srcRowBase = srcSliceBase + int64(y) * InRowBytes;
+					FMemory::Memcpy(&OutData[destRowBase], &InMipData[srcRowBase], size_t(InRowBytes));
+				}
+			}, EParallelForFlags::BackgroundPriority);
+
+		// --- 2) Create dummy UTexture2D on GameThread (with 1x1 mip) ---
+		// ... (This section is unchanged)
+		UTexture2D* PsuedoVolumeTexture = nullptr;
+		FEvent* DummyDoneEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		DummyDoneEvent->Reset();
+		AsyncTask(ENamedThreads::GameThread, [OutWidth, OutHeight, &PsuedoVolumeTexture, DummyDoneEvent]()
+			{
+				PsuedoVolumeTexture = NewObject<UTexture2D>(GetTransientPackage(), NAME_None, RF_Transient);
+				if (!PsuedoVolumeTexture) { DummyDoneEvent->Trigger(); return; }
+				PsuedoVolumeTexture->NeverStream = true;
+				FTexturePlatformData* PlatformData = new FTexturePlatformData();
+				PlatformData->SizeX = 1;
+				PlatformData->SizeY = 1;
+				PlatformData->PixelFormat = PF_B8G8R8A8;
+				FTexture2DMipMap* Mip = new FTexture2DMipMap();
+				Mip->SizeX = 1; Mip->SizeY = 1;
+				Mip->BulkData.Lock(LOCK_READ_WRITE);
+				void* ReallocPtr = Mip->BulkData.Realloc(1 * 1 * GPixelFormats[PF_B8G8R8A8].BlockBytes);
+				if (ReallocPtr) { FMemory::Memzero(ReallocPtr, GPixelFormats[PF_B8G8R8A8].BlockBytes); }
+				Mip->BulkData.Unlock();
+				PlatformData->Mips.Add(Mip);
+				PsuedoVolumeTexture->SetPlatformData(PlatformData);
+				PsuedoVolumeTexture->SRGB = false;
+				PsuedoVolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
+				PsuedoVolumeTexture->CompressionNone = true;
+				PsuedoVolumeTexture->Filter = TF_Nearest;
+				PsuedoVolumeTexture->MipGenSettings = TMGS_NoMipmaps;
+				PsuedoVolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
+				PsuedoVolumeTexture->NeverStream = true;
+				PsuedoVolumeTexture->DeferCompression = true;
+				PsuedoVolumeTexture->UnlinkStreaming();
+				PsuedoVolumeTexture->UpdateResource();
+				DummyDoneEvent->Trigger();
+			});
+		DummyDoneEvent->Wait();
+		FPlatformProcess::ReturnSynchEventToPool(DummyDoneEvent);
+		if (!PsuedoVolumeTexture)
 		{
-			UE_LOG(LogTemp, Error, TEXT("CreatePackage failed: %s"), *PackageName);
+			UE_LOG(LogTemp, Error, TEXT("Failed to create dummy texture"));
 			return nullptr;
 		}
-		Package->FullyLoad();
-		Package->MarkPackageDirty();
 
-		// Create texture object in package
-		UTexture2D* NewTexture = NewObject<UTexture2D>(Package, *AssetName, RF_Public | RF_Standalone | RF_MarkAsRootSet);
-		if (!NewTexture)
+		// --- 3) Create RHI texture asynchronously ---
+		// ... (This section is unchanged)
+		void* MipData[1] = { OutData.GetData() };
+		FGraphEventRef CompletionEvent;
+		FTexture2DRHIRef RHITex = RHIAsyncCreateTexture2D(OutWidth, OutHeight, PF_B8G8R8A8, 1, TexCreate_ShaderResource, ERHIAccess::SRVMask, MipData, 1, TEXT("MyAsyncTexture"), CompletionEvent);
+		if (CompletionEvent.IsValid()) { CompletionEvent->Wait(); }
+		FRHITexture* RHITexture = RHITex.GetReference();
+		if (!RHITexture)
 		{
-			UE_LOG(LogTemp, Error, TEXT("Failed to create UTexture2D"));
+			UE_LOG(LogTemp, Warning, TEXT("Async RHI texture creation failed"));
 			return nullptr;
 		}
 
-		// Mirror your volume texture init settings
-		NewTexture->NeverStream = true;
-		NewTexture->SRGB = false;
-		NewTexture->CompressionSettings = TC_VectorDisplacementmap;
-		NewTexture->CompressionNone = true;
-		NewTexture->Filter = TF_Nearest;
-		NewTexture->MipGenSettings = TMGS_NoMipmaps;
-		NewTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
-		NewTexture->DeferCompression = true;
-		NewTexture->UnlinkStreaming();
+		// --- 4) Link RHI texture to dummy texture on render thread ---
+		// ... (This section is unchanged)
+		FEvent* LinkDoneEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		LinkDoneEvent->Reset();
+		ENQUEUE_RENDER_COMMAND(LinkTextureCmd)([PsuedoVolumeTexture, RHITexture, LinkDoneEvent](FRHICommandListImmediate& RHICmdList)
+			{
+				RHIUpdateTextureReference(PsuedoVolumeTexture->TextureReference.TextureReferenceRHI, static_cast<FTexture2DRHIRef>(RHITexture));
+				PsuedoVolumeTexture->RefreshSamplerStates();
+				LinkDoneEvent->Trigger();
+			});
+		LinkDoneEvent->Wait();
+		FPlatformProcess::ReturnSynchEventToPool(LinkDoneEvent);
 
-		// Initialize Source with your BGRA8 data (this is the same flow as your volume texture)
-		NewTexture->Source.Init(Width, Height, /*NumSlices*/1, /*NumMips*/1, ETextureSourceFormat::TSF_BGRA8, MipData.GetData());
-
-		// Build render resource and *block* until RHI/render-thread/ImageCore finish reading the Source
-		NewTexture->UpdateResource();
-		FlushRenderingCommands(); // VERY IMPORTANT: ensures engine finished reading Source memory
-
-		// Now the engine has finished using MipData pointer — it is safe for caller to let MipData go out of scope.
-
-		// Register asset and save
-		FAssetRegistryModule::AssetCreated(NewTexture);
-		Package->MarkPackageDirty();
-
-		const FString FilePath = FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetAssetPackageExtension());
-
-		FSavePackageArgs SaveArgs;
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		SaveArgs.Error = GError;
-		SaveArgs.SaveFlags = SAVE_None;
-
-		const bool bSaved = UPackage::SavePackage(Package, NewTexture, *FilePath, SaveArgs);
-		if (!bSaved)
-		{
-			UE_LOG(LogTemp, Error, TEXT("Failed to save package %s"), *FilePath);
-		}
-		else
-		{
-			UE_LOG(LogTemp, Log, TEXT("Saved texture asset %s"), *PackageName);
-		}
-
-		return NewTexture;
+		return PsuedoVolumeTexture;
 	}
-
-
-
 };
