@@ -386,6 +386,133 @@ public:
 
 		return OutData;
 	}
+	
+	static TArray<uint8> UpscalePseudoVolumeDensityData(const TArray<uint8>& InMipData, int32 InRes, int32 OutRes, FastNoise::SmartNode<> InNoise = FastNoise::NewFromEncodedNodeTree("AAAAAAAA"), double InDomainScale = 1, FVector InDomainOffset = FVector(0, 0, 0), double InNoiseEffect = 1, int InSeed = 69)
+	{
+		check(InRes > 1 && OutRes > InRes);
+		const int32 InVoxels = InRes * InRes * InRes;
+		const int32 BytesPerVoxel = 4;
+		check(InMipData.Num() == InVoxels * BytesPerVoxel);
+
+		// Calculate 2D pseudo-volume layout parameters
+		int32 tilesPerSide = FMath::CeilToInt(FMath::Sqrt((float)OutRes));
+		int32 OutWidth = tilesPerSide * OutRes;
+		int32 OutHeight = tilesPerSide * OutRes;
+		const int64 OutBytes = int64(OutWidth) * OutHeight * BytesPerVoxel;
+
+		// Generate noise data for the output resolution
+		TArray<float> NoiseData;
+		NoiseData.SetNumUninitialized(OutRes * OutRes * OutRes);
+		InNoise->GenUniformGrid3D(NoiseData.GetData(), 0, 0, 0, OutRes, OutRes, OutRes, 1, InSeed);
+
+		// Initialize output data
+		TArray<uint8> OutData;
+		OutData.SetNumZeroed(OutBytes);
+
+		const float Scale = float(InRes - 1) / float(OutRes - 1);
+		const int32 InSlice = InRes * InRes;
+		const int32 OutRowBytes = OutWidth * BytesPerVoxel;
+
+		// Lambda to sample from input volume data
+		auto Sample = [&](int32 x, int32 y, int32 z, int32 channel) -> float
+			{
+				int32 index = (x + y * InRes + z * InSlice) * BytesPerVoxel + channel;
+				return float(InMipData[index]) / 255.0f; // normalize [0,1]
+			};
+
+		// Lambda to write to 2D pseudo-volume layout
+		auto WritePseudoVolume = [&](int32 x, int32 y, int32 z, const float* values)
+			{
+				// Calculate which tile this Z slice belongs to
+				int32 tileX = z % tilesPerSide;
+				int32 tileY = z / tilesPerSide;
+
+				// Calculate the destination coordinates in the 2D texture
+				int32 destX = tileX * OutRes + x;
+				int32 destY = tileY * OutRes + y;
+
+				// Calculate the linear index in the 2D array
+				int64 destIndex = int64(destY) * OutRowBytes + int64(destX) * BytesPerVoxel;
+
+				// Write the values
+				for (int c = 0; c < BytesPerVoxel; ++c)
+				{
+					OutData[destIndex + c] = uint8(FMath::Clamp(values[c] * 255.0f, 0.0f, 255.0f));
+				}
+			};
+
+		// Process each Z slice in parallel
+		ParallelFor(
+			OutRes,
+			[&](int32 z)
+			{
+				float fz = z * Scale;
+				int32 z0 = FMath::FloorToInt(fz);
+				int32 z1 = FMath::Min(z0 + 1, InRes - 1);
+				float tz = fz - z0;
+
+				for (int32 y = 0; y < OutRes; y++)
+				{
+					float fy = y * Scale;
+					int32 y0 = FMath::FloorToInt(fy);
+					int32 y1 = FMath::Min(y0 + 1, InRes - 1);
+					float ty = fy - y0;
+
+					for (int32 x = 0; x < OutRes; x++)
+					{
+						float fx = x * Scale;
+						int32 x0 = FMath::FloorToInt(fx);
+						int32 x1 = FMath::Min(x0 + 1, InRes - 1);
+						float tx = fx - x0;
+
+						float values[4] = { 0,0,0,0 };
+
+						for (int c = 0; c < BytesPerVoxel; ++c)
+						{
+							// Sample 8 neighbors and apply noise pre-filter
+							float c000 = Sample(x0, y0, z0, c);
+							c000 += c000 * NoiseData[x0 + y0 * OutRes + z0 * OutRes * OutRes] * InNoiseEffect;
+
+							float c100 = Sample(x1, y0, z0, c);
+							c100 += c100 * NoiseData[x1 + y0 * OutRes + z0 * OutRes * OutRes] * InNoiseEffect;
+
+							float c010 = Sample(x0, y1, z0, c);
+							c010 += c010 * NoiseData[x0 + y1 * OutRes + z0 * OutRes * OutRes] * InNoiseEffect;
+
+							float c110 = Sample(x1, y1, z0, c);
+							c110 += c110 * NoiseData[x1 + y1 * OutRes + z0 * OutRes * OutRes] * InNoiseEffect;
+
+							float c001 = Sample(x0, y0, z1, c);
+							c001 += c001 * NoiseData[x0 + y0 * OutRes + z1 * OutRes * OutRes] * InNoiseEffect;
+
+							float c101 = Sample(x1, y0, z1, c);
+							c101 += c101 * NoiseData[x1 + y1 * OutRes + z1 * OutRes * OutRes] * InNoiseEffect;
+
+							float c011 = Sample(x0, y1, z1, c);
+							c011 += c011 * NoiseData[x0 + y1 * OutRes + z1 * OutRes * OutRes] * InNoiseEffect;
+
+							float c111 = Sample(x1, y1, z1, c);
+							c111 += c111 * NoiseData[x1 + y1 * OutRes + z1 * OutRes * OutRes] * InNoiseEffect;
+
+							// Trilinear interpolation
+							float c00 = FMath::Lerp(c000, c100, tx);
+							float c10 = FMath::Lerp(c010, c110, tx);
+							float c01 = FMath::Lerp(c001, c101, tx);
+							float c11 = FMath::Lerp(c011, c111, tx);
+							float c0 = FMath::Lerp(c00, c10, ty);
+							float c1 = FMath::Lerp(c01, c11, ty);
+							values[c] = FMath::Lerp(c0, c1, tz);
+						}
+
+						WritePseudoVolume(x, y, z, values);
+					}
+				}
+			},
+			EParallelForFlags::BackgroundPriority
+		);
+
+		return OutData;
+	}
 
 	static UVolumeTexture* GenerateVolumeTextureFromMipData(const TArray<uint8>& InMipData, int32 InResolution) {
 		UVolumeTexture* VolumeTexture;
@@ -451,54 +578,30 @@ public:
 		}
 	}
 
-	static UTexture2D* GeneratePsuedoVolumeTextureFromMipData(const TArray<uint8>&InMipData, int32 InResolution) {
-		const int32 BytesPerVoxel = 4;
-		const int64 InVoxels = int64(InResolution) * InResolution * InResolution;
-		if (InMipData.Num() != InVoxels * BytesPerVoxel)
-		{
-			UE_LOG(LogTemp, Error, TEXT("Size mismatch"));
-			return nullptr;
-		}
-
-		// --- 1) Pack slices into 2D OutData (thread safe) ---
-		// ... (This section is unchanged)
+	static UTexture2D* GeneratePseudoVolumeTextureFromMipData(const TArray<uint8>& InMipData, int32 InResolution)
+	{
+		// Calculate expected 2D pseudo-volume layout parameters
 		int32 tilesPerSide = FMath::CeilToInt(FMath::Sqrt((float)InResolution));
 		int32 OutWidth = tilesPerSide * InResolution;
 		int32 OutHeight = tilesPerSide * InResolution;
-		const int64 OutBytes = int64(OutWidth) * OutHeight * BytesPerVoxel;
-		TArray<uint8> OutData;
-		OutData.SetNumZeroed(OutBytes);
-		const int32 InSlicePixels = InResolution * InResolution;
-		const int32 OutRowBytes = OutWidth * BytesPerVoxel;
-		const int32 InRowBytes = InResolution * BytesPerVoxel;
+		const int32 BytesPerVoxel = 4;
+		const int64 ExpectedBytes = int64(OutWidth) * OutHeight * BytesPerVoxel;
 
-		ParallelFor(InResolution, [&](int32 z)
-			{
-				const int32 tileX = z % tilesPerSide;
-				const int32 tileY = z / tilesPerSide;
-				const int32 destTileOriginX = tileX * InResolution;
-				const int32 destTileOriginY = tileY * InResolution;
-				const int64 srcSliceBase = int64(z) * InSlicePixels * BytesPerVoxel;
+		if (InMipData.Num() != ExpectedBytes)
+		{
+			UE_LOG(LogTemp, Error, TEXT("Size mismatch: Expected %lld bytes, got %d bytes"), ExpectedBytes, InMipData.Num());
+			return nullptr;
+		}
 
-				for (int32 y = 0; y < InResolution; ++y)
-				{
-					const int32 destY = destTileOriginY + y;
-					const int64 destRowBase = int64(destY) * OutRowBytes + int64(destTileOriginX) * BytesPerVoxel;
-					const int64 srcRowBase = srcSliceBase + int64(y) * InRowBytes;
-					FMemory::Memcpy(&OutData[destRowBase], &InMipData[srcRowBase], size_t(InRowBytes));
-				}
-			}, EParallelForFlags::BackgroundPriority);
-
-		// --- 2) Create dummy UTexture2D on GameThread (with 1x1 mip) ---
-		// ... (This section is unchanged)
-		UTexture2D* PsuedoVolumeTexture = nullptr;
+		// --- 1) Create dummy UTexture2D on GameThread (with 1x1 mip) ---
+		UTexture2D* PseudoVolumeTexture = nullptr;
 		FEvent* DummyDoneEvent = FPlatformProcess::GetSynchEventFromPool(true);
 		DummyDoneEvent->Reset();
-		AsyncTask(ENamedThreads::GameThread, [OutWidth, OutHeight, &PsuedoVolumeTexture, DummyDoneEvent]()
+		AsyncTask(ENamedThreads::GameThread, [OutWidth, OutHeight, &PseudoVolumeTexture, DummyDoneEvent]()
 			{
-				PsuedoVolumeTexture = NewObject<UTexture2D>(GetTransientPackage(), NAME_None, RF_Transient);
-				if (!PsuedoVolumeTexture) { DummyDoneEvent->Trigger(); return; }
-				PsuedoVolumeTexture->NeverStream = true;
+				PseudoVolumeTexture = NewObject<UTexture2D>(GetTransientPackage(), NAME_None, RF_Transient);
+				if (!PseudoVolumeTexture) { DummyDoneEvent->Trigger(); return; }
+				PseudoVolumeTexture->NeverStream = true;
 				FTexturePlatformData* PlatformData = new FTexturePlatformData();
 				PlatformData->SizeX = 1;
 				PlatformData->SizeY = 1;
@@ -510,32 +613,32 @@ public:
 				if (ReallocPtr) { FMemory::Memzero(ReallocPtr, GPixelFormats[PF_B8G8R8A8].BlockBytes); }
 				Mip->BulkData.Unlock();
 				PlatformData->Mips.Add(Mip);
-				PsuedoVolumeTexture->SetPlatformData(PlatformData);
-				PsuedoVolumeTexture->SRGB = false;
-				PsuedoVolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
-				PsuedoVolumeTexture->CompressionNone = true;
-				PsuedoVolumeTexture->Filter = TF_Nearest;
-				PsuedoVolumeTexture->MipGenSettings = TMGS_NoMipmaps;
-				PsuedoVolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
-				PsuedoVolumeTexture->NeverStream = true;
-				PsuedoVolumeTexture->DeferCompression = true;
-				PsuedoVolumeTexture->UnlinkStreaming();
-				PsuedoVolumeTexture->UpdateResource();
+				PseudoVolumeTexture->SetPlatformData(PlatformData);
+				PseudoVolumeTexture->SRGB = false;
+				PseudoVolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
+				PseudoVolumeTexture->CompressionNone = true;
+				PseudoVolumeTexture->Filter = TF_Nearest;
+				PseudoVolumeTexture->MipGenSettings = TMGS_NoMipmaps;
+				PseudoVolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
+				PseudoVolumeTexture->NeverStream = true;
+				PseudoVolumeTexture->DeferCompression = true;
+				PseudoVolumeTexture->UnlinkStreaming();
+				PseudoVolumeTexture->UpdateResource();
 				DummyDoneEvent->Trigger();
 			});
 		DummyDoneEvent->Wait();
 		FPlatformProcess::ReturnSynchEventToPool(DummyDoneEvent);
-		if (!PsuedoVolumeTexture)
+
+		if (!PseudoVolumeTexture)
 		{
 			UE_LOG(LogTemp, Error, TEXT("Failed to create dummy texture"));
 			return nullptr;
 		}
 
-		// --- 3) Create RHI texture asynchronously ---
-		// ... (This section is unchanged)
-		void* MipData[1] = { OutData.GetData() };
+		// --- 2) Create RHI texture asynchronously ---
+		void* MipData[1] = { const_cast<uint8*>(InMipData.GetData()) };
 		FGraphEventRef CompletionEvent;
-		FTexture2DRHIRef RHITex = RHIAsyncCreateTexture2D(OutWidth, OutHeight, PF_B8G8R8A8, 1, TexCreate_ShaderResource, ERHIAccess::SRVMask, MipData, 1, TEXT("MyAsyncTexture"), CompletionEvent);
+		FTexture2DRHIRef RHITex = RHIAsyncCreateTexture2D(OutWidth, OutHeight, PF_B8G8R8A8, 1, TexCreate_ShaderResource, ERHIAccess::SRVMask, MipData, 1, TEXT("MyAsyncPseudoVolumeTexture"), CompletionEvent);
 		if (CompletionEvent.IsValid()) { CompletionEvent->Wait(); }
 		FRHITexture* RHITexture = RHITex.GetReference();
 		if (!RHITexture)
@@ -544,19 +647,18 @@ public:
 			return nullptr;
 		}
 
-		// --- 4) Link RHI texture to dummy texture on render thread ---
-		// ... (This section is unchanged)
+		// --- 3) Link RHI texture to dummy texture on render thread ---
 		FEvent* LinkDoneEvent = FPlatformProcess::GetSynchEventFromPool(true);
 		LinkDoneEvent->Reset();
-		ENQUEUE_RENDER_COMMAND(LinkTextureCmd)([PsuedoVolumeTexture, RHITexture, LinkDoneEvent](FRHICommandListImmediate& RHICmdList)
+		ENQUEUE_RENDER_COMMAND(LinkTextureCmd)([PseudoVolumeTexture, RHITexture, LinkDoneEvent](FRHICommandListImmediate& RHICmdList)
 			{
-				RHIUpdateTextureReference(PsuedoVolumeTexture->TextureReference.TextureReferenceRHI, static_cast<FTexture2DRHIRef>(RHITexture));
-				PsuedoVolumeTexture->RefreshSamplerStates();
+				RHIUpdateTextureReference(PseudoVolumeTexture->TextureReference.TextureReferenceRHI, static_cast<FTexture2DRHIRef>(RHITexture));
+				PseudoVolumeTexture->RefreshSamplerStates();
 				LinkDoneEvent->Trigger();
 			});
 		LinkDoneEvent->Wait();
 		FPlatformProcess::ReturnSynchEventToPool(LinkDoneEvent);
 
-		return PsuedoVolumeTexture;
+		return PseudoVolumeTexture;
 	}
 };

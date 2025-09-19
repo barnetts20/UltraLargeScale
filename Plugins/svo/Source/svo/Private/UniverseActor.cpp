@@ -107,13 +107,14 @@ void AUniverseActor::InitializeVolumetric()
 {
 	double StartTime = FPlatformTime::Seconds();
 	int Resolution = 64;
-	auto SampleTextureData = FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, Resolution);
-	TextureData = FOctreeTextureProcessor::UpscaleVolumeDensityData(SampleTextureData, Resolution, 256); // can add noise here
-	if (TryCleanUpComponents()) return; //Early exit if destroying
+	TextureData = FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, Resolution), Resolution, 256); // can add noise here
+	if (TryCleanUpComponents()) return;
+
+	UTexture2D* PsuedoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(TextureData, 256); //Async texture generation
+	if (TryCleanUpComponents()) return;
 
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	UTexture2D* PsuedoVolumeTexture = FOctreeTextureProcessor::GeneratePsuedoVolumeTextureFromMipData(TextureData, 256); //Async texture generation
 	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise), PsuedoVolumeTexture]() mutable
 	{
 		double SourceStart = FPlatformTime::Seconds();
