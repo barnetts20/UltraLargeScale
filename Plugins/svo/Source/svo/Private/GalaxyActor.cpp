@@ -121,7 +121,7 @@ void AGalaxyActor::InitializeVolumetric()
 	ScaleNoise->SetSource(SeedOffset);
 	ScaleNoise->SetScale(1);
 
-	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, Resolution), Resolution, 256, ScaleNoise, 1, FVector::ZeroVector, 1.33, Seed), 256);
+	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, Resolution), Resolution));
 	if (TryCleanUpComponents()) return;
 
 	TPromise<void> CompletionPromise;
@@ -135,7 +135,6 @@ void AGalaxyActor::InitializeVolumetric()
 			);
 			DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), PseudoVolumeTexture);
 			DynamicMaterial->SetTextureParameterValue(FName("NoiseTexture"), LoadObject<UVolumeTexture>(nullptr, *GalaxyGenerator.GalaxyParams.VolumeNoise));
-			
 			DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), GalaxyGenerator.GalaxyParams.VolumeAmbientColor);
 			DynamicMaterial->SetVectorParameterValue(FName("CoolShift"), GalaxyGenerator.GalaxyParams.VolumeCoolShift);
 			DynamicMaterial->SetVectorParameterValue(FName("HotShift"), GalaxyGenerator.GalaxyParams.VolumeHotShift);
@@ -156,9 +155,6 @@ void AGalaxyActor::InitializeVolumetric()
 			VolumetricComponent->SetMaterial(0, DynamicMaterial);
 			VolumetricComponent->TranslucencySortPriority = 1;
 			VolumetricComponent->RegisterComponent();
-
-			double SourceDuration = FPlatformTime::Seconds() - SourceStart;
-			UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::VolumeTexture Source.Init & Update took: %.3f seconds"), SourceDuration);
 
 			CompletionPromise.SetValue();
 		});

@@ -107,10 +107,10 @@ void AUniverseActor::InitializeVolumetric()
 {
 	double StartTime = FPlatformTime::Seconds();
 	int Resolution = 64;
-	TextureData = FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, Resolution), Resolution, 256); // can add noise here
+	TextureData = FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, Resolution), Resolution); // can add noise here
 	if (TryCleanUpComponents()) return;
 
-	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(TextureData, 256); //Async texture generation
+	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(TextureData); //Async texture generation
 	if (TryCleanUpComponents()) return;
 
 	TPromise<void> CompletionPromise;

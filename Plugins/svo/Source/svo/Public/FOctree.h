@@ -226,62 +226,88 @@ class SVO_API FOctreeTextureProcessor {
 public:
 	static TArray<uint8> GenerateVolumeMipDataFromOctree(TSharedPtr<FOctree> InOctree, int32 Resolution)
 	{
-		// Get the octree data
-		const int TargetDepth = FMath::FloorLog2(Resolution);
+		double StartTime = FPlatformTime::Seconds();
+
+		// --- Octree + setup ---
+		const int32 TargetDepth = FMath::FloorLog2(Resolution);
 		TArray<TSharedPtr<FOctreeNode>> PopulatedNodes = InOctree->GetPopulatedNodes(TargetDepth, TargetDepth, -1);
-		const float MaxDensityAtDepth = (InOctree->DepthMaxDensities.IsValidIndex(TargetDepth) ? (float)InOctree->DepthMaxDensities[TargetDepth] : 1.0f);
+
+		const float MaxDensityAtDepth = (InOctree->DepthMaxDensities.IsValidIndex(TargetDepth)
+			? (float)InOctree->DepthMaxDensities[TargetDepth]
+			: 1.0f);
+
 		const int64 NodeExtentAtDepth = (InOctree->Extent >> TargetDepth);
 		const int64 OctreeExtent = InOctree->Extent;
 
-		// Allocate flat zeroed array directly
-		const int64 TotalVoxels = static_cast<int64>(Resolution) * Resolution * Resolution;
-		const int64 BytesPerVoxel = 4; // BGRA8 = 4 bytes
+		// Precompute reciprocal for fast coordinate mapping
+		const double Scale = 1.0 / (2.0 * NodeExtentAtDepth);
+
+		// --- Texture allocation ---
+		const int64 TotalVoxels = (int64)Resolution * Resolution * Resolution;
+		const int64 BytesPerVoxel = 4; // BGRA8
 		const int64 TotalBytes = TotalVoxels * BytesPerVoxel;
 
 		TArray<uint8> TextureData;
 		TextureData.SetNumZeroed(TotalBytes);
 
-		// Fill the array directly in one loop
-		ParallelFor(PopulatedNodes.Num(), [&](int32 NodeIndex)
+		// --- Parallel fill ---
+		// Use chunked ParallelFor to reduce scheduling overhead
+		const int32 ChunkSize = 512;
+		const int32 NumChunks = (PopulatedNodes.Num() + ChunkSize - 1) / ChunkSize;
+
+		ParallelFor(NumChunks, [&](int32 ChunkIdx)
 			{
-				const auto& Node = PopulatedNodes[NodeIndex];
-				if (!Node.IsValid()) return;
+				const int32 Start = ChunkIdx * ChunkSize;
+				const int32 End = FMath::Min(Start + ChunkSize, PopulatedNodes.Num());
 
-				// Calculate voxel coordinates
-				int32 VolumeX = static_cast<int32>((Node->Center.X + OctreeExtent) / (2 * NodeExtentAtDepth));
-				int32 VolumeY = static_cast<int32>((Node->Center.Y + OctreeExtent) / (2 * NodeExtentAtDepth));
-				int32 VolumeZ = static_cast<int32>((Node->Center.Z + OctreeExtent) / (2 * NodeExtentAtDepth));
-
-				// Bounds check
-				if (VolumeX < 0 || VolumeX >= Resolution ||
-					VolumeY < 0 || VolumeY >= Resolution ||
-					VolumeZ < 0 || VolumeZ >= Resolution)
+				for (int32 NodeIndex = Start; NodeIndex < End; NodeIndex++)
 				{
-					return;
+					const auto& Node = PopulatedNodes[NodeIndex];
+					if (!Node.IsValid()) continue;
+
+					// --- Compute voxel coords (multiply instead of divide) ---
+					int32 VolumeX = static_cast<int32>((Node->Center.X + OctreeExtent) * Scale);
+					int32 VolumeY = static_cast<int32>((Node->Center.Y + OctreeExtent) * Scale);
+					int32 VolumeZ = static_cast<int32>((Node->Center.Z + OctreeExtent) * Scale);
+
+					if (VolumeX < 0 || VolumeX >= Resolution ||
+						VolumeY < 0 || VolumeY >= Resolution ||
+						VolumeZ < 0 || VolumeZ >= Resolution)
+					{
+						continue;
+					}
+
+					// --- Linear voxel index ---
+					int64 VoxelIndex = ((int64)VolumeZ * Resolution * Resolution) +
+						((int64)VolumeY * Resolution) +
+						VolumeX;
+					int64 ByteIndex = VoxelIndex * BytesPerVoxel;
+
+					// --- Density ---
+					uint8 DensityByte = 0;
+					if (MaxDensityAtDepth > 0.0f)
+					{
+						float Norm = (float)Node->Data.Density / MaxDensityAtDepth;
+						DensityByte = (uint8)FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f);
+					}
+
+					// --- Composition ---
+					FVector Comp = Node->Data.Composition;
+
+					TextureData[ByteIndex + 0] = (uint8)FMath::Clamp(Comp.X * 255.0f, 0.0f, 255.0f); // B
+					TextureData[ByteIndex + 1] = (uint8)FMath::Clamp(Comp.Y * 255.0f, 0.0f, 255.0f); // G
+					TextureData[ByteIndex + 2] = (uint8)FMath::Clamp(Comp.Z * 255.0f, 0.0f, 255.0f); // R
+					TextureData[ByteIndex + 3] = DensityByte; // A
 				}
-
-				// Calculate linear index and write directly
-				int64 VoxelIndex = (static_cast<int64>(VolumeZ) * Resolution * Resolution) +
-					(static_cast<int64>(VolumeY) * Resolution) + VolumeX;
-				int64 ByteIndex = VoxelIndex * BytesPerVoxel;
-
-				// Calculate density
-				uint8 DensityByte = 0;
-				if (MaxDensityAtDepth > 0.0f)
-				{
-					float Norm = static_cast<float>(Node->Data.Density) / MaxDensityAtDepth;
-					DensityByte = static_cast<uint8>(FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f));
-				}
-
-				// Write voxel data directly
-				FVector Composition = Node->Data.Composition.GetSafeNormal();
-				TextureData[ByteIndex + 0] = static_cast<uint8>(Composition.X * 255); // B
-				TextureData[ByteIndex + 1] = static_cast<uint8>(Composition.Y * 255); // G
-				TextureData[ByteIndex + 2] = static_cast<uint8>(Composition.Z * 255); // R
-				TextureData[ByteIndex + 3] = DensityByte; // A
 			});
+
+		double TotalDuration = FPlatformTime::Seconds() - StartTime;
+		UE_LOG(LogTemp, Log, TEXT("OctreeTextureProcessor::Base volume mip data @%dx^3 generation duration: %.3f seconds"),
+			Resolution, TotalDuration);
+
 		return TextureData;
 	}
+
 
 	static TArray<uint8> UpscaleVolumeDensityData(const TArray<uint8>& InMipData, int32 InRes, int32 OutRes, FastNoise::SmartNode<> InNoise = FastNoise::NewFromEncodedNodeTree("AAAAAAAA"), double InDomainScale = 1, FVector InDomainOffset = FVector(0, 0, 0), double InNoiseEffect = 1, int InSeed = 69)
 	{
@@ -451,140 +477,141 @@ public:
 		}
 	}
 
-	static TArray<uint8> UpscalePseudoVolumeDensityData(const TArray<uint8>& InMipData, int32 InRes, int32 OutRes, FastNoise::SmartNode<> InNoise = FastNoise::NewFromEncodedNodeTree("AAAAAAAA"), double InDomainScale = 1, FVector InDomainOffset = FVector(0, 0, 0), double InNoiseEffect = 1, int InSeed = 69)
+	// --- Specialized fixed upscale: InRes^3 -> 256^3 -> 4096^2 pseudo volume ---
+	// InRes = low-res input (e.g. 32^3, 64^3, etc.)
+	// Always outputs a 4096x4096 2D pseudo volume (256^3 slices)
+	//TODO: Remove outres
+	static TArray<uint8> UpscalePseudoVolumeDensityData(const TArray<uint8>& InMipData, int32 InRes)
 	{
-		check(InRes > 1 && OutRes > InRes);
-		const int32 InVoxels = InRes * InRes * InRes;
-		const int32 BytesPerVoxel = 4;
-		check(InMipData.Num() == InVoxels * BytesPerVoxel);
+		double StartTime = FPlatformTime::Seconds();
+		check(InRes > 1);
 
-		// Calculate 2D pseudo-volume layout parameters
-		int32 tilesPerSide = FMath::CeilToInt(FMath::Sqrt((float)OutRes));
-		int32 OutWidth = tilesPerSide * OutRes;
-		int32 OutHeight = tilesPerSide * OutRes;
-		const int64 OutBytes = int64(OutWidth) * OutHeight * BytesPerVoxel;
+		constexpr int32 OutRes = 256;          // fixed target 3D resolution
+		constexpr int32 BytesPerVoxel = 4;     // RGBA8
+		constexpr int32 tilesPerSide = 16;     // 16x16 = 256 slices
+		constexpr int32 OutWidth = OutRes * tilesPerSide;   // 4096
+		constexpr int32 OutHeight = OutRes * tilesPerSide;  // 4096
+		constexpr int64 OutBytes = int64(OutWidth) * OutHeight * BytesPerVoxel;
 
-		// Generate noise data for the output resolution
-		TArray<float> NoiseData;
-		NoiseData.SetNumUninitialized(OutRes * OutRes * OutRes);
-		InNoise->GenUniformGrid3D(NoiseData.GetData(), 0, 0, 0, OutRes, OutRes, OutRes, 1, InSeed);
+		const int32 InSlice = InRes * InRes;
 
-		// Initialize output data
+		// --- Precompute coords for 256 steps (x,y,z) ---
+		struct SampleCoord { int i0, i1; float t; };
+		static TArray<SampleCoord> Precomputed;
+		static int32 CachedInRes = 0;
+		if (Precomputed.Num() == 0 || CachedInRes != InRes)
+		{
+			Precomputed.SetNum(OutRes);
+			for (int i = 0; i < OutRes; i++)
+			{
+				float f = i * (float(InRes - 1) / float(OutRes - 1));
+				int i0 = FMath::FloorToInt(f);
+				int i1 = FMath::Min(i0 + 1, InRes - 1);
+				Precomputed[i] = { i0, i1, f - i0 };
+			}
+			CachedInRes = InRes;
+		}
+
+		// --- Allocate output ---
 		TArray<uint8> OutData;
 		OutData.SetNumZeroed(OutBytes);
 
-		const float Scale = float(InRes - 1) / float(OutRes - 1);
-		const int32 InSlice = InRes * InRes;
-		const int32 OutRowBytes = OutWidth * BytesPerVoxel;
+		const uint8* InPtr = InMipData.GetData();
+		uint8* OutPtrBase = OutData.GetData();
 
-		// Lambda to sample from input volume data
-		auto Sample = [&](int32 x, int32 y, int32 z, int32 channel) -> float
-			{
-				int32 index = (x + y * InRes + z * InSlice) * BytesPerVoxel + channel;
-				return float(InMipData[index]) / 255.0f; // normalize [0,1]
+		// Lambda to compute base index into input voxel array
+		auto InIndexBase = [InRes, InSlice, BytesPerVoxel](int x, int y, int z)->int32 {
+			return ((z * InSlice) + (y * InRes) + x) * BytesPerVoxel;
 			};
 
-		// Lambda to write to 2D pseudo-volume layout
-		auto WritePseudoVolume = [&](int32 x, int32 y, int32 z, const float* values)
+		// --- Parallel slice processing ---
+		ParallelFor(OutRes, [&](int32 z)
 			{
-				// Calculate which tile this Z slice belongs to
-				int32 tileX = z % tilesPerSide;
-				int32 tileY = z / tilesPerSide;
+				const auto& Zc = Precomputed[z];
+				const int z0 = Zc.i0;
+				const int z1 = Zc.i1;
+				const float tz = Zc.t;
 
-				// Calculate the destination coordinates in the 2D texture
-				int32 destX = tileX * OutRes + x;
-				int32 destY = tileY * OutRes + y;
+				// Tile origin for this z slice
+				const int tileX = z % tilesPerSide;
+				const int tileY = z / tilesPerSide;
+				const int tileOriginX = tileX * OutRes;
+				const int tileOriginY = tileY * OutRes;
 
-				// Calculate the linear index in the 2D array
-				int64 destIndex = int64(destY) * OutRowBytes + int64(destX) * BytesPerVoxel;
-
-				// Write the values
-				for (int c = 0; c < BytesPerVoxel; ++c)
+				for (int y = 0; y < OutRes; ++y)
 				{
-					OutData[destIndex + c] = uint8(FMath::Clamp(values[c] * 255.0f, 0.0f, 255.0f));
-				}
-			};
+					const auto& Yc = Precomputed[y];
+					const int y0 = Yc.i0;
+					const int y1 = Yc.i1;
+					const float ty = Yc.t;
 
-		// Process each Z slice in parallel
-		ParallelFor(
-			OutRes,
-			[&](int32 z)
-			{
-				float fz = z * Scale;
-				int32 z0 = FMath::FloorToInt(fz);
-				int32 z1 = FMath::Min(z0 + 1, InRes - 1);
-				float tz = fz - z0;
+					// Destination row pointer
+					const int destY = tileOriginY + y;
+					uint8* DestRow = OutPtrBase + (int64(destY) * OutWidth + tileOriginX) * BytesPerVoxel;
 
-				for (int32 y = 0; y < OutRes; y++)
-				{
-					float fy = y * Scale;
-					int32 y0 = FMath::FloorToInt(fy);
-					int32 y1 = FMath::Min(y0 + 1, InRes - 1);
-					float ty = fy - y0;
-
-					for (int32 x = 0; x < OutRes; x++)
+					for (int x = 0; x < OutRes; ++x)
 					{
-						float fx = x * Scale;
-						int32 x0 = FMath::FloorToInt(fx);
-						int32 x1 = FMath::Min(x0 + 1, InRes - 1);
-						float tx = fx - x0;
+						const auto& Xc = Precomputed[x];
+						const int x0 = Xc.i0;
+						const int x1 = Xc.i1;
+						const float tx = Xc.t;
 
-						float values[4] = { 0,0,0,0 };
+						// Input voxel neighbors
+						const int base000 = InIndexBase(x0, y0, z0);
+						const int base100 = InIndexBase(x1, y0, z0);
+						const int base010 = InIndexBase(x0, y1, z0);
+						const int base110 = InIndexBase(x1, y1, z0);
+						const int base001 = InIndexBase(x0, y0, z1);
+						const int base101 = InIndexBase(x1, y0, z1);
+						const int base011 = InIndexBase(x0, y1, z1);
+						const int base111 = InIndexBase(x1, y1, z1);
+
+						float outC[4];
 
 						for (int c = 0; c < BytesPerVoxel; ++c)
 						{
-							// Sample 8 neighbors and apply noise pre-filter
-							float c000 = Sample(x0, y0, z0, c);
-							c000 += c000 * NoiseData[x0 + y0 * OutRes + z0 * OutRes * OutRes] * InNoiseEffect;
+							float c000 = float(InPtr[base000 + c]) * (1.f / 255.f);
+							float c100 = float(InPtr[base100 + c]) * (1.f / 255.f);
+							float c010 = float(InPtr[base010 + c]) * (1.f / 255.f);
+							float c110 = float(InPtr[base110 + c]) * (1.f / 255.f);
+							float c001 = float(InPtr[base001 + c]) * (1.f / 255.f);
+							float c101 = float(InPtr[base101 + c]) * (1.f / 255.f);
+							float c011 = float(InPtr[base011 + c]) * (1.f / 255.f);
+							float c111 = float(InPtr[base111 + c]) * (1.f / 255.f);
 
-							float c100 = Sample(x1, y0, z0, c);
-							c100 += c100 * NoiseData[x1 + y0 * OutRes + z0 * OutRes * OutRes] * InNoiseEffect;
-
-							float c010 = Sample(x0, y1, z0, c);
-							c010 += c010 * NoiseData[x0 + y1 * OutRes + z0 * OutRes * OutRes] * InNoiseEffect;
-
-							float c110 = Sample(x1, y1, z0, c);
-							c110 += c110 * NoiseData[x1 + y1 * OutRes + z0 * OutRes * OutRes] * InNoiseEffect;
-
-							float c001 = Sample(x0, y0, z1, c);
-							c001 += c001 * NoiseData[x0 + y0 * OutRes + z1 * OutRes * OutRes] * InNoiseEffect;
-
-							float c101 = Sample(x1, y0, z1, c);
-							c101 += c101 * NoiseData[x1 + y1 * OutRes + z1 * OutRes * OutRes] * InNoiseEffect;
-
-							float c011 = Sample(x0, y1, z1, c);
-							c011 += c011 * NoiseData[x0 + y1 * OutRes + z1 * OutRes * OutRes] * InNoiseEffect;
-
-							float c111 = Sample(x1, y1, z1, c);
-							c111 += c111 * NoiseData[x1 + y1 * OutRes + z1 * OutRes * OutRes] * InNoiseEffect;
-
-							// Trilinear interpolation
-							float c00 = FMath::Lerp(c000, c100, tx);
-							float c10 = FMath::Lerp(c010, c110, tx);
-							float c01 = FMath::Lerp(c001, c101, tx);
-							float c11 = FMath::Lerp(c011, c111, tx);
-							float c0 = FMath::Lerp(c00, c10, ty);
-							float c1 = FMath::Lerp(c01, c11, ty);
-							values[c] = FMath::Lerp(c0, c1, tz);
+							// Trilinear
+							const float c00 = FMath::Lerp(c000, c100, tx);
+							const float c10 = FMath::Lerp(c010, c110, tx);
+							const float c01 = FMath::Lerp(c001, c101, tx);
+							const float c11 = FMath::Lerp(c011, c111, tx);
+							const float c0 = FMath::Lerp(c00, c10, ty);
+							const float c1 = FMath::Lerp(c01, c11, ty);
+							outC[c] = FMath::Lerp(c0, c1, tz);
 						}
 
-						WritePseudoVolume(x, y, z, values);
+						// Write 4 channels
+						DestRow[x * BytesPerVoxel + 0] = uint8(outC[0] * 255.0f);
+						DestRow[x * BytesPerVoxel + 1] = uint8(outC[1] * 255.0f);
+						DestRow[x * BytesPerVoxel + 2] = uint8(outC[2] * 255.0f);
+						DestRow[x * BytesPerVoxel + 3] = uint8(outC[3] * 255.0f);
 					}
 				}
-			},
-			EParallelForFlags::BackgroundPriority
-		);
+			}, EParallelForFlags::BackgroundPriority);
+
+		double Duration = FPlatformTime::Seconds() - StartTime;
+		UE_LOG(LogTemp, Log, TEXT("UpscaleToPseudoVolume256 (%d^3 -> 256^3 -> 4096^2) took %.3f sec"), InRes, Duration);
 
 		return OutData;
 	}
 
-	//Call off game thread
-	static UTexture2D* GeneratePseudoVolumeTextureFromMipData(const TArray<uint8>& InMipData, int32 InResolution)
+	//Must call off of game thread
+	static UTexture2D* GeneratePseudoVolumeTextureFromMipData(const TArray<uint8>& InMipData)
 	{
-		// Calculate expected 2D pseudo-volume layout parameters
-		int32 tilesPerSide = FMath::CeilToInt(FMath::Sqrt((float)InResolution));
-		int32 OutWidth = tilesPerSide * InResolution;
-		int32 OutHeight = tilesPerSide * InResolution;
+		double StartTime = FPlatformTime::Seconds();
+		// Calculate expected 2D pseudo-volume layout parameters, will always output 256^3 to match noise texture dimensions
+		int32 tilesPerSide = 16;
+		int32 OutWidth = 4096;
+		int32 OutHeight = 4096;
 		const int32 BytesPerVoxel = 4;
 		const int64 ExpectedBytes = int64(OutWidth) * OutHeight * BytesPerVoxel;
 
@@ -629,7 +656,6 @@ public:
 			});
 		DummyDoneEvent->Wait();
 		FPlatformProcess::ReturnSynchEventToPool(DummyDoneEvent);
-
 		if (!PseudoVolumeTexture)
 		{
 			UE_LOG(LogTemp, Error, TEXT("Failed to create dummy texture"));
@@ -660,6 +686,9 @@ public:
 		LinkDoneEvent->Wait();
 		FPlatformProcess::ReturnSynchEventToPool(LinkDoneEvent);
 
+		double TotalDuration = FPlatformTime::Seconds() - StartTime;
+		UE_LOG(LogTemp, Log, TEXT("OctreeTextureProcessor::Async pseudovolume texture linking duration: %.3f seconds"), TotalDuration);
+		
 		return PseudoVolumeTexture;
 	}
 };
