@@ -386,7 +386,71 @@ public:
 
 		return OutData;
 	}
-	
+
+	static UVolumeTexture* GenerateVolumeTextureFromMipData(const TArray<uint8>& InMipData, int32 InResolution) {
+		UVolumeTexture* VolumeTexture;
+
+		VolumeTexture = NewObject<UVolumeTexture>(
+			GetTransientPackage(),
+			NAME_None,
+			RF_Transient
+		);
+
+		VolumeTexture->SRGB = false;
+		VolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
+		VolumeTexture->CompressionNone = true;
+		VolumeTexture->Filter = TF_Nearest;
+		VolumeTexture->AddressMode = TA_Clamp;
+		VolumeTexture->MipGenSettings = TMGS_NoMipmaps;
+		VolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
+		VolumeTexture->NeverStream = true;
+		VolumeTexture->DeferCompression = true;
+		VolumeTexture->UnlinkStreaming();
+
+		VolumeTexture->Source.Init(InResolution, InResolution, InResolution, 1, ETextureSourceFormat::TSF_BGRA8, InMipData.GetData());
+		VolumeTexture->UpdateResource();
+		FlushRenderingCommands();
+
+		return VolumeTexture;
+	}
+
+	static void SaveVolumeTextureAsAsset(UVolumeTexture* InSaveTexture, const FString& AssetPath, const FString& AssetName)
+	{
+		FString CleanAssetPath = AssetPath;
+		if (CleanAssetPath.EndsWith(TEXT("/")))
+		{
+			CleanAssetPath = CleanAssetPath.LeftChop(1);
+		}
+
+		FString PackagePath = CleanAssetPath + TEXT("/") + AssetName;
+		UPackage* Package = CreatePackage(*PackagePath);
+
+		if (!Package)
+		{
+			UE_LOG(LogTemp, Error, TEXT("Failed to create package"));
+			return;
+		}
+		Package->MarkPackageDirty();
+
+		// Save
+		FString PackageFileName = FPackageName::LongPackageNameToFilename(PackagePath, FPackageName::GetAssetPackageExtension());
+		FSavePackageArgs SaveArgs;
+		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+		SaveArgs.Error = GError;
+		SaveArgs.SaveFlags = SAVE_NoError;
+
+		bool bSaved = UPackage::SavePackage(Package, InSaveTexture, *PackageFileName, SaveArgs);
+
+		if (bSaved)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Volume texture saved successfully: %s"), *PackagePath);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("Failed to save volume texture"));
+		}
+	}
+
 	static TArray<uint8> UpscalePseudoVolumeDensityData(const TArray<uint8>& InMipData, int32 InRes, int32 OutRes, FastNoise::SmartNode<> InNoise = FastNoise::NewFromEncodedNodeTree("AAAAAAAA"), double InDomainScale = 1, FVector InDomainOffset = FVector(0, 0, 0), double InNoiseEffect = 1, int InSeed = 69)
 	{
 		check(InRes > 1 && OutRes > InRes);
@@ -514,70 +578,7 @@ public:
 		return OutData;
 	}
 
-	static UVolumeTexture* GenerateVolumeTextureFromMipData(const TArray<uint8>& InMipData, int32 InResolution) {
-		UVolumeTexture* VolumeTexture;
-
-		VolumeTexture = NewObject<UVolumeTexture>(
-			GetTransientPackage(),
-			NAME_None,
-			RF_Transient
-		);
-
-		VolumeTexture->SRGB = false;
-		VolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
-		VolumeTexture->CompressionNone = true;
-		VolumeTexture->Filter = TF_Nearest;
-		VolumeTexture->AddressMode = TA_Clamp;
-		VolumeTexture->MipGenSettings = TMGS_NoMipmaps;
-		VolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
-		VolumeTexture->NeverStream = true;
-		VolumeTexture->DeferCompression = true;
-		VolumeTexture->UnlinkStreaming();
-
-		VolumeTexture->Source.Init(InResolution, InResolution, InResolution, 1, ETextureSourceFormat::TSF_BGRA8, InMipData.GetData());
-		VolumeTexture->UpdateResource();
-		FlushRenderingCommands();
-
-		return VolumeTexture;
-	}
-
-	static void SaveVolumeTextureAsAsset(UVolumeTexture* InSaveTexture, const FString& AssetPath, const FString& AssetName)
-	{
-		FString CleanAssetPath = AssetPath;
-		if (CleanAssetPath.EndsWith(TEXT("/")))
-		{
-			CleanAssetPath = CleanAssetPath.LeftChop(1);
-		}
-
-		FString PackagePath = CleanAssetPath + TEXT("/") + AssetName;
-		UPackage* Package = CreatePackage(*PackagePath);
-
-		if (!Package)
-		{
-			UE_LOG(LogTemp, Error, TEXT("Failed to create package"));
-			return;
-		}
-		Package->MarkPackageDirty();
-
-		// Save
-		FString PackageFileName = FPackageName::LongPackageNameToFilename(PackagePath, FPackageName::GetAssetPackageExtension());
-		FSavePackageArgs SaveArgs;
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		SaveArgs.Error = GError;
-		SaveArgs.SaveFlags = SAVE_NoError;
-
-		bool bSaved = UPackage::SavePackage(Package, InSaveTexture, *PackageFileName, SaveArgs);
-
-		if (bSaved)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("Volume texture saved successfully: %s"), *PackagePath);
-		}
-		else
-		{
-			UE_LOG(LogTemp, Error, TEXT("Failed to save volume texture"));
-		}
-	}
-
+	//Call off game thread
 	static UTexture2D* GeneratePseudoVolumeTextureFromMipData(const TArray<uint8>& InMipData, int32 InResolution)
 	{
 		// Calculate expected 2D pseudo-volume layout parameters
@@ -638,7 +639,7 @@ public:
 		// --- 2) Create RHI texture asynchronously ---
 		void* MipData[1] = { const_cast<uint8*>(InMipData.GetData()) };
 		FGraphEventRef CompletionEvent;
-		FTexture2DRHIRef RHITex = RHIAsyncCreateTexture2D(OutWidth, OutHeight, PF_B8G8R8A8, 1, TexCreate_ShaderResource, ERHIAccess::SRVMask, MipData, 1, TEXT("MyAsyncPseudoVolumeTexture"), CompletionEvent);
+		FTexture2DRHIRef RHITex = RHIAsyncCreateTexture2D(OutWidth, OutHeight, PF_B8G8R8A8, 1, TexCreate_ShaderResource, ERHIAccess::SRVMask, MipData, 1, TEXT("PseudoVolumeTexture"), CompletionEvent);
 		if (CompletionEvent.IsValid()) { CompletionEvent->Wait(); }
 		FRHITexture* RHITexture = RHITex.GetReference();
 		if (!RHITexture)

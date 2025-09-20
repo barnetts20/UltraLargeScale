@@ -46,7 +46,7 @@ public:
 
 	//Volume Data and Component
 	TArray<uint8> TextureData;
-	UVolumeTexture* VolumeTexture;
+	UTexture2D* PseudoVolumeTexture;
 	UStaticMeshComponent* VolumetricComponent;
 
 	//Parallax

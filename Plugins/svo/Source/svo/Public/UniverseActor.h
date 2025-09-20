@@ -51,7 +51,7 @@ public:
 
 	//Volumetric
 	TArray<uint8> TextureData;
-	UVolumeTexture* VolumeTexture;
+	UTexture2D* PseudoVolumeTexture;
 	UStaticMeshComponent* VolumetricComponent;
 
 	//Managed galaxy actors

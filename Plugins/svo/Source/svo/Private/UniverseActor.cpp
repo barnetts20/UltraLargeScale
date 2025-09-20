@@ -110,12 +110,12 @@ void AUniverseActor::InitializeVolumetric()
 	TextureData = FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, Resolution), Resolution, 256); // can add noise here
 	if (TryCleanUpComponents()) return;
 
-	UTexture2D* PsuedoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(TextureData, 256); //Async texture generation
+	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(TextureData, 256); //Async texture generation
 	if (TryCleanUpComponents()) return;
 
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise), PsuedoVolumeTexture]() mutable
+	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 	{
 		double SourceStart = FPlatformTime::Seconds();
 		UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(
@@ -123,7 +123,7 @@ void AUniverseActor::InitializeVolumetric()
 			this
 		);
 
-		DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), PsuedoVolumeTexture);
+		DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), PseudoVolumeTexture);
 
 		//TODO: Proceduralize material
 

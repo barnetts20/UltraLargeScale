@@ -121,8 +121,7 @@ void AGalaxyActor::InitializeVolumetric()
 	ScaleNoise->SetSource(SeedOffset);
 	ScaleNoise->SetScale(1);
 
-	const TArray<uint8> SampleTextureData = FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, Resolution);
-	TextureData = FOctreeTextureProcessor::UpscaleVolumeDensityData(SampleTextureData, Resolution, 256, ScaleNoise, 1, FVector::ZeroVector, 1.33, Seed);
+	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, Resolution), Resolution, 256, ScaleNoise, 1, FVector::ZeroVector, 1.33, Seed), 256);
 	if (TryCleanUpComponents()) return;
 
 	TPromise<void> CompletionPromise;
@@ -131,14 +130,11 @@ void AGalaxyActor::InitializeVolumetric()
 		{
 			double SourceStart = FPlatformTime::Seconds();
 			UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(
-				LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_GalaxyRaymarch_Inst.MT_GalaxyRaymarch_Inst")),
+				LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_GalaxyRaymarchPsuedoVolume_Inst.MT_GalaxyRaymarchPsuedoVolume_Inst")),
 				this
 			);
-			VolumeTexture = FOctreeTextureProcessor::GenerateVolumeTextureFromMipData(TextureData, 256);
-			UVolumeTexture* NoiseTexture = LoadObject<UVolumeTexture>(nullptr, *GalaxyGenerator.GalaxyParams.VolumeNoise);
-
-			DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), VolumeTexture);
-			DynamicMaterial->SetTextureParameterValue(FName("NoiseTexture"), NoiseTexture);
+			DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), PseudoVolumeTexture);
+			DynamicMaterial->SetTextureParameterValue(FName("NoiseTexture"), LoadObject<UVolumeTexture>(nullptr, *GalaxyGenerator.GalaxyParams.VolumeNoise));
 			
 			DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), GalaxyGenerator.GalaxyParams.VolumeAmbientColor);
 			DynamicMaterial->SetVectorParameterValue(FName("CoolShift"), GalaxyGenerator.GalaxyParams.VolumeCoolShift);
