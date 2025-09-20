@@ -893,8 +893,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sa_Max.ArmRadialDensityMax = 12;
 	Sa_Min.ArmStartRatio = .25;
 	Sa_Max.ArmStartRatio = .5;
-	Sa_Min.TwistCoreRadius = .005;
-	Sa_Max.TwistCoreRadius = .03;
+	Sa_Min.TwistCoreRadius = .01;
+	Sa_Max.TwistCoreRadius = .1;
 	Sa_Min.TwistCoreStrength = 2;
 	Sa_Max.TwistCoreStrength = 8;
 	Sa_Min.TwistCoreTwistExponent = .9;
@@ -997,7 +997,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sb_Min.ArmStartRatio = .25;
 	Sb_Max.ArmStartRatio = .5;
 	Sb_Min.TwistCoreRadius = .01;
-	Sb_Max.TwistCoreRadius = .035;
+	Sb_Max.TwistCoreRadius = .1;
 	Sb_Min.TwistCoreStrength = 3;
 	Sb_Max.TwistCoreStrength = 9;
 	Sb_Min.TwistCoreTwistExponent = .9;
@@ -1101,7 +1101,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sc_Min.ArmStartRatio = .25;
 	Sc_Max.ArmStartRatio = .5;
 	Sc_Min.TwistCoreRadius = .01;
-	Sc_Max.TwistCoreRadius = .035;
+	Sc_Max.TwistCoreRadius = .1;
 	Sc_Min.TwistCoreStrength = 3;
 	Sc_Max.TwistCoreStrength = 9;
 	Sc_Min.TwistCoreTwistExponent = .9;
@@ -1209,8 +1209,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBa_Max.ArmRadialDensityMax = 12;
 	SBa_Min.ArmStartRatio = 0;
 	SBa_Max.ArmStartRatio = 0.2;
-	SBa_Min.TwistCoreRadius = .005;
-	SBa_Max.TwistCoreRadius = 0;
+	SBa_Min.TwistCoreRadius = .01;
+	SBa_Max.TwistCoreRadius = 0.1;
 	SBa_Min.TwistCoreStrength = 0;
 	SBa_Max.TwistCoreStrength = 8;
 	SBa_Min.TwistCoreTwistExponent = .9;
@@ -1318,7 +1318,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBb_Min.ArmStartRatio = 0;
 	SBb_Max.ArmStartRatio = .1;
 	SBb_Min.TwistCoreRadius = 01;
-	SBb_Max.TwistCoreRadius = .035;
+	SBb_Max.TwistCoreRadius = .1;
 	SBb_Min.TwistCoreStrength = 0;
 	SBb_Max.TwistCoreStrength = 0;
 	SBb_Min.TwistCoreTwistExponent = .9;
@@ -1426,7 +1426,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBc_Min.ArmStartRatio = 0;
 	SBc_Max.ArmStartRatio = .1;
 	SBc_Min.TwistCoreRadius = 01;
-	SBc_Max.TwistCoreRadius = .035;
+	SBc_Max.TwistCoreRadius = .1;
 	SBc_Min.TwistCoreStrength = 0;
 	SBc_Max.TwistCoreStrength = 0;
 	SBc_Min.TwistCoreTwistExponent = .9;
