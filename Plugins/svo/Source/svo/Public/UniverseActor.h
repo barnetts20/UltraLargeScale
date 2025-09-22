@@ -41,7 +41,7 @@ public:
 	int Count = 2000000; //TODO: NIAGARA STREAMING, ASYNC POINT GENERATION IN BATCHES TO OPTIMIZE LOAD TIME/STREAMING
 
 	TSharedPtr<FOctree> Octree;
-	UniverseGenerator UGenerator;
+	UniverseGenerator UniverseGenerator;
 	TArray<TSharedPtr<FOctreeNode>> VolumeNodes;
 	TArray<TSharedPtr<FOctreeNode>> PointNodes;
 	
@@ -83,7 +83,7 @@ protected:
 	bool TryCleanUpComponents();
 	void MarkDestroying();
 	void InitializeData();
-	void FetchData();
+	void PopulateNiagaraArrays();
 	void InitializeVolumetric();
 	void InitializeNiagara();
 	virtual void BeginPlay() override;

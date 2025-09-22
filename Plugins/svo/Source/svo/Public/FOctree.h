@@ -45,40 +45,23 @@ public:
 class SVO_API FOctree : public TSharedFromThis<FOctree>
 {
 public:
-	int MaxDepth;
+
 	int64 Extent; //Must be power of 2, eg 1024 2048 etc
-	double DepthMaxDensity;
 	TSharedPtr<FOctreeNode> Root;
 
+	double DepthMaxDensity = 0;
+	int MaxDepth;
 	int VolumeDepth = 5;
+
 	// In FOctree class, add a mutex
 	mutable FCriticalSection OctreeMutex;
 
-	int32 FindChunkIndexForPosition(FInt64Vector Position, const TArray<TSharedPtr<FOctreeNode>>& VolumeChunks) {
-		// Calculate which chunk this position belongs to based on volume depth grid
-		int64 NodesPerSide = 1LL << VolumeDepth;
-		int64 ChunkSize = (Extent * 2) / NodesPerSide;
-		int64 HalfExtent = Extent;
-
-		// Convert world position to grid coordinates
-		int64 GridX = (Position.X + HalfExtent) / ChunkSize;
-		int64 GridY = (Position.Y + HalfExtent) / ChunkSize;
-		int64 GridZ = (Position.Z + HalfExtent) / ChunkSize;
-
-		// Clamp to valid range
-		GridX = FMath::Clamp(GridX, 0LL, NodesPerSide - 1);
-		GridY = FMath::Clamp(GridY, 0LL, NodesPerSide - 1);
-		GridZ = FMath::Clamp(GridZ, 0LL, NodesPerSide - 1);
-
-		// Convert 3D grid coordinates to linear index
-		return GridX + GridY * NodesPerSide + GridZ * NodesPerSide * NodesPerSide;
-	}
-	
+	#pragma region BulkInsert
 	void BulkInsertPositions(TArray<FPointData> InPointData, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes, TArray<TSharedPtr<FOctreeNode>>& OutVolumeChunks) {
 		TArray<TArray<FPointData>> ChunkPointData;
 		PrePopulateVolumeLayer(OutVolumeChunks, ChunkPointData);
 
-		// Distribute points to chunks
+		// Distribute points to per chunk arrays
 		for (FPointData Point : InPointData) {
 			int32 ChunkIndex = FindChunkIndexForPosition(Point.GetInt64Position(), OutVolumeChunks);
 			if (ChunkIndex >= 0 && ChunkIndex < ChunkPointData.Num()) {
@@ -86,7 +69,6 @@ public:
 			}
 		}
 
-		// Process chunks in parallel
 		FCriticalSection ResultMutex;
 		ParallelFor(OutVolumeChunks.Num(), [&](int32 i) {
 			TSharedPtr<FOctreeNode> Chunk = OutVolumeChunks[i];
@@ -104,7 +86,7 @@ public:
 		}, EParallelForFlags::BackgroundPriority);
 	}
 
-	int32 FindChunkIndexForPosition(FInt64Vector Position) {
+	int32 FindChunkIndexForPosition(FInt64Vector Position, const TArray<TSharedPtr<FOctreeNode>>& VolumeChunks) {
 		// Calculate which chunk this position belongs to based on volume depth grid
 		int64 NodesPerSide = 1LL << VolumeDepth;
 		int64 ChunkSize = (Extent * 2) / NodesPerSide;
@@ -151,13 +133,13 @@ public:
 			}
 		}
 	}
-
+	
 	TSharedPtr<FOctreeNode> InsertPosition(FInt64Vector InPosition, int InDepth, FVoxelData InData, TSharedPtr<FOctreeNode> InCurrent = nullptr) {
-		if (InData.TypeId == -1 && InPosition == FInt64Vector::ZeroValue) return nullptr;
+		if (InData.TypeId == -1 && InPosition == FInt64Vector::ZeroValue) return nullptr; //Ignore typeless inserts into 0,0,0
+		
 		TSharedPtr<FOctreeNode> Current = Root;
 		int64 CurrentExtent = Extent;
-		// Calculate the leaf volume once (volume at target depth InDepth)
-		int64 LeafExtent = Extent >> InDepth; // Extent at target depth
+
 		if (InCurrent) {
 			Current = InCurrent;
 			CurrentExtent = Current->Extent;
@@ -208,10 +190,7 @@ public:
 		Current->Data = InData;
 		return Current;
 	}
-	
-	TSharedPtr<FOctreeNode> InsertPosition(FInt64Vector InPosition, FVoxelData InData) {
-		return InsertPosition(InPosition, MaxDepth, InData);
-	}
+	#pragma endregion
 
 	void CollectLeafNodes(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
 		if (!InNode.IsValid()) return;
@@ -329,97 +308,9 @@ public:
 
 class SVO_API FOctreeTextureProcessor {
 public:
-
-	//static TArray<uint8> GenerateVolumeDataFromNoise(FastNoise::SmartNode<> InNoise, int32 InResolution, int32 Seed) {
-	//	float* outData;
-	//	InNoise->GenUniformGrid3D(outData, 0, 0, 0, InResolution, InResolution, InResolution, 1, Seed);
-
-	//}
-
-	static TArray<uint8> GenerateVolumeMipDataFromOctree(TSharedPtr<FOctree> InOctree, int32 Resolution)
-	{
-		//double StartTime = FPlatformTime::Seconds();
-
-		// --- Octree + setup ---
-		const int32 TargetDepth = FMath::FloorLog2(Resolution);
-		TArray<TSharedPtr<FOctreeNode>> PopulatedNodes = InOctree->GetPopulatedNodes(TargetDepth, TargetDepth, -1);
-
-		const int64 NodeExtentAtDepth = (InOctree->Extent >> TargetDepth);
-		const int64 OctreeExtent = InOctree->Extent;
-
-		// Precompute reciprocal for fast coordinate mapping
-		const double Scale = 1.0 / (2.0 * NodeExtentAtDepth);
-
-		// --- Texture allocation ---
-		const int64 TotalVoxels = (int64)Resolution * Resolution * Resolution;
-		const int64 BytesPerVoxel = 4; // BGRA8
-		const int64 TotalBytes = TotalVoxels * BytesPerVoxel;
-
-		TArray<uint8> TextureData;
-		TextureData.SetNumZeroed(TotalBytes);
-
-		// --- Parallel fill ---
-		// Use chunked ParallelFor to reduce scheduling overhead
-		const int32 ChunkSize = 512;
-		const int32 NumChunks = (PopulatedNodes.Num() + ChunkSize - 1) / ChunkSize;
-
-		ParallelFor(NumChunks, [&](int32 ChunkIdx)
-			{
-				const int32 Start = ChunkIdx * ChunkSize;
-				const int32 End = FMath::Min(Start + ChunkSize, PopulatedNodes.Num());
-
-				for (int32 NodeIndex = Start; NodeIndex < End; NodeIndex++)
-				{
-					const auto& Node = PopulatedNodes[NodeIndex];
-					if (!Node.IsValid()) continue;
-
-					// --- Compute voxel coords (multiply instead of divide) ---
-					int32 VolumeX = static_cast<int32>((Node->Center.X + OctreeExtent) * Scale);
-					int32 VolumeY = static_cast<int32>((Node->Center.Y + OctreeExtent) * Scale);
-					int32 VolumeZ = static_cast<int32>((Node->Center.Z + OctreeExtent) * Scale);
-
-					if (VolumeX < 0 || VolumeX >= Resolution ||
-						VolumeY < 0 || VolumeY >= Resolution ||
-						VolumeZ < 0 || VolumeZ >= Resolution)
-					{
-						continue;
-					}
-
-					// --- Linear voxel index ---
-					int64 VoxelIndex = ((int64)VolumeZ * Resolution * Resolution) +
-						((int64)VolumeY * Resolution) +
-						VolumeX;
-					int64 ByteIndex = VoxelIndex * BytesPerVoxel;
-
-					// --- Density ---
-					uint8 DensityByte = 0;
-					if (InOctree->DepthMaxDensity > 0.0f)
-					{
-						float Norm = (float)Node->Data.Density / InOctree->DepthMaxDensity;
-						DensityByte = (uint8)FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f);
-					}
-
-					// --- Composition ---
-					FVector Comp = Node->Data.Composition;
-
-					TextureData[ByteIndex + 0] = (uint8)FMath::Clamp(Comp.X * 255.0f, 0.0f, 255.0f); // B
-					TextureData[ByteIndex + 1] = (uint8)FMath::Clamp(Comp.Y * 255.0f, 0.0f, 255.0f); // G
-					TextureData[ByteIndex + 2] = (uint8)FMath::Clamp(Comp.Z * 255.0f, 0.0f, 255.0f); // R
-					TextureData[ByteIndex + 3] = DensityByte; // A
-				}
-			},
-			EParallelForFlags::BackgroundPriority
-		);
-
-		//double TotalDuration = FPlatformTime::Seconds() - StartTime;
-		//UE_LOG(LogTemp, Log, TEXT("OctreeTextureProcessor::Base volume mip data @%dx^3 generation duration: %.3f seconds"), Resolution, TotalDuration);
-
-		return TextureData;
-	}
-
 	static TArray<uint8> GenerateVolumeMipDataFromOctree(TSharedPtr<FOctree> InOctree, TArray<TSharedPtr<FOctreeNode>> InVolumeNodes, int32 Resolution)
 	{
-		//double StartTime = FPlatformTime::Seconds();
+		double StartTime = FPlatformTime::Seconds();
 
 		// --- Octree + setup ---
 		const int32 TargetDepth = FMath::FloorLog2(Resolution);
@@ -443,56 +334,53 @@ public:
 		const int32 ChunkSize = 512;
 		const int32 NumChunks = (InVolumeNodes.Num() + ChunkSize - 1) / ChunkSize;
 
-		ParallelFor(NumChunks, [&](int32 ChunkIdx)
+		ParallelFor(NumChunks, [&](int32 ChunkIdx){
+			const int32 Start = ChunkIdx * ChunkSize;
+			const int32 End = FMath::Min(Start + ChunkSize, InVolumeNodes.Num());
+
+			for (int32 NodeIndex = Start; NodeIndex < End; NodeIndex++)
 			{
-				const int32 Start = ChunkIdx * ChunkSize;
-				const int32 End = FMath::Min(Start + ChunkSize, InVolumeNodes.Num());
+				const auto& Node = InVolumeNodes[NodeIndex];
+				if (!Node.IsValid()) continue;
 
-				for (int32 NodeIndex = Start; NodeIndex < End; NodeIndex++)
+				// --- Compute voxel coords (multiply instead of divide) ---
+				int32 VolumeX = static_cast<int32>((Node->Center.X + OctreeExtent) * Scale);
+				int32 VolumeY = static_cast<int32>((Node->Center.Y + OctreeExtent) * Scale);
+				int32 VolumeZ = static_cast<int32>((Node->Center.Z + OctreeExtent) * Scale);
+
+				if (VolumeX < 0 || VolumeX >= Resolution ||
+					VolumeY < 0 || VolumeY >= Resolution ||
+					VolumeZ < 0 || VolumeZ >= Resolution)
 				{
-					const auto& Node = InVolumeNodes[NodeIndex];
-					if (!Node.IsValid()) continue;
-
-					// --- Compute voxel coords (multiply instead of divide) ---
-					int32 VolumeX = static_cast<int32>((Node->Center.X + OctreeExtent) * Scale);
-					int32 VolumeY = static_cast<int32>((Node->Center.Y + OctreeExtent) * Scale);
-					int32 VolumeZ = static_cast<int32>((Node->Center.Z + OctreeExtent) * Scale);
-
-					if (VolumeX < 0 || VolumeX >= Resolution ||
-						VolumeY < 0 || VolumeY >= Resolution ||
-						VolumeZ < 0 || VolumeZ >= Resolution)
-					{
-						continue;
-					}
-
-					// --- Linear voxel index ---
-					int64 VoxelIndex = ((int64)VolumeZ * Resolution * Resolution) +
-						((int64)VolumeY * Resolution) +
-						VolumeX;
-					int64 ByteIndex = VoxelIndex * BytesPerVoxel;
-
-					// --- Density ---
-					uint8 DensityByte = 0;
-					if (InOctree->DepthMaxDensity > 0.0f)
-					{
-						float Norm = (float)Node->Data.Density / InOctree->DepthMaxDensity;
-						DensityByte = (uint8)FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f);
-					}
-
-					// --- Composition ---
-					FVector Comp = Node->Data.Composition;
-
-					TextureData[ByteIndex + 0] = (uint8)FMath::Clamp(Comp.X * 255.0f, 0.0f, 255.0f); // B
-					TextureData[ByteIndex + 1] = (uint8)FMath::Clamp(Comp.Y * 255.0f, 0.0f, 255.0f); // G
-					TextureData[ByteIndex + 2] = (uint8)FMath::Clamp(Comp.Z * 255.0f, 0.0f, 255.0f); // R
-					TextureData[ByteIndex + 3] = DensityByte; // A
+					continue;
 				}
-			},
-			EParallelForFlags::BackgroundPriority
-		);
 
-		//double TotalDuration = FPlatformTime::Seconds() - StartTime;
-		//UE_LOG(LogTemp, Log, TEXT("OctreeTextureProcessor::Base volume mip data @%dx^3 generation duration: %.3f seconds"), Resolution, TotalDuration);
+				// --- Linear voxel index ---
+				int64 VoxelIndex = ((int64)VolumeZ * Resolution * Resolution) +
+					((int64)VolumeY * Resolution) +
+					VolumeX;
+				int64 ByteIndex = VoxelIndex * BytesPerVoxel;
+
+				// --- Density ---
+				uint8 DensityByte = 0;
+				if (InOctree->DepthMaxDensity > 0.0f)
+				{
+					float Norm = (float)Node->Data.Density / InOctree->DepthMaxDensity;
+					DensityByte = (uint8)FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f);
+				}
+
+				// --- Composition ---
+				FVector Comp = Node->Data.Composition;
+
+				TextureData[ByteIndex + 0] = (uint8)FMath::Clamp(Comp.X * 255.0f, 0.0f, 255.0f); // B
+				TextureData[ByteIndex + 1] = (uint8)FMath::Clamp(Comp.Y * 255.0f, 0.0f, 255.0f); // G
+				TextureData[ByteIndex + 2] = (uint8)FMath::Clamp(Comp.Z * 255.0f, 0.0f, 255.0f); // R
+				TextureData[ByteIndex + 3] = DensityByte; // A
+			}
+		}, EParallelForFlags::BackgroundPriority);
+
+		double TotalDuration = FPlatformTime::Seconds() - StartTime;
+		UE_LOG(LogTemp, Log, TEXT("OctreeTextureProcessor::Base volume mip data @%dx^3 generation duration: %.3f seconds"), Resolution, TotalDuration);
 
 		return TextureData;
 	}
@@ -601,85 +489,20 @@ public:
 		return OutData;
 	}
 
-	static UVolumeTexture* GenerateVolumeTextureFromMipData(const TArray<uint8>& InMipData, int32 InResolution) {
-		UVolumeTexture* VolumeTexture;
-
-		VolumeTexture = NewObject<UVolumeTexture>(
-			GetTransientPackage(),
-			NAME_None,
-			RF_Transient
-		);
-
-		VolumeTexture->SRGB = false;
-		VolumeTexture->CompressionSettings = TC_VectorDisplacementmap;
-		VolumeTexture->CompressionNone = true;
-		VolumeTexture->Filter = TF_Nearest;
-		VolumeTexture->AddressMode = TA_Clamp;
-		VolumeTexture->MipGenSettings = TMGS_NoMipmaps;
-		VolumeTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
-		VolumeTexture->NeverStream = true;
-		VolumeTexture->DeferCompression = true;
-		VolumeTexture->UnlinkStreaming();
-
-		VolumeTexture->Source.Init(InResolution, InResolution, InResolution, 1, ETextureSourceFormat::TSF_BGRA8, InMipData.GetData());
-		VolumeTexture->UpdateResource();
-		FlushRenderingCommands();
-
-		return VolumeTexture;
-	}
-
-	static void SaveVolumeTextureAsAsset(UVolumeTexture* InSaveTexture, const FString& AssetPath, const FString& AssetName)
-	{
-		FString CleanAssetPath = AssetPath;
-		if (CleanAssetPath.EndsWith(TEXT("/")))
-		{
-			CleanAssetPath = CleanAssetPath.LeftChop(1);
-		}
-
-		FString PackagePath = CleanAssetPath + TEXT("/") + AssetName;
-		UPackage* Package = CreatePackage(*PackagePath);
-
-		if (!Package)
-		{
-			UE_LOG(LogTemp, Error, TEXT("Failed to create package"));
-			return;
-		}
-		Package->MarkPackageDirty();
-
-		// Save
-		FString PackageFileName = FPackageName::LongPackageNameToFilename(PackagePath, FPackageName::GetAssetPackageExtension());
-		FSavePackageArgs SaveArgs;
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		SaveArgs.Error = GError;
-		SaveArgs.SaveFlags = SAVE_NoError;
-
-		bool bSaved = UPackage::SavePackage(Package, InSaveTexture, *PackageFileName, SaveArgs);
-
-		if (bSaved)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("Volume texture saved successfully: %s"), *PackagePath);
-		}
-		else
-		{
-			UE_LOG(LogTemp, Error, TEXT("Failed to save volume texture"));
-		}
-	}
-
 	// --- Specialized fixed upscale: InRes^3 -> 256^3 -> 4096^2 pseudo volume ---
 	// InRes = low-res input (e.g. 32^3, 64^3, etc.)
 	// Always outputs a 4096x4096 2D pseudo volume (256^3 slices)
-	//TODO: Remove outres
 	static TArray<uint8> UpscalePseudoVolumeDensityData(const TArray<uint8>& InMipData, int32 InRes)
 	{
-		//double StartTime = FPlatformTime::Seconds();
+		double StartTime = FPlatformTime::Seconds();
+		
 		check(InRes > 1);
 
-		constexpr int32 OutRes = 256;          // fixed target 3D resolution
-		constexpr int32 BytesPerVoxel = 4;     // RGBA8
-		constexpr int32 tilesPerSide = 16;     // 16x16 = 256 slices
-		constexpr int32 OutWidth = OutRes * tilesPerSide;   // 4096
-		constexpr int32 OutHeight = OutRes * tilesPerSide;  // 4096
-		constexpr int64 OutBytes = int64(OutWidth) * OutHeight * BytesPerVoxel;
+		constexpr int32 Out3DRes = 256;												// fixed target 3D resolution
+		constexpr int32 BytesPerVoxel = 4;											// RGBA8
+		constexpr int32 tilesPerSide = 16;											// 16x16 = 256 slices
+		constexpr int32 Out2DRes = 4096;   // 4096
+		constexpr int32 OutBytes = 67108864; // 4096 * 4096 * 4
 
 		const int32 InSlice = InRes * InRes;
 
@@ -689,10 +512,10 @@ public:
 		static int32 CachedInRes = 0;
 		if (Precomputed.Num() == 0 || CachedInRes != InRes)
 		{
-			Precomputed.SetNum(OutRes);
-			for (int i = 0; i < OutRes; i++)
+			Precomputed.SetNum(Out3DRes);
+			for (int i = 0; i < Out3DRes; i++)
 			{
-				float f = i * (float(InRes - 1) / float(OutRes - 1));
+				float f = i * (float(InRes - 1) / float(Out3DRes - 1));
 				int i0 = FMath::FloorToInt(f);
 				int i1 = FMath::Min(i0 + 1, InRes - 1);
 				Precomputed[i] = { i0, i1, f - i0 };
@@ -710,10 +533,10 @@ public:
 		// Lambda to compute base index into input voxel array
 		auto InIndexBase = [InRes, InSlice, BytesPerVoxel](int x, int y, int z)->int32 {
 			return ((z * InSlice) + (y * InRes) + x) * BytesPerVoxel;
-			};
+		};
 
 		// --- Parallel slice processing ---
-		ParallelFor(OutRes, [&](int32 z)
+		ParallelFor(Out3DRes, [&](int32 z)
 			{
 				const auto& Zc = Precomputed[z];
 				const int z0 = Zc.i0;
@@ -723,10 +546,10 @@ public:
 				// Tile origin for this z slice
 				const int tileX = z % tilesPerSide;
 				const int tileY = z / tilesPerSide;
-				const int tileOriginX = tileX * OutRes;
-				const int tileOriginY = tileY * OutRes;
+				const int tileOriginX = tileX * Out3DRes;
+				const int tileOriginY = tileY * Out3DRes;
 
-				for (int y = 0; y < OutRes; ++y)
+				for (int y = 0; y < Out3DRes; ++y)
 				{
 					const auto& Yc = Precomputed[y];
 					const int y0 = Yc.i0;
@@ -735,9 +558,9 @@ public:
 
 					// Destination row pointer
 					const int destY = tileOriginY + y;
-					uint8* DestRow = OutPtrBase + (int64(destY) * OutWidth + tileOriginX) * BytesPerVoxel;
+					uint8* DestRow = OutPtrBase + (int64(destY) * Out2DRes + tileOriginX) * BytesPerVoxel;
 
-					for (int x = 0; x < OutRes; ++x)
+					for (int x = 0; x < Out3DRes; ++x)
 					{
 						const auto& Xc = Precomputed[x];
 						const int x0 = Xc.i0;
@@ -786,22 +609,22 @@ public:
 				}
 			}, EParallelForFlags::BackgroundPriority);
 
-		//double Duration = FPlatformTime::Seconds() - StartTime;
-		//UE_LOG(LogTemp, Log, TEXT("UpscaleToPseudoVolume256 (%d^3 -> 256^3 -> 4096^2) took %.3f sec"), InRes, Duration);
+		double Duration = FPlatformTime::Seconds() - StartTime;
+		UE_LOG(LogTemp, Log, TEXT("UpscaleToPseudoVolume (%d^3 -> 256^3 -> 4096^2) took %.3f sec"), InRes, Duration);
 
 		return OutData;
 	}
 
-	//Must call off of game thread
+	//MUST ALWAYS BE CALLED OFF GAME THREAD
 	static UTexture2D* GeneratePseudoVolumeTextureFromMipData(const TArray<uint8>& InMipData)
 	{
-		//double StartTime = FPlatformTime::Seconds();
+		double StartTime = FPlatformTime::Seconds();
+		
 		// Calculate expected 2D pseudo-volume layout parameters, will always output 256^3 to match noise texture dimensions
-		int32 tilesPerSide = 16;
-		int32 OutWidth = 4096;
-		int32 OutHeight = 4096;
 		const int32 BytesPerVoxel = 4;
-		const int64 ExpectedBytes = int64(OutWidth) * OutHeight * BytesPerVoxel;
+		int32 tilesPerSide = 16;
+		int32 OutRes = 4096;
+		const int32 ExpectedBytes = 67108864; // 4096 * 4096 * 4
 
 		if (InMipData.Num() != ExpectedBytes)
 		{
@@ -809,11 +632,12 @@ public:
 			return nullptr;
 		}
 
+		#pragma region Create Placeholder Texture on Game Thread
 		// --- 1) Create dummy UTexture2D on GameThread (with 1x1 mip) ---
 		UTexture2D* PseudoVolumeTexture = nullptr;
 		FEvent* DummyDoneEvent = FPlatformProcess::GetSynchEventFromPool(true);
 		DummyDoneEvent->Reset();
-		AsyncTask(ENamedThreads::GameThread, [OutWidth, OutHeight, &PseudoVolumeTexture, DummyDoneEvent]()
+		AsyncTask(ENamedThreads::GameThread, [OutRes, &PseudoVolumeTexture, DummyDoneEvent]()
 			{
 				PseudoVolumeTexture = NewObject<UTexture2D>(GetTransientPackage(), NAME_None, RF_Transient);
 				if (!PseudoVolumeTexture) { DummyDoneEvent->Trigger(); return; }
@@ -849,11 +673,12 @@ public:
 			UE_LOG(LogTemp, Error, TEXT("Failed to create dummy texture"));
 			return nullptr;
 		}
+		#pragma endregion
 
-		// --- 2) Create RHI texture asynchronously ---
+		#pragma region RHI Async Texture Creation
 		void* MipData[1] = { const_cast<uint8*>(InMipData.GetData()) };
 		FGraphEventRef CompletionEvent;
-		FTexture2DRHIRef RHITex = RHIAsyncCreateTexture2D(OutWidth, OutHeight, PF_B8G8R8A8, 1, TexCreate_ShaderResource, ERHIAccess::SRVMask, MipData, 1, TEXT("PseudoVolumeTexture"), CompletionEvent);
+		FTexture2DRHIRef RHITex = RHIAsyncCreateTexture2D(OutRes, OutRes, PF_B8G8R8A8, 1, TexCreate_ShaderResource, ERHIAccess::SRVMask, MipData, 1, TEXT("PseudoVolumeTexture"), CompletionEvent);
 		if (CompletionEvent.IsValid()) { CompletionEvent->Wait(); }
 		FRHITexture* RHITexture = RHITex.GetReference();
 		if (!RHITexture)
@@ -861,8 +686,9 @@ public:
 			UE_LOG(LogTemp, Warning, TEXT("Async RHI texture creation failed"));
 			return nullptr;
 		}
-
-		// --- 3) Link RHI texture to dummy texture on render thread ---
+		#pragma endregion
+	
+		#pragma region RHI Switch Texture Reference on Render Thread
 		FEvent* LinkDoneEvent = FPlatformProcess::GetSynchEventFromPool(true);
 		LinkDoneEvent->Reset();
 		ENQUEUE_RENDER_COMMAND(LinkTextureCmd)([PseudoVolumeTexture, RHITexture, LinkDoneEvent](FRHICommandListImmediate& RHICmdList)
@@ -873,9 +699,10 @@ public:
 			});
 		LinkDoneEvent->Wait();
 		FPlatformProcess::ReturnSynchEventToPool(LinkDoneEvent);
+		#pragma endregion
 
-		//double TotalDuration = FPlatformTime::Seconds() - StartTime;
-		//UE_LOG(LogTemp, Log, TEXT("OctreeTextureProcessor::Async pseudovolume texture linking duration: %.3f seconds"), TotalDuration);
+		double TotalDuration = FPlatformTime::Seconds() - StartTime;
+		UE_LOG(LogTemp, Log, TEXT("OctreeTextureProcessor::Async pseudovolume texture linking duration: %.3f seconds"), TotalDuration);
 		
 		return PseudoVolumeTexture;
 	}

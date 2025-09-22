@@ -61,7 +61,7 @@ public:
 
 protected:
 	void InitializeData();			//Initialize the octree data for the galaxy
-	void FetchData();				//Fetch the data for the particle system
+	void PopulateNiagaraArrays();				//Fetch the data for the particle system
 	void InitializeVolumetric();	//Fetch the volume density data, create a volume texture, initialize the volumetric component
 	void InitializeNiagara();		//Initialize the particle system
 	bool TryCleanUpComponents();	//Check early exit condition, destroy niagara and volumetric components and return true if early exit 

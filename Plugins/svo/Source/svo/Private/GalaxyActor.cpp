@@ -1,10 +1,7 @@
-// Fill out your copyright notice in the Description page of Project Settings.
 #include "GalaxyActor.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include <PointCloudGenerator.h>
-#include "Engine/VolumeTexture.h"
 #include <Kismet/GameplayStatics.h>
-#include <AssetRegistry/AssetRegistryModule.h>
 
 AGalaxyActor::AGalaxyActor()
 {
@@ -28,18 +25,15 @@ void AGalaxyActor::Initialize()
 	}
 
 	Octree = MakeShared<FOctree>(Extent);
-
-	//Initialize parent thread, any initialize tasks should manage their own game thread segments
-	//By default, they will execute their logic on this thread
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this]()
 	{
 		double StartTime = FPlatformTime::Seconds();
 
-		//FPlatformProcess::Sleep(0.5f);
+		FPlatformProcess::Sleep(0.3f); //Delay prevents heavy loadinig from starting for objects "zoomed past"
 		if (TryCleanUpComponents()) return; //Early exit if destroying
 		InitializeData();
 		if (TryCleanUpComponents()) return; //Early exit if destroying
-		FetchData();
+		PopulateNiagaraArrays();
 		if (TryCleanUpComponents()) return; //Early exit if destroying
 		InitializeVolumetric();
 		if (TryCleanUpComponents()) return; //Early exit if destroying
@@ -66,7 +60,6 @@ bool AGalaxyActor::TryCleanUpComponents() {
 
 void AGalaxyActor::MarkDestroying() {
 	InitializationState = ELifecycleState::Destroying;
-	GalaxyGenerator.MarkDestroying();
 }
 
 void AGalaxyActor::InitializeData() {
@@ -90,12 +83,13 @@ void AGalaxyActor::InitializeData() {
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Galaxy generation took: %.3f seconds"), GenDuration);
 }
 
-void AGalaxyActor::FetchData() {	
+void AGalaxyActor::PopulateNiagaraArrays() {	
 	double StartTime = FPlatformTime::Seconds();
 
 	Positions.SetNumUninitialized(PointNodes.Num());
 	Extents.SetNumUninitialized(PointNodes.Num());
 	Colors.SetNumUninitialized(PointNodes.Num());
+
 	ParallelFor(PointNodes.Num(), [&](int32 Index)
 	{
 		const TSharedPtr<FOctreeNode>& Node = PointNodes[Index];
@@ -115,14 +109,6 @@ void AGalaxyActor::InitializeVolumetric()
 	
 	int Resolution = 32;
 
-	FastNoise::SmartNode<> Noise = FastNoise::NewFromEncodedNodeTree("EwDhetQ/FwAAAAAAAACAPwAAgL8AAIA/DQADAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA==");
-	auto SeedOffset = FastNoise::New<FastNoise::SeedOffset>();
-	SeedOffset->SetSource(Noise);
-	SeedOffset->SetOffset(Seed);
-	auto ScaleNoise = FastNoise::New<FastNoise::DomainScale>();
-	ScaleNoise->SetSource(SeedOffset);
-	ScaleNoise->SetScale(1);
-
 	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, VolumeNodes, Resolution), Resolution));
 	if (TryCleanUpComponents()) return;
 
@@ -130,11 +116,11 @@ void AGalaxyActor::InitializeVolumetric()
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
-			double SourceStart = FPlatformTime::Seconds();
 			UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(
 				LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_GalaxyRaymarchPsuedoVolume_Inst.MT_GalaxyRaymarchPsuedoVolume_Inst")),
 				this
 			);
+
 			DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), PseudoVolumeTexture);
 			DynamicMaterial->SetTextureParameterValue(FName("NoiseTexture"), LoadObject<UVolumeTexture>(nullptr, *GalaxyGenerator.GalaxyParams.VolumeNoise));
 			DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), GalaxyGenerator.GalaxyParams.VolumeAmbientColor);
@@ -215,8 +201,11 @@ void AGalaxyActor::Tick(float DeltaTime)
 		auto Controller = UGameplayStatics::GetPlayerController(World, 0);
 		if (Controller)
 		{
-			CurrentFrameOfReferenceLocation = Controller->GetPawn()->GetActorLocation();
-			bHasReference = true;
+			if (APlayerCameraManager* CameraManager = Controller->PlayerCameraManager)
+			{
+				CurrentFrameOfReferenceLocation = CameraManager->GetCameraLocation();
+				bHasReference = true;
+			}
 		}
 	}
 

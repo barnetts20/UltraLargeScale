@@ -1,18 +1,15 @@
-// Fill out your copyright notice in the Description page of Project Settings.
 #include "UniverseActor.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include <PointCloudGenerator.h>
-#include <GalaxyActor.h>
 #include <Kismet/GameplayStatics.h>
+#include <GalaxyActor.h>
 
-// Sets default values
 AUniverseActor::AUniverseActor()
 {
 	PrimaryActorTick.bCanEverTick = true;
-	USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
+	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent")));
 	PointCloudNiagara = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/NG_UniverseCloud.NG_UniverseCloud"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
-	SetRootComponent(SceneRoot);
 }
 
 void AUniverseActor::Initialize()
@@ -30,13 +27,13 @@ void AUniverseActor::Initialize()
 	}
 
 	Octree = MakeShared<FOctree>(Extent);
-	Async(EAsyncExecution::Thread, [this]()
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this]()
 	{
 		double StartTime = FPlatformTime::Seconds();
 
 		InitializeData();
 		if (TryCleanUpComponents()) return; //Early exit if destroying
-		FetchData();
+		PopulateNiagaraArrays();
 		if (TryCleanUpComponents()) return; //Early exit if destroying
 		InitializeVolumetric();
 		if (TryCleanUpComponents()) return; //Early exit if destroying
@@ -66,25 +63,27 @@ void AUniverseActor::MarkDestroying() {
 
 void AUniverseActor::InitializeData() {
 	double StartTime = FPlatformTime::Seconds();
+
 	FRandomStream Stream(Seed);
-	UGenerator.Seed = Seed;// new GlobularNoiseGenerator(Seed);
+	UniverseGenerator.Seed = Seed;
 	UniverseParams UniverseParams;
 	UniverseParams.Extent = Extent;
 	//TODO: Proceduralize universe params
-	UGenerator.UniverseParams = UniverseParams;
-	UGenerator.Rotation = FRotator(0);
-	UGenerator.DepthRange = 7;
-	UGenerator.InsertDepthOffset = 5;
+	UniverseGenerator.UniverseParams = UniverseParams;
+	UniverseGenerator.Rotation = FRotator(0);
+	UniverseGenerator.DepthRange = 7;
+	UniverseGenerator.InsertDepthOffset = 5;
 
-	UGenerator.GenerateData(Octree);
-	Octree->BulkInsertPositions(UGenerator.GeneratedData, PointNodes, VolumeNodes);
+	UniverseGenerator.GenerateData(Octree);
+	Octree->BulkInsertPositions(UniverseGenerator.GeneratedData, PointNodes, VolumeNodes);
+	
 	double GenDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Universe generation took: %.3f seconds"), GenDuration);
 }
 
-void AUniverseActor::FetchData() {
+void AUniverseActor::PopulateNiagaraArrays() {
 	double StartTime = FPlatformTime::Seconds();
-	TArray<TSharedPtr<FOctreeNode>> Nodes = Octree->GetPopulatedNodes(-1, -1, 1);
+
 	Positions.SetNumUninitialized(PointNodes.Num());
 	Rotations.SetNumUninitialized(PointNodes.Num());
 	Extents.SetNumUninitialized(PointNodes.Num());
@@ -101,24 +100,22 @@ void AUniverseActor::FetchData() {
 	}, EParallelForFlags::BackgroundPriority);
 
 	double FetchDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Node fetch + array population took: %.3f seconds"), FetchDuration);
+	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Niagara array population took: %.3f seconds"), FetchDuration);
 }
 
 void AUniverseActor::InitializeVolumetric()
 {
 	double StartTime = FPlatformTime::Seconds();
-	int Resolution = 32;
-	TextureData = FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, VolumeNodes, Resolution), Resolution); // can add noise here
-	if (TryCleanUpComponents()) return;
 
-	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(TextureData); //Async texture generation
+	int Resolution = 32;
+
+	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, VolumeNodes, Resolution), Resolution)); //Async texture generation
 	if (TryCleanUpComponents()) return;
 
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 	{
-		double SourceStart = FPlatformTime::Seconds();
 		UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(
 			LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_UniverseRaymarchPsuedoVolume_Inst.MT_UniverseRaymarchPsuedoVolume_Inst")),
 			this
@@ -136,14 +133,10 @@ void AUniverseActor::InitializeVolumetric()
 		VolumetricComponent->TranslucencySortPriority = 0;
 		VolumetricComponent->RegisterComponent();
 
-
-		double SourceDuration = FPlatformTime::Seconds() - SourceStart;
-		UE_LOG(LogTemp, Log, TEXT("AUniverseActor::VolumeTexture Source.Init & Update took: %.3f seconds"), SourceDuration);
-
 		CompletionPromise.SetValue();
 	});
 	CompletionFuture.Wait();
-	UE_LOG(LogTemp, Log, TEXT("VolumeNodes count: %d, DepthMaxDensity: %f"), VolumeNodes.Num(), Octree->DepthMaxDensity);
+
 	double VolumetricDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Volumetric initialization took: %.3f seconds"), VolumetricDuration);
 }
@@ -151,6 +144,7 @@ void AUniverseActor::InitializeVolumetric()
 void AUniverseActor::InitializeNiagara()
 {
 	double StartTime = FPlatformTime::Seconds();
+
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
@@ -275,8 +269,11 @@ void AUniverseActor::Tick(float DeltaTime)
 		auto Controller = UGameplayStatics::GetPlayerController(World, 0);
 		if (Controller)
 		{
-			CurrentFrameOfReferenceLocation = Controller->GetPawn()->GetActorLocation();
-			bHasReference = true;
+			if (APlayerCameraManager* CameraManager = Controller->PlayerCameraManager)
+			{
+				CurrentFrameOfReferenceLocation = CameraManager->GetCameraLocation();
+				bHasReference = true;
+			}
 		}
 	}
 

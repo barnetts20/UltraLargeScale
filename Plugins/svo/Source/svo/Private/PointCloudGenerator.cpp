@@ -1,6 +1,6 @@
 ﻿#include "PointCloudGenerator.h"
 
-//Applies noise derivative offset to a sample position
+#pragma region PointCloudGenerator
 FInt64Vector PointCloudGenerator::ApplyNoiseDerivative(FastNoise::SmartNode<> InNoise, double InDomainScale, int64 InExtent, FInt64Vector InSamplePosition, float& OutDensity)
 {
 	double ScaleFactor = InDomainScale / static_cast<double>(InExtent);
@@ -83,391 +83,10 @@ FVector PointCloudGenerator::RotateCoordinate(FVector InCoordinate, FRotator InR
 	// Apply rotation around the origin
 	return Rotation.RotateVector(InCoordinate);
 }
+#pragma endregion
 
-//Example Generators
-void SimpleRandomGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
-{
-	if (!InOctree) return;
-
-	int64 Extent = InOctree->Extent;
-	MaxInsertionDepth = InOctree->MaxDepth;
-	MinInsertionDepth = FMath::Max(InOctree->MaxDepth - DepthRange, 1);
-
-	TArray<FInt64Vector> InsertPositions;
-	TArray<int32> InsertDepths;
-	TArray<FVoxelData> InsertPayloads;
-	ParallelFor(Count, [this, InOctree](int32 i)
-	{
-		// Generate unique stream per point
-		int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
-		FRandomStream Stream(HashedSeed);
-
-		// Generate random coordinates
-		int64 X = FMath::RoundToInt64(Stream.FRandRange(-InOctree->Extent, InOctree->Extent));
-		int64 Y = FMath::RoundToInt64(Stream.FRandRange(-InOctree->Extent, InOctree->Extent));
-		int64 Z = FMath::RoundToInt64(Stream.FRandRange(-InOctree->Extent, InOctree->Extent));
-
-		auto InsertPosition = FInt64Vector(X, Y, Z);
-		int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-		auto InsertData = FVoxelData(Stream.FRand(), Stream.GetUnitVector(), i, Type); //For now just placing the index in ObectId, will probably use it to map to object types
-		
-		InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
-	});
-}
-
-void SimpleRandomNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
-{
-	if (!InOctree) return;
-
-	MaxInsertionDepth = InOctree->MaxDepth;
-	MinInsertionDepth = FMath::Max(1, InOctree->MaxDepth - 8);
-
-	//Noise from encoded node tree, use Fast Noise tool to generate encoded tree strings
-	auto Noise = FastNoise::NewFromEncodedNodeTree(EncodedTree);
-
-	ParallelFor(Count, [this, InOctree, Noise](int32 i)
-		{
-			//Base Position Step
-			int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
-			FRandomStream Stream(HashedSeed);
-			int64 X = FMath::RoundToInt64(Stream.FRandRange(-InOctree->Extent, InOctree->Extent));
-			int64 Y = FMath::RoundToInt64(Stream.FRandRange(-InOctree->Extent, InOctree->Extent));
-			int64 Z = FMath::RoundToInt64(Stream.FRandRange(-InOctree->Extent, InOctree->Extent));
-
-			float OutDensity;
-			FInt64Vector InsertPosition = ApplyNoiseDerivative(Noise, 1, InOctree->Extent, FInt64Vector(X, Y, Z), OutDensity);
-
-			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-			auto InsertData = FVoxelData(OutDensity, Stream.GetUnitVector(), i, Type);
-			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
-		});
-}
-
-void GlobularGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
-{
-	if (!InOctree) return;
-
-	MaxInsertionDepth = InOctree->MaxDepth;
-	MinInsertionDepth = FMath::Max(InOctree->MaxDepth - DepthRange, 1);
-
-	ParallelFor(Count, [this, InOctree](int32 i)
-	{
-		// Generate unique stream per point
-		int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
-		FRandomStream Stream(HashedSeed);
-
-		// Generate random coordinates
-		FVector AxisScale = FVector(HorizontalExtent, HorizontalExtent, VerticalExtent);
-		FVector Direction = Stream.GetUnitVector();
-		double Distance = FMath::Pow(Stream.FRand(), Falloff) * InOctree->Extent;
-
-		auto InsertVector = AxisScale * Direction * Distance;
-		FInt64Vector InsertPosition = FInt64Vector(FMath::RoundToInt64(InsertVector.X), FMath::RoundToInt64(InsertVector.Y), FMath::RoundToInt64(InsertVector.Z));
-		InsertPosition = RotateCoordinate(InsertPosition, Rotation);
-
-		auto InsertDepth = Stream.FRandRange(MinInsertionDepth, MaxInsertionDepth);
-		auto InsertData = FVoxelData(Stream.FRand(), Stream.GetUnitVector(), i, Type);
-
-		InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
-	});
-}
-
-void GlobularNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
-{
-	if (!InOctree) return;
-	FRandomStream Stream(Seed);
-	MaxInsertionDepth = FMath::Max(InOctree->MaxDepth - InsertDepthOffset, 1);
-	MinInsertionDepth = FMath::Max(MaxInsertionDepth - DepthRange, 1); //Do not insert above level 1
-	auto Noise = FastNoise::NewFromEncodedNodeTree(EncodedTree);
-
-	ParallelFor(Count, [this, InOctree, Noise](int32 i)
-	{
-	//for (int i = 0; i < Count; i++)
-	//{
-			// Generate unique stream per point
-			int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
-			FRandomStream Stream(HashedSeed);
-
-			// Generate random coordinates
-			FVector AxisScale = FVector(HorizontalExtent, HorizontalExtent, VerticalExtent) * .5;
-			FVector Direction = Stream.GetUnitVector();
-			double Distance = FMath::Pow(Stream.FRand(), Falloff) * InOctree->Extent;
-			auto InsertCoeff = AxisScale * Direction;
-			auto InsertVector = InsertCoeff * Distance;
-
-			float OutDensity;
-			FInt64Vector InsertPosition = FInt64Vector(FMath::RoundToInt64(InsertVector.X), FMath::RoundToInt64(InsertVector.Y), FMath::RoundToInt64(InsertVector.Z));
-			InsertPosition = ApplyNoiseDerivative(Noise, 1, InOctree->Extent, InsertPosition, OutDensity);
-			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
-
-			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-			
-			FLinearColor Color = FLinearColor::MakeRandomSeededColor(i);
-			FVector Composition(Color.R, Color.G, Color.B);
-
-			auto InsertData = FVoxelData(FMath::Max(HorizontalExtent * .8, InsertPosition.Size()), Composition, i, Type);
-			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
-	}
-	);
-}
-
-void SpiralGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
-{
-	if (!InOctree) return;
-	//FRandomStream Stream(Seed);
-	int64 Extent = InOctree->Extent;
-
-	// Proceduralize parameters before entering population loop
-	HorizontalSpreadDistance = InOctree->Extent * HorizontalSpreadMax;
-	VerticalSpreadDistance = InOctree->Extent * VerticalSpreadMax;
-	RadialDistance = InOctree->Extent - HorizontalSpreadDistance; //Radius
-	CenterDistance = CenterScale * RadialDistance; //Distance from center spiral begins
-	PitchAngleRadians = FMath::DegreesToRadians(PitchAngle);
-	MaxTheta = FMath::Loge(RadialDistance / CenterDistance) / FMath::Tan(PitchAngleRadians);
-
-	MaxInsertionDepth = InOctree->MaxDepth;
-	MinInsertionDepth = FMath::Max(InOctree->MaxDepth - DepthRange, 1); //Do not insert above level 1
-
-	ParallelFor(Count, [this, InOctree](int32 i)
-	{
-		int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
-		FRandomStream Stream(HashedSeed);
-
-		int32 ArmIndex = i % NumArms;
-		double ArmPhaseOffset = (2.0 * PI * ArmIndex) / NumArms;
-		double Lambda = 1; // tweak to tune central density
-		double T = (1 - FMath::Exp(-Stream.FRand() / Lambda)) / (1 - FMath::Exp(-1.0 / Lambda));
-		double BaseTheta = T * MaxTheta;
-
-		// Spiral equation
-		double Radius = CenterDistance * FMath::Exp(BaseTheta * FMath::Tan(PitchAngleRadians));
-
-		// Arm perturbation
-		double PerturbStrength = ArmContrast * 0.5;
-		double Perturb = PerturbStrength * FMath::Sin(BaseTheta * 2.0);
-
-		double FinalTheta = BaseTheta + ArmPhaseOffset + Perturb;
-
-		double X = Radius * FMath::Cos(FinalTheta);
-		double Y = Radius * FMath::Sin(FinalTheta);
-		double Z = 0;
-
-		FVector JitterDirection = Stream.GetUnitVector();
-		double HorizontalFalloff = Stream.FRand() * FMath::Lerp(HorizontalSpreadMin, HorizontalSpreadMax, T);
-		double VerticalFalloff = Stream.FRand() * FMath::Lerp(VerticalSpreadMin, VerticalSpreadMax, T);
-
-		FVector JitterOffset;
-		JitterOffset.X = JitterDirection.X * InOctree->Extent * HorizontalFalloff;
-		JitterOffset.Y = JitterDirection.Y * InOctree->Extent * HorizontalFalloff;
-		JitterOffset.Z = JitterDirection.Z * InOctree->Extent * VerticalFalloff;
-
-		X += JitterOffset.X;
-		Y += JitterOffset.Y;
-		Z += JitterOffset.Z;
-
-		FInt64Vector InsertPosition(
-			FMath::RoundToInt64(X), 
-			FMath::RoundToInt64(Y), 
-			FMath::RoundToInt64(Z)
-		);
-		InsertPosition = RotateCoordinate(InsertPosition, Rotation);
-
-		auto InsertDepth = FMath::Lerp(MinInsertionDepth, MaxInsertionDepth, Stream.FRand());//  Stream.FRandRange(MinInsertionDepth, MaxInsertionDepth); //If a different scale distribution is wanted can change the way depth is randomized
-		auto InsertData = FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max(T - .3, 0.000001), 1), Stream.GetUnitVector().GetAbs(), i, Type);
-		InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
-	}, EParallelForFlags::BackgroundPriority);
-}
-
-void SpiralNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
-{
-	if (!InOctree) return;
-	FRandomStream Stream(Seed);
-	int64 Extent = InOctree->Extent;
-
-	// Proceduralize parameters before entering population loop
-	MaxInsertionDepth = FMath::Max(InOctree->MaxDepth - InsertDepthOffset, 1);
-	MinInsertionDepth = FMath::Max(MaxInsertionDepth - DepthRange, 1); //Do not insert above level 1
-	HorizontalSpreadDistance = InOctree->Extent * HorizontalSpreadMax;
-	VerticalSpreadDistance = InOctree->Extent * VerticalSpreadMax;
-	RadialDistance = InOctree->Extent - HorizontalSpreadDistance; //Radius
-	CenterDistance = CenterScale * RadialDistance; //Distance from center spiral begins
-	PitchAngleRadians = FMath::DegreesToRadians(PitchAngle);
-	MaxTheta = FMath::Loge(RadialDistance / CenterDistance) / FMath::Tan(PitchAngleRadians);
-
-	TArray<FInt64Vector> InsertPositions;
-	TArray<int32> InsertDepths;
-	TArray<FVoxelData> InsertPayloads;
-	InsertPositions.SetNumZeroed(Count);
-	InsertDepths.SetNumZeroed(Count);
-	InsertPayloads.SetNumZeroed(Count);
-
-	auto Noise = FastNoise::NewFromEncodedNodeTree(EncodedTree);
-	ParallelFor(Count, [this, &InsertPositions, &InsertDepths, &InsertPayloads, Extent, Noise, InOctree](int32 i)
-	{
-		int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
-		FRandomStream Stream(HashedSeed);
-
-		int32 ArmIndex = i % NumArms;
-		double ArmPhaseOffset = (2.0 * PI * ArmIndex) / NumArms;
-		double Lambda = 1; // tweak to tune central density
-		double T = (1 - FMath::Exp(-Stream.FRand() / Lambda)) / (1 - FMath::Exp(-1.0 / Lambda));
-		double BaseTheta = T * MaxTheta;
-
-		// Spiral equation
-		double Radius = CenterDistance * FMath::Exp(BaseTheta * FMath::Tan(PitchAngleRadians));
-
-		// Arm perturbation
-		double PerturbStrength = ArmContrast * 0.5;
-		double Perturb = PerturbStrength * FMath::Sin(BaseTheta * 2.0);
-
-		double FinalTheta = BaseTheta + ArmPhaseOffset + Perturb;
-
-		double X = Radius * FMath::Cos(FinalTheta);
-		double Y = Radius * FMath::Sin(FinalTheta);
-		double Z = 0;
-
-		FVector JitterDirection = Stream.GetUnitVector();
-		double HorizontalFalloff = Stream.FRand() * FMath::Lerp(HorizontalSpreadMin, HorizontalSpreadMax, T);
-		double VerticalFalloff = Stream.FRand() * FMath::Lerp(VerticalSpreadMin, VerticalSpreadMax, T);
-
-		FVector JitterOffset;
-		JitterOffset.X = JitterDirection.X * Extent * HorizontalFalloff;
-		JitterOffset.Y = JitterDirection.Y * Extent * HorizontalFalloff;
-		JitterOffset.Z = JitterDirection.Z * Extent * VerticalFalloff;
-
-		X += JitterOffset.X;
-		Y += JitterOffset.Y;
-		Z += JitterOffset.Z;
-
-		float OutDensity;
-		FInt64Vector InsertPosition(
-			FMath::RoundToInt64(X),
-			FMath::RoundToInt64(Y),
-			FMath::RoundToInt64(Z)
-		);
-		InsertPosition = ApplyNoiseDerivative(Noise, 2, Extent, InsertPosition, OutDensity);
-		InsertPosition = RotateCoordinate(InsertPosition, Rotation);
-		FLinearColor Color = FLinearColor::MakeRandomSeededColor(i);
-		FVector Composition(Color.R, Color.G, Color.B);
-		InOctree->InsertPosition(InsertPosition, Stream.RandRange(MinInsertionDepth, MaxInsertionDepth), FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max(T, 0.000001), 6), Composition, i, Type));
-	}
-	, EParallelForFlags::BackgroundPriority);
-}
-
-void BurstGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
-{
-	if (!InOctree) return;
-
-	int64 Extent = InOctree->Extent;
-	MaxInsertionDepth = InOctree->MaxDepth;
-	MinInsertionDepth = FMath::Max(1, InOctree->MaxDepth - DepthRange);
-
-	// Setup FastNoise2 graph
-	auto Noise = FastNoise::New<FastNoise::CellularDistance>();
-	auto SeedOffset = FastNoise::New<FastNoise::SeedOffset>();
-	SeedOffset->SetSource(Noise);
-	SeedOffset->SetOffset(Seed);
-
-	// Domain scaling consistent with extent
-	double OriginalScale = 2;
-	double DomainScale = OriginalScale / static_cast<double>(Extent);
-
-	ParallelFor(Count, [this, InOctree, SeedOffset, DomainScale](int32 i)
-	{
-		int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
-		FRandomStream Stream(HashedSeed);
-
-		// Sample a uniform random point
-		FVector3d UniformPoint;
-		UniformPoint.X = Stream.FRandRange(-InOctree->Extent, InOctree->Extent);
-		UniformPoint.Y = Stream.FRandRange(-InOctree->Extent, InOctree->Extent);
-		UniformPoint.Z = Stream.FRandRange(-InOctree->Extent, InOctree->Extent);
-
-		// Normalize for noise input
-		double NX = UniformPoint.X * DomainScale;
-		double NY = UniformPoint.Y * DomainScale;
-		double NZ = UniformPoint.Z * DomainScale;
-
-		// Evaluate noise and remap to [0,1] with emphasis
-		double NoiseValue = FMath::Pow(SeedOffset->GenSingle3D(NX, NY, NZ, 0), 3);
-
-		// Warp point toward noise "center" (here we use origin, but could sample gradient or add attractors later)
-		FVector3d WarpedPoint = FMath::Lerp(UniformPoint, FVector3d::ZeroVector, 1.0 - NoiseValue);
-
-		// Snap to voxel
-		auto Coord = FInt64Vector(
-			FMath::RoundToInt64(WarpedPoint.X),
-			FMath::RoundToInt64(WarpedPoint.Y),
-			FMath::RoundToInt64(WarpedPoint.Z)
-		);
-
-		int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-		FVoxelData Data(NoiseValue, Stream.GetUnitVector(), i, Type);
-		Coord = RotateCoordinate(Coord, Rotation);
-		InOctree->InsertPosition(Coord, InsertDepth, Data);
-	});
-}
-
-void BurstNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
-{
-	if (!InOctree) return;
-
-	int64 Extent = InOctree->Extent;
-	MaxInsertionDepth = InOctree->MaxDepth;
-	MinInsertionDepth = FMath::Max(1, InOctree->MaxDepth - DepthRange);
-
-	// Setup FastNoise2 graph
-	auto Noise = FastNoise::New<FastNoise::CellularDistance>();
-	auto SeedOffset = FastNoise::New<FastNoise::SeedOffset>();
-	SeedOffset->SetSource(Noise);
-	SeedOffset->SetOffset(Seed);
-
-	// Domain scaling consistent with extent
-	double OriginalScale = 1;
-	double DomainScale = OriginalScale / static_cast<double>(Extent);
-
-	auto DistortionNoise = FastNoise::NewFromEncodedNodeTree(EncodedTree);
-
-	ParallelFor(Count, [this, InOctree, SeedOffset, DomainScale, Noise, DistortionNoise](int32 i)
-		{
-			int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
-			FRandomStream Stream(HashedSeed);
-
-			// Sample a uniform random point
-			FVector3d UniformPoint;
-			UniformPoint.X = Stream.FRandRange(-InOctree->Extent, InOctree->Extent);
-			UniformPoint.Y = Stream.FRandRange(-InOctree->Extent, InOctree->Extent);
-			UniformPoint.Z = Stream.FRandRange(-InOctree->Extent, InOctree->Extent);
-
-			// Normalize for noise input
-			double NX = UniformPoint.X * DomainScale;
-			double NY = UniformPoint.Y * DomainScale;
-			double NZ = UniformPoint.Z * DomainScale;
-
-			// Evaluate noise and remap to [0,1] with emphasis
-			double NoiseValue = FMath::Pow(SeedOffset->GenSingle3D(NX, NY, NZ, 0), 3);
-
-			// Warp point toward noise "center" (here we use origin, but could sample gradient or add attractors later)
-			FVector3d WarpedPoint = FMath::Lerp(UniformPoint, FVector3d::ZeroVector, 1.0 - NoiseValue);
-
-			// Snap to voxel
-			float OutDensity;
-			auto InsertPosition = FInt64Vector(
-				FMath::RoundToInt64(WarpedPoint.X),
-				FMath::RoundToInt64(WarpedPoint.Y),
-				FMath::RoundToInt64(WarpedPoint.Z)
-			);
-			InsertPosition = ApplyNoiseDerivative(DistortionNoise, 6, InOctree->Extent, InsertPosition, OutDensity);
-			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
-
-			int32 InsertDepth = MaxInsertionDepth;// GalaxyGenerator::ChooseDepth(Stream.FRand());
-			FVoxelData Data(OutDensity, Stream.GetUnitVector(), i, Type);
-
-			InOctree->InsertPosition(InsertPosition, InsertDepth, Data);
-		});
-}
-
-//BEGIN GALAXY GENERATOR
+#pragma region GalaxyGenerator
+#pragma region GalaxyParamFactory
 GalaxyParamFactory::GalaxyParamFactory() {
 #pragma region VolumeMaterialBounds
 	Volume_Min.VolumeAmbientColor = FLinearColor(.1, .1, .1);
@@ -1690,7 +1309,8 @@ int GalaxyParamFactory::SelectGalaxyTypeIndex()
 
 	return 7; // Fallback to most common type
 }
-
+#pragma endregion
+#pragma region GalaxyGenerator
 void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {	 
 	//Glob - E0 E3 E5 E7 S0
@@ -1708,69 +1328,43 @@ void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 	BulgeRadius = GalaxyRadius * GalaxyParams.BulgeRatio; //Central bulge radius
 	VoidRadius = BulgeRadius * GalaxyParams.VoidRatio; //Central void
 
-	//Can tune these to create different classes maybe
 	GenerateArms();
-	//if (IsDestroying) return;
 	ApplyTwist();
-	//if (IsDestroying) return;
 	GenerateClusters();
-	//if (IsDestroying) return;
 	GenerateBulge();
-	//if (IsDestroying) return;
 	GenerateDisc();
-	//if (IsDestroying) return;
 	GenerateBackground();
-	//if (IsDestroying) return;
 	ApplyRotation();
-	//if (IsDestroying) return;
+
 	//TODO: Might be worth while to create a specific gas distribution and explicitly insert it at the desired depth for the volume texture
 
-// --- OPTIMIZATION 1: Pre-calculate squared radius to avoid costly sqrt operations in the loop. ---
 	const float VoidRadiusSquared = VoidRadius * VoidRadius;
 
-	//Accumulate Zero Vectors and Void stars into black hole
 	FPointData BlackHole;
 	BlackHole.Position = FVector::ZeroVector;
-	BlackHole.InsertDepth = MinInsertionDepth - 3;
 	BlackHole.Data.ObjectId = INT32_MAX;
 	BlackHole.Data.TypeId = 1;
 
-	// --- OPTIMIZATION 2 (CRITICAL FIX): Added a mutex to prevent a race condition. ---
-	// Multiple threads writing to BlackHole simultaneously would corrupt the data.
-	// This ensures that access is serialized and the final sum is correct.
 	FCriticalSection BlackHoleMutex;
 	TArray<FPointData> FinalData;
 	ParallelFor(GeneratedData.Num(), [this, InOctree, &BlackHole, &BlackHoleMutex, VoidRadiusSquared](int32 i){
-		//for (int i = 0; i < GeneratedData.Num(); i++) {
-
-			// FIX: Changed from 'const FPointData&' to 'FPointData' to create a mutable copy.
-			// This resolves the C2662 error when calling the non-const method GetInt64Position().
-			FPointData InsertData = GeneratedData[i];
-
-			// Use SizeSquared() for a significant performance gain over Size().
-			if (InsertData.Position.SizeSquared() < VoidRadiusSquared)
-			{
-				// Lock the mutex before modifying the shared BlackHole variable.
-				// The lock is automatically released when 'Lock' goes out of scope.
-				FScopeLock Lock(&BlackHoleMutex);
-				GeneratedData[i].Data.TypeId = -1;
-				GeneratedData[i].Position = FVector::ZeroVector;
-				double DensityWeight = FMath::Pow(2.0, InOctree->MaxDepth - InsertData.InsertDepth);
-				BlackHole.Data.Density += InsertData.Data.Density * DensityWeight;
-				BlackHole.Data.Composition += InsertData.Data.Composition * BlackHole.Data.Density;
-			}
-			else
-			{
-				// NOTE: This call assumes InOctree->InsertPosition() is internally thread-safe.
-				//InOctree->InsertPosition(InsertData.GetInt64Position(), InsertData.InsertDepth, InsertData.Data);
-			}
-		//}
+		FPointData InsertData = GeneratedData[i];
+		//This step checks for stars that are within the black holes consumption radius. 
+		//Their data gets accumulated into the black hole, and the original star is configured to be ignored in bulk insert.
+		if (InsertData.Position.SizeSquared() < VoidRadiusSquared)
+		{
+			FScopeLock Lock(&BlackHoleMutex);
+			GeneratedData[i].Data.TypeId = -1;
+			GeneratedData[i].Position = FVector::ZeroVector;
+			double DensityWeight = FMath::Pow(2.0, InOctree->MaxDepth - InsertData.InsertDepth);
+			BlackHole.Data.Density += InsertData.Data.Density * DensityWeight;
+			BlackHole.Data.Composition += InsertData.Data.Composition * BlackHole.Data.Density;
+		}
 	});
 
-	BlackHole.Data.Density = 1; // Should be accumulated below but that affects gas distribution, hard setting for now, can switch back if we do an explicit gas population stage
+	BlackHole.InsertDepth = MinInsertionDepth - 3; //TODO: Calculate approx radius based on end density
+	BlackHole.Data.Density = 1; //TODO: This should be allowed to be the accumulated density but it currently effects gas accumulation too much
 	GeneratedData.Add(BlackHole);
-	//TODO: calculate black hole size based on solar mass density and figure out the depth, for now inserting at min depth - an arbitrary number
-	//InOctree->InsertPosition(FInt64Vector::ZeroValue, MinInsertionDepth - 3, BlackHole); //Should insert at different depth for black hole
 }
 
 void GalaxyGenerator::GenerateBulge()
@@ -2074,13 +1668,10 @@ int GalaxyGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
 	}
 	return FMath::Clamp(MaxInsertionDepth - chosenDepth, MinInsertionDepth, MaxInsertionDepth);
 }
+#pragma endregion
+#pragma endregion
 
-void GalaxyGenerator::MarkDestroying()
-{
-	IsDestroying = true;
-}
-//END GALAXY GENERATOR
-
+#pragma region UniverseGenerator
 //BEGIN UNIVERSE GENERATOR
 void UniverseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {
@@ -2128,261 +1719,6 @@ void UniverseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			PointInserted = true;
 		}
 	}, EParallelForFlags::BackgroundPriority);
-}
-
-void UniverseGenerator::GenerateDensityWeb(TSharedPtr<FOctree> InOctree) {
-	// Cosmic web parameters
-	double MaxRadius = InOctree->Extent * .9;
-	const int32 NumFilaments = 8;
-	const int32 NumNodes = 12;
-	const float FilamentLength = MaxRadius * 0.8f;
-	const float FilamentThickness = MaxRadius * 0.01f;
-	const float NodeRadius = MaxRadius * 0.03f;
-	const int32 PointsPerFilament = 5000;
-	const int32 PointsPerNode = 20000;
-
-	FRandomStream WebRandom(Seed);
-
-	// 1. Generate major intersection nodes (galaxy clusters)
-	TArray<FVector> ClusterNodes;
-	for (int32 i = 0; i < NumNodes; ++i) {
-		// Distribute nodes in a roughly spherical pattern with some clustering
-		float Theta = WebRandom.FRandRange(0, 2 * PI);
-		float Phi = FMath::Acos(WebRandom.FRandRange(-1, 1));
-		float R = WebRandom.FRandRange(0.3f, 0.9f) * MaxRadius;
-
-		FVector NodePos = FVector(
-			R * FMath::Sin(Phi) * FMath::Cos(Theta),
-			R * FMath::Sin(Phi) * FMath::Sin(Theta),
-			R * FMath::Cos(Phi)
-		);
-		ClusterNodes.Add(NodePos);
-	}
-
-	// 2. Create connections between nearby nodes (filaments)
-	TArray<TPair<int32, int32>> Connections;
-	for (int32 i = 0; i < ClusterNodes.Num(); ++i) {
-		for (int32 j = i + 1; j < ClusterNodes.Num(); ++j) {
-			float Distance = FVector::Dist(ClusterNodes[i], ClusterNodes[j]);
-			// Connect nodes that are reasonably close
-			if (Distance < MaxRadius * 0.6f) {
-				Connections.Add(TPair<int32, int32>(i, j));
-			}
-		}
-	}
-
-	// 3. Generate points along filaments
-	for (const auto& Connection : Connections) {
-		FVector StartPos = ClusterNodes[Connection.Key];
-		FVector EndPos = ClusterNodes[Connection.Value];
-		FVector Direction = (EndPos - StartPos).GetSafeNormal();
-		float FilamentLen = FVector::Dist(StartPos, EndPos);
-
-		for (int32 p = 0; p < PointsPerFilament; ++p) {
-			// Position along filament
-			float T = WebRandom.FRandRange(0.1f, 0.9f);
-			FVector BasePos = FMath::Lerp(StartPos, EndPos, T);
-
-			// Add perpendicular variation (filament thickness)
-			FVector Perpendicular1 = FVector::CrossProduct(Direction, FVector::UpVector).GetSafeNormal();
-			FVector Perpendicular2 = FVector::CrossProduct(Direction, Perpendicular1).GetSafeNormal();
-
-			// Use Gaussian distribution for thickness falloff
-			float RadialOffset = FMath::Sqrt(-2.0f * FMath::Loge(WebRandom.FRand())) * FilamentThickness * 0.3f;
-			float Angle = WebRandom.FRandRange(0, 2 * PI);
-
-			FVector Offset = (Perpendicular1 * FMath::Cos(Angle) + Perpendicular2 * FMath::Sin(Angle)) * RadialOffset;
-			FVector FinalPos = BasePos + Offset;
-
-			// Density based on distance from filament center and position along filament
-			float CenterWeight = FMath::Exp(-RadialOffset / (FilamentThickness * 0.1f));
-			float EndWeight = FMath::Sin(T * PI); // Higher density toward middle of filament
-			float Density = CenterWeight * EndWeight * WebRandom.FRandRange(0.5f, 1.5f);
-
-			FPointData Point;
-			Point.Position = FinalPos;
-			Point.Data.Density = Density;
-			Point.Data.Composition = FVector(0.1f, 0.1f, 0.8f); // Bluish for filaments
-			Point.Data.ObjectId = WebRandom.RandHelper(INT32_MAX);
-			Point.Data.TypeId = 1; // Filament type
-			Point.InsertDepth = MinInsertionDepth + WebRandom.RandHelper(DepthRange);
-
-			GeneratedData.Add(Point);
-		}
-	}
-
-	// 4. Generate dense cluster regions at nodes
-	for (int32 n = 0; n < ClusterNodes.Num(); ++n) {
-		FVector NodeCenter = ClusterNodes[n];
-
-		for (int32 p = 0; p < PointsPerNode; ++p) {
-			// Spherical distribution around node with density falloff
-			float R = WebRandom.FRandRange(0, NodeRadius);
-			float Theta = WebRandom.FRandRange(0, 2 * PI);
-			float Phi = FMath::Acos(WebRandom.FRandRange(-1, 1));
-
-			// Apply density falloff (more points toward center)
-			R = FMath::Pow(R / NodeRadius, 0.5f) * NodeRadius;
-
-			FVector Offset = FVector(
-				R * FMath::Sin(Phi) * FMath::Cos(Theta),
-				R * FMath::Sin(Phi) * FMath::Sin(Theta),
-				R * FMath::Cos(Phi)
-			);
-
-			FVector FinalPos = NodeCenter + Offset;
-
-			// Higher density at cluster centers
-			float CenterDensity = FMath::Exp(-R / (NodeRadius * 0.3f));
-			float Density = CenterDensity * WebRandom.FRandRange(1.0f, 3.0f);
-
-			FPointData Point;
-			Point.Position = FinalPos;
-			Point.Data.Density = Density;
-			Point.Data.Composition = FVector(1.0f, 0.8f, 0.2f); // Yellowish for clusters
-			Point.Data.ObjectId = WebRandom.RandHelper(INT32_MAX);
-			Point.Data.TypeId = 1; // Cluster type
-			Point.InsertDepth = MinInsertionDepth + WebRandom.RandHelper(DepthRange);
-
-			GeneratedData.Add(Point);
-		}
-	}
-
-	// 5. Add sparse void regions (lower density background)
-	int32 VoidPoints = GeneratedData.Num() / 10; // Much sparser
-	for (int32 v = 0; v < VoidPoints; ++v) {
-		// Random position in space
-		FVector VoidPos = FVector(
-			WebRandom.FRandRange(-MaxRadius, MaxRadius),
-			WebRandom.FRandRange(-MaxRadius, MaxRadius),
-			WebRandom.FRandRange(-MaxRadius, MaxRadius)
-		);
-
-		// Check if too close to filaments or clusters (skip if so)
-		bool TooClose = false;
-		for (const FVector& Node : ClusterNodes) {
-			if (FVector::Dist(VoidPos, Node) < NodeRadius * 1.5f) {
-				TooClose = true;
-				break;
-			}
-		}
-
-		if (!TooClose) {
-			FPointData Point;
-			Point.Position = VoidPos;
-			Point.Data.Density = WebRandom.FRandRange(0.01f, 0.1f); // Very low density
-			Point.Data.Composition = FVector(0.3f, 0.3f, 0.3f); // Grayish for voids
-			Point.Data.ObjectId = WebRandom.RandHelper(INT32_MAX);
-			Point.Data.TypeId = 1; // Void type
-			Point.InsertDepth = MaxInsertionDepth; // Insert at deepest level
-
-			GeneratedData.Add(Point);
-		}
-	}
-}
-
-void UniverseGenerator::GenerateAdhesionWeb(TSharedPtr<FOctree> InOctree) {
-	const float MaxRadius = InOctree->Extent * 0.8f;
-	FRandomStream Stream(Seed);
-	// Create potential wells (proto-clusters)
-	TArray<FVector> PotentialWells;
-	for (int32 i = 0; i < 8; i++) {
-		FVector Well = FVector(
-			Stream.RandRange(-MaxRadius * 0.7f, MaxRadius * 0.7f),
-			Stream.RandRange(-MaxRadius * 0.7f, MaxRadius * 0.7f),
-			Stream.RandRange(-MaxRadius * 0.7f, MaxRadius * 0.7f)
-		);
-		PotentialWells.Add(Well);
-	}
-
-	auto GetPotential = [&](FVector Pos) -> float {
-		float Potential = 0.0f;
-		for (const FVector& Well : PotentialWells) {
-			float Dist = FVector::Dist(Pos, Well);
-			Potential += FMath::Exp(-Dist * Dist / (MaxRadius * MaxRadius * 0.05f));
-		}
-		return Potential;
-		};
-
-	// Place galaxies at high-potential locations
-	const int32 NumSamples = 2000;
-	for (int32 i = 0; i < NumSamples; i++) {
-		FVector TestPos = FVector(
-			Stream.RandRange(-MaxRadius, MaxRadius),
-			Stream.RandRange(-MaxRadius, MaxRadius),
-			Stream.RandRange(-MaxRadius, MaxRadius)
-		);
-
-		float Potential = GetPotential(TestPos);
-		if (Potential > 0.3f) { // Threshold for galaxy formation
-			FPointData Point;
-			Point.Position = TestPos;
-			Point.Data.Density = Potential * 2.0f;
-			Point.Data.Composition = FVector(0.9f, 0.7f, 0.4f);
-			Point.Data.ObjectId = FMath::RandRange(0, INT32_MAX);
-			Point.Data.TypeId = 1; // Galaxy type
-			Point.InsertDepth = InOctree->MaxDepth - 12;
-
-			GeneratedData.Add(Point);
-		}
-	}
-}
-
-void UniverseGenerator::GenerateZeldovichWeb(TSharedPtr<FOctree> InOctree) {
-	const float MaxRadius = InOctree->Extent * 0.8f;
-
-	// Initial density field - simple sinusoidal waves as approximation
-	const int32 ZelGridSize = 128;
-	const float CellSize = (MaxRadius * 2) / ZelGridSize;
-	FRandomStream Stream(Seed);
-	// Multiple wave modes to create structure
-	TArray<FVector> WaveModes = {
-		FVector(2 * PI / MaxRadius, 0, 0),
-		FVector(0, 2 * PI / MaxRadius, 0),
-		FVector(PI / MaxRadius, PI / MaxRadius, 0),
-		FVector(PI / MaxRadius, 0, PI / MaxRadius)
-	};
-
-	for (int32 x = 0; x < ZelGridSize; x++) {
-		for (int32 y = 0; y < ZelGridSize; y++) {
-			for (int32 z = 0; z < ZelGridSize; z++) {
-				FVector Pos = FVector(
-					(x - ZelGridSize / 2) * CellSize,
-					(y - ZelGridSize / 2) * CellSize,
-					(z - ZelGridSize / 2) * CellSize
-				);
-
-				// Sum density fluctuations from multiple modes
-				float Density = 1.0f; // Background density
-				for (const FVector& Mode : WaveModes) {
-					float Phase = FVector::DotProduct(Mode, Pos);
-					Density += 0.1f * FMath::Sin(Phase + Stream.FRandRange(0, 2 * PI));
-				}
-
-				// Zel'dovich displacement (simplified)
-				FVector Displacement = FVector::ZeroVector;
-				for (const FVector& Mode : WaveModes) {
-					float Phase = FVector::DotProduct(Mode, Pos);
-					float Growth = 0.5f; // Growth factor
-					Displacement += Mode.GetSafeNormal() * Growth * FMath::Cos(Phase) / Mode.Size();
-				}
-
-				FVector FinalPos = Pos + Displacement;
-
-				if (FinalPos.Size() < MaxRadius && Density > 0.5f) {
-					FPointData Point;
-					Point.Position = FinalPos;
-					Point.Data.Density = FMath::Max(0.01f, Density);
-					Point.Data.Composition = FVector(0.2f, 0.4f, 0.8f);
-					Point.Data.ObjectId = FMath::RandRange(0, INT32_MAX);
-					Point.Data.TypeId = 1; // Cosmic web type
-					Point.InsertDepth = InOctree->MaxDepth - 12;
-
-					GeneratedData.Add(Point); // Append to existing array
-				}
-			}
-		}
-	}
 }
 
 void UniverseGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity, double InDepthBias) //add falloff or curve param
@@ -2438,3 +1774,388 @@ int UniverseGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
 	return FMath::Clamp(MaxInsertionDepth - chosenDepth, MinInsertionDepth, MaxInsertionDepth);
 }
 //END UNIVERSE GENERATOR
+#pragma endregion
+
+#pragma region ExampleGenerators
+void SimpleRandomGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
+{
+	if (!InOctree) return;
+
+	int64 Extent = InOctree->Extent;
+	MaxInsertionDepth = InOctree->MaxDepth;
+	MinInsertionDepth = FMath::Max(InOctree->MaxDepth - DepthRange, 1);
+
+	TArray<FInt64Vector> InsertPositions;
+	TArray<int32> InsertDepths;
+	TArray<FVoxelData> InsertPayloads;
+	ParallelFor(Count, [this, InOctree](int32 i)
+		{
+			// Generate unique stream per point
+			int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
+			FRandomStream Stream(HashedSeed);
+
+			// Generate random coordinates
+			int64 X = FMath::RoundToInt64(Stream.FRandRange(-InOctree->Extent, InOctree->Extent));
+			int64 Y = FMath::RoundToInt64(Stream.FRandRange(-InOctree->Extent, InOctree->Extent));
+			int64 Z = FMath::RoundToInt64(Stream.FRandRange(-InOctree->Extent, InOctree->Extent));
+
+			auto InsertPosition = FInt64Vector(X, Y, Z);
+			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
+			auto InsertData = FVoxelData(Stream.FRand(), Stream.GetUnitVector(), i, Type); //For now just placing the index in ObectId, will probably use it to map to object types
+
+			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
+		});
+}
+
+void SimpleRandomNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
+{
+	if (!InOctree) return;
+
+	MaxInsertionDepth = InOctree->MaxDepth;
+	MinInsertionDepth = FMath::Max(1, InOctree->MaxDepth - 8);
+
+	//Noise from encoded node tree, use Fast Noise tool to generate encoded tree strings
+	auto Noise = FastNoise::NewFromEncodedNodeTree(EncodedTree);
+
+	ParallelFor(Count, [this, InOctree, Noise](int32 i)
+		{
+			//Base Position Step
+			int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
+			FRandomStream Stream(HashedSeed);
+			int64 X = FMath::RoundToInt64(Stream.FRandRange(-InOctree->Extent, InOctree->Extent));
+			int64 Y = FMath::RoundToInt64(Stream.FRandRange(-InOctree->Extent, InOctree->Extent));
+			int64 Z = FMath::RoundToInt64(Stream.FRandRange(-InOctree->Extent, InOctree->Extent));
+
+			float OutDensity;
+			FInt64Vector InsertPosition = ApplyNoiseDerivative(Noise, 1, InOctree->Extent, FInt64Vector(X, Y, Z), OutDensity);
+
+			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
+			auto InsertData = FVoxelData(OutDensity, Stream.GetUnitVector(), i, Type);
+			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
+		});
+}
+
+void GlobularGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
+{
+	if (!InOctree) return;
+
+	MaxInsertionDepth = InOctree->MaxDepth;
+	MinInsertionDepth = FMath::Max(InOctree->MaxDepth - DepthRange, 1);
+
+	ParallelFor(Count, [this, InOctree](int32 i)
+		{
+			// Generate unique stream per point
+			int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
+			FRandomStream Stream(HashedSeed);
+
+			// Generate random coordinates
+			FVector AxisScale = FVector(HorizontalExtent, HorizontalExtent, VerticalExtent);
+			FVector Direction = Stream.GetUnitVector();
+			double Distance = FMath::Pow(Stream.FRand(), Falloff) * InOctree->Extent;
+
+			auto InsertVector = AxisScale * Direction * Distance;
+			FInt64Vector InsertPosition = FInt64Vector(FMath::RoundToInt64(InsertVector.X), FMath::RoundToInt64(InsertVector.Y), FMath::RoundToInt64(InsertVector.Z));
+			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
+
+			auto InsertDepth = Stream.FRandRange(MinInsertionDepth, MaxInsertionDepth);
+			auto InsertData = FVoxelData(Stream.FRand(), Stream.GetUnitVector(), i, Type);
+
+			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
+		});
+}
+
+void GlobularNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
+{
+	if (!InOctree) return;
+	FRandomStream Stream(Seed);
+	MaxInsertionDepth = FMath::Max(InOctree->MaxDepth - InsertDepthOffset, 1);
+	MinInsertionDepth = FMath::Max(MaxInsertionDepth - DepthRange, 1); //Do not insert above level 1
+	auto Noise = FastNoise::NewFromEncodedNodeTree(EncodedTree);
+
+	ParallelFor(Count, [this, InOctree, Noise](int32 i)
+		{
+			//for (int i = 0; i < Count; i++)
+			//{
+					// Generate unique stream per point
+			int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
+			FRandomStream Stream(HashedSeed);
+
+			// Generate random coordinates
+			FVector AxisScale = FVector(HorizontalExtent, HorizontalExtent, VerticalExtent) * .5;
+			FVector Direction = Stream.GetUnitVector();
+			double Distance = FMath::Pow(Stream.FRand(), Falloff) * InOctree->Extent;
+			auto InsertCoeff = AxisScale * Direction;
+			auto InsertVector = InsertCoeff * Distance;
+
+			float OutDensity;
+			FInt64Vector InsertPosition = FInt64Vector(FMath::RoundToInt64(InsertVector.X), FMath::RoundToInt64(InsertVector.Y), FMath::RoundToInt64(InsertVector.Z));
+			InsertPosition = ApplyNoiseDerivative(Noise, 1, InOctree->Extent, InsertPosition, OutDensity);
+			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
+
+			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
+
+			FLinearColor Color = FLinearColor::MakeRandomSeededColor(i);
+			FVector Composition(Color.R, Color.G, Color.B);
+
+			auto InsertData = FVoxelData(FMath::Max(HorizontalExtent * .8, InsertPosition.Size()), Composition, i, Type);
+			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
+		}
+	);
+}
+
+void SpiralGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
+{
+	if (!InOctree) return;
+	//FRandomStream Stream(Seed);
+	int64 Extent = InOctree->Extent;
+
+	// Proceduralize parameters before entering population loop
+	HorizontalSpreadDistance = InOctree->Extent * HorizontalSpreadMax;
+	VerticalSpreadDistance = InOctree->Extent * VerticalSpreadMax;
+	RadialDistance = InOctree->Extent - HorizontalSpreadDistance; //Radius
+	CenterDistance = CenterScale * RadialDistance; //Distance from center spiral begins
+	PitchAngleRadians = FMath::DegreesToRadians(PitchAngle);
+	MaxTheta = FMath::Loge(RadialDistance / CenterDistance) / FMath::Tan(PitchAngleRadians);
+
+	MaxInsertionDepth = InOctree->MaxDepth;
+	MinInsertionDepth = FMath::Max(InOctree->MaxDepth - DepthRange, 1); //Do not insert above level 1
+
+	ParallelFor(Count, [this, InOctree](int32 i)
+		{
+			int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
+			FRandomStream Stream(HashedSeed);
+
+			int32 ArmIndex = i % NumArms;
+			double ArmPhaseOffset = (2.0 * PI * ArmIndex) / NumArms;
+			double Lambda = 1; // tweak to tune central density
+			double T = (1 - FMath::Exp(-Stream.FRand() / Lambda)) / (1 - FMath::Exp(-1.0 / Lambda));
+			double BaseTheta = T * MaxTheta;
+
+			// Spiral equation
+			double Radius = CenterDistance * FMath::Exp(BaseTheta * FMath::Tan(PitchAngleRadians));
+
+			// Arm perturbation
+			double PerturbStrength = ArmContrast * 0.5;
+			double Perturb = PerturbStrength * FMath::Sin(BaseTheta * 2.0);
+
+			double FinalTheta = BaseTheta + ArmPhaseOffset + Perturb;
+
+			double X = Radius * FMath::Cos(FinalTheta);
+			double Y = Radius * FMath::Sin(FinalTheta);
+			double Z = 0;
+
+			FVector JitterDirection = Stream.GetUnitVector();
+			double HorizontalFalloff = Stream.FRand() * FMath::Lerp(HorizontalSpreadMin, HorizontalSpreadMax, T);
+			double VerticalFalloff = Stream.FRand() * FMath::Lerp(VerticalSpreadMin, VerticalSpreadMax, T);
+
+			FVector JitterOffset;
+			JitterOffset.X = JitterDirection.X * InOctree->Extent * HorizontalFalloff;
+			JitterOffset.Y = JitterDirection.Y * InOctree->Extent * HorizontalFalloff;
+			JitterOffset.Z = JitterDirection.Z * InOctree->Extent * VerticalFalloff;
+
+			X += JitterOffset.X;
+			Y += JitterOffset.Y;
+			Z += JitterOffset.Z;
+
+			FInt64Vector InsertPosition(
+				FMath::RoundToInt64(X),
+				FMath::RoundToInt64(Y),
+				FMath::RoundToInt64(Z)
+			);
+			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
+
+			auto InsertDepth = FMath::Lerp(MinInsertionDepth, MaxInsertionDepth, Stream.FRand());//  Stream.FRandRange(MinInsertionDepth, MaxInsertionDepth); //If a different scale distribution is wanted can change the way depth is randomized
+			auto InsertData = FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max(T - .3, 0.000001), 1), Stream.GetUnitVector().GetAbs(), i, Type);
+			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
+		}, EParallelForFlags::BackgroundPriority);
+}
+
+void SpiralNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
+{
+	if (!InOctree) return;
+	FRandomStream Stream(Seed);
+	int64 Extent = InOctree->Extent;
+
+	// Proceduralize parameters before entering population loop
+	MaxInsertionDepth = FMath::Max(InOctree->MaxDepth - InsertDepthOffset, 1);
+	MinInsertionDepth = FMath::Max(MaxInsertionDepth - DepthRange, 1); //Do not insert above level 1
+	HorizontalSpreadDistance = InOctree->Extent * HorizontalSpreadMax;
+	VerticalSpreadDistance = InOctree->Extent * VerticalSpreadMax;
+	RadialDistance = InOctree->Extent - HorizontalSpreadDistance; //Radius
+	CenterDistance = CenterScale * RadialDistance; //Distance from center spiral begins
+	PitchAngleRadians = FMath::DegreesToRadians(PitchAngle);
+	MaxTheta = FMath::Loge(RadialDistance / CenterDistance) / FMath::Tan(PitchAngleRadians);
+
+	TArray<FInt64Vector> InsertPositions;
+	TArray<int32> InsertDepths;
+	TArray<FVoxelData> InsertPayloads;
+	InsertPositions.SetNumZeroed(Count);
+	InsertDepths.SetNumZeroed(Count);
+	InsertPayloads.SetNumZeroed(Count);
+
+	auto Noise = FastNoise::NewFromEncodedNodeTree(EncodedTree);
+	ParallelFor(Count, [this, &InsertPositions, &InsertDepths, &InsertPayloads, Extent, Noise, InOctree](int32 i)
+		{
+			int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
+			FRandomStream Stream(HashedSeed);
+
+			int32 ArmIndex = i % NumArms;
+			double ArmPhaseOffset = (2.0 * PI * ArmIndex) / NumArms;
+			double Lambda = 1; // tweak to tune central density
+			double T = (1 - FMath::Exp(-Stream.FRand() / Lambda)) / (1 - FMath::Exp(-1.0 / Lambda));
+			double BaseTheta = T * MaxTheta;
+
+			// Spiral equation
+			double Radius = CenterDistance * FMath::Exp(BaseTheta * FMath::Tan(PitchAngleRadians));
+
+			// Arm perturbation
+			double PerturbStrength = ArmContrast * 0.5;
+			double Perturb = PerturbStrength * FMath::Sin(BaseTheta * 2.0);
+
+			double FinalTheta = BaseTheta + ArmPhaseOffset + Perturb;
+
+			double X = Radius * FMath::Cos(FinalTheta);
+			double Y = Radius * FMath::Sin(FinalTheta);
+			double Z = 0;
+
+			FVector JitterDirection = Stream.GetUnitVector();
+			double HorizontalFalloff = Stream.FRand() * FMath::Lerp(HorizontalSpreadMin, HorizontalSpreadMax, T);
+			double VerticalFalloff = Stream.FRand() * FMath::Lerp(VerticalSpreadMin, VerticalSpreadMax, T);
+
+			FVector JitterOffset;
+			JitterOffset.X = JitterDirection.X * Extent * HorizontalFalloff;
+			JitterOffset.Y = JitterDirection.Y * Extent * HorizontalFalloff;
+			JitterOffset.Z = JitterDirection.Z * Extent * VerticalFalloff;
+
+			X += JitterOffset.X;
+			Y += JitterOffset.Y;
+			Z += JitterOffset.Z;
+
+			float OutDensity;
+			FInt64Vector InsertPosition(
+				FMath::RoundToInt64(X),
+				FMath::RoundToInt64(Y),
+				FMath::RoundToInt64(Z)
+			);
+			InsertPosition = ApplyNoiseDerivative(Noise, 2, Extent, InsertPosition, OutDensity);
+			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
+			FLinearColor Color = FLinearColor::MakeRandomSeededColor(i);
+			FVector Composition(Color.R, Color.G, Color.B);
+			InOctree->InsertPosition(InsertPosition, Stream.RandRange(MinInsertionDepth, MaxInsertionDepth), FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max(T, 0.000001), 6), Composition, i, Type));
+		}
+	, EParallelForFlags::BackgroundPriority);
+}
+
+void BurstGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
+{
+	if (!InOctree) return;
+
+	int64 Extent = InOctree->Extent;
+	MaxInsertionDepth = InOctree->MaxDepth;
+	MinInsertionDepth = FMath::Max(1, InOctree->MaxDepth - DepthRange);
+
+	// Setup FastNoise2 graph
+	auto Noise = FastNoise::New<FastNoise::CellularDistance>();
+	auto SeedOffset = FastNoise::New<FastNoise::SeedOffset>();
+	SeedOffset->SetSource(Noise);
+	SeedOffset->SetOffset(Seed);
+
+	// Domain scaling consistent with extent
+	double OriginalScale = 2;
+	double DomainScale = OriginalScale / static_cast<double>(Extent);
+
+	ParallelFor(Count, [this, InOctree, SeedOffset, DomainScale](int32 i)
+		{
+			int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
+			FRandomStream Stream(HashedSeed);
+
+			// Sample a uniform random point
+			FVector3d UniformPoint;
+			UniformPoint.X = Stream.FRandRange(-InOctree->Extent, InOctree->Extent);
+			UniformPoint.Y = Stream.FRandRange(-InOctree->Extent, InOctree->Extent);
+			UniformPoint.Z = Stream.FRandRange(-InOctree->Extent, InOctree->Extent);
+
+			// Normalize for noise input
+			double NX = UniformPoint.X * DomainScale;
+			double NY = UniformPoint.Y * DomainScale;
+			double NZ = UniformPoint.Z * DomainScale;
+
+			// Evaluate noise and remap to [0,1] with emphasis
+			double NoiseValue = FMath::Pow(SeedOffset->GenSingle3D(NX, NY, NZ, 0), 3);
+
+			// Warp point toward noise "center" (here we use origin, but could sample gradient or add attractors later)
+			FVector3d WarpedPoint = FMath::Lerp(UniformPoint, FVector3d::ZeroVector, 1.0 - NoiseValue);
+
+			// Snap to voxel
+			auto Coord = FInt64Vector(
+				FMath::RoundToInt64(WarpedPoint.X),
+				FMath::RoundToInt64(WarpedPoint.Y),
+				FMath::RoundToInt64(WarpedPoint.Z)
+			);
+
+			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
+			FVoxelData Data(NoiseValue, Stream.GetUnitVector(), i, Type);
+			Coord = RotateCoordinate(Coord, Rotation);
+			InOctree->InsertPosition(Coord, InsertDepth, Data);
+		});
+}
+
+void BurstNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
+{
+	if (!InOctree) return;
+
+	int64 Extent = InOctree->Extent;
+	MaxInsertionDepth = InOctree->MaxDepth;
+	MinInsertionDepth = FMath::Max(1, InOctree->MaxDepth - DepthRange);
+
+	// Setup FastNoise2 graph
+	auto Noise = FastNoise::New<FastNoise::CellularDistance>();
+	auto SeedOffset = FastNoise::New<FastNoise::SeedOffset>();
+	SeedOffset->SetSource(Noise);
+	SeedOffset->SetOffset(Seed);
+
+	// Domain scaling consistent with extent
+	double OriginalScale = 1;
+	double DomainScale = OriginalScale / static_cast<double>(Extent);
+
+	auto DistortionNoise = FastNoise::NewFromEncodedNodeTree(EncodedTree);
+
+	ParallelFor(Count, [this, InOctree, SeedOffset, DomainScale, Noise, DistortionNoise](int32 i)
+		{
+			int32 HashedSeed = FCrc::MemCrc32(&i, sizeof(i), Seed);
+			FRandomStream Stream(HashedSeed);
+
+			// Sample a uniform random point
+			FVector3d UniformPoint;
+			UniformPoint.X = Stream.FRandRange(-InOctree->Extent, InOctree->Extent);
+			UniformPoint.Y = Stream.FRandRange(-InOctree->Extent, InOctree->Extent);
+			UniformPoint.Z = Stream.FRandRange(-InOctree->Extent, InOctree->Extent);
+
+			// Normalize for noise input
+			double NX = UniformPoint.X * DomainScale;
+			double NY = UniformPoint.Y * DomainScale;
+			double NZ = UniformPoint.Z * DomainScale;
+
+			// Evaluate noise and remap to [0,1] with emphasis
+			double NoiseValue = FMath::Pow(SeedOffset->GenSingle3D(NX, NY, NZ, 0), 3);
+
+			// Warp point toward noise "center" (here we use origin, but could sample gradient or add attractors later)
+			FVector3d WarpedPoint = FMath::Lerp(UniformPoint, FVector3d::ZeroVector, 1.0 - NoiseValue);
+
+			// Snap to voxel
+			float OutDensity;
+			auto InsertPosition = FInt64Vector(
+				FMath::RoundToInt64(WarpedPoint.X),
+				FMath::RoundToInt64(WarpedPoint.Y),
+				FMath::RoundToInt64(WarpedPoint.Z)
+			);
+			InsertPosition = ApplyNoiseDerivative(DistortionNoise, 6, InOctree->Extent, InsertPosition, OutDensity);
+			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
+
+			int32 InsertDepth = MaxInsertionDepth;// GalaxyGenerator::ChooseDepth(Stream.FRand());
+			FVoxelData Data(OutDensity, Stream.GetUnitVector(), i, Type);
+
+			InOctree->InsertPosition(InsertPosition, InsertDepth, Data);
+		});
+}
+#pragma endregion
