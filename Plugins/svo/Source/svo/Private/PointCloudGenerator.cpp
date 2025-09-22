@@ -55,7 +55,7 @@ bool PointCloudGenerator::ApplyNoiseSelective(FastNoise::SmartNode<> InNoise, do
 	double NX = static_cast<double>(InSamplePosition.X) * ScaleFactor;
 	double NY = static_cast<double>(InSamplePosition.Y) * ScaleFactor;
 	double NZ = static_cast<double>(InSamplePosition.Z) * ScaleFactor;
-	return (InDensity >= InNoise->GenSingle3D(NX, NY, NZ, Seed + 80085));
+	return (InDensity <= InNoise->GenSingle3D(NX, NY, NZ, Seed + 80085));
 }
 
 FInt64Vector PointCloudGenerator::RotateCoordinate(FInt64Vector InCoordinate, FRotator InRotation)
@@ -470,12 +470,12 @@ void BurstNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 //BEGIN GALAXY GENERATOR
 GalaxyParamFactory::GalaxyParamFactory() {
 #pragma region VolumeMaterialBounds
-	Volume_Min.VolumeAmbientColor = FLinearColor(.3, .3, .3);
-	Volume_Max.VolumeAmbientColor = FLinearColor(1, 1, 1);
-	Volume_Min.VolumeCoolShift = FLinearColor(.5, .5, .5);
-	Volume_Max.VolumeCoolShift = FLinearColor(10, 10, 10);
-	Volume_Min.VolumeDensity = .3;
-	Volume_Max.VolumeDensity = 1;
+	Volume_Min.VolumeAmbientColor = FLinearColor(.1, .1, .1);
+	Volume_Max.VolumeAmbientColor = FLinearColor(1.5, 1.5, 1.5);
+	Volume_Min.VolumeCoolShift = FLinearColor(1, 1, 1);
+	Volume_Max.VolumeCoolShift = FLinearColor(25, 25, 25);
+	Volume_Min.VolumeDensity = .1;
+	Volume_Max.VolumeDensity = .5;
 	Volume_Min.VolumeHotShift = FLinearColor(.5, .25, .01);
 	Volume_Max.VolumeHotShift = FLinearColor(1, .7, .3);
 	Volume_Min.VolumeHueVariance = .01;
@@ -519,8 +519,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	E0_Max.BulgeBaseDensity = 4;
 	E0_Min.BulgeDepthBias = .8;
 	E0_Max.BulgeDepthBias = 1;
-	E0_Min.BulgeNumPoints = 100000;
-	E0_Max.BulgeNumPoints = 200000;
+	E0_Min.BulgeNumPoints = 150000;
+	E0_Max.BulgeNumPoints = 250000;
 	E0_Min.BulgeRadiusScale = .2;
 	E0_Max.BulgeRadiusScale = .4;
 	E0_Min.BulgeRatio = .8;
@@ -529,8 +529,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	E0_Max.BulgeTruncationScale = 1.3;
 	E0_Min.BulgeJitter = .2;
 	E0_Max.BulgeJitter = .4;
-	E0_Min.BackgroundNumPoints = 50000;
-	E0_Max.BackgroundNumPoints = 100000;
+	E0_Min.BackgroundNumPoints = 100000;
+	E0_Max.BackgroundNumPoints = 150000;
 	E0_Min.BackgroundBaseDensity = 15;
 	E0_Max.BackgroundBaseDensity = 25;
 	E0_Min.BackgroundDepthBias = .9;
@@ -552,7 +552,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	E0_Min.ClusterNumClusters = 12;
 	E0_Max.ClusterNumClusters = 64;
 	E0_Min.ClusterNumPoints = 100;
-	E0_Max.ClusterNumPoints = 15000;
+	E0_Max.ClusterNumPoints = 20000;
 	E0_Min.ClusterSpreadFactor = .25;
 	E0_Max.ClusterSpreadFactor = .45;
 #pragma endregion
@@ -582,8 +582,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	E3_Max.BulgeBaseDensity = 4;
 	E3_Min.BulgeDepthBias = .8;
 	E3_Max.BulgeDepthBias = 1;
-	E3_Min.BulgeNumPoints = 100000;
-	E3_Max.BulgeNumPoints = 200000;
+	E3_Min.BulgeNumPoints = 150000;
+	E3_Max.BulgeNumPoints = 250000;
 	E3_Min.BulgeRadiusScale = .2;
 	E3_Max.BulgeRadiusScale = .4;
 	E3_Min.BulgeRatio = .8;
@@ -592,8 +592,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	E3_Max.BulgeTruncationScale = 1.3;
 	E3_Min.BulgeJitter = .2;
 	E3_Max.BulgeJitter = .4;
-	E3_Min.BackgroundNumPoints = 50000;
-	E3_Max.BackgroundNumPoints = 100000;
+	E3_Min.BackgroundNumPoints = 100000;
+	E3_Max.BackgroundNumPoints = 150000;
 	E3_Min.BackgroundBaseDensity = 15;
 	E3_Max.BackgroundBaseDensity = 25;
 	E3_Min.BackgroundDepthBias = .9;
@@ -646,8 +646,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	E5_Max.DiscDepthBias = 1;
 	E5_Min.DiscHeightRatio = .15;
 	E5_Max.DiscHeightRatio = .4;
-	E5_Min.DiscNumPoints = 25000;
-	E5_Max.DiscNumPoints = 50000;
+	E5_Min.DiscNumPoints = 50000;
+	E5_Max.DiscNumPoints = 100000;
 	E5_Min.BulgeAcceptanceExponent = 1.5;
 	E5_Max.BulgeAcceptanceExponent = 2.5;
 	E5_Min.BulgeAxisScale = FVector(.85, .85, .45);
@@ -656,8 +656,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	E5_Max.BulgeBaseDensity = 4;
 	E5_Min.BulgeDepthBias = .6;
 	E5_Max.BulgeDepthBias = .8;
-	E5_Min.BulgeNumPoints = 100000;
-	E5_Max.BulgeNumPoints = 200000;
+	E5_Min.BulgeNumPoints = 150000;
+	E5_Max.BulgeNumPoints = 250000;
 	E5_Min.BulgeRadiusScale = .2;
 	E5_Max.BulgeRadiusScale = .4;
 	E5_Min.BulgeRatio = .8;
@@ -666,8 +666,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	E5_Max.BulgeTruncationScale = 1.3;
 	E5_Min.BulgeJitter = .2;
 	E5_Max.BulgeJitter = .4;
-	E5_Min.BackgroundNumPoints = 50000;
-	E5_Max.BackgroundNumPoints = 100000;
+	E5_Min.BackgroundNumPoints = 100000;
+	E5_Max.BackgroundNumPoints = 150000;
 	E5_Min.BackgroundBaseDensity = 15;
 	E5_Max.BackgroundBaseDensity = 25;
 	E5_Min.BackgroundDepthBias = .9;
@@ -689,7 +689,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	E5_Min.ClusterNumClusters = 12;
 	E5_Max.ClusterNumClusters = 64;
 	E5_Min.ClusterNumPoints = 100;
-	E5_Max.ClusterNumPoints = 10000;
+	E5_Max.ClusterNumPoints = 20000;
 	E5_Min.ClusterSpreadFactor = .25;
 	E5_Max.ClusterSpreadFactor = .45;
 #pragma endregion
@@ -720,8 +720,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	E7_Max.DiscDepthBias = 1;
 	E7_Min.DiscHeightRatio = .1;
 	E7_Max.DiscHeightRatio = .25;
-	E7_Min.DiscNumPoints = 75000;
-	E7_Max.DiscNumPoints = 125000;
+	E7_Min.DiscNumPoints = 150000;
+	E7_Max.DiscNumPoints = 200000;
 	E7_Min.BulgeAcceptanceExponent = 1.5;
 	E7_Max.BulgeAcceptanceExponent = 2.5;
 	E7_Min.BulgeAxisScale = FVector(.85, .85, .35);
@@ -730,8 +730,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	E7_Max.BulgeBaseDensity = 4;
 	E7_Min.BulgeDepthBias = .6;
 	E7_Max.BulgeDepthBias = .8;
-	E7_Min.BulgeNumPoints = 100000;
-	E7_Max.BulgeNumPoints = 200000;
+	E7_Min.BulgeNumPoints = 150000;
+	E7_Max.BulgeNumPoints = 250000;
 	E7_Min.BulgeRadiusScale = .2;
 	E7_Max.BulgeRadiusScale = .4;
 	E7_Min.BulgeRatio = .8;
@@ -740,8 +740,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	E7_Max.BulgeTruncationScale = 1.3;
 	E7_Min.BulgeJitter = .2;
 	E7_Max.BulgeJitter = .4;
-	E7_Min.BackgroundNumPoints = 50000;
-	E7_Max.BackgroundNumPoints = 100000;
+	E7_Min.BackgroundNumPoints = 100000;
+	E7_Max.BackgroundNumPoints = 150000;
 	E7_Min.BackgroundBaseDensity = 15;
 	E7_Max.BackgroundBaseDensity = 25;
 	E7_Min.BackgroundDepthBias = .9;
@@ -793,8 +793,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	S0_Max.DiscDepthBias = 1;
 	S0_Min.DiscHeightRatio = .03;
 	S0_Max.DiscHeightRatio = .1;
-	S0_Min.DiscNumPoints = 100000;
-	S0_Max.DiscNumPoints = 150000;
+	S0_Min.DiscNumPoints = 150000;
+	S0_Max.DiscNumPoints = 200000;
 	S0_Min.BulgeAcceptanceExponent = 1.5;
 	S0_Max.BulgeAcceptanceExponent = 2.5;
 	S0_Min.BulgeAxisScale = FVector(.9, .9, .35);
@@ -803,8 +803,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	S0_Max.BulgeBaseDensity = 4;
 	S0_Min.BulgeDepthBias = .6;
 	S0_Max.BulgeDepthBias = .8;
-	S0_Min.BulgeNumPoints = 100000;
-	S0_Max.BulgeNumPoints = 150000;
+	S0_Min.BulgeNumPoints = 150000;
+	S0_Max.BulgeNumPoints = 200000;
 	S0_Min.BulgeRadiusScale = .2;
 	S0_Max.BulgeRadiusScale = .4;
 	S0_Min.BulgeRatio = .8;
@@ -813,8 +813,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	S0_Max.BulgeTruncationScale = 1.3;
 	S0_Min.BulgeJitter = .2;
 	S0_Max.BulgeJitter = .4;
-	S0_Min.BackgroundNumPoints = 50000;
-	S0_Max.BackgroundNumPoints = 100000;
+	S0_Min.BackgroundNumPoints = 100000;
+	S0_Max.BackgroundNumPoints = 150000;
 	S0_Min.BackgroundBaseDensity = 15;
 	S0_Max.BackgroundBaseDensity = 25;
 	S0_Min.BackgroundDepthBias = .9;
@@ -861,8 +861,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sa_Max.DiscDepthBias = 1;
 	Sa_Min.DiscHeightRatio = .03;
 	Sa_Max.DiscHeightRatio = .1;
-	Sa_Min.DiscNumPoints = 50000;
-	Sa_Max.DiscNumPoints = 100000;
+	Sa_Min.DiscNumPoints = 100000;
+	Sa_Max.DiscNumPoints = 150000;
 	Sa_Min.ArmBaseDensity = 1;
 	Sa_Max.ArmBaseDensity = 4;
 	Sa_Min.ArmClusterRadiusMin = .025;
@@ -883,8 +883,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sa_Max.ArmHeightRatio = .8;
 	Sa_Min.ArmNumArms = 2;
 	Sa_Max.ArmNumArms = 2;
-	Sa_Min.ArmNumPoints = 75000;
-	Sa_Max.ArmNumPoints = 125000;
+	Sa_Min.ArmNumPoints = 125000;
+	Sa_Max.ArmNumPoints = 200000;
 	Sa_Min.ArmRadialDensityMin = .1;
 	Sa_Max.ArmRadialDensityMin = 1;
 	Sa_Min.ArmRadialDensityExponent = 1;
@@ -909,8 +909,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sa_Max.BulgeBaseDensity = 4;
 	Sa_Min.BulgeDepthBias = .6;
 	Sa_Max.BulgeDepthBias = .8;
-	Sa_Min.BulgeNumPoints = 100000;
-	Sa_Max.BulgeNumPoints = 150000;
+	Sa_Min.BulgeNumPoints = 150000;
+	Sa_Max.BulgeNumPoints = 200000;
 	Sa_Min.BulgeRadiusScale = .2;
 	Sa_Max.BulgeRadiusScale = .4;
 	Sa_Min.BulgeRatio = .8;
@@ -919,8 +919,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sa_Max.BulgeTruncationScale = 1.3;
 	Sa_Min.BulgeJitter = .2;
 	Sa_Max.BulgeJitter = .4;
-	Sa_Min.BackgroundNumPoints = 50000;
-	Sa_Max.BackgroundNumPoints = 100000;
+	Sa_Min.BackgroundNumPoints = 100000;
+	Sa_Max.BackgroundNumPoints = 150000;
 	Sa_Min.BackgroundBaseDensity = 15;
 	Sa_Max.BackgroundBaseDensity = 25;
 	Sa_Min.BackgroundDepthBias = .9;
@@ -964,8 +964,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sb_Max.DiscDepthBias = 1;
 	Sb_Min.DiscHeightRatio = .03;
 	Sb_Max.DiscHeightRatio = .1;
-	Sb_Min.DiscNumPoints = 50000;
-	Sb_Max.DiscNumPoints = 100000;
+	Sb_Min.DiscNumPoints = 100000;
+	Sb_Max.DiscNumPoints = 150000;
 	Sb_Min.ArmBaseDensity = 1;
 	Sb_Max.ArmBaseDensity = 4;
 	Sb_Min.ArmClusterRadiusMin = .025;
@@ -986,8 +986,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sb_Max.ArmHeightRatio = .8;
 	Sb_Min.ArmNumArms = 2;
 	Sb_Max.ArmNumArms = 2;
-	Sb_Min.ArmNumPoints = 100000;
-	Sb_Max.ArmNumPoints = 150000;
+	Sb_Min.ArmNumPoints = 150000;
+	Sb_Max.ArmNumPoints = 200000;
 	Sb_Min.ArmRadialDensityMin = .1;
 	Sb_Max.ArmRadialDensityMin = 1;
 	Sb_Min.ArmRadialDensityExponent = 1;
@@ -1012,8 +1012,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sb_Max.BulgeBaseDensity = 4;
 	Sb_Min.BulgeDepthBias = .6;
 	Sb_Max.BulgeDepthBias = .8;
-	Sb_Min.BulgeNumPoints = 100000;
-	Sb_Max.BulgeNumPoints = 150000;
+	Sb_Min.BulgeNumPoints = 150000;
+	Sb_Max.BulgeNumPoints = 200000;
 	Sb_Min.BulgeRadiusScale = .2;
 	Sb_Max.BulgeRadiusScale = .4;
 	Sb_Min.BulgeRatio = .8;
@@ -1022,8 +1022,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sb_Max.BulgeTruncationScale = 1.3;
 	Sb_Min.BulgeJitter = .2;
 	Sb_Max.BulgeJitter = .4;
-	Sb_Min.BackgroundNumPoints = 50000;
-	Sb_Max.BackgroundNumPoints = 100000;
+	Sb_Min.BackgroundNumPoints = 100000;
+	Sb_Max.BackgroundNumPoints = 150000;
 	Sb_Min.BackgroundBaseDensity = 15;
 	Sb_Max.BackgroundBaseDensity = 25;
 	Sb_Min.BackgroundDepthBias = .9;
@@ -1068,8 +1068,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sc_Max.DiscDepthBias = 1;
 	Sc_Min.DiscHeightRatio = .03;
 	Sc_Max.DiscHeightRatio = .1;
-	Sc_Min.DiscNumPoints = 50000;
-	Sc_Max.DiscNumPoints = 100000;
+	Sc_Min.DiscNumPoints = 100000;
+	Sc_Max.DiscNumPoints = 150000;
 	Sc_Min.ArmBaseDensity = 1;
 	Sc_Max.ArmBaseDensity = 4;
 	Sc_Min.ArmClusterRadiusMin = .025;
@@ -1090,8 +1090,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sc_Max.ArmHeightRatio = .8;
 	Sc_Min.ArmNumArms = 3;
 	Sc_Max.ArmNumArms = 8;
-	Sc_Min.ArmNumPoints = 100000;
-	Sc_Max.ArmNumPoints = 200000;
+	Sc_Min.ArmNumPoints = 150000;
+	Sc_Max.ArmNumPoints = 250000;
 	Sc_Min.ArmRadialDensityMin = .1;
 	Sc_Max.ArmRadialDensityMin = 1;
 	Sc_Min.ArmRadialDensityExponent = 1;
@@ -1116,8 +1116,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sc_Max.BulgeBaseDensity = 4;
 	Sc_Min.BulgeDepthBias = .6;
 	Sc_Max.BulgeDepthBias = .8;
-	Sc_Min.BulgeNumPoints = 100000;
-	Sc_Max.BulgeNumPoints = 200000;
+	Sc_Min.BulgeNumPoints = 150000;
+	Sc_Max.BulgeNumPoints = 250000;
 	Sc_Min.BulgeRadiusScale = .2;
 	Sc_Max.BulgeRadiusScale = .4;
 	Sc_Min.BulgeRatio = .8;
@@ -1126,8 +1126,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sc_Max.BulgeTruncationScale = 1.3;
 	Sc_Min.BulgeJitter = .2;
 	Sc_Max.BulgeJitter = .4;
-	Sc_Min.BackgroundNumPoints = 50000;
-	Sc_Max.BackgroundNumPoints = 100000;
+	Sc_Min.BackgroundNumPoints = 100000;
+	Sc_Max.BackgroundNumPoints = 150000;
 	Sc_Min.BackgroundBaseDensity = 15;
 	Sc_Max.BackgroundBaseDensity = 25;
 	Sc_Min.BackgroundDepthBias = .9;
@@ -1177,8 +1177,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBa_Max.DiscDepthBias = 1;
 	SBa_Min.DiscHeightRatio = .03;
 	SBa_Max.DiscHeightRatio = .1;
-	SBa_Min.DiscNumPoints = 50000;
-	SBa_Max.DiscNumPoints = 100000;
+	SBa_Min.DiscNumPoints = 100000;
+	SBa_Max.DiscNumPoints = 150000;
 	SBa_Min.ArmBaseDensity = 1;
 	SBa_Max.ArmBaseDensity = 4;
 	SBa_Min.ArmClusterRadiusMin = .025;
@@ -1199,8 +1199,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBa_Max.ArmHeightRatio = .8;
 	SBa_Min.ArmNumArms = 2;
 	SBa_Max.ArmNumArms = 2;
-	SBa_Min.ArmNumPoints = 100000;
-	SBa_Max.ArmNumPoints = 200000;
+	SBa_Min.ArmNumPoints = 150000;
+	SBa_Max.ArmNumPoints = 250000;
 	SBa_Min.ArmRadialDensityMin = .1;
 	SBa_Max.ArmRadialDensityMin = 1;
 	SBa_Min.ArmRadialDensityExponent = 1;
@@ -1225,8 +1225,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBa_Max.BulgeBaseDensity = 4;
 	SBa_Min.BulgeDepthBias = .6;
 	SBa_Max.BulgeDepthBias = .8;
-	SBa_Min.BulgeNumPoints = 100000;
-	SBa_Max.BulgeNumPoints = 200000;
+	SBa_Min.BulgeNumPoints = 150000;
+	SBa_Max.BulgeNumPoints = 250000;
 	SBa_Min.BulgeRadiusScale = .2;
 	SBa_Max.BulgeRadiusScale = .4;
 	SBa_Min.BulgeRatio = .8;
@@ -1235,8 +1235,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBa_Max.BulgeTruncationScale = 1.3;
 	SBa_Min.BulgeJitter = .2;
 	SBa_Max.BulgeJitter = .4;
-	SBa_Min.BackgroundNumPoints = 50000;
-	SBa_Max.BackgroundNumPoints = 100000;
+	SBa_Min.BackgroundNumPoints = 100000;
+	SBa_Max.BackgroundNumPoints = 150000;
 	SBa_Min.BackgroundBaseDensity = 15;
 	SBa_Max.BackgroundBaseDensity = 25;
 	SBa_Min.BackgroundDepthBias = .9;
@@ -1285,8 +1285,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBb_Max.DiscDepthBias = 1;
 	SBb_Min.DiscHeightRatio = .03;
 	SBb_Max.DiscHeightRatio = .1;
-	SBb_Min.DiscNumPoints = 50000;
-	SBb_Max.DiscNumPoints = 100000;
+	SBb_Min.DiscNumPoints = 100000;
+	SBb_Max.DiscNumPoints = 150000;
 	SBb_Min.ArmBaseDensity = 1;
 	SBb_Max.ArmBaseDensity = 4;
 	SBb_Min.ArmClusterRadiusMin = .025;
@@ -1307,8 +1307,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBb_Max.ArmHeightRatio = .8;
 	SBb_Min.ArmNumArms = 2;
 	SBb_Max.ArmNumArms = 2;
-	SBb_Min.ArmNumPoints = 100000;
-	SBb_Max.ArmNumPoints = 200000;
+	SBb_Min.ArmNumPoints = 150000;
+	SBb_Max.ArmNumPoints = 250000;
 	SBb_Min.ArmRadialDensityMin = .1;
 	SBb_Max.ArmRadialDensityMin = 1;
 	SBb_Min.ArmRadialDensityExponent = 1;
@@ -1333,8 +1333,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBb_Max.BulgeBaseDensity = 4;
 	SBb_Min.BulgeDepthBias = .6;
 	SBb_Max.BulgeDepthBias = .8;
-	SBb_Min.BulgeNumPoints = 100000;
-	SBb_Max.BulgeNumPoints = 200000;
+	SBb_Min.BulgeNumPoints = 150000;
+	SBb_Max.BulgeNumPoints = 250000;
 	SBb_Min.BulgeRadiusScale = .2;
 	SBb_Max.BulgeRadiusScale = .4;
 	SBb_Min.BulgeRatio = .8;
@@ -1343,8 +1343,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBb_Max.BulgeTruncationScale = 1.3;
 	SBb_Min.BulgeJitter = .2;
 	SBb_Max.BulgeJitter = .4;
-	SBb_Min.BackgroundNumPoints = 50000;
-	SBb_Max.BackgroundNumPoints = 100000;
+	SBb_Min.BackgroundNumPoints = 100000;
+	SBb_Max.BackgroundNumPoints = 150000;
 	SBb_Min.BackgroundBaseDensity = 15;
 	SBb_Max.BackgroundBaseDensity = 25;
 	SBb_Min.BackgroundDepthBias = .9;
@@ -1393,8 +1393,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBc_Max.DiscDepthBias = 1;
 	SBc_Min.DiscHeightRatio = .03;
 	SBc_Max.DiscHeightRatio = .1;
-	SBc_Min.DiscNumPoints = 50000;
-	SBc_Max.DiscNumPoints = 100000;
+	SBc_Min.DiscNumPoints = 100000;
+	SBc_Max.DiscNumPoints = 150000;
 	SBc_Min.ArmBaseDensity = 2;
 	SBc_Max.ArmBaseDensity = 4;
 	SBc_Min.ArmClusterRadiusMin = .025;
@@ -1415,8 +1415,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBc_Max.ArmHeightRatio = .8;
 	SBc_Min.ArmNumArms = 2;
 	SBc_Max.ArmNumArms = 2;
-	SBc_Min.ArmNumPoints = 100000;
-	SBc_Max.ArmNumPoints = 200000;
+	SBc_Min.ArmNumPoints = 150000;
+	SBc_Max.ArmNumPoints = 250000;
 	SBc_Min.ArmRadialDensityMin = .1;
 	SBc_Max.ArmRadialDensityMin = 1;
 	SBc_Min.ArmRadialDensityExponent = 1;
@@ -1441,8 +1441,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBc_Max.BulgeBaseDensity = 4;
 	SBc_Min.BulgeDepthBias = .6;
 	SBc_Max.BulgeDepthBias = .8;
-	SBc_Min.BulgeNumPoints = 100000;
-	SBc_Max.BulgeNumPoints = 200000;
+	SBc_Min.BulgeNumPoints = 150000;
+	SBc_Max.BulgeNumPoints = 250000;
 	SBc_Min.BulgeRadiusScale = .2;
 	SBc_Max.BulgeRadiusScale = .4;
 	SBc_Min.BulgeRatio = .8;
@@ -1451,8 +1451,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBc_Max.BulgeTruncationScale = 1.3;
 	SBc_Min.BulgeJitter = .2;
 	SBc_Max.BulgeJitter = .4;
-	SBc_Min.BackgroundNumPoints = 50000;
-	SBc_Max.BackgroundNumPoints = 100000;
+	SBc_Min.BackgroundNumPoints = 100000;
+	SBc_Max.BackgroundNumPoints = 150000;
 	SBc_Min.BackgroundBaseDensity = 15;
 	SBc_Max.BackgroundBaseDensity = 25;
 	SBc_Min.BackgroundDepthBias = .9;
@@ -1503,7 +1503,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Irr_Max.BulgeRadiusScale = .4;
 	Irr_Min.BulgeRatio = .8;
 	Irr_Max.BulgeRatio = 1.2;
-	Irr_Min.BackgroundNumPoints = 50000;
+	Irr_Min.BackgroundNumPoints = 100000;
 	Irr_Max.BackgroundNumPoints = 150000;
 	Irr_Min.BackgroundBaseDensity = 5;
 	Irr_Max.BackgroundBaseDensity = 10;
@@ -1523,10 +1523,10 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Irr_Max.ClusterMaxScale = .6;
 	Irr_Min.ClusterMinScale = .2;
 	Irr_Max.ClusterMinScale = .4;
-	Irr_Min.ClusterNumClusters = 32;
-	Irr_Max.ClusterNumClusters = 128;
-	Irr_Min.ClusterNumPoints = 100000;
-	Irr_Max.ClusterNumPoints = 200000;
+	Irr_Min.ClusterNumClusters = 64;
+	Irr_Max.ClusterNumClusters = 256;
+	Irr_Min.ClusterNumPoints = 200000;
+	Irr_Max.ClusterNumPoints = 300000;
 	Irr_Min.ClusterSpreadFactor = .3;
 	Irr_Max.ClusterSpreadFactor = .6;
 #pragma endregion
@@ -1729,17 +1729,20 @@ void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 	const float VoidRadiusSquared = VoidRadius * VoidRadius;
 
 	//Accumulate Zero Vectors and Void stars into black hole
-	FVoxelData BlackHole;
-	BlackHole.ObjectId = INT32_MAX;
-	BlackHole.TypeId = 1;
+	FPointData BlackHole;
+	BlackHole.Position = FVector::ZeroVector;
+	BlackHole.InsertDepth = MinInsertionDepth - 3;
+	BlackHole.Data.ObjectId = INT32_MAX;
+	BlackHole.Data.TypeId = 1;
 
 	// --- OPTIMIZATION 2 (CRITICAL FIX): Added a mutex to prevent a race condition. ---
 	// Multiple threads writing to BlackHole simultaneously would corrupt the data.
 	// This ensures that access is serialized and the final sum is correct.
 	FCriticalSection BlackHoleMutex;
+	TArray<FPointData> FinalData;
+	ParallelFor(GeneratedData.Num(), [this, InOctree, &BlackHole, &BlackHoleMutex, VoidRadiusSquared](int32 i){
+		//for (int i = 0; i < GeneratedData.Num(); i++) {
 
-	ParallelFor(GeneratedData.Num(), [this, InOctree, &BlackHole, &BlackHoleMutex, VoidRadiusSquared](int32 i)
-		{
 			// FIX: Changed from 'const FPointData&' to 'FPointData' to create a mutable copy.
 			// This resolves the C2662 error when calling the non-const method GetInt64Position().
 			FPointData InsertData = GeneratedData[i];
@@ -1750,25 +1753,29 @@ void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 				// Lock the mutex before modifying the shared BlackHole variable.
 				// The lock is automatically released when 'Lock' goes out of scope.
 				FScopeLock Lock(&BlackHoleMutex);
-				BlackHole.Density += InsertData.Data.Density;
-				BlackHole.Composition += InsertData.Data.Composition;
+				GeneratedData[i].Data.TypeId = -1;
+				GeneratedData[i].Position = FVector::ZeroVector;
+				double DensityWeight = FMath::Pow(2.0, InOctree->MaxDepth - InsertData.InsertDepth);
+				BlackHole.Data.Density += InsertData.Data.Density * DensityWeight;
+				BlackHole.Data.Composition += InsertData.Data.Composition * BlackHole.Data.Density;
 			}
 			else
 			{
 				// NOTE: This call assumes InOctree->InsertPosition() is internally thread-safe.
-				InOctree->InsertPosition(InsertData.GetInt64Position(), InsertData.InsertDepth, InsertData.Data);
+				//InOctree->InsertPosition(InsertData.GetInt64Position(), InsertData.InsertDepth, InsertData.Data);
 			}
-		});
+		//}
+	});
 
-	BlackHole.Density = 1; // Should be accumulated below but that affects gas distribution, hard setting for now, can switch back if we do an explicit gas population stage
-
+	BlackHole.Data.Density = 1; // Should be accumulated below but that affects gas distribution, hard setting for now, can switch back if we do an explicit gas population stage
+	GeneratedData.Add(BlackHole);
 	//TODO: calculate black hole size based on solar mass density and figure out the depth, for now inserting at min depth - an arbitrary number
-	InOctree->InsertPosition(FInt64Vector::ZeroValue, MinInsertionDepth - 3, BlackHole); //Should insert at different depth for black hole
+	//InOctree->InsertPosition(FInt64Vector::ZeroValue, MinInsertionDepth - 3, BlackHole); //Should insert at different depth for black hole
 }
 
 void GalaxyGenerator::GenerateBulge()
 {
-	double StartTime = FPlatformTime::Seconds();
+	//double StartTime = FPlatformTime::Seconds();
 
 	const int32 NumPoints = GalaxyParams.BulgeNumPoints;
 	GeneratedData.Reserve(GeneratedData.Num() + NumPoints);
@@ -1837,13 +1844,13 @@ void GalaxyGenerator::GenerateBulge()
 			InsertData.Position = Stream.GetUnitVector() * r * AxisScale + (Stream.GetUnitVector() * Stream.FRand() * BulgeRadius * GalaxyParams.BulgeJitter);
 		});
 
-	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Bulge duration: %.3f seconds "), TotalDuration);
+	//double TotalDuration = FPlatformTime::Seconds() - StartTime;
+	//UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Bulge duration: %.3f seconds "), TotalDuration);
 }
 
 void GalaxyGenerator::GenerateClusters()
 {
-	double StartTime = FPlatformTime::Seconds();
+	//double StartTime = FPlatformTime::Seconds();
 
 	// Exit if no clusters or points are requested to avoid division by zero.
 	if (GalaxyParams.ClusterNumClusters <= 0 || GalaxyParams.ClusterNumPoints <= 0)
@@ -1908,13 +1915,13 @@ void GalaxyGenerator::GenerateClusters()
 		GenerateCluster(i + 987654, Center, Radius, PointsPerCluster, GalaxyParams.ClusterBaseDensity, GalaxyParams.ClusterDepthBias);
 	}
 
-	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Cluster duration: %.3f seconds "), TotalDuration);
+	//double TotalDuration = FPlatformTime::Seconds() - StartTime;
+	//UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Cluster duration: %.3f seconds "), TotalDuration);
 }
 
 void GalaxyGenerator::GenerateArms()
 {
-	double StartTime = FPlatformTime::Seconds();
+	//double StartTime = FPlatformTime::Seconds();
 
 	int StarsPerCluster = (GalaxyParams.ArmNumPoints / GalaxyParams.ArmNumArms) / GalaxyParams.ArmClusters; // should have some degree of randomization
 	double MinScale = GalaxyRadius * GalaxyParams.ArmClusterRadiusMin;
@@ -1953,13 +1960,13 @@ void GalaxyGenerator::GenerateArms()
 		}
 	}
 
-	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Arms duration: %.3f seconds "), TotalDuration);
+	//double TotalDuration = FPlatformTime::Seconds() - StartTime;
+	//UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Arms duration: %.3f seconds "), TotalDuration);
 }
 
 void GalaxyGenerator::ApplyTwist()
 {
-	double StartTime = FPlatformTime::Seconds();
+	//double StartTime = FPlatformTime::Seconds();
 
 	ParallelFor(GeneratedData.Num(), [&](int32 i)
 		{
@@ -1978,32 +1985,32 @@ void GalaxyGenerator::ApplyTwist()
 			GeneratedData[i].Position.Y = rXY * FMath::Sin(newTheta);
 		}, EParallelForFlags::BackgroundPriority);
 
-	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Apply Twist duration: %.3f seconds "), TotalDuration);
+	//double TotalDuration = FPlatformTime::Seconds() - StartTime;
+	//UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Apply Twist duration: %.3f seconds "), TotalDuration);
 }
 
 void GalaxyGenerator::GenerateDisc()
 {
-	double StartTime = FPlatformTime::Seconds();
+	//double StartTime = FPlatformTime::Seconds();
 	
 	GenerateCluster(Seed + 999, FVector::ZeroVector, FVector(GalaxyRadius, GalaxyRadius, GalaxyRadius * GalaxyParams.DiscHeightRatio), GalaxyParams.DiscNumPoints, GalaxyParams.DiscBaseDensity, GalaxyParams.DiscDepthBias);
 	
-	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Disc duration: %.3f seconds "), TotalDuration);
+	//double TotalDuration = FPlatformTime::Seconds() - StartTime;
+	//UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Disc duration: %.3f seconds "), TotalDuration);
 }
 
 void GalaxyGenerator::GenerateBackground()
 {
-	double StartTime = FPlatformTime::Seconds();
+	//double StartTime = FPlatformTime::Seconds();
 
 	GenerateCluster(Seed + 123456789, FVector::ZeroVector, FVector(MaxRadius, MaxRadius, MaxRadius * GalaxyParams.BackgroundHeightRatio), GalaxyParams.BackgroundNumPoints, GalaxyParams.BackgroundBaseDensity, GalaxyParams.BackgroundDepthBias);
 
-	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Background duration: %.3f seconds "), TotalDuration);
+	//double TotalDuration = FPlatformTime::Seconds() - StartTime;
+	//UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Background duration: %.3f seconds "), TotalDuration);
 }
 
 void GalaxyGenerator::ApplyRotation() {
-	double StartTime = FPlatformTime::Seconds();
+	//double StartTime = FPlatformTime::Seconds();
 	
 	ParallelFor(GeneratedData.Num(), [&](int32 i)
 		{
@@ -2011,8 +2018,8 @@ void GalaxyGenerator::ApplyRotation() {
 		}
 	);
 
-	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Apply Rotation duration: %.3f seconds "), TotalDuration);
+	//double TotalDuration = FPlatformTime::Seconds() - StartTime;
+	//UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Apply Rotation duration: %.3f seconds "), TotalDuration);
 }
 
 void GalaxyGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity, double InDepthBias) //add falloff or curve param
@@ -2080,67 +2087,300 @@ void UniverseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 	MaxInsertionDepth = FMath::Max(1, InOctree->MaxDepth - InsertDepthOffset);
 	MinInsertionDepth = FMath::Max(1, MaxInsertionDepth - DepthRange);
 
-	FRandomStream Stream(Seed + 4713);
-	auto Noise = FastNoise::NewFromEncodedNodeTree(UniverseParams.EncodedTree);
+	GeneratedData.Empty();
 
-	int Remaining = UniverseParams.Count;
-	int ClusterIndex = 0;
+	// Pre-allocate with extra space to avoid race conditions
+	GeneratedData.AddUninitialized(UniverseParams.Count); // Double size for safety
+	auto LocalNoise = FastNoise::NewFromEncodedNodeTree(UniverseParams.EncodedTree);
 
-	while (Remaining > 0)
-	{
-		// Pick candidate cluster center
-		FVector ClusterCenter(
-			Stream.FRandRange(-UniverseParams.Extent, UniverseParams.Extent),
-			Stream.FRandRange(-UniverseParams.Extent, UniverseParams.Extent),
-			Stream.FRandRange(-UniverseParams.Extent, UniverseParams.Extent)
-		);
+	ParallelFor(UniverseParams.Count, [&](int32 i) {
+		FRandomStream LocalStream(Seed + 4713 + i * 10007);
+		bool PointInserted = false;
+		while (!PointInserted) {
+			FVector PointCenter(
+				LocalStream.FRandRange(-UniverseParams.Extent, UniverseParams.Extent),
+				LocalStream.FRandRange(-UniverseParams.Extent, UniverseParams.Extent),
+				LocalStream.FRandRange(-UniverseParams.Extent, UniverseParams.Extent)
+			);
 
-		// Filter against noise
-		double NoiseVal = Stream.FRand();
-		if (!ApplyNoiseSelective(Noise, NoiseVal, 1, UniverseParams.Extent, ClusterCenter))
-		{
-			continue; // reject cluster, try again
+			const double ScaleFactor = 1.0 / static_cast<double>(UniverseParams.Extent);
+			const double NX = PointCenter.X * ScaleFactor;
+			const double NY = PointCenter.Y * ScaleFactor;
+			const double NZ = PointCenter.Z * ScaleFactor;
+
+
+			const double RadialWeight = FMath::Pow(1.0 - FMath::Clamp(PointCenter.Size() / UniverseParams.Extent, 0.0, 1.0), .3);
+
+			const double NoiseVal = LocalStream.FRand();
+			const double NoiseSample = FMath::Pow(LocalNoise->GenSingle3D(NX, NY, NZ, Seed), 2.0) * RadialWeight;
+
+			if (NoiseVal >= NoiseSample)
+			{
+				continue; // Reject this point
+			}
+
+			FPointData InsertData;
+			InsertData.Data = FVoxelData(LocalStream.FRandRange(0.5, 1.5), LocalStream.GetUnitVector(), i, 1);
+			InsertData.Position = PointCenter;
+			InsertData.InsertDepth = ChooseDepth(LocalStream.FRand(), 1 - NoiseSample * 0.9);
+			InsertData.Data.ObjectId = i;
+			GeneratedData[i] = InsertData;
+			PointInserted = true;
 		}
+	}, EParallelForFlags::BackgroundPriority);
+}
 
-		// Cluster size (1000–5000 but capped by Remaining)
-		double RadiusCoeff = Stream.FRand() * (2 - NoiseVal);
-		int ClusterCount = FMath::Clamp(
-			Stream.RandRange(1000, 2000) * RadiusCoeff,
-			1,
-			Remaining
+void UniverseGenerator::GenerateDensityWeb(TSharedPtr<FOctree> InOctree) {
+	// Cosmic web parameters
+	double MaxRadius = InOctree->Extent * .9;
+	const int32 NumFilaments = 8;
+	const int32 NumNodes = 12;
+	const float FilamentLength = MaxRadius * 0.8f;
+	const float FilamentThickness = MaxRadius * 0.01f;
+	const float NodeRadius = MaxRadius * 0.03f;
+	const int32 PointsPerFilament = 5000;
+	const int32 PointsPerNode = 20000;
+
+	FRandomStream WebRandom(Seed);
+
+	// 1. Generate major intersection nodes (galaxy clusters)
+	TArray<FVector> ClusterNodes;
+	for (int32 i = 0; i < NumNodes; ++i) {
+		// Distribute nodes in a roughly spherical pattern with some clustering
+		float Theta = WebRandom.FRandRange(0, 2 * PI);
+		float Phi = FMath::Acos(WebRandom.FRandRange(-1, 1));
+		float R = WebRandom.FRandRange(0.3f, 0.9f) * MaxRadius;
+
+		FVector NodePos = FVector(
+			R * FMath::Sin(Phi) * FMath::Cos(Theta),
+			R * FMath::Sin(Phi) * FMath::Sin(Theta),
+			R * FMath::Cos(Phi)
 		);
-
-		// Cluster radius as fraction of extent (scaleable)
-		double RadiusScale = FMath::Lerp(.02, .1, RadiusCoeff) ; // 1–5% of universe extent
-		FVector ClusterRadius(
-			UniverseParams.Extent * RadiusScale,
-			UniverseParams.Extent * RadiusScale,
-			UniverseParams.Extent * RadiusScale
-		);
-
-		// Noise controls density weight
-		double BaseDensity = FMath::Clamp(2 - NoiseVal, 0.1, 1.0);
-
-		// Spawn the cluster
-		GenerateCluster(
-			ClusterIndex, // unique seed
-			ClusterCenter,
-			ClusterRadius,
-			ClusterCount,
-			BaseDensity,
-			NoiseVal + .1 // depth bias
-		);
-
-		Remaining -= ClusterCount;
-		ClusterIndex++;
+		ClusterNodes.Add(NodePos);
 	}
 
-	// Insert final data into octree
-	for (auto& Data : GeneratedData)
-	{
-		if (Data.Data.TypeId == 1 && Data.Position != FVector::ZeroVector)
-		{
-			InOctree->InsertPosition(Data.GetInt64Position(), Data.InsertDepth, Data.Data);
+	// 2. Create connections between nearby nodes (filaments)
+	TArray<TPair<int32, int32>> Connections;
+	for (int32 i = 0; i < ClusterNodes.Num(); ++i) {
+		for (int32 j = i + 1; j < ClusterNodes.Num(); ++j) {
+			float Distance = FVector::Dist(ClusterNodes[i], ClusterNodes[j]);
+			// Connect nodes that are reasonably close
+			if (Distance < MaxRadius * 0.6f) {
+				Connections.Add(TPair<int32, int32>(i, j));
+			}
+		}
+	}
+
+	// 3. Generate points along filaments
+	for (const auto& Connection : Connections) {
+		FVector StartPos = ClusterNodes[Connection.Key];
+		FVector EndPos = ClusterNodes[Connection.Value];
+		FVector Direction = (EndPos - StartPos).GetSafeNormal();
+		float FilamentLen = FVector::Dist(StartPos, EndPos);
+
+		for (int32 p = 0; p < PointsPerFilament; ++p) {
+			// Position along filament
+			float T = WebRandom.FRandRange(0.1f, 0.9f);
+			FVector BasePos = FMath::Lerp(StartPos, EndPos, T);
+
+			// Add perpendicular variation (filament thickness)
+			FVector Perpendicular1 = FVector::CrossProduct(Direction, FVector::UpVector).GetSafeNormal();
+			FVector Perpendicular2 = FVector::CrossProduct(Direction, Perpendicular1).GetSafeNormal();
+
+			// Use Gaussian distribution for thickness falloff
+			float RadialOffset = FMath::Sqrt(-2.0f * FMath::Loge(WebRandom.FRand())) * FilamentThickness * 0.3f;
+			float Angle = WebRandom.FRandRange(0, 2 * PI);
+
+			FVector Offset = (Perpendicular1 * FMath::Cos(Angle) + Perpendicular2 * FMath::Sin(Angle)) * RadialOffset;
+			FVector FinalPos = BasePos + Offset;
+
+			// Density based on distance from filament center and position along filament
+			float CenterWeight = FMath::Exp(-RadialOffset / (FilamentThickness * 0.1f));
+			float EndWeight = FMath::Sin(T * PI); // Higher density toward middle of filament
+			float Density = CenterWeight * EndWeight * WebRandom.FRandRange(0.5f, 1.5f);
+
+			FPointData Point;
+			Point.Position = FinalPos;
+			Point.Data.Density = Density;
+			Point.Data.Composition = FVector(0.1f, 0.1f, 0.8f); // Bluish for filaments
+			Point.Data.ObjectId = WebRandom.RandHelper(INT32_MAX);
+			Point.Data.TypeId = 1; // Filament type
+			Point.InsertDepth = MinInsertionDepth + WebRandom.RandHelper(DepthRange);
+
+			GeneratedData.Add(Point);
+		}
+	}
+
+	// 4. Generate dense cluster regions at nodes
+	for (int32 n = 0; n < ClusterNodes.Num(); ++n) {
+		FVector NodeCenter = ClusterNodes[n];
+
+		for (int32 p = 0; p < PointsPerNode; ++p) {
+			// Spherical distribution around node with density falloff
+			float R = WebRandom.FRandRange(0, NodeRadius);
+			float Theta = WebRandom.FRandRange(0, 2 * PI);
+			float Phi = FMath::Acos(WebRandom.FRandRange(-1, 1));
+
+			// Apply density falloff (more points toward center)
+			R = FMath::Pow(R / NodeRadius, 0.5f) * NodeRadius;
+
+			FVector Offset = FVector(
+				R * FMath::Sin(Phi) * FMath::Cos(Theta),
+				R * FMath::Sin(Phi) * FMath::Sin(Theta),
+				R * FMath::Cos(Phi)
+			);
+
+			FVector FinalPos = NodeCenter + Offset;
+
+			// Higher density at cluster centers
+			float CenterDensity = FMath::Exp(-R / (NodeRadius * 0.3f));
+			float Density = CenterDensity * WebRandom.FRandRange(1.0f, 3.0f);
+
+			FPointData Point;
+			Point.Position = FinalPos;
+			Point.Data.Density = Density;
+			Point.Data.Composition = FVector(1.0f, 0.8f, 0.2f); // Yellowish for clusters
+			Point.Data.ObjectId = WebRandom.RandHelper(INT32_MAX);
+			Point.Data.TypeId = 1; // Cluster type
+			Point.InsertDepth = MinInsertionDepth + WebRandom.RandHelper(DepthRange);
+
+			GeneratedData.Add(Point);
+		}
+	}
+
+	// 5. Add sparse void regions (lower density background)
+	int32 VoidPoints = GeneratedData.Num() / 10; // Much sparser
+	for (int32 v = 0; v < VoidPoints; ++v) {
+		// Random position in space
+		FVector VoidPos = FVector(
+			WebRandom.FRandRange(-MaxRadius, MaxRadius),
+			WebRandom.FRandRange(-MaxRadius, MaxRadius),
+			WebRandom.FRandRange(-MaxRadius, MaxRadius)
+		);
+
+		// Check if too close to filaments or clusters (skip if so)
+		bool TooClose = false;
+		for (const FVector& Node : ClusterNodes) {
+			if (FVector::Dist(VoidPos, Node) < NodeRadius * 1.5f) {
+				TooClose = true;
+				break;
+			}
+		}
+
+		if (!TooClose) {
+			FPointData Point;
+			Point.Position = VoidPos;
+			Point.Data.Density = WebRandom.FRandRange(0.01f, 0.1f); // Very low density
+			Point.Data.Composition = FVector(0.3f, 0.3f, 0.3f); // Grayish for voids
+			Point.Data.ObjectId = WebRandom.RandHelper(INT32_MAX);
+			Point.Data.TypeId = 1; // Void type
+			Point.InsertDepth = MaxInsertionDepth; // Insert at deepest level
+
+			GeneratedData.Add(Point);
+		}
+	}
+}
+
+void UniverseGenerator::GenerateAdhesionWeb(TSharedPtr<FOctree> InOctree) {
+	const float MaxRadius = InOctree->Extent * 0.8f;
+	FRandomStream Stream(Seed);
+	// Create potential wells (proto-clusters)
+	TArray<FVector> PotentialWells;
+	for (int32 i = 0; i < 8; i++) {
+		FVector Well = FVector(
+			Stream.RandRange(-MaxRadius * 0.7f, MaxRadius * 0.7f),
+			Stream.RandRange(-MaxRadius * 0.7f, MaxRadius * 0.7f),
+			Stream.RandRange(-MaxRadius * 0.7f, MaxRadius * 0.7f)
+		);
+		PotentialWells.Add(Well);
+	}
+
+	auto GetPotential = [&](FVector Pos) -> float {
+		float Potential = 0.0f;
+		for (const FVector& Well : PotentialWells) {
+			float Dist = FVector::Dist(Pos, Well);
+			Potential += FMath::Exp(-Dist * Dist / (MaxRadius * MaxRadius * 0.05f));
+		}
+		return Potential;
+		};
+
+	// Place galaxies at high-potential locations
+	const int32 NumSamples = 2000;
+	for (int32 i = 0; i < NumSamples; i++) {
+		FVector TestPos = FVector(
+			Stream.RandRange(-MaxRadius, MaxRadius),
+			Stream.RandRange(-MaxRadius, MaxRadius),
+			Stream.RandRange(-MaxRadius, MaxRadius)
+		);
+
+		float Potential = GetPotential(TestPos);
+		if (Potential > 0.3f) { // Threshold for galaxy formation
+			FPointData Point;
+			Point.Position = TestPos;
+			Point.Data.Density = Potential * 2.0f;
+			Point.Data.Composition = FVector(0.9f, 0.7f, 0.4f);
+			Point.Data.ObjectId = FMath::RandRange(0, INT32_MAX);
+			Point.Data.TypeId = 1; // Galaxy type
+			Point.InsertDepth = InOctree->MaxDepth - 12;
+
+			GeneratedData.Add(Point);
+		}
+	}
+}
+
+void UniverseGenerator::GenerateZeldovichWeb(TSharedPtr<FOctree> InOctree) {
+	const float MaxRadius = InOctree->Extent * 0.8f;
+
+	// Initial density field - simple sinusoidal waves as approximation
+	const int32 ZelGridSize = 128;
+	const float CellSize = (MaxRadius * 2) / ZelGridSize;
+	FRandomStream Stream(Seed);
+	// Multiple wave modes to create structure
+	TArray<FVector> WaveModes = {
+		FVector(2 * PI / MaxRadius, 0, 0),
+		FVector(0, 2 * PI / MaxRadius, 0),
+		FVector(PI / MaxRadius, PI / MaxRadius, 0),
+		FVector(PI / MaxRadius, 0, PI / MaxRadius)
+	};
+
+	for (int32 x = 0; x < ZelGridSize; x++) {
+		for (int32 y = 0; y < ZelGridSize; y++) {
+			for (int32 z = 0; z < ZelGridSize; z++) {
+				FVector Pos = FVector(
+					(x - ZelGridSize / 2) * CellSize,
+					(y - ZelGridSize / 2) * CellSize,
+					(z - ZelGridSize / 2) * CellSize
+				);
+
+				// Sum density fluctuations from multiple modes
+				float Density = 1.0f; // Background density
+				for (const FVector& Mode : WaveModes) {
+					float Phase = FVector::DotProduct(Mode, Pos);
+					Density += 0.1f * FMath::Sin(Phase + Stream.FRandRange(0, 2 * PI));
+				}
+
+				// Zel'dovich displacement (simplified)
+				FVector Displacement = FVector::ZeroVector;
+				for (const FVector& Mode : WaveModes) {
+					float Phase = FVector::DotProduct(Mode, Pos);
+					float Growth = 0.5f; // Growth factor
+					Displacement += Mode.GetSafeNormal() * Growth * FMath::Cos(Phase) / Mode.Size();
+				}
+
+				FVector FinalPos = Pos + Displacement;
+
+				if (FinalPos.Size() < MaxRadius && Density > 0.5f) {
+					FPointData Point;
+					Point.Position = FinalPos;
+					Point.Data.Density = FMath::Max(0.01f, Density);
+					Point.Data.Composition = FVector(0.2f, 0.4f, 0.8f);
+					Point.Data.ObjectId = FMath::RandRange(0, INT32_MAX);
+					Point.Data.TypeId = 1; // Cosmic web type
+					Point.InsertDepth = InOctree->MaxDepth - 12;
+
+					GeneratedData.Add(Point); // Append to existing array
+				}
+			}
 		}
 	}
 }

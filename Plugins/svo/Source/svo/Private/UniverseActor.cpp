@@ -30,7 +30,6 @@ void AUniverseActor::Initialize()
 	}
 
 	Octree = MakeShared<FOctree>(Extent);
-
 	Async(EAsyncExecution::Thread, [this]()
 	{
 		double StartTime = FPlatformTime::Seconds();
@@ -68,15 +67,17 @@ void AUniverseActor::MarkDestroying() {
 void AUniverseActor::InitializeData() {
 	double StartTime = FPlatformTime::Seconds();
 	FRandomStream Stream(Seed);
-	auto Generator = new UniverseGenerator(Seed);// new GlobularNoiseGenerator(Seed);
+	UGenerator.Seed = Seed;// new GlobularNoiseGenerator(Seed);
 	UniverseParams UniverseParams;
+	UniverseParams.Extent = Extent;
 	//TODO: Proceduralize universe params
-	Generator->UniverseParams = UniverseParams;
-	Generator->UniverseParams.Extent = Extent;
-	Generator->Rotation = FRotator(0);
-	Generator->DepthRange = 7;
-	Generator->InsertDepthOffset = 5;
-	Generator->GenerateData(Octree);
+	UGenerator.UniverseParams = UniverseParams;
+	UGenerator.Rotation = FRotator(0);
+	UGenerator.DepthRange = 7;
+	UGenerator.InsertDepthOffset = 5;
+
+	UGenerator.GenerateData(Octree);
+	Octree->BulkInsertPositions(UGenerator.GeneratedData, PointNodes, VolumeNodes);
 	double GenDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Universe generation took: %.3f seconds"), GenDuration);
 }
@@ -84,14 +85,14 @@ void AUniverseActor::InitializeData() {
 void AUniverseActor::FetchData() {
 	double StartTime = FPlatformTime::Seconds();
 	TArray<TSharedPtr<FOctreeNode>> Nodes = Octree->GetPopulatedNodes(-1, -1, 1);
-	Positions.SetNumUninitialized(Nodes.Num());
-	Rotations.SetNumUninitialized(Nodes.Num());
-	Extents.SetNumUninitialized(Nodes.Num());
-	Colors.SetNumUninitialized(Nodes.Num());
+	Positions.SetNumUninitialized(PointNodes.Num());
+	Rotations.SetNumUninitialized(PointNodes.Num());
+	Extents.SetNumUninitialized(PointNodes.Num());
+	Colors.SetNumUninitialized(PointNodes.Num());
 
-	ParallelFor(Nodes.Num(), [&](int32 Index)
+	ParallelFor(PointNodes.Num(), [&](int32 Index)
 	{
-		const TSharedPtr<FOctreeNode>& Node = Nodes[Index];
+		const TSharedPtr<FOctreeNode>& Node = PointNodes[Index];
 		FRandomStream RandStream(Node->Data.ObjectId);
 		Rotations[Index] = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
 		Positions[Index] = FVector(Node->Center.X, Node->Center.Y, Node->Center.Z);
@@ -106,8 +107,8 @@ void AUniverseActor::FetchData() {
 void AUniverseActor::InitializeVolumetric()
 {
 	double StartTime = FPlatformTime::Seconds();
-	int Resolution = 64;
-	TextureData = FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, Resolution), Resolution); // can add noise here
+	int Resolution = 32;
+	TextureData = FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, VolumeNodes, Resolution), Resolution); // can add noise here
 	if (TryCleanUpComponents()) return;
 
 	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(TextureData); //Async texture generation
@@ -142,7 +143,7 @@ void AUniverseActor::InitializeVolumetric()
 		CompletionPromise.SetValue();
 	});
 	CompletionFuture.Wait();
-
+	UE_LOG(LogTemp, Log, TEXT("VolumeNodes count: %d, DepthMaxDensity: %f"), VolumeNodes.Num(), Octree->DepthMaxDensity);
 	double VolumetricDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Volumetric initialization took: %.3f seconds"), VolumetricDuration);
 }

@@ -71,32 +71,34 @@ void AGalaxyActor::MarkDestroying() {
 
 void AGalaxyActor::InitializeData() {
 	double StartTime = FPlatformTime::Seconds();
+	
 	FRandomStream Stream(Seed);
 	auto EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
 
 	GalaxyGenerator.Seed = Seed;
 	GalaxyGenerator.DepthRange = 7; //With seven levels, assuming our smallest star is say 1/2 the size of the sun, we can cover the vast majority of potential realistic star scales
-	GalaxyGenerator.InsertDepthOffset = 8; //Controlls the depth above max depth the smallest stars will be generated in
-	GalaxyGenerator.Rotation = FRotator(Stream.FRandRange(-45, 45), Stream.FRandRange(-45, 45), Stream.FRandRange(-45, 45));
+	GalaxyGenerator.InsertDepthOffset = 7; //Controlls the depth above max depth the smallest stars will be generated in
+	GalaxyGenerator.Rotation = FRotator(Stream.FRandRange(-35, 35), Stream.FRandRange(-35, 35), Stream.FRandRange(-35, 35));
 	GalaxyParamFactory GalaxyParamGen;
 	GalaxyParamGen.Seed = this->Seed;
 
 	GalaxyGenerator.GalaxyParams = GalaxyParamGen.GenerateParams();
 	GalaxyGenerator.GenerateData(Octree);
-
+	Octree->BulkInsertPositions(GalaxyGenerator.GeneratedData, PointNodes, VolumeNodes);
+	
 	double GenDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Galaxy generation took: %.3f seconds"), GenDuration);
 }
 
 void AGalaxyActor::FetchData() {	
 	double StartTime = FPlatformTime::Seconds();
-	TArray<TSharedPtr<FOctreeNode>> Nodes = Octree->GetPopulatedNodes(-1, -1, 1);
-	Positions.SetNumUninitialized(Nodes.Num());
-	Extents.SetNumUninitialized(Nodes.Num());
-	Colors.SetNumUninitialized(Nodes.Num());
-	ParallelFor(Nodes.Num(), [&](int32 Index)
+
+	Positions.SetNumUninitialized(PointNodes.Num());
+	Extents.SetNumUninitialized(PointNodes.Num());
+	Colors.SetNumUninitialized(PointNodes.Num());
+	ParallelFor(PointNodes.Num(), [&](int32 Index)
 	{
-		const TSharedPtr<FOctreeNode>& Node = Nodes[Index];
+		const TSharedPtr<FOctreeNode>& Node = PointNodes[Index];
 		FRandomStream RandStream(Node->Data.ObjectId);
 		Positions[Index] = FVector(Node->Center.X, Node->Center.Y, Node->Center.Z);
 		Extents[Index] = static_cast<float>(Node->Extent * 2) * RandStream.FRandRange(.5,1);
@@ -121,7 +123,7 @@ void AGalaxyActor::InitializeVolumetric()
 	ScaleNoise->SetSource(SeedOffset);
 	ScaleNoise->SetScale(1);
 
-	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, Resolution), Resolution));
+	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, VolumeNodes, Resolution), Resolution));
 	if (TryCleanUpComponents()) return;
 
 	TPromise<void> CompletionPromise;
@@ -167,6 +169,7 @@ void AGalaxyActor::InitializeVolumetric()
 void AGalaxyActor::InitializeNiagara()
 {
 	double StartTime = FPlatformTime::Seconds();
+
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable

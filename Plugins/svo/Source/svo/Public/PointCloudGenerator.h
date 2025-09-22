@@ -353,7 +353,7 @@ public:
 struct SVO_API UniverseParams {
 	int Count = 2000000;
 	double Extent = 2147483648;
-	const char* EncodedTree = "EwAAAEBAJAACAAAAEAAAAIA/FwAAAAAAAACAPwAAgD8AAAAAJAAEAAAADwABAAAAAAAAQAcAAAAAAD8AAAAAAAAAAIA/";
+	const char* EncodedTree = "EwAAAEBAFwAAAAAAmpmZPgAAAAAAAIA/HwAgABAAzcyMQBcAAACAvwAAgD8AAAAAzcxMPhsAFwAAAAAAAACAPwAAgL8AAIA/JAALAAAACwABAAAAAAAAAAEAAAAEAAAAAAAAgD8AAAAAQAAK16M9AAAAAAAAAAAAPwCamZk+AAAAAD8=";
 };
 
 //class SVO_API UniverseParamFactory {};
@@ -368,6 +368,9 @@ public:
 	static constexpr double DepthProb[7] = {0.25,0.35,0.20,0.10,0.05,0.04,0.01};
 
 	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
+	void GenerateDensityWeb(TSharedPtr<FOctree> InOctree);
+	void GenerateAdhesionWeb(TSharedPtr<FOctree> InOctree);
+	void GenerateZeldovichWeb(TSharedPtr<FOctree> InOctree);
 	void GenerateCluster(int InSeed, FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity = 1, double InDepthBias = 1);
 
 	int ChooseDepth(double InRandomSample, double InDepthBias);

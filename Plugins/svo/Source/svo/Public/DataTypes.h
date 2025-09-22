@@ -9,7 +9,7 @@ public:
 	FVoxelData() : Density(0.0), Composition(0, 0, 0), ObjectId(-1), TypeId(-1) {};
 	FVoxelData(double InDensity, FVector InComposition, int InObjectId, int InTypeId = -1) : Density(InDensity), Composition(InComposition), ObjectId(InObjectId), TypeId(InTypeId) {};
 
-	double Density;
+	float Density;
 	FVector Composition; // Density could be accumulated in alpha
 	int ObjectId;
 	int TypeId;

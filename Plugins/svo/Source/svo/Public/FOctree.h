@@ -47,27 +47,132 @@ class SVO_API FOctree : public TSharedFromThis<FOctree>
 public:
 	int MaxDepth;
 	int64 Extent; //Must be power of 2, eg 1024 2048 etc
-	TArray<double> DepthMaxDensities;
+	double DepthMaxDensity;
 	TSharedPtr<FOctreeNode> Root;
+
+	int VolumeDepth = 5;
 	// In FOctree class, add a mutex
 	mutable FCriticalSection OctreeMutex;
 
-	TSharedPtr<FOctreeNode> InsertPosition(FInt64Vector InPosition, int InDepth, FVoxelData InData) {
+	int32 FindChunkIndexForPosition(FInt64Vector Position, const TArray<TSharedPtr<FOctreeNode>>& VolumeChunks) {
+		// Calculate which chunk this position belongs to based on volume depth grid
+		int64 NodesPerSide = 1LL << VolumeDepth;
+		int64 ChunkSize = (Extent * 2) / NodesPerSide;
+		int64 HalfExtent = Extent;
+
+		// Convert world position to grid coordinates
+		int64 GridX = (Position.X + HalfExtent) / ChunkSize;
+		int64 GridY = (Position.Y + HalfExtent) / ChunkSize;
+		int64 GridZ = (Position.Z + HalfExtent) / ChunkSize;
+
+		// Clamp to valid range
+		GridX = FMath::Clamp(GridX, 0LL, NodesPerSide - 1);
+		GridY = FMath::Clamp(GridY, 0LL, NodesPerSide - 1);
+		GridZ = FMath::Clamp(GridZ, 0LL, NodesPerSide - 1);
+
+		// Convert 3D grid coordinates to linear index
+		return GridX + GridY * NodesPerSide + GridZ * NodesPerSide * NodesPerSide;
+	}
+	
+	void BulkInsertPositions(TArray<FPointData> InPointData, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes, TArray<TSharedPtr<FOctreeNode>>& OutVolumeChunks) {
+		TArray<TArray<FPointData>> ChunkPointData;
+		PrePopulateVolumeLayer(OutVolumeChunks, ChunkPointData);
+
+		// Distribute points to chunks
+		for (FPointData Point : InPointData) {
+			int32 ChunkIndex = FindChunkIndexForPosition(Point.GetInt64Position(), OutVolumeChunks);
+			if (ChunkIndex >= 0 && ChunkIndex < ChunkPointData.Num()) {
+				ChunkPointData[ChunkIndex].Add(Point);
+			}
+		}
+
+		// Process chunks in parallel
+		FCriticalSection ResultMutex;
+		ParallelFor(OutVolumeChunks.Num(), [&](int32 i) {
+			TSharedPtr<FOctreeNode> Chunk = OutVolumeChunks[i];
+			TArray<TSharedPtr<FOctreeNode>> ChunkResults;
+
+			for (FPointData Point : ChunkPointData[i]) {
+				TSharedPtr<FOctreeNode> Result = InsertPosition(Point.GetInt64Position(), Point.InsertDepth, Point.Data,Chunk);
+				if (Result.IsValid()) {
+					ChunkResults.Add(Result);
+				}
+			}
+
+			FScopeLock Lock(&ResultMutex);
+			OutInsertedNodes.Append(ChunkResults);
+		}, EParallelForFlags::BackgroundPriority);
+	}
+
+	int32 FindChunkIndexForPosition(FInt64Vector Position) {
+		// Calculate which chunk this position belongs to based on volume depth grid
+		int64 NodesPerSide = 1LL << VolumeDepth;
+		int64 ChunkSize = (Extent * 2) / NodesPerSide;
+		int64 HalfExtent = Extent;
+
+		// Convert world position to grid coordinates
+		int64 GridX = (Position.X + HalfExtent) / ChunkSize;
+		int64 GridY = (Position.Y + HalfExtent) / ChunkSize;
+		int64 GridZ = (Position.Z + HalfExtent) / ChunkSize;
+
+		// Clamp to valid range
+		GridX = FMath::Clamp(GridX, 0LL, NodesPerSide - 1);
+		GridY = FMath::Clamp(GridY, 0LL, NodesPerSide - 1);
+		GridZ = FMath::Clamp(GridZ, 0LL, NodesPerSide - 1);
+
+		// Convert 3D grid coordinates to linear index
+		return GridX + GridY * NodesPerSide + GridZ * NodesPerSide * NodesPerSide;
+	}
+
+	void PrePopulateVolumeLayer(TArray<TSharedPtr<FOctreeNode>>& OutVolumeChunks, TArray<TArray<FPointData>>& OutChunkPointData) {
+		int64 NodesPerSide = 1LL << VolumeDepth;
+		int64 ChunkExtent = Extent >> VolumeDepth;
+		int64 TotalNodeCount = NodesPerSide * NodesPerSide * NodesPerSide;
+		OutVolumeChunks.SetNum(TotalNodeCount);
+		OutChunkPointData.SetNum(TotalNodeCount);
+
+		for (int64 x = 0; x < NodesPerSide; ++x) {
+			for (int64 y = 0; y < NodesPerSide; ++y) {
+				for (int64 z = 0; z < NodesPerSide; ++z) {
+					// Calculate index directly
+					int32 idx = x + y * NodesPerSide + z * NodesPerSide * NodesPerSide;
+
+					FInt64Vector ChunkCenter = FInt64Vector(
+						(x - NodesPerSide / 2) * ChunkExtent * 2 + ChunkExtent,
+						(y - NodesPerSide / 2) * ChunkExtent * 2 + ChunkExtent,
+						(z - NodesPerSide / 2) * ChunkExtent * 2 + ChunkExtent
+					);
+
+					TSharedPtr<FOctreeNode> ChunkNode = InsertPosition(ChunkCenter, VolumeDepth, FVoxelData(0, FVector::ZeroVector, -1, 2));
+					
+					OutVolumeChunks[idx] = ChunkNode;
+					OutChunkPointData[idx] = TArray<FPointData>();
+				}
+			}
+		}
+	}
+
+	TSharedPtr<FOctreeNode> InsertPosition(FInt64Vector InPosition, int InDepth, FVoxelData InData, TSharedPtr<FOctreeNode> InCurrent = nullptr) {
+		if (InData.TypeId == -1 && InPosition == FInt64Vector::ZeroValue) return nullptr;
 		TSharedPtr<FOctreeNode> Current = Root;
 		int64 CurrentExtent = Extent;
-
 		// Calculate the leaf volume once (volume at target depth InDepth)
 		int64 LeafExtent = Extent >> InDepth; // Extent at target depth
-		for (int Depth = 0; Depth < InDepth; ++Depth) {
-			// Weight the contribution by volume ratio
-			double DensityWeight = static_cast<double>(CurrentExtent) / static_cast<double>(LeafExtent);
-
-			// Accumulate density weighted by volume
-			Current->Data.Density += InData.Density * DensityWeight;
+		if (InCurrent) {
+			Current = InCurrent;
+			CurrentExtent = Current->Extent;
+			//double DensityWeight = static_cast<double>(CurrentExtent) / static_cast<double>(LeafExtent);
+			double DensityWeight = FMath::Pow(2.0, MaxDepth - InDepth);
+			Current->Data.Density += InData.Density * DensityWeight; //Roughly scale density contribution by insert depth
 			Current->Data.Composition += InData.Composition * InData.Density * DensityWeight;
+			DepthMaxDensity = FMath::Max(DepthMaxDensity, Current->Data.Density);
+		}
+		else {
+			FScopeLock Lock(&OctreeMutex);
+		}
 
-			DepthMaxDensities[Depth] = FMath::Max(DepthMaxDensities[Depth], Current->Data.Density);
 
+		for (int Depth = Current->Depth; Depth < InDepth; Depth++) {
 			//Check/Set Max for layer
 			CurrentExtent /= 2;
 
@@ -217,24 +322,27 @@ public:
 	FOctree(int64 InExtent) {
 		Extent = InExtent;
 		MaxDepth = static_cast<int32>(FMath::Log2(static_cast<double>(Extent)));
-		DepthMaxDensities.SetNumZeroed(128, true);
+		DepthMaxDensity = 0;
 		Root = MakeShared<FOctreeNode>(FInt64Vector(), Extent, TArray<uint8>(), nullptr);
 	}
 };
 
 class SVO_API FOctreeTextureProcessor {
 public:
+
+	//static TArray<uint8> GenerateVolumeDataFromNoise(FastNoise::SmartNode<> InNoise, int32 InResolution, int32 Seed) {
+	//	float* outData;
+	//	InNoise->GenUniformGrid3D(outData, 0, 0, 0, InResolution, InResolution, InResolution, 1, Seed);
+
+	//}
+
 	static TArray<uint8> GenerateVolumeMipDataFromOctree(TSharedPtr<FOctree> InOctree, int32 Resolution)
 	{
-		double StartTime = FPlatformTime::Seconds();
+		//double StartTime = FPlatformTime::Seconds();
 
 		// --- Octree + setup ---
 		const int32 TargetDepth = FMath::FloorLog2(Resolution);
 		TArray<TSharedPtr<FOctreeNode>> PopulatedNodes = InOctree->GetPopulatedNodes(TargetDepth, TargetDepth, -1);
-
-		const float MaxDensityAtDepth = (InOctree->DepthMaxDensities.IsValidIndex(TargetDepth)
-			? (float)InOctree->DepthMaxDensities[TargetDepth]
-			: 1.0f);
 
 		const int64 NodeExtentAtDepth = (InOctree->Extent >> TargetDepth);
 		const int64 OctreeExtent = InOctree->Extent;
@@ -285,9 +393,9 @@ public:
 
 					// --- Density ---
 					uint8 DensityByte = 0;
-					if (MaxDensityAtDepth > 0.0f)
+					if (InOctree->DepthMaxDensity > 0.0f)
 					{
-						float Norm = (float)Node->Data.Density / MaxDensityAtDepth;
+						float Norm = (float)Node->Data.Density / InOctree->DepthMaxDensity;
 						DensityByte = (uint8)FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f);
 					}
 
@@ -299,15 +407,95 @@ public:
 					TextureData[ByteIndex + 2] = (uint8)FMath::Clamp(Comp.Z * 255.0f, 0.0f, 255.0f); // R
 					TextureData[ByteIndex + 3] = DensityByte; // A
 				}
-			});
+			},
+			EParallelForFlags::BackgroundPriority
+		);
 
-		double TotalDuration = FPlatformTime::Seconds() - StartTime;
-		UE_LOG(LogTemp, Log, TEXT("OctreeTextureProcessor::Base volume mip data @%dx^3 generation duration: %.3f seconds"),
-			Resolution, TotalDuration);
+		//double TotalDuration = FPlatformTime::Seconds() - StartTime;
+		//UE_LOG(LogTemp, Log, TEXT("OctreeTextureProcessor::Base volume mip data @%dx^3 generation duration: %.3f seconds"), Resolution, TotalDuration);
 
 		return TextureData;
 	}
 
+	static TArray<uint8> GenerateVolumeMipDataFromOctree(TSharedPtr<FOctree> InOctree, TArray<TSharedPtr<FOctreeNode>> InVolumeNodes, int32 Resolution)
+	{
+		//double StartTime = FPlatformTime::Seconds();
+
+		// --- Octree + setup ---
+		const int32 TargetDepth = FMath::FloorLog2(Resolution);
+
+		const int64 NodeExtentAtDepth = (InOctree->Extent >> TargetDepth);
+		const int64 OctreeExtent = InOctree->Extent;
+
+		// Precompute reciprocal for fast coordinate mapping
+		const double Scale = 1.0 / (2.0 * NodeExtentAtDepth);
+
+		// --- Texture allocation ---
+		const int64 TotalVoxels = (int64)Resolution * Resolution * Resolution;
+		const int64 BytesPerVoxel = 4; // BGRA8
+		const int64 TotalBytes = TotalVoxels * BytesPerVoxel;
+
+		TArray<uint8> TextureData;
+		TextureData.SetNumZeroed(TotalBytes);
+
+		// --- Parallel fill ---
+		// Use chunked ParallelFor to reduce scheduling overhead
+		const int32 ChunkSize = 512;
+		const int32 NumChunks = (InVolumeNodes.Num() + ChunkSize - 1) / ChunkSize;
+
+		ParallelFor(NumChunks, [&](int32 ChunkIdx)
+			{
+				const int32 Start = ChunkIdx * ChunkSize;
+				const int32 End = FMath::Min(Start + ChunkSize, InVolumeNodes.Num());
+
+				for (int32 NodeIndex = Start; NodeIndex < End; NodeIndex++)
+				{
+					const auto& Node = InVolumeNodes[NodeIndex];
+					if (!Node.IsValid()) continue;
+
+					// --- Compute voxel coords (multiply instead of divide) ---
+					int32 VolumeX = static_cast<int32>((Node->Center.X + OctreeExtent) * Scale);
+					int32 VolumeY = static_cast<int32>((Node->Center.Y + OctreeExtent) * Scale);
+					int32 VolumeZ = static_cast<int32>((Node->Center.Z + OctreeExtent) * Scale);
+
+					if (VolumeX < 0 || VolumeX >= Resolution ||
+						VolumeY < 0 || VolumeY >= Resolution ||
+						VolumeZ < 0 || VolumeZ >= Resolution)
+					{
+						continue;
+					}
+
+					// --- Linear voxel index ---
+					int64 VoxelIndex = ((int64)VolumeZ * Resolution * Resolution) +
+						((int64)VolumeY * Resolution) +
+						VolumeX;
+					int64 ByteIndex = VoxelIndex * BytesPerVoxel;
+
+					// --- Density ---
+					uint8 DensityByte = 0;
+					if (InOctree->DepthMaxDensity > 0.0f)
+					{
+						float Norm = (float)Node->Data.Density / InOctree->DepthMaxDensity;
+						DensityByte = (uint8)FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f);
+					}
+
+					// --- Composition ---
+					FVector Comp = Node->Data.Composition;
+
+					TextureData[ByteIndex + 0] = (uint8)FMath::Clamp(Comp.X * 255.0f, 0.0f, 255.0f); // B
+					TextureData[ByteIndex + 1] = (uint8)FMath::Clamp(Comp.Y * 255.0f, 0.0f, 255.0f); // G
+					TextureData[ByteIndex + 2] = (uint8)FMath::Clamp(Comp.Z * 255.0f, 0.0f, 255.0f); // R
+					TextureData[ByteIndex + 3] = DensityByte; // A
+				}
+			},
+			EParallelForFlags::BackgroundPriority
+		);
+
+		//double TotalDuration = FPlatformTime::Seconds() - StartTime;
+		//UE_LOG(LogTemp, Log, TEXT("OctreeTextureProcessor::Base volume mip data @%dx^3 generation duration: %.3f seconds"), Resolution, TotalDuration);
+
+		return TextureData;
+	}
 
 	static TArray<uint8> UpscaleVolumeDensityData(const TArray<uint8>& InMipData, int32 InRes, int32 OutRes, FastNoise::SmartNode<> InNoise = FastNoise::NewFromEncodedNodeTree("AAAAAAAA"), double InDomainScale = 1, FVector InDomainOffset = FVector(0, 0, 0), double InNoiseEffect = 1, int InSeed = 69)
 	{
@@ -483,7 +671,7 @@ public:
 	//TODO: Remove outres
 	static TArray<uint8> UpscalePseudoVolumeDensityData(const TArray<uint8>& InMipData, int32 InRes)
 	{
-		double StartTime = FPlatformTime::Seconds();
+		//double StartTime = FPlatformTime::Seconds();
 		check(InRes > 1);
 
 		constexpr int32 OutRes = 256;          // fixed target 3D resolution
@@ -598,8 +786,8 @@ public:
 				}
 			}, EParallelForFlags::BackgroundPriority);
 
-		double Duration = FPlatformTime::Seconds() - StartTime;
-		UE_LOG(LogTemp, Log, TEXT("UpscaleToPseudoVolume256 (%d^3 -> 256^3 -> 4096^2) took %.3f sec"), InRes, Duration);
+		//double Duration = FPlatformTime::Seconds() - StartTime;
+		//UE_LOG(LogTemp, Log, TEXT("UpscaleToPseudoVolume256 (%d^3 -> 256^3 -> 4096^2) took %.3f sec"), InRes, Duration);
 
 		return OutData;
 	}
@@ -607,7 +795,7 @@ public:
 	//Must call off of game thread
 	static UTexture2D* GeneratePseudoVolumeTextureFromMipData(const TArray<uint8>& InMipData)
 	{
-		double StartTime = FPlatformTime::Seconds();
+		//double StartTime = FPlatformTime::Seconds();
 		// Calculate expected 2D pseudo-volume layout parameters, will always output 256^3 to match noise texture dimensions
 		int32 tilesPerSide = 16;
 		int32 OutWidth = 4096;
@@ -686,8 +874,8 @@ public:
 		LinkDoneEvent->Wait();
 		FPlatformProcess::ReturnSynchEventToPool(LinkDoneEvent);
 
-		double TotalDuration = FPlatformTime::Seconds() - StartTime;
-		UE_LOG(LogTemp, Log, TEXT("OctreeTextureProcessor::Async pseudovolume texture linking duration: %.3f seconds"), TotalDuration);
+		//double TotalDuration = FPlatformTime::Seconds() - StartTime;
+		//UE_LOG(LogTemp, Log, TEXT("OctreeTextureProcessor::Async pseudovolume texture linking duration: %.3f seconds"), TotalDuration);
 		
 		return PseudoVolumeTexture;
 	}

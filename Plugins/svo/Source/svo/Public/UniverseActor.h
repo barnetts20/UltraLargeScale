@@ -5,6 +5,7 @@
 #include "GameFramework/Actor.h"
 #include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"
+#include "PointCloudGenerator.h"
 #include "NiagaraSystem.h"
 #include "UniverseActor.generated.h"
 
@@ -40,7 +41,10 @@ public:
 	int Count = 2000000; //TODO: NIAGARA STREAMING, ASYNC POINT GENERATION IN BATCHES TO OPTIMIZE LOAD TIME/STREAMING
 
 	TSharedPtr<FOctree> Octree;
-
+	UniverseGenerator UGenerator;
+	TArray<TSharedPtr<FOctreeNode>> VolumeNodes;
+	TArray<TSharedPtr<FOctreeNode>> PointNodes;
+	
 	//Niagara Data and Component
 	TArray<FVector> Positions;
 	TArray<FVector> Rotations;
