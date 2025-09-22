@@ -1,10 +1,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "FOctreeNode.h"
+#include "FOctree.h"
 #include "GameFramework/Actor.h"
 #include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"
+#include "PointCloudGenerator.h"
 #include "NiagaraSystem.h"
 #include "UniverseActor.generated.h"
 
@@ -40,7 +41,10 @@ public:
 	int Count = 2000000; //TODO: NIAGARA STREAMING, ASYNC POINT GENERATION IN BATCHES TO OPTIMIZE LOAD TIME/STREAMING
 
 	TSharedPtr<FOctree> Octree;
-
+	UniverseGenerator UniverseGenerator;
+	TArray<TSharedPtr<FOctreeNode>> VolumeNodes;
+	TArray<TSharedPtr<FOctreeNode>> PointNodes;
+	
 	//Niagara Data and Component
 	TArray<FVector> Positions;
 	TArray<FVector> Rotations;
@@ -51,19 +55,19 @@ public:
 
 	//Volumetric
 	TArray<uint8> TextureData;
-	UVolumeTexture* VolumeTexture;
+	UTexture2D* PseudoVolumeTexture;
 	UStaticMeshComponent* VolumetricComponent;
 
 	//Managed galaxy actors
 	TSubclassOf<AGalaxyActor> GalaxyActorClass;
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
-	void SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InReferencePosition);
+	void SpawnGalaxy(TSharedPtr<FOctreeNode> InNode);
 	void DestroyGalaxy(TSharedPtr<FOctreeNode> InNode);
 
 	//Parallax tracking locations
 	FVector LastFrameOfReferenceLocation;
 	FVector CurrentFrameOfReferenceLocation;
-
+	FVector CurrentPlayerLocation;
 	//Noise formulas
 	TArray<const char*> EncodedTrees = {
 	"DQAIAAAAAAAAQAcAAAAAAD8AAAAAAA==",
@@ -79,7 +83,7 @@ protected:
 	bool TryCleanUpComponents();
 	void MarkDestroying();
 	void InitializeData();
-	void FetchData();
+	void PopulateNiagaraArrays();
 	void InitializeVolumetric();
 	void InitializeNiagara();
 	virtual void BeginPlay() override;

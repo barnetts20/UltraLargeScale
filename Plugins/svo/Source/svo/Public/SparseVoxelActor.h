@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "FOctreeNode.h"
+#include "FOctree.h"
 #include "GameFramework/Actor.h"
 #include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"

@@ -3,11 +3,13 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "FOctreeNode.h"
+#include "FOctree.h"
 #include "GameFramework/Actor.h"
 #include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraSystem.h"
+#include "PointCloudGenerator.h"
+#include "FastNoise/FastNoise.h"
 #include <UniverseActor.h>
 #include "GalaxyActor.generated.h"
 
@@ -22,7 +24,7 @@ public:
 	ELifecycleState InitializationState = ELifecycleState::Initializing;
 	AUniverseActor* Universe;	//Parent UniverseActor pointer
 	TSharedPtr<FOctree> Octree; //Octree data
-
+	GalaxyGenerator GalaxyGenerator;
 	//Initialization parameters
 	int Seed = 133780085;
 	int64 Extent = 2147483648;
@@ -32,6 +34,9 @@ public:
 	FVector AxisRotation = FVector::ZeroVector;
 	FLinearColor ParentColor = FLinearColor(1, 1, 1, 0);
 	TArray<const char*> EncodedTrees = { "DQAIAAAAAAAAQAcAAAAAAD8AAAAAAA==", "FwAAAAAAAACAPwAAgD8AAIC/DwABAAAAAAAAQA0ACAAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAPwAAAAAA", "FwAAAAAAmpmZPwAAAAAAAIA/DwABAAAAAAAAQA0ACAAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAPwAAAAAA", "DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA==", "FwAAAADAAACAPwAAgD8AAIC/EAAAAAA/DQAGAAAAAAAAQBcAAAAAAAAAgD8AAIC/AACAPwsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAAEbABMAzcxMPg0AAwAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAQA==", "FwAAAAAAAACAPwAAgD8AAIC/DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA==" };
+
+	TArray<TSharedPtr<FOctreeNode>> VolumeNodes;
+	TArray<TSharedPtr<FOctreeNode>> PointNodes;
 
 	//Niagara Data and Component
 	TArray<FVector> Positions;
@@ -44,7 +49,7 @@ public:
 
 	//Volume Data and Component
 	TArray<uint8> TextureData;
-	UVolumeTexture* VolumeTexture;
+	UTexture2D* PseudoVolumeTexture;
 	UStaticMeshComponent* VolumetricComponent;
 
 	//Parallax
@@ -56,10 +61,11 @@ public:
 
 protected:
 	void InitializeData();			//Initialize the octree data for the galaxy
-	void FetchData();				//Fetch the data for the particle system
+	void PopulateNiagaraArrays();				//Fetch the data for the particle system
 	void InitializeVolumetric();	//Fetch the volume density data, create a volume texture, initialize the volumetric component
 	void InitializeNiagara();		//Initialize the particle system
 	bool TryCleanUpComponents();	//Check early exit condition, destroy niagara and volumetric components and return true if early exit 
 	
 	virtual void Tick(float DeltaTime) override;
+
 };
