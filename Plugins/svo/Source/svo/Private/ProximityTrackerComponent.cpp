@@ -47,19 +47,8 @@ void UProximityTrackerComponent::OnProximityUpdate()
         {
             if (!SpawnedGalaxyNodes.Contains(Node))
             {
-                FVector CameraLocation = FVector::ZeroVector;
-                if (const auto* World = GetWorld())
-                {
-                    if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-                    {
-                        if (APlayerCameraManager* CameraManager = Controller->PlayerCameraManager)
-                        {
-                            CameraLocation = CameraManager->GetCameraLocation();
-                            UniverseActor->SpawnGalaxy(Node, CameraLocation);
-                            SpawnedGalaxyNodes.Add(Node);
-                        }
-                    }
-                }
+                SpawnedGalaxyNodes.Add(Node);
+                UniverseActor->SpawnGalaxy(Node);
             }
         }
     }

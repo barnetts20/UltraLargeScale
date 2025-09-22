@@ -2,6 +2,8 @@
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include <PointCloudGenerator.h>
 #include <Kismet/GameplayStatics.h>
+#include <Camera/CameraComponent.h>
+#include <GameFramework/SpringArmComponent.h>
 
 AGalaxyActor::AGalaxyActor()
 {
@@ -198,12 +200,11 @@ void AGalaxyActor::Tick(float DeltaTime)
 	bool bHasReference = false;
 	if (const auto* World = GetWorld())
 	{
-		auto Controller = UGameplayStatics::GetPlayerController(World, 0);
-		if (Controller)
+		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
 		{
-			if (APlayerCameraManager* CameraManager = Controller->PlayerCameraManager)
+			if (APawn* Pawn = Controller->GetPawn())
 			{
-				CurrentFrameOfReferenceLocation = CameraManager->GetCameraLocation();
+				CurrentFrameOfReferenceLocation = Pawn->GetActorLocation();
 				bHasReference = true;
 			}
 		}
@@ -216,7 +217,7 @@ void AGalaxyActor::Tick(float DeltaTime)
 	}
 
 	double ParallaxRatio = (Universe ? Universe->SpeedScale : SpeedScale) / UnitScale;
-	FVector ActorOrigin = FVector::ZeroVector; // Replace with your origin if dynamic
+
 	FVector PlayerOffset = CurrentFrameOfReferenceLocation - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
 	FVector ParallaxOffset = PlayerOffset * (1.0 - ParallaxRatio);

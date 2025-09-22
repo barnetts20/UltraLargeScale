@@ -3,6 +3,8 @@
 #include <PointCloudGenerator.h>
 #include <Kismet/GameplayStatics.h>
 #include <GalaxyActor.h>
+#include <Camera/CameraComponent.h>
+#include <GameFramework/SpringArmComponent.h>
 
 AUniverseActor::AUniverseActor()
 {
@@ -182,25 +184,21 @@ void AUniverseActor::InitializeNiagara()
 	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeNiagara total duration: %.3f seconds"), TotalDuration);
 }
 
-void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InReferencePosition)
+void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode)
 {
 	if (!InNode.IsValid() || !GalaxyActorClass || SpawnedGalaxies.Contains(InNode) || InitializationState != ELifecycleState::Ready)
 	{
 		return;
 	}
-
 	//Scale is derived from perceived universe extent divided galaxy extent
-	const double GalaxyUnitScale = (InNode->Extent * this->UnitScale) / GalaxyExtent; 
-
+	const double GalaxyUnitScale = (InNode->Extent * this->UnitScale) / GalaxyExtent;
 	// Compute correct parallax ratios
 	const double GalaxyParallaxRatio = (SpeedScale / GalaxyUnitScale);
 	const double UniverseParallaxRatio = (SpeedScale / UnitScale);
-
 	// Compute spawn location
 	FVector NodeWorldPosition = FVector(InNode->Center.X, InNode->Center.Y, InNode->Center.Z) + GetActorLocation();
-	FVector PlayerToNode = InReferencePosition - NodeWorldPosition;
-	FVector GalaxySpawnPosition = InReferencePosition - PlayerToNode * (GalaxyParallaxRatio / UniverseParallaxRatio);
-
+	FVector PlayerToNode = CurrentFrameOfReferenceLocation - NodeWorldPosition;
+	FVector GalaxySpawnPosition = CurrentFrameOfReferenceLocation - PlayerToNode * (GalaxyParallaxRatio / UniverseParallaxRatio);
 	AGalaxyActor* NewGalaxy = GetWorld()->SpawnActor<AGalaxyActor>(GalaxyActorClass, GalaxySpawnPosition, FRotator::ZeroRotator);
 	if (NewGalaxy)
 	{
@@ -266,12 +264,11 @@ void AUniverseActor::Tick(float DeltaTime)
 	bool bHasReference = false;
 	if (const auto* World = GetWorld())
 	{
-		auto Controller = UGameplayStatics::GetPlayerController(World, 0);
-		if (Controller)
+		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
 		{
-			if (APlayerCameraManager* CameraManager = Controller->PlayerCameraManager)
+			if (APawn* Pawn = Controller->GetPawn())
 			{
-				CurrentFrameOfReferenceLocation = CameraManager->GetCameraLocation();
+				CurrentFrameOfReferenceLocation = Pawn->GetActorLocation();
 				bHasReference = true;
 			}
 		}

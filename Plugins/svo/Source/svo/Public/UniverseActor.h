@@ -61,13 +61,13 @@ public:
 	//Managed galaxy actors
 	TSubclassOf<AGalaxyActor> GalaxyActorClass;
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
-	void SpawnGalaxy(TSharedPtr<FOctreeNode> InNode, FVector InReferencePosition);
+	void SpawnGalaxy(TSharedPtr<FOctreeNode> InNode);
 	void DestroyGalaxy(TSharedPtr<FOctreeNode> InNode);
 
 	//Parallax tracking locations
 	FVector LastFrameOfReferenceLocation;
 	FVector CurrentFrameOfReferenceLocation;
-
+	FVector CurrentPlayerLocation;
 	//Noise formulas
 	TArray<const char*> EncodedTrees = {
 	"DQAIAAAAAAAAQAcAAAAAAD8AAAAAAA==",
