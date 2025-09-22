@@ -34,13 +34,13 @@ void AUniverseActor::Initialize()
 		double StartTime = FPlatformTime::Seconds();
 
 		InitializeData();
-		if (TryCleanUpComponents()) return; //Early exit if destroying
+		if (CleanUpComponents()) return; //Early exit if destroying
 		PopulateNiagaraArrays();
-		if (TryCleanUpComponents()) return; //Early exit if destroying
+		if (CleanUpComponents()) return; //Early exit if destroying
 		InitializeVolumetric();
-		if (TryCleanUpComponents()) return; //Early exit if destroying
+		if (CleanUpComponents()) return; //Early exit if destroying
 		InitializeNiagara();
-		if (TryCleanUpComponents()) return; //Early exit if destroying
+		if (CleanUpComponents()) return; //Early exit if destroying
 
 		InitializationState = ELifecycleState::Ready;
 
@@ -49,7 +49,7 @@ void AUniverseActor::Initialize()
 	});
 }
 
-bool AUniverseActor::TryCleanUpComponents() {
+bool AUniverseActor::CleanUpComponents() {
 	if (InitializationState != ELifecycleState::Destroying) return false;
 	AsyncTask(ENamedThreads::GameThread, [this]()
 	{
@@ -74,7 +74,7 @@ void AUniverseActor::InitializeData() {
 	UniverseGenerator.UniverseParams = UniverseParams;
 	UniverseGenerator.Rotation = FRotator(0);
 	UniverseGenerator.DepthRange = 7;
-	UniverseGenerator.InsertDepthOffset = 5;
+	UniverseGenerator.InsertDepthOffset = 4;
 
 	UniverseGenerator.GenerateData(Octree);
 	Octree->BulkInsertPositions(UniverseGenerator.GeneratedData, PointNodes, VolumeNodes);
@@ -112,7 +112,7 @@ void AUniverseActor::InitializeVolumetric()
 	int Resolution = 32;
 
 	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, VolumeNodes, Resolution), Resolution)); //Async texture generation
-	if (TryCleanUpComponents()) return;
+	if (CleanUpComponents()) return;
 
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();

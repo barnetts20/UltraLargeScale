@@ -12,6 +12,18 @@ AGalaxyActor::AGalaxyActor()
 	PointCloudNiagara = Cast<UNiagaraSystem>(FSoftObjectPath(NiagaraPath).TryLoad());
 }
 
+AGalaxyActor::~AGalaxyActor()
+{
+	VolumeNodes.Empty();
+	PointNodes.Empty();
+	Positions.Empty();
+	Extents.Empty();
+	Colors.Empty();
+	TextureData.Empty();
+	GalaxyGenerator.GeneratedData.Reset();
+	if (Octree.IsValid()) Octree.Reset();
+}
+
 void AGalaxyActor::Initialize()
 {
 	// Set initial frame of reference position
@@ -28,36 +40,43 @@ void AGalaxyActor::Initialize()
 
 	Octree = MakeShared<FOctree>(Extent);
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this]()
-	{
-		double StartTime = FPlatformTime::Seconds();
+		{
+			double StartTime = FPlatformTime::Seconds();
 
-		FPlatformProcess::Sleep(0.3f); //Delay prevents heavy loadinig from starting for objects "zoomed past"
-		if (TryCleanUpComponents()) return; //Early exit if destroying
-		InitializeData();
-		if (TryCleanUpComponents()) return; //Early exit if destroying
-		PopulateNiagaraArrays();
-		if (TryCleanUpComponents()) return; //Early exit if destroying
-		InitializeVolumetric();
-		if (TryCleanUpComponents()) return; //Early exit if destroying
-		InitializeNiagara();
-		if (TryCleanUpComponents()) return; //Early exit if destroying
+			FPlatformProcess::Sleep(0.1f); //Delay prevents heavy loadinig from starting for objects "zoomed past"
+			if (InitializationState == ELifecycleState::Destroying) return; //Early exit if destroying
+			InitializeData();
+			if (InitializationState == ELifecycleState::Destroying) return; //Early exit if destroying
+			PopulateNiagaraArrays();
+			if (InitializationState == ELifecycleState::Destroying) return; //Early exit if destroying
+			InitializeVolumetric();
+			if (InitializationState == ELifecycleState::Destroying) return; //Early exit if destroying
+			InitializeNiagara();
+			if (InitializationState == ELifecycleState::Destroying) return; //Early exit if destroying
 
-		VolumetricComponent->SetVisibility(true);
-		InitializationState = ELifecycleState::Ready;
+			InitializationState = ELifecycleState::Ready;
 
-		double TotalDuration = FPlatformTime::Seconds() - StartTime;
-		UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Initialize total duration: %.3f seconds"), TotalDuration);
+			double TotalDuration = FPlatformTime::Seconds() - StartTime;
+			UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Initialize total duration: %.3f seconds"), TotalDuration);
 	});
 }
 
-bool AGalaxyActor::TryCleanUpComponents() {
-	if (InitializationState != ELifecycleState::Destroying) return false;
+// Add proper cleanup in BeginDestroy or EndPlay
+void AGalaxyActor::BeginDestroy()
+{
+	CleanUpComponents();
+	Super::BeginDestroy();
+}
+
+void AGalaxyActor::CleanUpComponents() {
 	AsyncTask(ENamedThreads::GameThread, [this]()
 	{
 		if (VolumetricComponent) VolumetricComponent->DestroyComponent();
-		if (NiagaraComponent) NiagaraComponent->DestroyComponent();
+		if (NiagaraComponent) {
+			NiagaraComponent->DeactivateImmediate();
+			NiagaraComponent->DestroyComponent();
+		}
 	});
-	return true;
 }
 
 void AGalaxyActor::MarkDestroying() {
@@ -112,7 +131,6 @@ void AGalaxyActor::InitializeVolumetric()
 	int Resolution = 32;
 
 	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, VolumeNodes, Resolution), Resolution));
-	if (TryCleanUpComponents()) return;
 
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
@@ -138,7 +156,6 @@ void AGalaxyActor::InitializeVolumetric()
 			DynamicMaterial->SetScalarParameterValue(FName("WarpScale"), GalaxyGenerator.GalaxyParams.VolumeWarpScale);
 
 			VolumetricComponent = NewObject<UStaticMeshComponent>(this);
-			VolumetricComponent->SetVisibility(false);
 			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));
 			VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
 			VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);

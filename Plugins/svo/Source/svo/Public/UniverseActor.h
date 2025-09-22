@@ -80,7 +80,7 @@ public:
 
 protected:
 	void Initialize();
-	bool TryCleanUpComponents();
+	bool CleanUpComponents();
 	void MarkDestroying();
 	void InitializeData();
 	void PopulateNiagaraArrays();
