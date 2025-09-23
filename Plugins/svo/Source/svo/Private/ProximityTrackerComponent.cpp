@@ -55,7 +55,7 @@ void UProximityTrackerComponent::OnProximityUpdate()
 
     for (const TSharedPtr<FOctreeNode>& Node : StaleGalaxyNodes) {
         if (UniverseActor) {
-            UniverseActor->DestroyGalaxy(Node);
+            UniverseActor->ReturnGalaxyToPool(Node);
             SpawnedGalaxyNodes.Remove(Node);
         }
     }

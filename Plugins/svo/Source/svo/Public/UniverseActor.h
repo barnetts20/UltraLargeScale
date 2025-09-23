@@ -60,9 +60,13 @@ public:
 
 	//Managed galaxy actors
 	TSubclassOf<AGalaxyActor> GalaxyActorClass;
+
+	int GalaxyPoolSize = 5;
+	TArray<AGalaxyActor*> GalaxyPool;
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
+	
 	void SpawnGalaxy(TSharedPtr<FOctreeNode> InNode);
-	void DestroyGalaxy(TSharedPtr<FOctreeNode> InNode);
+	void ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode);
 
 	//Parallax tracking locations
 	FVector LastFrameOfReferenceLocation;
@@ -82,6 +86,7 @@ protected:
 	void Initialize();
 	bool CleanUpComponents();
 	void MarkDestroying();
+	void InitializeGalaxyPool();
 	void InitializeData();
 	void PopulateNiagaraArrays();
 	void InitializeVolumetric();

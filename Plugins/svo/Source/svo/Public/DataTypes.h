@@ -29,7 +29,9 @@ struct SVO_API FPointData {
 UENUM()
 enum class ELifecycleState : uint8
 {
+	Uninitialized,
 	Initializing,
 	Ready,
+	Pooling,
 	Destroying
 };

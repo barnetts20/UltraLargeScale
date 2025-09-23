@@ -14,18 +14,17 @@ AGalaxyActor::AGalaxyActor()
 
 AGalaxyActor::~AGalaxyActor()
 {
-	VolumeNodes.Empty();
-	PointNodes.Empty();
 	Positions.Empty();
 	Extents.Empty();
 	Colors.Empty();
-	TextureData.Empty();
 	GalaxyGenerator.GeneratedData.Reset();
 	if (Octree.IsValid()) Octree.Reset();
 }
 
 void AGalaxyActor::Initialize()
 {
+	InitializationState = ELifecycleState::Initializing;
+
 	// Set initial frame of reference position
 	if (const auto* World = GetWorld())
 	{
@@ -38,27 +37,61 @@ void AGalaxyActor::Initialize()
 		}
 	}
 
-	Octree = MakeShared<FOctree>(Extent);
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this]()
 		{
 			double StartTime = FPlatformTime::Seconds();
 
 			FPlatformProcess::Sleep(0.1f); //Delay prevents heavy loadinig from starting for objects "zoomed past"
-			if (InitializationState == ELifecycleState::Destroying) return; //Early exit if destroying
+			if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
+			InitializeComponents();
+			if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
 			InitializeData();
-			if (InitializationState == ELifecycleState::Destroying) return; //Early exit if destroying
-			PopulateNiagaraArrays();
-			if (InitializationState == ELifecycleState::Destroying) return; //Early exit if destroying
+			if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
 			InitializeVolumetric();
-			if (InitializationState == ELifecycleState::Destroying) return; //Early exit if destroying
+			if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
 			InitializeNiagara();
-			if (InitializationState == ELifecycleState::Destroying) return; //Early exit if destroying
+			if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
 
 			InitializationState = ELifecycleState::Ready;
 
 			double TotalDuration = FPlatformTime::Seconds() - StartTime;
 			UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Initialize total duration: %.3f seconds"), TotalDuration);
 	});
+}
+
+void AGalaxyActor::InitializeComponents() {
+	if (!ComponentsInitialized) {
+		ComponentsInitialized = true;
+		TPromise<void> CompletionPromise;
+		TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
+		AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable {
+			VolumetricComponent = NewObject<UStaticMeshComponent>(this); //TODO: THESE NEED TO MOVE INTO SEPERATE RUN ONCE INIT
+			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));  //TODO: THESE NEED TO MOVE INTO SEPERATE RUN ONCE INIT
+			VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+			VolumetricComponent->TranslucencySortPriority = 1;
+			VolumetricComponent->RegisterComponent();
+			VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
+			VolumetricComponent->SetVisibility(false);
+			//TODO: THESE NEED TO MOVE INTO SEPERATE RUN ONCE INIT
+			NiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
+				PointCloudNiagara,
+				GetRootComponent(),
+				NAME_None,
+				FVector::ZeroVector,
+				FRotator::ZeroRotator,
+				EAttachLocation::SnapToTarget,
+				true,
+				false
+			);
+			NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Extent), FVector(Extent)));
+			NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Extent);
+			NiagaraComponent->TranslucencySortPriority = 1;
+			NiagaraComponent->SetVisibility(false);
+
+			CompletionPromise.SetValue();
+		});
+		CompletionFuture.Wait();
+	}
 }
 
 // Add proper cleanup in BeginDestroy or EndPlay
@@ -79,8 +112,49 @@ void AGalaxyActor::CleanUpComponents() {
 	});
 }
 
-void AGalaxyActor::MarkDestroying() {
-	InitializationState = ELifecycleState::Destroying;
+void AGalaxyActor::ResetForSpawn() {
+	//TPromise<void> CompletionPromise;
+	//TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
+	//AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
+	//{
+		SetActorHiddenInGame(false);
+		SetActorTickEnabled(true);
+		// Prepare components for next use
+		if (VolumetricComponent) {
+			VolumetricComponent->SetVisibility(false);
+			//VolumetricComponent->SetComponentTickEnabled(true);
+		}
+		if (NiagaraComponent) {
+			NiagaraComponent->SetVisibility(false);
+			//NiagaraComponent->SetComponentTickEnabled(true);
+		}
+		Octree = MakeShared<FOctree>(Extent);
+		InitializationState = ELifecycleState::Uninitialized;
+		//CompletionPromise.SetValue();
+//});
+	//CompletionFuture.Wait();
+}
+
+void AGalaxyActor::ResetForPool() {
+	// Hide and disable
+	SetActorHiddenInGame(true);
+	SetActorTickEnabled(false);
+
+	// Disable components without destroying them
+	if (VolumetricComponent)
+	{
+		VolumetricComponent->SetVisibility(false);
+		VolumetricComponent->SetComponentTickEnabled(false);
+	}
+	if (NiagaraComponent)
+	{
+		//NiagaraComponent->Deactivate();
+		//NiagaraComponent->DeactivateImmediate(); // Force immediate deactivation
+		NiagaraComponent->SetVisibility(false);
+		NiagaraComponent->SetComponentTickEnabled(false);
+	}
+
+	InitializationState = ELifecycleState::Pooling;
 }
 
 void AGalaxyActor::InitializeData() {
@@ -98,71 +172,58 @@ void AGalaxyActor::InitializeData() {
 
 	GalaxyGenerator.GalaxyParams = GalaxyParamGen.GenerateParams();
 	GalaxyGenerator.GenerateData(Octree);
-	Octree->BulkInsertPositions(GalaxyGenerator.GeneratedData, PointNodes, VolumeNodes);
-	
-	double GenDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Galaxy generation took: %.3f seconds"), GenDuration);
-}
 
-void AGalaxyActor::PopulateNiagaraArrays() {	
-	double StartTime = FPlatformTime::Seconds();
+	TArray<TSharedPtr<FOctreeNode>> VolumeNodes; //Trade out for volume mip data directly
+	TArray<TSharedPtr<FOctreeNode>> PointNodes; //Trade out for niagara arrays directly
+	Octree->BulkInsertPositions(GalaxyGenerator.GeneratedData, PointNodes, VolumeNodes);
+	//GalaxyGenerator.GeneratedData.SetNum(0);
 
 	Positions.SetNumUninitialized(PointNodes.Num());
 	Extents.SetNumUninitialized(PointNodes.Num());
 	Colors.SetNumUninitialized(PointNodes.Num());
 
 	ParallelFor(PointNodes.Num(), [&](int32 Index)
-	{
-		const TSharedPtr<FOctreeNode>& Node = PointNodes[Index];
-		FRandomStream RandStream(Node->Data.ObjectId);
-		Positions[Index] = FVector(Node->Center.X, Node->Center.Y, Node->Center.Z);
-		Extents[Index] = static_cast<float>(Node->Extent * 2) * RandStream.FRandRange(.5,1);
-		Colors[Index] = FLinearColor(Node->Data.Composition);
-	}, EParallelForFlags::BackgroundPriority);
+		{
+			const TSharedPtr<FOctreeNode>& Node = PointNodes[Index];
+			FRandomStream RandStream(Node->Data.ObjectId);
+			Positions[Index] = FVector(Node->Center.X, Node->Center.Y, Node->Center.Z);
+			Extents[Index] = static_cast<float>(Node->Extent * 2) * RandStream.FRandRange(.5, 1);
+			Colors[Index] = FLinearColor(Node->Data.Composition);
+		}, EParallelForFlags::BackgroundPriority);
 
-	double FetchDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Node fetch + array population took: %.3f seconds"), FetchDuration);
+	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, VolumeNodes, 32), 32));
+
+	double GenDuration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Galaxy generation took: %.3f seconds"), GenDuration);
 }
 
 void AGalaxyActor::InitializeVolumetric()
 {
 	double StartTime = FPlatformTime::Seconds();
-	
-	int Resolution = 32;
-
-	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, VolumeNodes, Resolution), Resolution));
-
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
-			UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(
+			//Spawn base volume component & material
+			VolumeMaterial = UMaterialInstanceDynamic::Create(
 				LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_GalaxyRaymarchPsuedoVolume_Inst.MT_GalaxyRaymarchPsuedoVolume_Inst")),
 				this
 			);
-
-			DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), PseudoVolumeTexture);
-			DynamicMaterial->SetTextureParameterValue(FName("NoiseTexture"), LoadObject<UVolumeTexture>(nullptr, *GalaxyGenerator.GalaxyParams.VolumeNoise));
-			DynamicMaterial->SetVectorParameterValue(FName("AmbientColor"), GalaxyGenerator.GalaxyParams.VolumeAmbientColor);
-			DynamicMaterial->SetVectorParameterValue(FName("CoolShift"), GalaxyGenerator.GalaxyParams.VolumeCoolShift);
-			DynamicMaterial->SetVectorParameterValue(FName("HotShift"), GalaxyGenerator.GalaxyParams.VolumeHotShift);
-			DynamicMaterial->SetScalarParameterValue(FName("HueVariance"), GalaxyGenerator.GalaxyParams.VolumeHueVariance);
-			DynamicMaterial->SetScalarParameterValue(FName("HueVarianceScale"), GalaxyGenerator.GalaxyParams.VolumeHueVarianceScale);
-			DynamicMaterial->SetScalarParameterValue(FName("SaturationVariance"), GalaxyGenerator.GalaxyParams.VolumeSaturationVariance);
-			DynamicMaterial->SetScalarParameterValue(FName("TemperatureInfluence"), GalaxyGenerator.GalaxyParams.VolumeTemperatureInfluence);
-			DynamicMaterial->SetScalarParameterValue(FName("TemperatureScale"), GalaxyGenerator.GalaxyParams.VolumeTemperatureScale);
-			DynamicMaterial->SetScalarParameterValue(FName("Density"), GalaxyGenerator.GalaxyParams.VolumeDensity);
-			DynamicMaterial->SetScalarParameterValue(FName("WarpAmount"), GalaxyGenerator.GalaxyParams.VolumeWarpAmount);
-			DynamicMaterial->SetScalarParameterValue(FName("WarpScale"), GalaxyGenerator.GalaxyParams.VolumeWarpScale);
-
-			VolumetricComponent = NewObject<UStaticMeshComponent>(this);
-			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));
-			VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
-			VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-			VolumetricComponent->SetMaterial(0, DynamicMaterial);
-			VolumetricComponent->TranslucencySortPriority = 1;
-			VolumetricComponent->RegisterComponent();
-
+			VolumeMaterial->SetTextureParameterValue(FName("VolumeTexture"), PseudoVolumeTexture);
+			VolumeMaterial->SetTextureParameterValue(FName("NoiseTexture"), LoadObject<UVolumeTexture>(nullptr, *GalaxyGenerator.GalaxyParams.VolumeNoise));
+			VolumeMaterial->SetVectorParameterValue(FName("AmbientColor"), GalaxyGenerator.GalaxyParams.VolumeAmbientColor);
+			VolumeMaterial->SetVectorParameterValue(FName("CoolShift"), GalaxyGenerator.GalaxyParams.VolumeCoolShift);
+			VolumeMaterial->SetVectorParameterValue(FName("HotShift"), GalaxyGenerator.GalaxyParams.VolumeHotShift);
+			VolumeMaterial->SetScalarParameterValue(FName("HueVariance"), GalaxyGenerator.GalaxyParams.VolumeHueVariance);
+			VolumeMaterial->SetScalarParameterValue(FName("HueVarianceScale"), GalaxyGenerator.GalaxyParams.VolumeHueVarianceScale);
+			VolumeMaterial->SetScalarParameterValue(FName("SaturationVariance"), GalaxyGenerator.GalaxyParams.VolumeSaturationVariance);
+			VolumeMaterial->SetScalarParameterValue(FName("TemperatureInfluence"), GalaxyGenerator.GalaxyParams.VolumeTemperatureInfluence);
+			VolumeMaterial->SetScalarParameterValue(FName("TemperatureScale"), GalaxyGenerator.GalaxyParams.VolumeTemperatureScale);
+			VolumeMaterial->SetScalarParameterValue(FName("Density"), GalaxyGenerator.GalaxyParams.VolumeDensity);
+			VolumeMaterial->SetScalarParameterValue(FName("WarpAmount"), GalaxyGenerator.GalaxyParams.VolumeWarpAmount);
+			VolumeMaterial->SetScalarParameterValue(FName("WarpScale"), GalaxyGenerator.GalaxyParams.VolumeWarpScale);
+			VolumetricComponent->SetMaterial(0, VolumeMaterial);
+			VolumetricComponent->SetVisibility(true);
 			CompletionPromise.SetValue();
 		});
 	CompletionFuture.Wait();
@@ -179,20 +240,6 @@ void AGalaxyActor::InitializeNiagara()
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 	{
-		NiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
-			PointCloudNiagara,
-			GetRootComponent(),
-			NAME_None,
-			FVector::ZeroVector,
-			FRotator::ZeroRotator,
-			EAttachLocation::SnapToTarget,
-			true,
-			false
-		);
-		NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Extent), FVector(Extent)));
-		NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Extent);
-		NiagaraComponent->TranslucencySortPriority = 1;
-
 		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
 			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), Positions);
@@ -201,6 +248,7 @@ void AGalaxyActor::InitializeNiagara()
 
 			AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 			{
+				NiagaraComponent->SetVisibility(true);
 				NiagaraComponent->Activate(true);
 				CompletionPromise.SetValue();
 			});

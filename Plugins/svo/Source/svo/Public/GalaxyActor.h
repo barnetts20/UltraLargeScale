@@ -22,7 +22,8 @@ class SVO_API AGalaxyActor : public AActor
 public:
 	AGalaxyActor();
 	~AGalaxyActor();
-	ELifecycleState InitializationState = ELifecycleState::Initializing;
+	ELifecycleState InitializationState = ELifecycleState::Uninitialized;
+	bool ComponentsInitialized = false;
 	AUniverseActor* Universe;	//Parent UniverseActor pointer
 	TSharedPtr<FOctree> Octree; //Octree data
 	GalaxyGenerator GalaxyGenerator;
@@ -36,9 +37,6 @@ public:
 	FLinearColor ParentColor = FLinearColor(1, 1, 1, 0);
 	TArray<const char*> EncodedTrees = { "DQAIAAAAAAAAQAcAAAAAAD8AAAAAAA==", "FwAAAAAAAACAPwAAgD8AAIC/DwABAAAAAAAAQA0ACAAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAPwAAAAAA", "FwAAAAAAmpmZPwAAAAAAAIA/DwABAAAAAAAAQA0ACAAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAPwAAAAAA", "DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA==", "FwAAAADAAACAPwAAgD8AAIC/EAAAAAA/DQAGAAAAAAAAQBcAAAAAAAAAgD8AAIC/AACAPwsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAAEbABMAzcxMPg0AAwAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAQA==", "FwAAAAAAAACAPwAAgD8AAIC/DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA==" };
 
-	TArray<TSharedPtr<FOctreeNode>> VolumeNodes;
-	TArray<TSharedPtr<FOctreeNode>> PointNodes;
-
 	//Niagara Data and Component
 	TArray<FVector> Positions;
 	TArray<float> Extents;
@@ -49,8 +47,8 @@ public:
 	UNiagaraComponent* NiagaraComponent;
 
 	//Volume Data and Component
-	TArray<uint8> TextureData;
 	UTexture2D* PseudoVolumeTexture;
+	UMaterialInstanceDynamic* VolumeMaterial;
 	UStaticMeshComponent* VolumetricComponent;
 
 	//Parallax
@@ -58,14 +56,15 @@ public:
 	FVector CurrentFrameOfReferenceLocation;
 
 	void Initialize();				//Kick of async initialization of system
-	void MarkDestroying();			//Call externally before destroying
-
+	void ResetForPool();			//Call externally before destroying
+	void ResetForSpawn();
 protected:
+	void InitializeComponents();
 	void InitializeData();			//Initialize the octree data for the galaxy
-	void PopulateNiagaraArrays();				//Fetch the data for the particle system
+	void PopulateNiagaraArrays();	//Fetch the data for the particle system
 	void InitializeVolumetric();	//Fetch the volume density data, create a volume texture, initialize the volumetric component
 	void InitializeNiagara();		//Initialize the particle system
-	void CleanUpComponents();	//Check early exit condition, destroy niagara and volumetric components and return true if early exit 
+	void CleanUpComponents();		//Check early exit condition, destroy niagara and volumetric components and return true if early exit 
 	virtual void BeginDestroy() override;
 	virtual void Tick(float DeltaTime) override;
 
