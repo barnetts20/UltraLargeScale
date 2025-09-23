@@ -40,8 +40,6 @@ public:
 	void SpawnGalaxy(TSharedPtr<FOctreeNode> InNode);
 	void ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode);
 
-	void Initialize();
-
 protected:
 	//Niagara Data and Component
 	TArray<FVector> Positions;
@@ -66,6 +64,7 @@ protected:
 	FVector LastFrameOfReferenceLocation;
 	FVector CurrentFrameOfReferenceLocation;
 
+	void Initialize();
 	void InitializeGalaxyPool();
 	void InitializeData();
 	void InitializeVolumetric();
