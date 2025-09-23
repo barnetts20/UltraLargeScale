@@ -61,12 +61,9 @@ public:
 	void ResetForPool();			//Call externally before destroying
 	void ResetForSpawn();
 protected:
-	void InitializeComponents();
 	void InitializeData();			//Initialize the octree data for the galaxy
-	void PopulateNiagaraArrays();	//Fetch the data for the particle system
 	void InitializeVolumetric();	//Fetch the volume density data, create a volume texture, initialize the volumetric component
 	void InitializeNiagara();		//Initialize the particle system
-	void CleanUpComponents();		//Check early exit condition, destroy niagara and volumetric components and return true if early exit 
 	virtual void BeginDestroy() override;
 	virtual void Tick(float DeltaTime) override;
 

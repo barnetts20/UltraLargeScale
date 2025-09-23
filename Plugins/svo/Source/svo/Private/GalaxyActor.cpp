@@ -43,8 +43,6 @@ void AGalaxyActor::Initialize()
 			double StartTime = FPlatformTime::Seconds();
 
 			if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
-			InitializeComponents();
-			if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
 			InitializeData();
 			if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
 			InitializeVolumetric();
@@ -59,50 +57,14 @@ void AGalaxyActor::Initialize()
 	});
 }
 
-void AGalaxyActor::InitializeComponents() {
-	//if (!ComponentsInitialized) {
-	//	ComponentsInitialized = true;
-	//	TPromise<void> CompletionPromise;
-	//	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	//	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable {
-
-	//		//TODO: THESE NEED TO MOVE INTO SEPERATE RUN ONCE INIT
-
-	//		CompletionPromise.SetValue();
-	//	});
-	//	CompletionFuture.Wait();
-	//}
-}
-
 // Add proper cleanup in BeginDestroy or EndPlay
 void AGalaxyActor::BeginDestroy()
 {
-	CleanUpComponents();
 	Super::BeginDestroy();
 }
 
-void AGalaxyActor::CleanUpComponents() {
-	AsyncTask(ENamedThreads::GameThread, [this]()
-	{
-		if (VolumetricComponent) VolumetricComponent->DestroyComponent();
-		if (NiagaraComponent) {
-			NiagaraComponent->DeactivateImmediate();
-			NiagaraComponent->DestroyComponent();
-		}
-	});
-}
-
 void AGalaxyActor::ResetForSpawn() {
-	//TPromise<void> CompletionPromise;
-	//TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	//AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-	//{
-		//SetActorHiddenInGame(false);
-		//SetActorTickEnabled(true);
-		InitializationState = ELifecycleState::Uninitialized;
-		//CompletionPromise.SetValue();
-//});
-	//CompletionFuture.Wait();
+	InitializationState = ELifecycleState::Uninitialized;
 }
 
 void AGalaxyActor::ResetForPool() {
@@ -143,9 +105,13 @@ void AGalaxyActor::InitializeData() {
 	GalaxyGenerator.GalaxyParams = GalaxyParamGen.GenerateParams();
 	GalaxyGenerator.GenerateData(Octree);
 
+	if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
+
 	TArray<TSharedPtr<FOctreeNode>> VolumeNodes; //Trade out for volume mip data directly
 	TArray<TSharedPtr<FOctreeNode>> PointNodes; //Trade out for niagara arrays directly
 	Octree->BulkInsertPositions(GalaxyGenerator.GeneratedData, PointNodes, VolumeNodes);
+
+	if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
 
 	double GenDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Data Generation took: %.3f seconds"), GenDuration);
