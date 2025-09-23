@@ -104,6 +104,10 @@ void AGalaxyActor::InitializeData() {
 
 	GalaxyGenerator.GalaxyParams = GalaxyParamGen.GenerateParams();
 	GalaxyGenerator.GenerateData(Octree);
+	
+	double GenFinish = FPlatformTime::Seconds();
+	double GenDuration = GenFinish - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Data Generation took: %.3f seconds"), GenDuration);
 
 	if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
 
@@ -111,10 +115,12 @@ void AGalaxyActor::InitializeData() {
 	TArray<TSharedPtr<FOctreeNode>> PointNodes; //Trade out for niagara arrays directly
 	Octree->BulkInsertPositions(GalaxyGenerator.GeneratedData, PointNodes, VolumeNodes);
 
+	double InsertFinish = FPlatformTime::Seconds();
+	GenDuration = InsertFinish - GenFinish;
+	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Bulk Insert took: %.3f seconds"), GenDuration);
+
 	if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
 
-	double GenDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Data Generation took: %.3f seconds"), GenDuration);
 
 	Positions.SetNumUninitialized(PointNodes.Num());
 	Extents.SetNumUninitialized(PointNodes.Num());
@@ -129,6 +135,10 @@ void AGalaxyActor::InitializeData() {
 	}, EParallelForFlags::BackgroundPriority);
 
 	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, VolumeNodes, 32), 32));
+
+	double RemapFinish = FPlatformTime::Seconds();
+	GenDuration = RemapFinish - InsertFinish;
+	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Data Remap took: %.3f seconds"), GenDuration);
 
 	GenDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeData took: %.3f seconds"), GenDuration);

@@ -1369,7 +1369,7 @@ void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 
 void GalaxyGenerator::GenerateBulge()
 {
-	//double StartTime = FPlatformTime::Seconds();
+	double StartTime = FPlatformTime::Seconds();
 
 	const int32 NumPoints = GalaxyParams.BulgeNumPoints;
 	GeneratedData.Reserve(GeneratedData.Num() + NumPoints);
@@ -1405,46 +1405,40 @@ void GalaxyGenerator::GenerateBulge()
 			FPointData& InsertData = GeneratedData[StartIndex + i];
 			InsertData.Data.ObjectId = i;
 			InsertData.Data.TypeId = 1;
-			InsertData.Data.Density = Stream.FRandRange(0.5f, 1.5f) * GalaxyParams.BulgeBaseDensity;
-			InsertData.Data.Composition = Stream.GetUnitVector();
-			InsertData.InsertDepth = ChooseDepth(Stream.FRand(), GalaxyParams.BulgeDepthBias);
 
-			// 1. Sample Hernquist radius
-			// double sqrtu = FMath::Sqrt(FMath::Clamp(Stream.FRand(), KINDA_SMALL_NUMBER, 1.0 - KINDA_SMALL_NUMBER));
-			// double r = (a * sqrtu) / (1.0 - sqrtu);
-			// Approximate f(u) = sqrt(u)/(1-sqrt(u)) with a 5th-degree poly
-			double u = Stream.FRand();
-			double f = u * (1.0 + u * (0.5 + u * (0.333 + u * 0.25)));
-			double r = a * f;
-			// 2. Apply soft truncation with probabilistic acceptance
-			if (r > SoftTruncationRadius)
-			{
-				if (r > MaxRadius) // Failed points get fed to the black hole
+			bool PointInserted = false;
+			while (!PointInserted) {
+				// 1. Sample Hernquist radius
+				// double sqrtu = FMath::Sqrt(FMath::Clamp(Stream.FRand(), KINDA_SMALL_NUMBER, 1.0 - KINDA_SMALL_NUMBER));
+				// double r = (a * sqrtu) / (1.0 - sqrtu);
+				// Approximate f(u) = sqrt(u)/(1-sqrt(u)) with a 5th-degree poly
+				double u = Stream.FRand();
+				double f = u * (1.0 + u * (0.5 + u * (0.333 + u * 0.25)));  //Hernquist approximation
+				double r = a * f;
+
+				// 2. Apply soft truncation with probabilistic acceptance
+				if (r > SoftTruncationRadius)
 				{
-					InsertData.Position = FVector::ZeroVector;
-					return;
+					if (r > MaxRadius) continue;
+					double acceptanceProbability = FMath::Exp(-3.0 * FMath::Pow(((r - SoftTruncationRadius) / TruncationZone), GalaxyParams.BulgeAcceptanceExponent));
+					if (Stream.FRand() > acceptanceProbability) continue;
 				}
 
-				// Exponential falloff probability
-				double acceptanceProbability = FMath::Exp(-3.0 * FMath::Pow(((r - SoftTruncationRadius) / TruncationZone), GalaxyParams.BulgeAcceptanceExponent));
-				if (Stream.FRand() > acceptanceProbability) // Failed points get fed to the black hole
-				{
-					InsertData.Position = FVector::ZeroVector;
-					return;
-				}
+				InsertData.Data.Density = Stream.FRandRange(0.5f, 1.5f) * GalaxyParams.BulgeBaseDensity;
+				InsertData.Data.Composition = Stream.GetUnitVector();
+				InsertData.InsertDepth = ChooseDepth(Stream.FRand(), GalaxyParams.BulgeDepthBias);
+				InsertData.Position = Stream.GetUnitVector() * r * AxisScale + (Stream.GetUnitVector() * Stream.FRand() * BulgeRadius * GalaxyParams.BulgeJitter);
+				PointInserted = true;
 			}
-
-			// 3. Calculate final position
-			InsertData.Position = Stream.GetUnitVector() * r * AxisScale + (Stream.GetUnitVector() * Stream.FRand() * BulgeRadius * GalaxyParams.BulgeJitter);
 		});
 
-	//double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	//UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Bulge duration: %.3f seconds "), TotalDuration);
+	double TotalDuration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Bulge duration: %.3f seconds "), TotalDuration);
 }
 
 void GalaxyGenerator::GenerateClusters()
 {
-	//double StartTime = FPlatformTime::Seconds();
+	double StartTime = FPlatformTime::Seconds();
 
 	// Exit if no clusters or points are requested to avoid division by zero.
 	if (GalaxyParams.ClusterNumClusters <= 0 || GalaxyParams.ClusterNumPoints <= 0)
@@ -1509,13 +1503,13 @@ void GalaxyGenerator::GenerateClusters()
 		GenerateCluster(i + 987654, Center, Radius, PointsPerCluster, GalaxyParams.ClusterBaseDensity, GalaxyParams.ClusterDepthBias);
 	}
 
-	//double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	//UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Cluster duration: %.3f seconds "), TotalDuration);
+	double TotalDuration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Clusters duration: %.3f seconds "), TotalDuration);
 }
 
 void GalaxyGenerator::GenerateArms()
 {
-	//double StartTime = FPlatformTime::Seconds();
+	double StartTime = FPlatformTime::Seconds();
 
 	int StarsPerCluster = (GalaxyParams.ArmNumPoints / GalaxyParams.ArmNumArms) / GalaxyParams.ArmClusters; // should have some degree of randomization
 	double MinScale = GalaxyRadius * GalaxyParams.ArmClusterRadiusMin;
@@ -1554,18 +1548,18 @@ void GalaxyGenerator::GenerateArms()
 		}
 	}
 
-	//double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	//UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Arms duration: %.3f seconds "), TotalDuration);
+	double TotalDuration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Arms duration: %.3f seconds "), TotalDuration);
 }
 
 void GalaxyGenerator::ApplyTwist()
 {
-	//double StartTime = FPlatformTime::Seconds();
+	double StartTime = FPlatformTime::Seconds();
 
 	ParallelFor(GeneratedData.Num(), [&](int32 i)
 		{
 			FVector P = GeneratedData[i].Position;
-			//double rXY = (P * FVector(1,1,0)).Length();
+			//double rXY = (P * FVector(1,1,0)).Length(); // Can add this in if you want to bias twist factor for an axis
 			double rXY = P.Length();
 			if (rXY < KINDA_SMALL_NUMBER) return;
 			double theta = FMath::Atan2(P.Y, P.X);
@@ -1579,32 +1573,32 @@ void GalaxyGenerator::ApplyTwist()
 			GeneratedData[i].Position.Y = rXY * FMath::Sin(newTheta);
 		}, EParallelForFlags::BackgroundPriority);
 
-	//double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	//UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Apply Twist duration: %.3f seconds "), TotalDuration);
+	double TotalDuration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Apply Twist duration: %.3f seconds "), TotalDuration);
 }
 
 void GalaxyGenerator::GenerateDisc()
 {
-	//double StartTime = FPlatformTime::Seconds();
+	double StartTime = FPlatformTime::Seconds();
 	
 	GenerateCluster(Seed + 999, FVector::ZeroVector, FVector(GalaxyRadius, GalaxyRadius, GalaxyRadius * GalaxyParams.DiscHeightRatio), GalaxyParams.DiscNumPoints, GalaxyParams.DiscBaseDensity, GalaxyParams.DiscDepthBias);
 	
-	//double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	//UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Disc duration: %.3f seconds "), TotalDuration);
+	double TotalDuration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Disc duration: %.3f seconds "), TotalDuration);
 }
 
 void GalaxyGenerator::GenerateBackground()
 {
-	//double StartTime = FPlatformTime::Seconds();
+	double StartTime = FPlatformTime::Seconds();
 
 	GenerateCluster(Seed + 123456789, FVector::ZeroVector, FVector(MaxRadius, MaxRadius, MaxRadius * GalaxyParams.BackgroundHeightRatio), GalaxyParams.BackgroundNumPoints, GalaxyParams.BackgroundBaseDensity, GalaxyParams.BackgroundDepthBias);
 
-	//double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	//UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Background duration: %.3f seconds "), TotalDuration);
+	double TotalDuration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Background duration: %.3f seconds "), TotalDuration);
 }
 
 void GalaxyGenerator::ApplyRotation() {
-	//double StartTime = FPlatformTime::Seconds();
+	double StartTime = FPlatformTime::Seconds();
 	
 	ParallelFor(GeneratedData.Num(), [&](int32 i)
 		{
@@ -1612,12 +1606,14 @@ void GalaxyGenerator::ApplyRotation() {
 		}
 	);
 
-	//double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	//UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Apply Rotation duration: %.3f seconds "), TotalDuration);
+	double TotalDuration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Apply Rotation duration: %.3f seconds "), TotalDuration);
 }
 
 void GalaxyGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity, double InDepthBias) //add falloff or curve param
 {
+	//double StartTime = FPlatformTime::Seconds();
+
 	int32 StartIndex = GeneratedData.Num();
 	GeneratedData.AddUninitialized(InCount);
 
@@ -1650,6 +1646,8 @@ void GalaxyGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, FVect
 
 			GeneratedData[StartIndex + i] = InsertData;
 		}, EParallelForFlags::BackgroundPriority);
+	//double TotalDuration = FPlatformTime::Seconds() - StartTime;
+	//UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Cluster duration: %.3f seconds "), TotalDuration);
 }
 
 int GalaxyGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
