@@ -256,24 +256,39 @@ void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode)
 
 void AUniverseActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 {
+	if (!InNode.IsValid())
+	{
+		return;
+	}
 	TWeakObjectPtr<AGalaxyActor> GalaxyToDestroy;
-
 	// Find the actor in the map and remove the entry simultaneously.
 	if (SpawnedGalaxies.RemoveAndCopyValue(InNode, GalaxyToDestroy))
 	{
-		if (!InNode.IsValid())
-		{
-			return;
-		}
-
+		AGalaxyActor* PoolGalaxy = GalaxyToDestroy.Get();
 		// Ensure the actor pointer is still valid before trying to destroy it.
-		if (GalaxyToDestroy.IsValid())
+		if (PoolGalaxy)
 		{
 			UE_LOG(LogTemp, Log, TEXT("Resetting galaxy for node with ObjectId: %d"),
 				InNode->Data.ObjectId);
-			GalaxyToDestroy->ResetForPool(); //Change this to be more of a reset
-			GalaxyPool.Push(GalaxyToDestroy.Get());
-			//GalaxyToDestroy->Destroy();
+			PoolGalaxy->ResetForPool(); //Change this to be more of a reset
+
+			AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, PoolGalaxy]()
+			{
+				double StartTime = FPlatformTime::Seconds();
+					
+				PoolGalaxy->Octree->bIsResetting.store(true);
+				FPlatformProcess::Sleep(0.05f);
+				PoolGalaxy->Octree = MakeShared<FOctree>(GalaxyExtent);
+				PoolGalaxy->Octree->bIsResetting.store(false);
+
+				// Return to pool on game thread
+				AsyncTask(ENamedThreads::GameThread, [this, PoolGalaxy, StartTime]()
+				{
+					GalaxyPool.Insert(PoolGalaxy, 0);
+					double ODuration = FPlatformTime::Seconds() - StartTime;
+					UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Freeing Octree took: %.3f seconds"), ODuration);
+				});
+			});
 		}
 		else
 		{

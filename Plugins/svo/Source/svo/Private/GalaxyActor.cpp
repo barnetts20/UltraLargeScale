@@ -107,27 +107,20 @@ void AGalaxyActor::ResetForSpawn() {
 
 void AGalaxyActor::ResetForPool() {
 	double StartTime = FPlatformTime::Seconds();
-	Octree = MakeShared<FOctree>(Extent);
-	double ODuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Freeing Octree took: %.3f seconds"), ODuration);
+	InitializationState = ELifecycleState::Pooling;//Set to pooling to stop any further init operations
 
-	AsyncTask(ENamedThreads::GameThread, [this]()
-		{
-			if (VolumetricComponent)
-			{
-				VolumetricComponent->DetachFromParent();
-				VolumetricComponent->DestroyComponent();
-				VolumetricComponent = nullptr;
-			}
-			if (NiagaraComponent)
-			{
-				NiagaraComponent->DetachFromParent();
-				NiagaraComponent->DestroyComponent();
-				NiagaraComponent = nullptr;
-			}
-		});
-
-	InitializationState = ELifecycleState::Pooling;
+	if (VolumetricComponent)
+	{
+		VolumetricComponent->DetachFromParent();
+		VolumetricComponent->DestroyComponent();
+		VolumetricComponent = nullptr;
+	}
+	if (NiagaraComponent)
+	{
+		NiagaraComponent->DetachFromParent();
+		NiagaraComponent->DestroyComponent();
+		NiagaraComponent = nullptr;
+	}
 
 	double Duration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::ResetForPool took: %.3f seconds"), Duration);
@@ -241,16 +234,13 @@ void AGalaxyActor::InitializeNiagara()
 		NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Extent), FVector(Extent)));
 		NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Extent);
 		NiagaraComponent->TranslucencySortPriority = 1;
-		NiagaraComponent->SetVisibility(false);
-		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-		{
+
+		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable {
 			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), Positions);
 			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), Colors);
 			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), Extents);
 
-			AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-			{
-				NiagaraComponent->SetVisibility(true);
+			AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable {
 				NiagaraComponent->Activate(true);
 				CompletionPromise.SetValue();
 			});

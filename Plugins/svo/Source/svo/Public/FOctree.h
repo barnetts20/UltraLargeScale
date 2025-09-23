@@ -55,9 +55,12 @@ public:
 
 	// In FOctree class, add a mutex
 	mutable FCriticalSection OctreeMutex;
-
+	std::atomic<bool> bIsResetting{ false };
 	#pragma region BulkInsert
 	void BulkInsertPositions(TArray<FPointData> InPointData, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes, TArray<TSharedPtr<FOctreeNode>>& OutVolumeChunks) {
+		if (bIsResetting.load()) {
+			return; // Early exit if shutting down
+		}
 		TArray<TArray<FPointData>> ChunkPointData;
 		PrePopulateVolumeLayer(OutVolumeChunks, ChunkPointData);
 
@@ -71,10 +74,16 @@ public:
 
 		FCriticalSection ResultMutex;
 		ParallelFor(OutVolumeChunks.Num(), [&](int32 i) {
+			if (bIsResetting.load()) {
+				return; // Early exit if shutting down
+			}
 			TSharedPtr<FOctreeNode> Chunk = OutVolumeChunks[i];
 			TArray<TSharedPtr<FOctreeNode>> ChunkResults;
 
 			for (FPointData Point : ChunkPointData[i]) {
+				if (bIsResetting.load()) {
+					return; // Early exit if shutting down
+				}
 				TSharedPtr<FOctreeNode> Result = InsertPosition(Point.GetInt64Position(), Point.InsertDepth, Point.Data,Chunk);
 				if (Result.IsValid()) {
 					ChunkResults.Add(Result);
@@ -135,6 +144,9 @@ public:
 	}
 	
 	TSharedPtr<FOctreeNode> InsertPosition(FInt64Vector InPosition, int InDepth, FVoxelData InData, TSharedPtr<FOctreeNode> InCurrent = nullptr) {
+		if (bIsResetting.load()) {
+			return nullptr; // Early exit if shutting down
+		}
 		if (InData.TypeId == -1 && InPosition == FInt64Vector::ZeroValue) return nullptr; //Ignore typeless inserts into 0,0,0
 		
 		TSharedPtr<FOctreeNode> Current = Root;
