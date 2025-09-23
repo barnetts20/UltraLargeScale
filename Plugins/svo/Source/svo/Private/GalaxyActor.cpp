@@ -14,11 +14,12 @@ AGalaxyActor::AGalaxyActor()
 }
 
 AGalaxyActor::~AGalaxyActor()
-{
+{	
+	//Release all populated data
 	Positions.Empty();
 	Extents.Empty();
 	Colors.Empty();
-	GalaxyGenerator.GeneratedData.Reset();
+	GalaxyGenerator.GeneratedData.Empty();
 	if (Octree.IsValid()) Octree.Reset();
 }
 
@@ -57,19 +58,14 @@ void AGalaxyActor::Initialize()
 	});
 }
 
-// Add proper cleanup in BeginDestroy or EndPlay
-void AGalaxyActor::BeginDestroy()
-{
-	Super::BeginDestroy();
-}
-
 void AGalaxyActor::ResetForSpawn() {
 	InitializationState = ELifecycleState::Uninitialized;
 }
 
 void AGalaxyActor::ResetForPool() {
 	double StartTime = FPlatformTime::Seconds();
-	InitializationState = ELifecycleState::Pooling;//Set to pooling to stop any further init operations
+
+	InitializationState = ELifecycleState::Pooling; //Set to pooling to stop any further init operations
 
 	if (VolumetricComponent)
 	{
@@ -92,16 +88,14 @@ void AGalaxyActor::InitializeData() {
 	double StartTime = FPlatformTime::Seconds();
 	
 	FRandomStream Stream(Seed);
-	auto EncodedTree = EncodedTrees[Stream.RandRange(0, 5)];
-
 	GalaxyGenerator.Seed = Seed;
 	GalaxyGenerator.DepthRange = 7; //With seven levels, assuming our smallest star is say 1/2 the size of the sun, we can cover the vast majority of potential realistic star scales
 	GalaxyGenerator.InsertDepthOffset = 9; //Controlls the depth above max depth the smallest stars will be generated in
 	GalaxyGenerator.Rotation = FRotator(Stream.FRandRange(-35, 35), Stream.FRandRange(-35, 35), Stream.FRandRange(-35, 35));
 	GalaxyGenerator.GeneratedData.SetNum(0);
+	
 	GalaxyParamFactory GalaxyParamGen;
 	GalaxyParamGen.Seed = this->Seed;
-
 	GalaxyGenerator.GalaxyParams = GalaxyParamGen.GenerateParams();
 	GalaxyGenerator.GenerateData(Octree);
 	
@@ -151,18 +145,18 @@ void AGalaxyActor::InitializeVolumetric()
 	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
 			VolumetricComponent = NewObject<UStaticMeshComponent>(this); //TODO: THESE NEED TO MOVE INTO SEPERATE RUN ONCE INIT
+			VolumetricComponent->SetVisibility(false);
 			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));  //TODO: THESE NEED TO MOVE INTO SEPERATE RUN ONCE INIT
 			VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
 			VolumetricComponent->TranslucencySortPriority = 1;
 			VolumetricComponent->RegisterComponent();
 			VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
-			VolumetricComponent->SetVisibility(false);
 
-			//Spawn base volume component & material
 			VolumeMaterial = UMaterialInstanceDynamic::Create(
 				LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_GalaxyRaymarchPsuedoVolume_Inst.MT_GalaxyRaymarchPsuedoVolume_Inst")),
 				this
 			);
+
 			VolumeMaterial->SetTextureParameterValue(FName("VolumeTexture"), PseudoVolumeTexture);
 			VolumeMaterial->SetTextureParameterValue(FName("NoiseTexture"), LoadObject<UVolumeTexture>(nullptr, *GalaxyGenerator.GalaxyParams.VolumeNoise));
 			VolumeMaterial->SetVectorParameterValue(FName("AmbientColor"), GalaxyGenerator.GalaxyParams.VolumeAmbientColor);
@@ -207,7 +201,7 @@ void AGalaxyActor::InitializeNiagara()
 			false
 		);
 		NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Extent), FVector(Extent)));
-		NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Extent);
+		NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Extent); //TODO: Might not need this, check niagara component
 		NiagaraComponent->TranslucencySortPriority = 1;
 
 		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable {
@@ -249,10 +243,8 @@ void AGalaxyActor::Tick(float DeltaTime)
 	}
 
 	double ParallaxRatio = (Universe ? Universe->SpeedScale : SpeedScale) / UnitScale;
-
 	FVector PlayerOffset = CurrentFrameOfReferenceLocation - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
 	FVector ParallaxOffset = PlayerOffset * (1.0 - ParallaxRatio);
 	SetActorLocation(GetActorLocation() + ParallaxOffset);
-	Super::Tick(DeltaTime);
 }

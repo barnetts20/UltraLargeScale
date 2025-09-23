@@ -24,27 +24,25 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
 	int Seed = 133780085;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
-	int64 Extent = 2147483648;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
-	int64 GalaxyExtent = 2147483648;
-
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
 	double UnitScale = 10000.0;
-
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
 	double SpeedScale = 1.0;
-
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
-	int Count = 2000000; //TODO: NIAGARA STREAMING, ASYNC POINT GENERATION IN BATCHES TO OPTIMIZE LOAD TIME/STREAMING
+	int Count = 2000000; //TODO: NIAGARA STREAMING, ASYNC POINT GENERATION IN BATCHES TO OPTIMIZE LOAD TIME/STREAMING... 2 million is max spawn burst, more than this would need chunking
+
+
+	int64 Extent = 2147483648;
 
 	TSharedPtr<FOctree> Octree;
 	UniverseGenerator UniverseGenerator;
-	TArray<TSharedPtr<FOctreeNode>> VolumeNodes;
-	TArray<TSharedPtr<FOctreeNode>> PointNodes;
-	
+
+	void SpawnGalaxy(TSharedPtr<FOctreeNode> InNode);
+	void ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode);
+
+	void Initialize();
+
+protected:
 	//Niagara Data and Component
 	TArray<FVector> Positions;
 	TArray<FVector> Rotations;
@@ -60,37 +58,19 @@ public:
 
 	//Managed galaxy actors
 	TSubclassOf<AGalaxyActor> GalaxyActorClass;
-
 	int GalaxyPoolSize = 5;
 	TArray<AGalaxyActor*> GalaxyPool;
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
-	
-	void SpawnGalaxy(TSharedPtr<FOctreeNode> InNode);
-	void ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode);
 
 	//Parallax tracking locations
 	FVector LastFrameOfReferenceLocation;
 	FVector CurrentFrameOfReferenceLocation;
-	FVector CurrentPlayerLocation;
-	//Noise formulas
-	TArray<const char*> EncodedTrees = {
-	"DQAIAAAAAAAAQAcAAAAAAD8AAAAAAA==",
-	"FwAAAAAAAACAPwAAgD8AAIC/DwABAAAAAAAAQA0ACAAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAPwAAAAAA",
-	"FwAAAAAAmpmZPwAAAAAAAIA/DwABAAAAAAAAQA0ACAAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAPwAAAAAA",
-	"DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA==",
-	"FwAAAADAAACAPwAAgD8AAIC/EAAAAAA/DQAGAAAAAAAAQBcAAAAAAAAAgD8AAIC/AACAPwsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAAEbABMAzcxMPg0AAwAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAQA==",
-	"FwAAAAAAAACAPwAAgD8AAIC/DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA=="
-	};
 
-protected:
-	void Initialize();
-	bool CleanUpComponents();
-	void MarkDestroying();
 	void InitializeGalaxyPool();
 	void InitializeData();
-	void PopulateNiagaraArrays();
 	void InitializeVolumetric();
 	void InitializeNiagara();
+
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
 };
