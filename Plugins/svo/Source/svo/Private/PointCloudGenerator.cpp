@@ -102,7 +102,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Volume_Min.VolumeHueVarianceScale = .25;
 	Volume_Max.VolumeHueVarianceScale = 1.75;
 	Volume_Min.VolumeSaturationVariance = 0;
-	Volume_Max.VolumeSaturationVariance = .5;
+	Volume_Max.VolumeSaturationVariance = .9;
 	Volume_Min.VolumeTemperatureScale = 3;
 	Volume_Max.VolumeTemperatureScale = 10;
 	Volume_Min.VolumeTemperatureInfluence = 8;
@@ -482,8 +482,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sa_Max.DiscHeightRatio = .1;
 	Sa_Min.DiscNumPoints = 100000;
 	Sa_Max.DiscNumPoints = 150000;
-	Sa_Min.ArmBaseDensity = 1;
-	Sa_Max.ArmBaseDensity = 4;
+	Sa_Min.ArmBaseDensity = 2;
+	Sa_Max.ArmBaseDensity = 6;
 	Sa_Min.ArmClusterRadiusMin = .025;
 	Sa_Max.ArmClusterRadiusMin = .1;
 	Sa_Min.ArmClusterRadiusMax = .15;
@@ -508,7 +508,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sa_Max.ArmRadialDensityMin = 1;
 	Sa_Min.ArmRadialDensityExponent = 1;
 	Sa_Max.ArmRadialDensityExponent = 3;
-	Sa_Min.ArmRadialDensityMax = 2;
+	Sa_Min.ArmRadialDensityMax = 4;
 	Sa_Max.ArmRadialDensityMax = 12;
 	Sa_Min.ArmStartRatio = .25;
 	Sa_Max.ArmStartRatio = .5;
@@ -585,8 +585,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sb_Max.DiscHeightRatio = .1;
 	Sb_Min.DiscNumPoints = 100000;
 	Sb_Max.DiscNumPoints = 150000;
-	Sb_Min.ArmBaseDensity = 1;
-	Sb_Max.ArmBaseDensity = 4;
+	Sb_Min.ArmBaseDensity = 2;
+	Sb_Max.ArmBaseDensity = 6;
 	Sb_Min.ArmClusterRadiusMin = .025;
 	Sb_Max.ArmClusterRadiusMin = .1;
 	Sb_Min.ArmClusterRadiusMax = .15;
@@ -611,7 +611,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sb_Max.ArmRadialDensityMin = 1;
 	Sb_Min.ArmRadialDensityExponent = 1;
 	Sb_Max.ArmRadialDensityExponent = 3;
-	Sb_Min.ArmRadialDensityMax = 2;
+	Sb_Min.ArmRadialDensityMax = 4;
 	Sb_Max.ArmRadialDensityMax = 12;
 	Sb_Min.ArmStartRatio = .25;
 	Sb_Max.ArmStartRatio = .5;
@@ -689,8 +689,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sc_Max.DiscHeightRatio = .1;
 	Sc_Min.DiscNumPoints = 100000;
 	Sc_Max.DiscNumPoints = 150000;
-	Sc_Min.ArmBaseDensity = 1;
-	Sc_Max.ArmBaseDensity = 4;
+	Sc_Min.ArmBaseDensity = 2;
+	Sc_Max.ArmBaseDensity = 6;
 	Sc_Min.ArmClusterRadiusMin = .025;
 	Sc_Max.ArmClusterRadiusMin = .1;
 	Sc_Min.ArmClusterRadiusMax = .15;
@@ -715,7 +715,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	Sc_Max.ArmRadialDensityMin = 1;
 	Sc_Min.ArmRadialDensityExponent = 1;
 	Sc_Max.ArmRadialDensityExponent = 3;
-	Sc_Min.ArmRadialDensityMax = 2;
+	Sc_Min.ArmRadialDensityMax = 4;
 	Sc_Max.ArmRadialDensityMax = 12;
 	Sc_Min.ArmStartRatio = .25;
 	Sc_Max.ArmStartRatio = .5;
@@ -798,8 +798,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBa_Max.DiscHeightRatio = .1;
 	SBa_Min.DiscNumPoints = 100000;
 	SBa_Max.DiscNumPoints = 150000;
-	SBa_Min.ArmBaseDensity = 1;
-	SBa_Max.ArmBaseDensity = 4;
+	SBa_Min.ArmBaseDensity = 2;
+	SBa_Max.ArmBaseDensity = 6;
 	SBa_Min.ArmClusterRadiusMin = .025;
 	SBa_Max.ArmClusterRadiusMin = .1;
 	SBa_Min.ArmClusterRadiusMax = .15;
@@ -824,7 +824,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBa_Max.ArmRadialDensityMin = 1;
 	SBa_Min.ArmRadialDensityExponent = 1;
 	SBa_Max.ArmRadialDensityExponent = 3;
-	SBa_Min.ArmRadialDensityMax = 2;
+	SBa_Min.ArmRadialDensityMax = 4;
 	SBa_Max.ArmRadialDensityMax = 12;
 	SBa_Min.ArmStartRatio = 0;
 	SBa_Max.ArmStartRatio = 0.2;
@@ -906,8 +906,8 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBb_Max.DiscHeightRatio = .1;
 	SBb_Min.DiscNumPoints = 100000;
 	SBb_Max.DiscNumPoints = 150000;
-	SBb_Min.ArmBaseDensity = 1;
-	SBb_Max.ArmBaseDensity = 4;
+	SBb_Min.ArmBaseDensity = 2;
+	SBb_Max.ArmBaseDensity = 6;
 	SBb_Min.ArmClusterRadiusMin = .025;
 	SBb_Max.ArmClusterRadiusMin = .1;
 	SBb_Min.ArmClusterRadiusMax = .15;
@@ -932,7 +932,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBb_Max.ArmRadialDensityMin = 1;
 	SBb_Min.ArmRadialDensityExponent = 1;
 	SBb_Max.ArmRadialDensityExponent = 3;
-	SBb_Min.ArmRadialDensityMax = 2;
+	SBb_Min.ArmRadialDensityMax = 4;
 	SBb_Max.ArmRadialDensityMax = 12;
 	SBb_Min.ArmStartRatio = 0;
 	SBb_Max.ArmStartRatio = .1;
@@ -1015,7 +1015,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBc_Min.DiscNumPoints = 100000;
 	SBc_Max.DiscNumPoints = 150000;
 	SBc_Min.ArmBaseDensity = 2;
-	SBc_Max.ArmBaseDensity = 4;
+	SBc_Max.ArmBaseDensity = 6;
 	SBc_Min.ArmClusterRadiusMin = .025;
 	SBc_Max.ArmClusterRadiusMin = .1;
 	SBc_Min.ArmClusterRadiusMax = .15;
@@ -1040,7 +1040,7 @@ GalaxyParamFactory::GalaxyParamFactory() {
 	SBc_Max.ArmRadialDensityMin = 1;
 	SBc_Min.ArmRadialDensityExponent = 1;
 	SBc_Max.ArmRadialDensityExponent = 3;
-	SBc_Min.ArmRadialDensityMax = 2;
+	SBc_Min.ArmRadialDensityMax = 4;
 	SBc_Max.ArmRadialDensityMax = 12;
 	SBc_Min.ArmStartRatio = 0;
 	SBc_Max.ArmStartRatio = .1;
@@ -1279,14 +1279,14 @@ GalaxyParams GalaxyParamFactory::BoundedRandomizeParams(GalaxyParams MinParams, 
 		Stream.FRandRange(Volume_Min.VolumeHotShift.G, Volume_Max.VolumeHotShift.G),
 		Stream.FRandRange(Volume_Min.VolumeHotShift.B, Volume_Max.VolumeHotShift.B)
 	);
-	Params.VolumeNoise = NoisePaths[Stream.RandRange(0, 3)];
+	Params.VolumeNoise = NoisePaths[Stream.RandRange(0, 9)];
 	Params.VolumeDensity = Stream.FRandRange(Volume_Min.VolumeDensity, Volume_Max.VolumeDensity);
 	Params.VolumeHueVariance = Stream.FRandRange(Volume_Min.VolumeHueVariance, Volume_Max.VolumeHueVariance);
 	Params.VolumeHueVarianceScale = Stream.FRandRange(Volume_Min.VolumeHueVarianceScale, Volume_Max.VolumeHueVarianceScale);
 	Params.VolumeSaturationVariance = Stream.FRandRange(Volume_Min.VolumeSaturationVariance, Volume_Max.VolumeSaturationVariance);
 	Params.VolumeTemperatureScale = Stream.FRandRange(Volume_Min.VolumeTemperatureScale, Volume_Max.VolumeTemperatureScale);
 	Params.VolumeTemperatureInfluence = Stream.FRandRange(Volume_Min.VolumeTemperatureInfluence, Volume_Max.VolumeTemperatureInfluence);
-	Params.VolumeWarpAmount = Stream.FRandRange(Volume_Min.VolumeWarpAmount, Volume_Max.VolumeWarpAmount);
+	Params.VolumeWarpAmount = Stream.FRandRange(Volume_Min.VolumeWarpAmount, Volume_Max.VolumeWarpAmount) * (Stream.FRandRange(-1,1) < 0 ? -1 : 1);
 	Params.VolumeWarpScale = Stream.FRandRange(Volume_Min.VolumeWarpScale, Volume_Max.VolumeWarpScale);
 
 	return Params;
@@ -1531,7 +1531,7 @@ void GalaxyGenerator::GenerateArms()
 		FVector ArmDir(FMath::Cos(BaseAngle), FMath::Sin(BaseAngle), 0);
 		for (int c = 0; c < GalaxyParams.ArmClusters; c++)
 		{
-			double Dist = FMath::Clamp(-GalaxyRadius * FMath::Loge(1.0 - Stream.FRand()), FMath::Max(0,BulgeRadius * GalaxyParams.ArmStartRatio), GalaxyRadius);
+			double Dist = FMath::Lerp(FMath::Max(0, BulgeRadius * GalaxyParams.ArmStartRatio), GalaxyRadius, -FMath::Loge(1.0 - Stream.FRand()));
 			double Progress = Dist / GalaxyRadius;
 			double ExpProgress = FMath::Pow(Progress, ProgressExponent);
 			FVector Center = ArmDir * Dist + FMath::Lerp(MinJitter, MaxJitter, ExpProgress) * Stream.GetUnitVector() * Stream.FRandRange(MinJitterVariance, MaxJitterVariance);
@@ -1612,14 +1612,12 @@ void GalaxyGenerator::ApplyRotation() {
 
 void GalaxyGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity, double InDepthBias) //add falloff or curve param
 {
-	//double StartTime = FPlatformTime::Seconds();
-
 	int32 StartIndex = GeneratedData.Num();
 	GeneratedData.AddUninitialized(InCount);
 
 	ParallelFor(InCount, [&](int32 i)
 		{
-			FRandomStream Stream(InSeed ^ (StartIndex + i)); // unique seed per point
+			FRandomStream Stream(InSeed ^ (StartIndex + i));
 
 			auto Gaussian = [&](FRandomStream& Rand)
 				{
@@ -1640,14 +1638,13 @@ void GalaxyGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, FVect
 			double size = P.Length();
 
 			FPointData InsertData;
+
 			InsertData.SetPosition(size < MaxRadius ? P : FVector::ZeroVector);
 			InsertData.InsertDepth = ChooseDepth(Stream.FRand(), InDepthBias);
 			InsertData.Data = FVoxelData(InBaseDensity * Stream.FRandRange(.5, 1.5), Stream.GetUnitVector(), i + StartIndex, 1);
 
 			GeneratedData[StartIndex + i] = InsertData;
 		}, EParallelForFlags::BackgroundPriority);
-	//double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	//UE_LOG(LogTemp, Log, TEXT("GalaxyGenerator::Generate Cluster duration: %.3f seconds "), TotalDuration);
 }
 
 int GalaxyGenerator::ChooseDepth(double InRandomSample, double InDepthBias)

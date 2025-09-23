@@ -92,7 +92,7 @@ void AUniverseActor::InitializeData() {
 	UniverseGenerator.UniverseParams = UniverseParams;
 	UniverseGenerator.Rotation = FRotator(0);
 	UniverseGenerator.DepthRange = 7;
-	UniverseGenerator.InsertDepthOffset = 4;
+	UniverseGenerator.InsertDepthOffset = 5;
 
 	UniverseGenerator.GenerateData(Octree);
 	Octree->BulkInsertPositions(UniverseGenerator.GeneratedData, PointNodes, VolumeNodes);

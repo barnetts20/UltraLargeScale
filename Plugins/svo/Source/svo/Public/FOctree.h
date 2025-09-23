@@ -690,7 +690,7 @@ public:
 		}
 
 		#pragma region Create Placeholder Texture on Game Thread
-		// --- 1) Create dummy UTexture2D on GameThread (with 1x1 mip) ---
+		// --- 1) Create dummy UTexture2D on GameThread (with 1x1 mip) --- //TODO: PROBABLY SHOULD BE MOVED TO INIT ONCE AT AT GALAXY LEVEL AND JUST PASS IN FOR POINTER SWAP
 		UTexture2D* PseudoVolumeTexture = nullptr;
 		FEvent* DummyDoneEvent = FPlatformProcess::GetSynchEventFromPool(true);
 		DummyDoneEvent->Reset();

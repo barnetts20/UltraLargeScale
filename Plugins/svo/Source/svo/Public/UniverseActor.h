@@ -29,7 +29,7 @@ public:
 	int64 Extent = 2147483648;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
-	int64 GalaxyExtent = 536870912;
+	int64 GalaxyExtent = 2147483648;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
 	double UnitScale = 10000.0;
