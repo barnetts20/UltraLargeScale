@@ -1,22 +1,42 @@
-
+#pragma region Includes
 #include "ProximityTrackerComponent.h"
 #include <Engine.h>
+#pragma endregion
 
-// Sets default values for this component's properties
+#pragma region Constructor/Destructor
 UProximityTrackerComponent::UProximityTrackerComponent()
 {
-	// Set this component to be initialized when the game starts, and to be ticked every frame.  You can turn these features
-	// off to improve performance if you don't need them.
 	PrimaryComponentTick.bCanEverTick = true;
-
-	// ...
 }
+#pragma endregion
 
+#pragma region Initialization
+void UProximityTrackerComponent::BeginPlay()
+{
+    Super::BeginPlay();
+    UniverseActor = Cast<AUniverseActor>(UGameplayStatics::GetActorOfClass(GetWorld(), AUniverseActor::StaticClass()));
+    if (UniverseActor)
+    {
+        GetWorld()->GetTimerManager().SetTimer(
+            UpdateTimerHandle,
+            this,
+            &UProximityTrackerComponent::OnProximityUpdate,
+            UpdateInterval,
+            true);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Error, TEXT("ProximityTrackerComponent: AUniverseActor not found in the world!"));
+    }
+}
+#pragma endregion
+
+#pragma region Proximity Polling
 void UProximityTrackerComponent::OnProximityUpdate()
 {
 	if (!UniverseActor) return;
 
-	// Get current position in universe space
+	//Get parent position
 	AActor* Owner = GetOwner();
 	if (!Owner) return;
     if (!UniverseActor || UniverseActor->InitializationState != ELifecycleState::Ready) return;
@@ -24,12 +44,11 @@ void UProximityTrackerComponent::OnProximityUpdate()
 	FVector SampleLocation = WorldLocation - UniverseActor->GetActorLocation();
     FInt64Vector SampleCoordinate = FInt64Vector(FMath::RoundToInt64(SampleLocation.X), FMath::RoundToInt64(SampleLocation.Y), FMath::RoundToInt64(SampleLocation.Z));
 
-	// Perform query
+	//Proximity Query Octree
 	TArray<TSharedPtr<FOctreeNode>> NearbyNodes = UniverseActor->Octree->GetNodesInRange(SampleCoordinate, ScanExtent, -1, -1, 1);
 
-	// Example processing
-    bool bDebugDraw = false;
-    if (bDebugDraw) {
+    //Draw the node bounding boxes in debug mode
+    if (DebugMode) {
         for (const TSharedPtr<FOctreeNode>& Node : NearbyNodes)
         {
             if (Node.IsValid())
@@ -39,6 +58,7 @@ void UProximityTrackerComponent::OnProximityUpdate()
         }
     }
     
+    //Update the currently tracked galaxies and trigger lifecycle changes
     TSet<TSharedPtr<FOctreeNode>> StaleGalaxyNodes = TSet<TSharedPtr<FOctreeNode>>(SpawnedGalaxyNodes);
     for (const TSharedPtr<FOctreeNode>& Node : NearbyNodes)
     {
@@ -60,7 +80,9 @@ void UProximityTrackerComponent::OnProximityUpdate()
         }
     }
 }
+#pragma endregion
 
+#pragma region Debug
 void UProximityTrackerComponent::DebugDrawNode(TSharedPtr<FOctreeNode> InNode)
 {
     if (!InNode.IsValid() || !UniverseActor) return;
@@ -93,34 +115,4 @@ void UProximityTrackerComponent::DebugDrawNode(TSharedPtr<FOctreeNode> InNode)
         Thickness
     );
 }
-
-void UProximityTrackerComponent::BeginPlay()
-{
-    Super::BeginPlay();
-
-    // Find the single instance of AUniverseActor in the world.
-    UniverseActor = Cast<AUniverseActor>(UGameplayStatics::GetActorOfClass(GetWorld(), AUniverseActor::StaticClass()));
-
-    // It's good practice to check if the actor was actually found before using it.
-    if (UniverseActor)
-    {
-        // Start the timer only if the UniverseActor is valid.
-        GetWorld()->GetTimerManager().SetTimer(
-            UpdateTimerHandle,
-            this,
-            &UProximityTrackerComponent::OnProximityUpdate,
-            UpdateInterval,
-            true);
-    }
-    else
-    {
-        // Log an error so you know if something is wrong with your level setup.
-        UE_LOG(LogTemp, Error, TEXT("ProximityTrackerComponent: AUniverseActor not found in the world!"));
-    }
-}
-
-void UProximityTrackerComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
-{
-	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
-}
-
+#pragma endregion

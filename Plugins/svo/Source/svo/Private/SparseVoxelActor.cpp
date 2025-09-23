@@ -1,3 +1,4 @@
+//TODO:REMOVE, NO LONGER USED/OUT OF DATE
 // Fill out your copyright notice in the Description page of Project Settings.
 #include "SparseVoxelActor.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
