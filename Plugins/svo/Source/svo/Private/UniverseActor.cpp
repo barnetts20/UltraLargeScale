@@ -244,11 +244,10 @@ void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode)
 
 	FRandomStream RandStream(InNode->Data.ObjectId);
 	Galaxy->ParentColor = FLinearColor(InNode->Data.Composition);
+	
 	FVector normal = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
 	FMatrix RotationMatrix = FRotationMatrix::MakeFromZX(normal, FVector::ForwardVector);
 	Galaxy->AxisRotation = normal * 360;
-	
-	Galaxy->Count = RandStream.RandRange(150000, 250000);
 	
 	Galaxy->Initialize();				
 	Galaxy->SetActorHiddenInGame(false);
@@ -286,7 +285,7 @@ void AUniverseActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 				{
 					GalaxyPool.Insert(PoolGalaxy, 0);
 					double ODuration = FPlatformTime::Seconds() - StartTime;
-					UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Freeing Octree took: %.3f seconds"), ODuration);
+					UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Flushing Octree took: %.3f seconds"), ODuration);
 				});
 			});
 		}

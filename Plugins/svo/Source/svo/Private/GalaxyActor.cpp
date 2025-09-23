@@ -111,8 +111,8 @@ void AGalaxyActor::InitializeData() {
 
 	if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
 
-	TArray<TSharedPtr<FOctreeNode>> VolumeNodes; //Trade out for volume mip data directly
-	TArray<TSharedPtr<FOctreeNode>> PointNodes; //Trade out for niagara arrays directly
+	TArray<TSharedPtr<FOctreeNode>> VolumeNodes;
+	TArray<TSharedPtr<FOctreeNode>> PointNodes;
 	Octree->BulkInsertPositions(GalaxyGenerator.GeneratedData, PointNodes, VolumeNodes);
 
 	double InsertFinish = FPlatformTime::Seconds();
@@ -120,7 +120,6 @@ void AGalaxyActor::InitializeData() {
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Bulk Insert took: %.3f seconds"), GenDuration);
 
 	if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
-
 
 	Positions.SetNumUninitialized(PointNodes.Num());
 	Extents.SetNumUninitialized(PointNodes.Num());

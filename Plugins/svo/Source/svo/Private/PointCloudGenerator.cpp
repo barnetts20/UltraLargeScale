@@ -1341,7 +1341,7 @@ void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 	const float VoidRadiusSquared = VoidRadius * VoidRadius;
 
 	FPointData BlackHole;
-	BlackHole.Position = FVector::ZeroVector;
+	BlackHole.SetPosition(FVector::ZeroVector);
 	BlackHole.Data.ObjectId = INT32_MAX;
 	BlackHole.Data.TypeId = 1;
 
@@ -1351,11 +1351,11 @@ void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 		FPointData InsertData = GeneratedData[i];
 		//This step checks for stars that are within the black holes consumption radius. 
 		//Their data gets accumulated into the black hole, and the original star is configured to be ignored in bulk insert.
-		if (InsertData.Position.SizeSquared() < VoidRadiusSquared)
+		if (InsertData.GetPosition().SizeSquared() < VoidRadiusSquared)
 		{
 			FScopeLock Lock(&BlackHoleMutex);
-			GeneratedData[i].Data.TypeId = -1;
-			GeneratedData[i].Position = FVector::ZeroVector;
+			GeneratedData[i].Data.TypeId = -1; //Set Type -1 and Position to 0 vector so it gets ignored in bulk insert
+			GeneratedData[i].SetPosition(FVector::ZeroVector);
 			double DensityWeight = FMath::Pow(2.0, InOctree->MaxDepth - InsertData.InsertDepth);
 			BlackHole.Data.Density += InsertData.Data.Density * DensityWeight;
 			BlackHole.Data.Composition += InsertData.Data.Composition * BlackHole.Data.Density;
@@ -1427,7 +1427,7 @@ void GalaxyGenerator::GenerateBulge()
 				InsertData.Data.Density = Stream.FRandRange(0.5f, 1.5f) * GalaxyParams.BulgeBaseDensity;
 				InsertData.Data.Composition = Stream.GetUnitVector();
 				InsertData.InsertDepth = ChooseDepth(Stream.FRand(), GalaxyParams.BulgeDepthBias);
-				InsertData.Position = Stream.GetUnitVector() * r * AxisScale + (Stream.GetUnitVector() * Stream.FRand() * BulgeRadius * GalaxyParams.BulgeJitter);
+				InsertData.SetPosition(Stream.GetUnitVector() * r * AxisScale + (Stream.GetUnitVector() * Stream.FRand() * BulgeRadius * GalaxyParams.BulgeJitter));
 				PointInserted = true;
 			}
 		});
@@ -1558,7 +1558,7 @@ void GalaxyGenerator::ApplyTwist()
 
 	ParallelFor(GeneratedData.Num(), [&](int32 i)
 		{
-			FVector P = GeneratedData[i].Position;
+			FVector P = GeneratedData[i].GetPosition();
 			//double rXY = (P * FVector(1,1,0)).Length(); // Can add this in if you want to bias twist factor for an axis
 			double rXY = P.Length();
 			if (rXY < KINDA_SMALL_NUMBER) return;
@@ -1569,8 +1569,8 @@ void GalaxyGenerator::ApplyTwist()
 			double deltaTheta = baseDelta + coreBoost;
 			double newTheta = theta + deltaTheta;
 
-			GeneratedData[i].Position.X = rXY * FMath::Cos(newTheta);
-			GeneratedData[i].Position.Y = rXY * FMath::Sin(newTheta);
+			GeneratedData[i].SetPosition(FVector(rXY * FMath::Cos(newTheta), rXY * FMath::Sin(newTheta), GeneratedData[i].GetPosition().Z));
+
 		}, EParallelForFlags::BackgroundPriority);
 
 	double TotalDuration = FPlatformTime::Seconds() - StartTime;
@@ -1602,7 +1602,7 @@ void GalaxyGenerator::ApplyRotation() {
 	
 	ParallelFor(GeneratedData.Num(), [&](int32 i)
 		{
-			GeneratedData[i].Position = RotateCoordinate(GeneratedData[i].Position, Rotation);
+			GeneratedData[i].SetPosition(RotateCoordinate(GeneratedData[i].GetPosition(), Rotation));
 		}
 	);
 
@@ -1640,7 +1640,7 @@ void GalaxyGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, FVect
 			double size = P.Length();
 
 			FPointData InsertData;
-			InsertData.Position = (size < MaxRadius ? P : FVector::ZeroVector);
+			InsertData.SetPosition(size < MaxRadius ? P : FVector::ZeroVector);
 			InsertData.InsertDepth = ChooseDepth(Stream.FRand(), InDepthBias);
 			InsertData.Data = FVoxelData(InBaseDensity * Stream.FRandRange(.5, 1.5), Stream.GetUnitVector(), i + StartIndex, 1);
 
@@ -1710,7 +1710,7 @@ void UniverseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 
 			FPointData InsertData;
 			InsertData.Data = FVoxelData(LocalStream.FRandRange(0.5, 1.5), LocalStream.GetUnitVector(), i, 1);
-			InsertData.Position = PointCenter;
+			InsertData.SetPosition(PointCenter);
 			InsertData.InsertDepth = ChooseDepth(LocalStream.FRand(), 1 - NoiseSample * 0.9);
 			InsertData.Data.ObjectId = i;
 			GeneratedData[i] = InsertData;
@@ -1747,7 +1747,7 @@ void UniverseGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, FVe
 			double size = P.Length();
 
 			FPointData InsertData;
-			InsertData.Position = (size < UniverseParams.Extent ? P : FVector::ZeroVector);
+			InsertData.SetPosition(size < UniverseParams.Extent ? P : FVector::ZeroVector);
 			InsertData.InsertDepth = ChooseDepth(Stream.FRand(), InDepthBias);
 			InsertData.Data = FVoxelData(InBaseDensity * Stream.FRandRange(.5, 1.5), FVector(Stream.FRandRange(.2,1.2), Stream.FRandRange(.2, 1.2), Stream.FRandRange(.2, 1.2)), i + StartIndex, 1);
 

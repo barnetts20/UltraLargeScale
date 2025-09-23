@@ -57,42 +57,87 @@ public:
 	mutable FCriticalSection OctreeMutex;
 	std::atomic<bool> bIsResetting{ false };
 	#pragma region BulkInsert
-	void BulkInsertPositions(TArray<FPointData> InPointData, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes, TArray<TSharedPtr<FOctreeNode>>& OutVolumeChunks) {
+	void BulkInsertPositions(
+		TArray<FPointData> InPointData,
+		TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes,
+		TArray<TSharedPtr<FOctreeNode>>& OutVolumeChunks)
+	{
 		if (bIsResetting.load()) {
 			return; // Early exit if shutting down
 		}
+
+		double StartTime = FPlatformTime::Seconds();
+
+		// ---------------- Prepopulation ----------------
+		double PreStart = FPlatformTime::Seconds();
 		TArray<TArray<FPointData>> ChunkPointData;
 		PrePopulateVolumeLayer(OutVolumeChunks, ChunkPointData);
+		double PreEnd = FPlatformTime::Seconds();
+		UE_LOG(LogTemp, Log, TEXT("BulkInsert: PrePopulateVolumeLayer took %.3f sec"), PreEnd - PreStart);
 
-		// Distribute points to per chunk arrays
-		for (FPointData Point : InPointData) {
+		// ---------------- Point Distribution ----------------
+		double DistStart = FPlatformTime::Seconds();
+		for (const FPointData& Point : InPointData) {
 			int32 ChunkIndex = FindChunkIndexForPosition(Point.GetInt64Position(), OutVolumeChunks);
 			if (ChunkIndex >= 0 && ChunkIndex < ChunkPointData.Num()) {
 				ChunkPointData[ChunkIndex].Add(Point);
 			}
 		}
+		double DistEnd = FPlatformTime::Seconds();
+		UE_LOG(LogTemp, Log, TEXT("BulkInsert: Point distribution took %.3f sec"), DistEnd - DistStart);
 
-		FCriticalSection ResultMutex;
-		ParallelFor(OutVolumeChunks.Num(), [&](int32 i) {
+		// ---------------- Parallel Chunk Inserts ----------------
+		double InsertStart = FPlatformTime::Seconds();
+		const int32 NumChunks = OutVolumeChunks.Num();
+		TArray<TArray<TSharedPtr<FOctreeNode>>> PerChunkResults;
+		PerChunkResults.SetNum(NumChunks);
+
+		ParallelFor(NumChunks, [&](int32 i) {
 			if (bIsResetting.load()) {
 				return; // Early exit if shutting down
 			}
+
 			TSharedPtr<FOctreeNode> Chunk = OutVolumeChunks[i];
 			TArray<TSharedPtr<FOctreeNode>> ChunkResults;
+			ChunkResults.Reserve(ChunkPointData[i].Num());
 
-			for (FPointData Point : ChunkPointData[i]) {
+			for (const FPointData& Point : ChunkPointData[i]) {
 				if (bIsResetting.load()) {
 					return; // Early exit if shutting down
 				}
-				TSharedPtr<FOctreeNode> Result = InsertPosition(Point.GetInt64Position(), Point.InsertDepth, Point.Data,Chunk);
+
+				TSharedPtr<FOctreeNode> Result = InsertPosition(Point.GetInt64Position(), Point.InsertDepth, Point.Data, Chunk);
 				if (Result.IsValid()) {
 					ChunkResults.Add(Result);
 				}
 			}
 
-			FScopeLock Lock(&ResultMutex);
-			OutInsertedNodes.Append(ChunkResults);
-		}, EParallelForFlags::BackgroundPriority);
+			PerChunkResults[i] = MoveTemp(ChunkResults);
+			}, EParallelForFlags::BackgroundPriority);
+		double InsertEnd = FPlatformTime::Seconds();
+		UE_LOG(LogTemp, Log, TEXT("BulkInsert: Parallel insert took %.3f sec"), InsertEnd - InsertStart);
+
+		// ---------------- Recombine Results ----------------
+		double RecombineStart = FPlatformTime::Seconds();
+		OutInsertedNodes.Empty();
+
+		int32 TotalResults = 0;
+		for (const auto& Arr : PerChunkResults) {
+			TotalResults += Arr.Num();
+		}
+		OutInsertedNodes.Reserve(TotalResults);
+
+		for (int32 i = 0; i < NumChunks; ++i) {
+			if (PerChunkResults[i].Num() > 0) {
+				OutInsertedNodes.Append(PerChunkResults[i]);
+			}
+		}
+		double RecombineEnd = FPlatformTime::Seconds();
+		UE_LOG(LogTemp, Log, TEXT("BulkInsert: Recombine results took %.3f sec"), RecombineEnd - RecombineStart);
+
+		// ---------------- Total ----------------
+		double EndTime = FPlatformTime::Seconds();
+		UE_LOG(LogTemp, Log, TEXT("BulkInsert: Total duration %.3f sec"), EndTime - StartTime);
 	}
 
 	int32 FindChunkIndexForPosition(FInt64Vector Position, const TArray<TSharedPtr<FOctreeNode>>& VolumeChunks) {
