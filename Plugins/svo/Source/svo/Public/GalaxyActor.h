@@ -54,6 +54,8 @@ public:
 	//Parallax
 	FVector LastFrameOfReferenceLocation = FVector(0,0,0);
 	FVector CurrentFrameOfReferenceLocation;
+	
+	mutable FCriticalSection DataMutex;
 
 	void Initialize();				//Kick of async initialization of system
 	void ResetForPool();			//Call externally before destroying

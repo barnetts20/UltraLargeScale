@@ -256,34 +256,31 @@ void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode)
 
 void AUniverseActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 {
-	AsyncTask(ENamedThreads::GameThread, [this, InNode]()
+	TWeakObjectPtr<AGalaxyActor> GalaxyToDestroy;
+
+	// Find the actor in the map and remove the entry simultaneously.
+	if (SpawnedGalaxies.RemoveAndCopyValue(InNode, GalaxyToDestroy))
 	{
 		if (!InNode.IsValid())
 		{
 			return;
 		}
 
-		TWeakObjectPtr<AGalaxyActor> GalaxyToDestroy;
-
-		// Find the actor in the map and remove the entry simultaneously.
-		if (SpawnedGalaxies.RemoveAndCopyValue(InNode, GalaxyToDestroy))
+		// Ensure the actor pointer is still valid before trying to destroy it.
+		if (GalaxyToDestroy.IsValid())
 		{
-			// Ensure the actor pointer is still valid before trying to destroy it.
-			if (GalaxyToDestroy.IsValid())
-			{
-				UE_LOG(LogTemp, Log, TEXT("Resetting galaxy for node with ObjectId: %d"),
-					InNode->Data.ObjectId);
-				GalaxyToDestroy->ResetForPool(); //Change this to be more of a reset
-				GalaxyPool.Add(GalaxyToDestroy.Get());
-				//GalaxyToDestroy->Destroy();
-			}
-			else
-			{
-				UE_LOG(LogTemp, Warning, TEXT("Galaxy actor was already invalid for node with ObjectId: %d"),
-					InNode->Data.ObjectId);
-			}
+			UE_LOG(LogTemp, Log, TEXT("Resetting galaxy for node with ObjectId: %d"),
+				InNode->Data.ObjectId);
+			GalaxyToDestroy->ResetForPool(); //Change this to be more of a reset
+			GalaxyPool.Push(GalaxyToDestroy.Get());
+			//GalaxyToDestroy->Destroy();
 		}
-	});
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Galaxy actor was already invalid for node with ObjectId: %d"),
+				InNode->Data.ObjectId);
+		}	
+	}
 }
 
 void AUniverseActor::BeginPlay()

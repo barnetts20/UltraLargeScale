@@ -10,6 +10,7 @@ AGalaxyActor::AGalaxyActor()
 	PrimaryActorTick.bCanEverTick = true;
 	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent")));
 	PointCloudNiagara = Cast<UNiagaraSystem>(FSoftObjectPath(NiagaraPath).TryLoad());
+	Octree = MakeShared<FOctree>(Extent);
 }
 
 AGalaxyActor::~AGalaxyActor()
@@ -41,7 +42,6 @@ void AGalaxyActor::Initialize()
 		{
 			double StartTime = FPlatformTime::Seconds();
 
-			FPlatformProcess::Sleep(0.1f); //Delay prevents heavy loadinig from starting for objects "zoomed past"
 			if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
 			InitializeComponents();
 			if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
@@ -60,38 +60,18 @@ void AGalaxyActor::Initialize()
 }
 
 void AGalaxyActor::InitializeComponents() {
-	if (!ComponentsInitialized) {
-		ComponentsInitialized = true;
-		TPromise<void> CompletionPromise;
-		TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-		AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable {
-			VolumetricComponent = NewObject<UStaticMeshComponent>(this); //TODO: THESE NEED TO MOVE INTO SEPERATE RUN ONCE INIT
-			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));  //TODO: THESE NEED TO MOVE INTO SEPERATE RUN ONCE INIT
-			VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-			VolumetricComponent->TranslucencySortPriority = 1;
-			VolumetricComponent->RegisterComponent();
-			VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
-			VolumetricComponent->SetVisibility(false);
-			//TODO: THESE NEED TO MOVE INTO SEPERATE RUN ONCE INIT
-			NiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
-				PointCloudNiagara,
-				GetRootComponent(),
-				NAME_None,
-				FVector::ZeroVector,
-				FRotator::ZeroRotator,
-				EAttachLocation::SnapToTarget,
-				true,
-				false
-			);
-			NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Extent), FVector(Extent)));
-			NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Extent);
-			NiagaraComponent->TranslucencySortPriority = 1;
-			NiagaraComponent->SetVisibility(false);
+	//if (!ComponentsInitialized) {
+	//	ComponentsInitialized = true;
+	//	TPromise<void> CompletionPromise;
+	//	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
+	//	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable {
 
-			CompletionPromise.SetValue();
-		});
-		CompletionFuture.Wait();
-	}
+	//		//TODO: THESE NEED TO MOVE INTO SEPERATE RUN ONCE INIT
+
+	//		CompletionPromise.SetValue();
+	//	});
+	//	CompletionFuture.Wait();
+	//}
 }
 
 // Add proper cleanup in BeginDestroy or EndPlay
@@ -117,18 +97,8 @@ void AGalaxyActor::ResetForSpawn() {
 	//TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	//AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 	//{
-		SetActorHiddenInGame(false);
-		SetActorTickEnabled(true);
-		// Prepare components for next use
-		if (VolumetricComponent) {
-			VolumetricComponent->SetVisibility(false);
-			//VolumetricComponent->SetComponentTickEnabled(true);
-		}
-		if (NiagaraComponent) {
-			NiagaraComponent->SetVisibility(false);
-			//NiagaraComponent->SetComponentTickEnabled(true);
-		}
-		Octree = MakeShared<FOctree>(Extent);
+		//SetActorHiddenInGame(false);
+		//SetActorTickEnabled(true);
 		InitializationState = ELifecycleState::Uninitialized;
 		//CompletionPromise.SetValue();
 //});
@@ -136,25 +106,31 @@ void AGalaxyActor::ResetForSpawn() {
 }
 
 void AGalaxyActor::ResetForPool() {
-	// Hide and disable
-	SetActorHiddenInGame(true);
-	SetActorTickEnabled(false);
+	double StartTime = FPlatformTime::Seconds();
+	Octree = MakeShared<FOctree>(Extent);
+	double ODuration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Freeing Octree took: %.3f seconds"), ODuration);
 
-	// Disable components without destroying them
-	if (VolumetricComponent)
-	{
-		VolumetricComponent->SetVisibility(false);
-		VolumetricComponent->SetComponentTickEnabled(false);
-	}
-	if (NiagaraComponent)
-	{
-		//NiagaraComponent->Deactivate();
-		//NiagaraComponent->DeactivateImmediate(); // Force immediate deactivation
-		NiagaraComponent->SetVisibility(false);
-		NiagaraComponent->SetComponentTickEnabled(false);
-	}
+	AsyncTask(ENamedThreads::GameThread, [this]()
+		{
+			if (VolumetricComponent)
+			{
+				VolumetricComponent->DetachFromParent();
+				VolumetricComponent->DestroyComponent();
+				VolumetricComponent = nullptr;
+			}
+			if (NiagaraComponent)
+			{
+				NiagaraComponent->DetachFromParent();
+				NiagaraComponent->DestroyComponent();
+				NiagaraComponent = nullptr;
+			}
+		});
 
 	InitializationState = ELifecycleState::Pooling;
+
+	double Duration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::ResetForPool took: %.3f seconds"), Duration);
 }
 
 void AGalaxyActor::InitializeData() {
@@ -167,6 +143,7 @@ void AGalaxyActor::InitializeData() {
 	GalaxyGenerator.DepthRange = 7; //With seven levels, assuming our smallest star is say 1/2 the size of the sun, we can cover the vast majority of potential realistic star scales
 	GalaxyGenerator.InsertDepthOffset = 7; //Controlls the depth above max depth the smallest stars will be generated in
 	GalaxyGenerator.Rotation = FRotator(Stream.FRandRange(-35, 35), Stream.FRandRange(-35, 35), Stream.FRandRange(-35, 35));
+	GalaxyGenerator.GeneratedData.SetNum(0);
 	GalaxyParamFactory GalaxyParamGen;
 	GalaxyParamGen.Seed = this->Seed;
 
@@ -176,25 +153,26 @@ void AGalaxyActor::InitializeData() {
 	TArray<TSharedPtr<FOctreeNode>> VolumeNodes; //Trade out for volume mip data directly
 	TArray<TSharedPtr<FOctreeNode>> PointNodes; //Trade out for niagara arrays directly
 	Octree->BulkInsertPositions(GalaxyGenerator.GeneratedData, PointNodes, VolumeNodes);
-	//GalaxyGenerator.GeneratedData.SetNum(0);
+
+	double GenDuration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Data Generation took: %.3f seconds"), GenDuration);
 
 	Positions.SetNumUninitialized(PointNodes.Num());
 	Extents.SetNumUninitialized(PointNodes.Num());
 	Colors.SetNumUninitialized(PointNodes.Num());
 
-	ParallelFor(PointNodes.Num(), [&](int32 Index)
-		{
-			const TSharedPtr<FOctreeNode>& Node = PointNodes[Index];
-			FRandomStream RandStream(Node->Data.ObjectId);
-			Positions[Index] = FVector(Node->Center.X, Node->Center.Y, Node->Center.Z);
-			Extents[Index] = static_cast<float>(Node->Extent * 2) * RandStream.FRandRange(.5, 1);
-			Colors[Index] = FLinearColor(Node->Data.Composition);
-		}, EParallelForFlags::BackgroundPriority);
+	ParallelFor(PointNodes.Num(), [&](int32 Index){
+		const TSharedPtr<FOctreeNode>& Node = PointNodes[Index];
+		FRandomStream RandStream(Node->Data.ObjectId);
+		Positions[Index] = FVector(Node->Center.X, Node->Center.Y, Node->Center.Z);
+		Extents[Index] = static_cast<float>(Node->Extent * 2) * RandStream.FRandRange(.5, 1);
+		Colors[Index] = FLinearColor(Node->Data.Composition);
+	}, EParallelForFlags::BackgroundPriority);
 
 	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, VolumeNodes, 32), 32));
 
-	double GenDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Galaxy generation took: %.3f seconds"), GenDuration);
+	GenDuration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeData took: %.3f seconds"), GenDuration);
 }
 
 void AGalaxyActor::InitializeVolumetric()
@@ -204,6 +182,14 @@ void AGalaxyActor::InitializeVolumetric()
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
+			VolumetricComponent = NewObject<UStaticMeshComponent>(this); //TODO: THESE NEED TO MOVE INTO SEPERATE RUN ONCE INIT
+			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));  //TODO: THESE NEED TO MOVE INTO SEPERATE RUN ONCE INIT
+			VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+			VolumetricComponent->TranslucencySortPriority = 1;
+			VolumetricComponent->RegisterComponent();
+			VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
+			VolumetricComponent->SetVisibility(false);
+
 			//Spawn base volume component & material
 			VolumeMaterial = UMaterialInstanceDynamic::Create(
 				LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_GalaxyRaymarchPsuedoVolume_Inst.MT_GalaxyRaymarchPsuedoVolume_Inst")),
@@ -222,8 +208,10 @@ void AGalaxyActor::InitializeVolumetric()
 			VolumeMaterial->SetScalarParameterValue(FName("Density"), GalaxyGenerator.GalaxyParams.VolumeDensity);
 			VolumeMaterial->SetScalarParameterValue(FName("WarpAmount"), GalaxyGenerator.GalaxyParams.VolumeWarpAmount);
 			VolumeMaterial->SetScalarParameterValue(FName("WarpScale"), GalaxyGenerator.GalaxyParams.VolumeWarpScale);
+			
 			VolumetricComponent->SetMaterial(0, VolumeMaterial);
 			VolumetricComponent->SetVisibility(true);
+			
 			CompletionPromise.SetValue();
 		});
 	CompletionFuture.Wait();
@@ -240,6 +228,20 @@ void AGalaxyActor::InitializeNiagara()
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 	{
+		NiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
+			PointCloudNiagara,
+			GetRootComponent(),
+			NAME_None,
+			FVector::ZeroVector,
+			FRotator::ZeroRotator,
+			EAttachLocation::SnapToTarget,
+			true,
+			false
+		);
+		NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Extent), FVector(Extent)));
+		NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Extent);
+		NiagaraComponent->TranslucencySortPriority = 1;
+		NiagaraComponent->SetVisibility(false);
 		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
 			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), Positions);

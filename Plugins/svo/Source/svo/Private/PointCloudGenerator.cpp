@@ -1319,7 +1319,7 @@ void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 	//Irregular - Irr
 	// 0  1  2  3  4  5  6  7  8   9   10  11
 	// E0 E3 E5 E7 S0 Sa Sb Sc SBa SBb SBc Irr
-
+	GeneratedData.SetNum(0);
 	MaxInsertionDepth = FMath::Max(1, InOctree->MaxDepth - InsertDepthOffset);
 	MinInsertionDepth = FMath::Max(1, MaxInsertionDepth - DepthRange);
 
