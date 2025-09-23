@@ -1,4 +1,6 @@
-﻿#include "PointCloudGenerator.h"
+﻿#pragma region Includes/ForwardDec
+#include "PointCloudGenerator.h"
+#pragma endregion
 
 #pragma region PointCloudGenerator
 FInt64Vector PointCloudGenerator::ApplyNoiseDerivative(FastNoise::SmartNode<> InNoise, double InDomainScale, int64 InExtent, FInt64Vector InSamplePosition, float& OutDensity)

@@ -2,7 +2,9 @@
 
 #pragma once
 
+#pragma region Includes/ForwardDec
 #include "CoreMinimal.h"
+#pragma endregion
 
 struct SVO_API FVoxelData {
 public:

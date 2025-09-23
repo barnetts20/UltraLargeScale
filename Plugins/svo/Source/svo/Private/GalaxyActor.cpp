@@ -1,4 +1,4 @@
-#pragma region Includes
+#pragma region Includes/ForwardDec
 #include "GalaxyActor.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include <PointCloudGenerator.h>
