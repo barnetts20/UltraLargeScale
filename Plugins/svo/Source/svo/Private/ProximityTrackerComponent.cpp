@@ -48,7 +48,7 @@ void UProximityTrackerComponent::OnProximityUpdate()
             if (!SpawnedGalaxyNodes.Contains(Node))
             {
                 SpawnedGalaxyNodes.Add(Node);
-                UniverseActor->SpawnGalaxy(Node);
+                UniverseActor->SpawnGalaxyFromPool(Node);
             }
         }
     }

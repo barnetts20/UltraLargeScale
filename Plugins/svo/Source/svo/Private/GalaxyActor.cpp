@@ -1,10 +1,13 @@
+#pragma region Includes
 #include "GalaxyActor.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include <PointCloudGenerator.h>
 #include <Kismet/GameplayStatics.h>
 #include <Camera/CameraComponent.h>
 #include <GameFramework/SpringArmComponent.h>
+#pragma endregion
 
+#pragma region Constructor/Destructor
 AGalaxyActor::AGalaxyActor()
 {
 	PrimaryActorTick.bCanEverTick = true;
@@ -22,7 +25,9 @@ AGalaxyActor::~AGalaxyActor()
 	GalaxyGenerator.GeneratedData.Empty();
 	if (Octree.IsValid()) Octree.Reset();
 }
+#pragma endregion
 
+#pragma region Initialization
 void AGalaxyActor::Initialize()
 {
 	InitializationState = ELifecycleState::Initializing;
@@ -56,32 +61,6 @@ void AGalaxyActor::Initialize()
 			double TotalDuration = FPlatformTime::Seconds() - StartTime;
 			UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Initialize total duration: %.3f seconds"), TotalDuration);
 	});
-}
-
-void AGalaxyActor::ResetForSpawn() {
-	InitializationState = ELifecycleState::Uninitialized;
-}
-
-void AGalaxyActor::ResetForPool() {
-	double StartTime = FPlatformTime::Seconds();
-
-	InitializationState = ELifecycleState::Pooling; //Set to pooling to stop any further init operations
-
-	if (VolumetricComponent)
-	{
-		VolumetricComponent->DetachFromParent();
-		VolumetricComponent->DestroyComponent();
-		VolumetricComponent = nullptr;
-	}
-	if (NiagaraComponent)
-	{
-		NiagaraComponent->DetachFromParent();
-		NiagaraComponent->DestroyComponent();
-		NiagaraComponent = nullptr;
-	}
-
-	double Duration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::ResetForPool took: %.3f seconds"), Duration);
 }
 
 void AGalaxyActor::InitializeData() {
@@ -220,8 +199,38 @@ void AGalaxyActor::InitializeNiagara()
 	double TotalDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeNiagara total duration: %.3f seconds"), TotalDuration);
 }
+#pragma endregion
 
-void AGalaxyActor::Tick(float DeltaTime)
+#pragma region Lifecycle Management
+void AGalaxyActor::ResetForSpawn() {
+	InitializationState = ELifecycleState::Uninitialized;
+}
+
+void AGalaxyActor::ResetForPool() {
+	double StartTime = FPlatformTime::Seconds();
+
+	InitializationState = ELifecycleState::Pooling; //Set to pooling to stop any further init operations
+
+	if (VolumetricComponent)
+	{
+		VolumetricComponent->DetachFromParent();
+		VolumetricComponent->DestroyComponent();
+		VolumetricComponent = nullptr;
+	}
+	if (NiagaraComponent)
+	{
+		NiagaraComponent->DetachFromParent();
+		NiagaraComponent->DestroyComponent();
+		NiagaraComponent = nullptr;
+	}
+
+	double Duration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::ResetForPool took: %.3f seconds"), Duration);
+}
+#pragma endregion
+
+#pragma region Parallax
+void AGalaxyActor::ApplyParallaxOffset()
 {
 	bool bHasReference = false;
 	if (const auto* World = GetWorld())
@@ -248,3 +257,9 @@ void AGalaxyActor::Tick(float DeltaTime)
 	FVector ParallaxOffset = PlayerOffset * (1.0 - ParallaxRatio);
 	SetActorLocation(GetActorLocation() + ParallaxOffset);
 }
+
+void AGalaxyActor::Tick(float DeltaTime)
+{
+	ApplyParallaxOffset();
+}
+#pragma endregion

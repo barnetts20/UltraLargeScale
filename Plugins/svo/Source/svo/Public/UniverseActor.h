@@ -1,5 +1,6 @@
 #pragma once
 
+#pragma region Includes
 #include "CoreMinimal.h"
 #include "FOctree.h"
 #include "GameFramework/Actor.h"
@@ -9,7 +10,8 @@
 #include "NiagaraSystem.h"
 #include "UniverseActor.generated.h"
 
-class AGalaxyActor; // Forward declaration
+class AGalaxyActor;
+#pragma endregion
 
 UCLASS()
 class SVO_API AUniverseActor : public AActor
@@ -17,59 +19,72 @@ class SVO_API AUniverseActor : public AActor
 	GENERATED_BODY()
 
 public:
-	// Sets default values for this actor's properties
+	#pragma region Constructor/Destructor
 	AUniverseActor();
+	#pragma endregion
 
-	ELifecycleState InitializationState = ELifecycleState::Initializing;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
+	#pragma region Editor Exposed Parameters
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
 	int Seed = 133780085;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
 	double UnitScale = 10000.0;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
 	double SpeedScale = 1.0;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Octree Properties")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
 	int Count = 2000000; //TODO: NIAGARA STREAMING, ASYNC POINT GENERATION IN BATCHES TO OPTIMIZE LOAD TIME/STREAMING... 2 million is max spawn burst, more than this would need chunking
+	#pragma endregion
 
-
+	#pragma region Public Parameters
 	int64 Extent = 2147483648;
-
+	ELifecycleState InitializationState = ELifecycleState::Initializing;
 	TSharedPtr<FOctree> Octree;
-	UniverseGenerator UniverseGenerator;
-
-	void SpawnGalaxy(TSharedPtr<FOctreeNode> InNode);
+	#pragma endregion
+	
+	#pragma region Pooled Spawn/Despawn Hooks
+	void SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode);
 	void ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode);
+	#pragma endregion
 
 protected:
-	//Niagara Data and Component
+	#pragma region Initialization
+	UniverseGenerator UniverseGenerator;
+	void Initialize();
+	void InitializeData();
+	#pragma endregion
+
+	#pragma region Niagara Parameters and Components 
 	TArray<FVector> Positions;
 	TArray<FVector> Rotations;
 	TArray<float> Extents;
 	TArray<FLinearColor> Colors;
 	UNiagaraSystem* PointCloudNiagara;
 	UNiagaraComponent* NiagaraComponent;
+	void InitializeNiagara();
+	#pragma endregion
 
-	//Volumetric
+	#pragma region Volumetric Parameters and Components
 	TArray<uint8> TextureData;
 	UTexture2D* PseudoVolumeTexture;
 	UStaticMeshComponent* VolumetricComponent;
+	void InitializeVolumetric();
+	#pragma endregion
 
-	//Managed galaxy actors
+	#pragma region Galaxy Pool
 	TSubclassOf<AGalaxyActor> GalaxyActorClass;
 	int GalaxyPoolSize = 5;
 	TArray<AGalaxyActor*> GalaxyPool;
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
+	void InitializeGalaxyPool();
+	#pragma endregion
 
-	//Parallax tracking locations
+	#pragma region Parallax
 	FVector LastFrameOfReferenceLocation;
 	FVector CurrentFrameOfReferenceLocation;
+	void ApplyParallaxOffset();
+	#pragma endregion
 
-	void Initialize();
-	void InitializeGalaxyPool();
-	void InitializeData();
-	void InitializeVolumetric();
-	void InitializeNiagara();
-
+	#pragma region Overrides
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
+	#pragma endregion
 };

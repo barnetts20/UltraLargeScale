@@ -1,3 +1,4 @@
+#pragma region Includes
 #include "UniverseActor.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include <PointCloudGenerator.h>
@@ -5,7 +6,9 @@
 #include <GalaxyActor.h>
 #include <Camera/CameraComponent.h>
 #include <GameFramework/SpringArmComponent.h>
+#pragma endregion
 
+#pragma region Constructor/Destructor
 AUniverseActor::AUniverseActor()
 {
 	PrimaryActorTick.bCanEverTick = true;
@@ -13,6 +16,15 @@ AUniverseActor::AUniverseActor()
 	PointCloudNiagara = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/NG_UniverseCloud.NG_UniverseCloud"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
 	Octree = MakeShared<FOctree>(Extent);
+}
+#pragma endregion
+
+#pragma region Initialization
+
+void AUniverseActor::BeginPlay()
+{
+	Super::BeginPlay();
+	Initialize();
 }
 
 void AUniverseActor::Initialize()
@@ -177,8 +189,10 @@ void AUniverseActor::InitializeNiagara()
 	double TotalDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeNiagara total duration: %.3f seconds"), TotalDuration);
 }
+#pragma endregion
 
-void AUniverseActor::SpawnGalaxy(TSharedPtr<FOctreeNode> InNode)
+#pragma region Galaxy Pooled Spawn Hooks
+void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 {
 	if (!InNode.IsValid() || !GalaxyActorClass || SpawnedGalaxies.Contains(InNode) || InitializationState != ELifecycleState::Ready || GalaxyPool.Num() == 0)
 	{
@@ -267,14 +281,10 @@ void AUniverseActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 		}	
 	}
 }
+#pragma endregion
 
-void AUniverseActor::BeginPlay()
-{
-	Super::BeginPlay();
-	Initialize();
-}
-
-void AUniverseActor::Tick(float DeltaTime)
+#pragma region Parallax
+void AUniverseActor::ApplyParallaxOffset()
 {
 	bool bHasReference = false;
 	if (const auto* World = GetWorld())
@@ -301,3 +311,9 @@ void AUniverseActor::Tick(float DeltaTime)
 	FVector ParallaxOffset = PlayerOffset * (1.0 - ParallaxRatio);
 	SetActorLocation(GetActorLocation() + ParallaxOffset);
 }
+
+void AUniverseActor::Tick(float DeltaTime)
+{
+	ApplyParallaxOffset();
+}
+#pragma endregion
