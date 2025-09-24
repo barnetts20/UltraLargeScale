@@ -69,7 +69,7 @@ void AGalaxyActor::InitializeData() {
 	FRandomStream Stream(Seed);
 	GalaxyGenerator.Seed = Seed;
 	GalaxyGenerator.DepthRange = 7; //With seven levels, assuming our smallest star is say 1/2 the size of the sun, we can cover the vast majority of potential realistic star scales
-	GalaxyGenerator.InsertDepthOffset = 9; //Controlls the depth above max depth the smallest stars will be generated in
+	GalaxyGenerator.InsertDepthOffset = 8; //Controlls the depth above max depth the smallest stars will be generated in
 	GalaxyGenerator.Rotation = FRotator(Stream.FRandRange(-35, 35), Stream.FRandRange(-35, 35), Stream.FRandRange(-35, 35));
 	GalaxyGenerator.GeneratedData.SetNum(0);
 	
@@ -106,7 +106,7 @@ void AGalaxyActor::InitializeData() {
 		Colors[Index] = FLinearColor(Node->Data.Composition);
 	}, EParallelForFlags::BackgroundPriority);
 
-	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(Octree, VolumeNodes, 32), 32));
+	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree( VolumeNodes, 32, Extent, Octree->DepthMaxDensity), 32));
 
 	double RemapFinish = FPlatformTime::Seconds();
 	GenDuration = RemapFinish - InsertFinish;

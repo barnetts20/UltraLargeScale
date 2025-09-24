@@ -359,17 +359,15 @@ public:
 
 class SVO_API FOctreeTextureProcessor {
 public:
-	//TODO: SHOULD PROBABLY TAKE EXTENT/MAX DENSITY DIRECTLY SO THAT WE DONT NEED TO PASS AN OCTREE POINTER
-	//EXTRACTS A VOLUME MIP ARRAY FROM THE PASSED IN VOLUME NODES, THEY MUST BE RETRIEVED FROM BULK INSERT RESULT
-	static TArray<uint8> GenerateVolumeMipDataFromOctree(TSharedPtr<FOctree> InOctree, TArray<TSharedPtr<FOctreeNode>> InVolumeNodes, int32 InResolution)
+	#pragma region Extract Mip Data From Volume Nodes
+	static TArray<uint8> GenerateVolumeMipDataFromOctree(TArray<TSharedPtr<FOctreeNode>> InVolumeNodes, int32 InResolution, int64 InExtent, double InMaxDensity)
 	{
 		double StartTime = FPlatformTime::Seconds();
 
 		// --- Octree + setup ---
 		const int32 TargetDepth = FMath::FloorLog2(InResolution);
-
-		const int64 NodeExtentAtDepth = (InOctree->Extent >> TargetDepth);
-		const int64 OctreeExtent = InOctree->Extent;
+		const int64 NodeExtentAtDepth = (InExtent >> TargetDepth);
+		const int64 OctreeExtent = InExtent;
 
 		// Precompute reciprocal for fast coordinate mapping
 		const double Scale = 1.0 / (2.0 * NodeExtentAtDepth);
@@ -409,16 +407,14 @@ public:
 				}
 
 				// --- Linear voxel index ---
-				int64 VoxelIndex = ((int64)VolumeZ * InResolution * InResolution) +
-					((int64)VolumeY * InResolution) +
-					VolumeX;
+				int64 VoxelIndex = ((int64)VolumeZ * InResolution * InResolution) + ((int64)VolumeY * InResolution) + VolumeX;
 				int64 ByteIndex = VoxelIndex * BytesPerVoxel;
 
 				// --- Density ---
 				uint8 DensityByte = 0;
-				if (InOctree->DepthMaxDensity > 0.0f)
+				if (InMaxDensity > 0.0f)
 				{
-					float Norm = (float)Node->Data.Density / InOctree->DepthMaxDensity;
+					float Norm = (float)Node->Data.Density / InMaxDensity;
 					DensityByte = (uint8)FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f);
 				}
 
@@ -437,27 +433,23 @@ public:
 
 		return TextureData;
 	}
-
-	// --- Specialized fixed upscale: InResolution^3 -> 4096^2 pseudo volume ---
-	// InMipData = MipData generated in volume format from Octree
-	// InResolution = 3D resolution of InMipData 16^3, 32^3, 64^3, 128^3, 256^3 
-	// Always outputs a 4096x4096 2D pseudo volume (256^3 slices)
+	#pragma endregion
+	
+	#pragma region Upscale Mip Data From InResolution^3 to 4096^2 Pseudo-volume
 	static TArray<uint8> UpscalePseudoVolumeDensityData(const TArray<uint8>& InMipData, int32 InResolution)
 	{
 		double StartTime = FPlatformTime::Seconds();
-		
-		check(InResolution > 1);
 
-		//Hard coded to 256^3 output volume
+		#pragma region 256^3 Constants
 		constexpr int32 Out3DRes = 256;												// fixed target 3D resolution
 		constexpr int32 BytesPerVoxel = 4;											// RGBA8
 		constexpr int32 tilesPerSide = 16;											// 16x16 = 256 slices
 		constexpr int32 Out2DRes = 4096;   // 4096
 		constexpr int32 OutBytes = 67108864; // 4096 * 4096 * 4
-
 		const int32 InSlice = InResolution * InResolution;
+		#pragma endregion
 
-		// --- Precompute coords for 256 steps (x,y,z) ---
+		#pragma region Precompute Coordinates
 		struct SampleCoord { int i0, i1; float t; };
 		static TArray<SampleCoord> Precomputed;
 		static int32 CachedInRes = 0;
@@ -473,8 +465,9 @@ public:
 			}
 			CachedInRes = InResolution;
 		}
+		#pragma endregion
 
-		// --- Allocate output ---
+		#pragma region Allocate Output/Index Lambda
 		TArray<uint8> OutData;
 		OutData.SetNumZeroed(OutBytes);
 
@@ -485,7 +478,9 @@ public:
 		auto InIndexBase = [InResolution, InSlice, BytesPerVoxel](int x, int y, int z)->int32 {
 			return ((z * InSlice) + (y * InResolution) + x) * BytesPerVoxel;
 		};
+		#pragma endregion
 
+		#pragma region Parallel Slice Processing
 		// --- Parallel slice processing ---
 		ParallelFor(Out3DRes, [&](int32 z)
 			{
@@ -559,14 +554,16 @@ public:
 					}
 				}
 			}, EParallelForFlags::BackgroundPriority);
+		#pragma endregion;
 
 		double Duration = FPlatformTime::Seconds() - StartTime;
 		UE_LOG(LogTemp, Log, TEXT("UpscaleToPseudoVolume (%d^3 -> 256^3 -> 4096^2) took %.3f sec"), InResolution, Duration);
 
 		return OutData;
 	}
-
-	//TODO: MUST ALWAYS BE CALLED OFF GAME THREAD, ASYNC TEXTURE BAKING
+	#pragma endregion
+	
+	#pragma region Async Texture Generation - Must be called off game thread
 	static UTexture2D* GeneratePseudoVolumeTextureFromMipData(const TArray<uint8>& InMipData)
 	{
 		double StartTime = FPlatformTime::Seconds();
@@ -584,7 +581,7 @@ public:
 		}
 
 		#pragma region Create Placeholder Texture on Game Thread
-		// --- 1) Create dummy UTexture2D on GameThread (with 1x1 mip) --- //TODO: PROBABLY SHOULD BE MOVED TO INIT ONCE AT AT GALAXY LEVEL AND JUST PASS IN FOR POINTER SWAP
+		// --- 1) Create dummy UTexture2D on GameThread (with 1x1 mip) ---
 		UTexture2D* PseudoVolumeTexture = nullptr;
 		FEvent* DummyDoneEvent = FPlatformProcess::GetSynchEventFromPool(true);
 		DummyDoneEvent->Reset();
@@ -657,4 +654,5 @@ public:
 		
 		return PseudoVolumeTexture;
 	}
+	#pragma endregion
 };

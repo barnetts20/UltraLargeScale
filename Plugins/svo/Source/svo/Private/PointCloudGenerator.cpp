@@ -88,6 +88,7 @@ FVector PointCloudGenerator::RotateCoordinate(FVector InCoordinate, FRotator InR
 #pragma endregion
 
 #pragma region GalaxyGenerator
+
 #pragma region GalaxyParamFactory
 GalaxyParamFactory::GalaxyParamFactory() {
 #pragma region VolumeMaterialBounds
@@ -1312,6 +1313,7 @@ int GalaxyParamFactory::SelectGalaxyTypeIndex()
 	return 7; // Fallback to most common type
 }
 #pragma endregion
+
 #pragma region GalaxyGenerator
 void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {	 
@@ -1666,6 +1668,7 @@ int GalaxyGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
 	return FMath::Clamp(MaxInsertionDepth - chosenDepth, MinInsertionDepth, MaxInsertionDepth);
 }
 #pragma endregion
+
 #pragma endregion
 
 #pragma region UniverseGenerator
