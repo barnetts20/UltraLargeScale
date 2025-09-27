@@ -60,7 +60,7 @@ public:
 /// </summary>
 struct SVO_API GalaxyParams {
 	//Base Params - control overall sizes
-	double GalaxyRatio = .33;
+	double GalaxyRatio = .30;
 	double BulgeRatio = .75;
 	double VoidRatio = .033;
 
@@ -176,6 +176,8 @@ public:
 	TArray<TPair<float, GalaxyParams*>> GalaxyWeights = {{0.02f, &E0}, {0.04f, &E3}, {0.04f, &E5}, {0.03f, &E7}, {0.1f, &S0}, {0.2f, &Sa}, {0.2f, &Sb}, {0.22f, &Sc}, {0.04f, &SBa}, {0.04f, &SBb}, {0.03f, &SBc}, {0.04f, &Irr}};
 	TArray<const char*> NoisePaths = { 
 		"/svo/VolumeTextures/VT_PerlinWorley_Balanced", 
+		"/svo/VolumeTextures/VT_PerlinWorley_Balanced",
+		"/svo/VolumeTextures/VT_PerlinWorley_Balanced",
 		"/svo/VolumeTextures/VT_Gradient_l5_256", 
 		"/svo/VolumeTextures/VT_Gradient_Turbulence_l5_256", 
 		"/svo/VolumeTextures/VT_Voronoi_l5_256",

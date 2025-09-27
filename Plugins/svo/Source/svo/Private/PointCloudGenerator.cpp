@@ -93,9 +93,9 @@ FVector PointCloudGenerator::RotateCoordinate(FVector InCoordinate, FRotator InR
 GalaxyParamFactory::GalaxyParamFactory() {
 #pragma region VolumeMaterialBounds
 	Volume_Min.VolumeAmbientColor = FLinearColor(.1, .1, .1);
-	Volume_Max.VolumeAmbientColor = FLinearColor(1.5, 1.5, 1.5);
+	Volume_Max.VolumeAmbientColor = FLinearColor(1.2, 1.2, 1.2);
 	Volume_Min.VolumeCoolShift = FLinearColor(1, 1, 1);
-	Volume_Max.VolumeCoolShift = FLinearColor(25, 25, 25);
+	Volume_Max.VolumeCoolShift = FLinearColor(20, 20, 20);
 	Volume_Min.VolumeDensity = .1;
 	Volume_Max.VolumeDensity = .5;
 	Volume_Min.VolumeHotShift = FLinearColor(.5, .25, .01);
