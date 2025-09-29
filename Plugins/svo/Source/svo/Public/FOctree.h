@@ -299,23 +299,17 @@ public:
 	void CollectNodesInRange(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, const FInt64Vector& InCenter, int64 InExtent, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
 		if (!InNode.IsValid()) return;
 
-		//Query Bounds
+		// Get Query and Node Bounds
 		const FInt64Vector QueryMin = InCenter - FInt64Vector(InExtent, InExtent, InExtent);
 		const FInt64Vector QueryMax = InCenter + FInt64Vector(InExtent, InExtent, InExtent);
-
-		//Node Bounds
 		const FInt64Vector NodeMin = InNode->Center - FInt64Vector(InNode->Extent, InNode->Extent, InNode->Extent);
 		const FInt64Vector NodeMax = InNode->Center + FInt64Vector(InNode->Extent, InNode->Extent, InNode->Extent);
 
 		// Early reject if node doesn't intersect the query bounds
-		const bool bIntersects =
-			NodeMin.X <= QueryMax.X && NodeMax.X >= QueryMin.X &&
-			NodeMin.Y <= QueryMax.Y && NodeMax.Y >= QueryMin.Y &&
-			NodeMin.Z <= QueryMax.Z && NodeMax.Z >= QueryMin.Z;
-
+		const bool bIntersects = NodeMin.X <= QueryMax.X && NodeMax.X >= QueryMin.X && NodeMin.Y <= QueryMax.Y && NodeMax.Y >= QueryMin.Y && NodeMin.Z <= QueryMax.Z && NodeMax.Z >= QueryMin.Z;
 		if (!bIntersects) return;
 
-		// Recurse into children
+		// Recurse
 		for (const TSharedPtr<FOctreeNode>& Child : InNode->Children)
 		{
 			if (Child.IsValid())
@@ -326,12 +320,9 @@ public:
 
 		// Filtering checks
 		bool bPassesFilter = true;
-		if (InNode->Data.GasDensity <= 0) bPassesFilter = false;
-		if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
-		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) bPassesFilter = false;
-		if (InTypeIdFilter != -1 && InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false;
+		if ((InNode->Data.Density <= 0) || (InMinDepth >= 0 && InNode->Depth < InMinDepth) || (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) || (InTypeIdFilter != -1 && InNode->Data.TypeId != InTypeIdFilter)) bPassesFilter = false;
 
-		if (bPassesFilter && InNode->Data.GasDensity > 0)
+		if (bPassesFilter)
 		{
 			OutNodes.Add(InNode);
 		}
@@ -349,38 +340,26 @@ public:
 	void CollectNodesByScreenSpace(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, const FInt64Vector& InCenter, int64 InExtent, double ScreenSpaceThreshold, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
 		if (!InNode.IsValid()) return;
 
-		//Query Bounds
+		// Get Query and Node Bounds
 		const FInt64Vector QueryMin = InCenter - FInt64Vector(InExtent, InExtent, InExtent);
 		const FInt64Vector QueryMax = InCenter + FInt64Vector(InExtent, InExtent, InExtent);
-
-		//Node Bounds
 		const FInt64Vector NodeMin = InNode->Center - FInt64Vector(InNode->Extent, InNode->Extent, InNode->Extent);
 		const FInt64Vector NodeMax = InNode->Center + FInt64Vector(InNode->Extent, InNode->Extent, InNode->Extent);
 
-		// Early reject if node doesn't intersect the query bounds
-		const bool bIntersects =
-			NodeMin.X <= QueryMax.X && NodeMax.X >= QueryMin.X &&
-			NodeMin.Y <= QueryMax.Y && NodeMax.Y >= QueryMin.Y &&
-			NodeMin.Z <= QueryMax.Z && NodeMax.Z >= QueryMin.Z;
-
+		// Intersection Rejection
+		const bool bIntersects = NodeMin.X <= QueryMax.X && NodeMax.X >= QueryMin.X && NodeMin.Y <= QueryMax.Y && NodeMax.Y >= QueryMin.Y && NodeMin.Z <= QueryMax.Z && NodeMax.Z >= QueryMin.Z;
 		if (!bIntersects) return;
 
 		const double Distance = FVector::Dist(FVector(InNode->Center), FVector(InCenter));
 
-		// --- 2. Screen-space reject ---
+		// Screen Space Rejection
 		if (Distance > 0.0)
 		{
-			const double VisibleRadius = (double)InNode->Extent * (1.0 + InNode->Data.Density);
-			const double ApparentSize = VisibleRadius / Distance;
-
-			if (ApparentSize < ScreenSpaceThreshold)
-			{
-				
-				return; // too small on screen, reject whole subtree
-			}
+			// Reject if too small on screen
+			if ((double)InNode->Extent * (1.0 + InNode->Data.Density) / Distance < ScreenSpaceThreshold) return;
 		}
 
-		// --- 3. Recurse into children if parent survives ---
+		// Recurse
 		for (const TSharedPtr<FOctreeNode>& Child : InNode->Children)
 		{
 			if (Child.IsValid())
@@ -390,12 +369,9 @@ public:
 			}
 		}
 
-		// --- 4. Per-node filters ---
+		// Filter Result Set
 		bool bPassesFilter = true;
-		if (InNode->Data.GasDensity <= 0) bPassesFilter = false;
-		if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
-		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) bPassesFilter = false;
-		if (InTypeIdFilter != -1 && InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false;
+		if ((InNode->Data.Density <= 0) || (InMinDepth >= 0 && InNode->Depth < InMinDepth) || (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) || (InTypeIdFilter != -1 && InNode->Data.TypeId != InTypeIdFilter)) bPassesFilter = false;
 
 		if (bPassesFilter)
 		{
