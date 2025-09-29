@@ -45,8 +45,8 @@ void UProximityTrackerComponent::OnProximityUpdate()
     FInt64Vector SampleCoordinate = FInt64Vector(FMath::RoundToInt64(SampleLocation.X), FMath::RoundToInt64(SampleLocation.Y), FMath::RoundToInt64(SampleLocation.Z));
 
 	//Proximity Query Octree
-	TArray<TSharedPtr<FOctreeNode>> NearbyNodes = UniverseActor->Octree->GetNodesInRange(SampleCoordinate, ScanExtent, -1, -1, 1);
-
+	//TArray<TSharedPtr<FOctreeNode>> NearbyNodes = UniverseActor->Octree->GetNodesInRange(SampleCoordinate, ScanExtent, -1, -1, 1);
+    TArray<TSharedPtr<FOctreeNode>> NearbyNodes = UniverseActor->Octree->GetNodesByScreenSpace(SampleCoordinate, ScanExtent, .001, -1, -1, 1);
     //Draw the node bounding boxes in debug mode
     if (DebugMode) {
         for (const TSharedPtr<FOctreeNode>& Node : NearbyNodes)

@@ -103,7 +103,7 @@ void AUniverseActor::InitializeData() {
 		FRandomStream RandStream(Node->Data.ObjectId);
 		Rotations[Index] = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
 		Positions[Index] = FVector(Node->Center.X, Node->Center.Y, Node->Center.Z);
-		Extents[Index] = static_cast<float>(Node->Extent * 2) * RandStream.FRandRange(.5, 1);
+		Extents[Index] = static_cast<float>(Node->Extent * (1 + Node->Data.Density));
 		Colors[Index] = FLinearColor(Node->Data.Composition);
 	}, EParallelForFlags::BackgroundPriority);
 

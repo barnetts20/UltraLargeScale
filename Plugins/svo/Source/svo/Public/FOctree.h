@@ -168,7 +168,7 @@ public:
 						(z - NodesPerSide / 2) * ChunkExtent * 2 + ChunkExtent
 					);
 
-					TSharedPtr<FOctreeNode> ChunkNode = InsertPosition(ChunkCenter, VolumeDepth, FVoxelData(0, FVector::ZeroVector, -1, 2));
+					TSharedPtr<FOctreeNode> ChunkNode = InsertPosition(ChunkCenter, VolumeDepth, FVoxelData(0, 0, FVector::ZeroVector, -1, 2));
 					
 					OutVolumeChunks[idx] = ChunkNode;
 					OutChunkPointData[idx] = TArray<FPointData>();
@@ -191,9 +191,9 @@ public:
 			CurrentExtent = Current->Extent;
 			//double DensityWeight = static_cast<double>(CurrentExtent) / static_cast<double>(LeafExtent);
 			double DensityWeight = FMath::Pow(2.0, MaxDepth - InDepth);
-			Current->Data.Density += InData.Density * DensityWeight; //Roughly scale density contribution by insert depth
-			Current->Data.Composition += InData.Composition * InData.Density * DensityWeight;
-			DepthMaxDensity = FMath::Max(DepthMaxDensity, Current->Data.Density);
+			Current->Data.GasDensity += InData.GasDensity * DensityWeight; //Roughly scale density contribution by insert depth
+			Current->Data.Composition += InData.Composition * InData.GasDensity * DensityWeight;
+			DepthMaxDensity = FMath::Max(DepthMaxDensity, Current->Data.GasDensity);
 		}
 		else {
 			//Before we build our chunks, insert needs to be serial to avoid collisions
@@ -233,7 +233,7 @@ public:
 			Current = Current->Children[ChildIndex];
 		}
 
-		InData.Density += Current->Data.Density;
+		InData.GasDensity += Current->Data.GasDensity;
 		Current->Data = InData;
 		return Current;
 	}
@@ -270,7 +270,7 @@ public:
 		}
 
 		bool bPassesFilter = true;
-		if (InNode->Data.Density <= 0) bPassesFilter = false;
+		if (InNode->Data.GasDensity <= 0) bPassesFilter = false;
 		if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
 		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) bPassesFilter = false;
 		if (InTypeIdFilter != -1 && InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false;
@@ -326,12 +326,12 @@ public:
 
 		// Filtering checks
 		bool bPassesFilter = true;
-		if (InNode->Data.Density <= 0) bPassesFilter = false;
+		if (InNode->Data.GasDensity <= 0) bPassesFilter = false;
 		if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
 		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) bPassesFilter = false;
 		if (InTypeIdFilter != -1 && InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false;
 
-		if (bPassesFilter && InNode->Data.Density > 0)
+		if (bPassesFilter && InNode->Data.GasDensity > 0)
 		{
 			OutNodes.Add(InNode);
 		}
@@ -342,6 +342,73 @@ public:
 		if (Root.IsValid())
 		{
 			CollectNodesInRange(Root, Nodes, InCenter, InExtent, InMinDepth, InMaxDepth, InTypeIdFilter);
+		}
+		return Nodes;
+	}
+
+	void CollectNodesByScreenSpace(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, const FInt64Vector& InCenter, int64 InExtent, double ScreenSpaceThreshold, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
+		if (!InNode.IsValid()) return;
+
+		//Query Bounds
+		const FInt64Vector QueryMin = InCenter - FInt64Vector(InExtent, InExtent, InExtent);
+		const FInt64Vector QueryMax = InCenter + FInt64Vector(InExtent, InExtent, InExtent);
+
+		//Node Bounds
+		const FInt64Vector NodeMin = InNode->Center - FInt64Vector(InNode->Extent, InNode->Extent, InNode->Extent);
+		const FInt64Vector NodeMax = InNode->Center + FInt64Vector(InNode->Extent, InNode->Extent, InNode->Extent);
+
+		// Early reject if node doesn't intersect the query bounds
+		const bool bIntersects =
+			NodeMin.X <= QueryMax.X && NodeMax.X >= QueryMin.X &&
+			NodeMin.Y <= QueryMax.Y && NodeMax.Y >= QueryMin.Y &&
+			NodeMin.Z <= QueryMax.Z && NodeMax.Z >= QueryMin.Z;
+
+		if (!bIntersects) return;
+
+		const double Distance = FVector::Dist(FVector(InNode->Center), FVector(InCenter));
+
+		// --- 2. Screen-space reject ---
+		if (Distance > 0.0)
+		{
+			const double VisibleRadius = (double)InNode->Extent * (1.0 + InNode->Data.Density);
+			const double ApparentSize = VisibleRadius / Distance;
+
+			if (ApparentSize < ScreenSpaceThreshold)
+			{
+				
+				return; // too small on screen, reject whole subtree
+			}
+		}
+
+		// --- 3. Recurse into children if parent survives ---
+		for (const TSharedPtr<FOctreeNode>& Child : InNode->Children)
+		{
+			if (Child.IsValid())
+			{
+				CollectNodesByScreenSpace(Child, OutNodes, InCenter, InExtent, ScreenSpaceThreshold,
+					InMinDepth, InMaxDepth, InTypeIdFilter);
+			}
+		}
+
+		// --- 4. Per-node filters ---
+		bool bPassesFilter = true;
+		if (InNode->Data.GasDensity <= 0) bPassesFilter = false;
+		if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
+		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) bPassesFilter = false;
+		if (InTypeIdFilter != -1 && InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false;
+
+		if (bPassesFilter)
+		{
+			OutNodes.Add(InNode);
+		}
+	}
+
+	TArray<TSharedPtr<FOctreeNode>> GetNodesByScreenSpace(const FInt64Vector& InCenter, int64 InExtent, double ScreenSpaceThreshold, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const
+	{
+		TArray<TSharedPtr<FOctreeNode>> Nodes;
+		if (Root.IsValid())
+		{
+			CollectNodesByScreenSpace(Root, Nodes, InCenter, InExtent, ScreenSpaceThreshold, InMinDepth, InMaxDepth, InTypeIdFilter);
 		}
 		return Nodes;
 	}
@@ -414,7 +481,7 @@ public:
 				uint8 DensityByte = 0;
 				if (InMaxDensity > 0.0f)
 				{
-					float Norm = (float)Node->Data.Density / InMaxDensity;
+					float Norm = (float)Node->Data.GasDensity / InMaxDensity;
 					DensityByte = (uint8)FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f);
 				}
 

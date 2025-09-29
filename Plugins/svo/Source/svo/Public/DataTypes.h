@@ -8,11 +8,12 @@
 
 struct SVO_API FVoxelData {
 public:
-	FVoxelData() : Density(0.0), Composition(0, 0, 0), ObjectId(-1), TypeId(-1) {};
-	FVoxelData(double InDensity, FVector InComposition, int InObjectId, int InTypeId = -1) : Density(InDensity), Composition(InComposition), ObjectId(InObjectId), TypeId(InTypeId) {};
+	FVoxelData() : Density(0.0), GasDensity(0.0), Composition(0, 0, 0), ObjectId(-1), TypeId(-1) {};
+	FVoxelData(float InDensity, float InGasDensity, FVector InComposition, int InObjectId, int InTypeId = -1) : Density(InDensity), GasDensity(InGasDensity), Composition(InComposition), ObjectId(InObjectId), TypeId(InTypeId) {};
 
 	float Density;
-	FVector Composition; //TODO:: We still are not making effective use of this extra data. Investigate ways we could encode extra utility
+	float GasDensity;
+	FVector Composition;
 	int ObjectId;
 	int TypeId;
 };
