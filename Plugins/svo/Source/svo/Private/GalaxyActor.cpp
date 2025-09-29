@@ -102,7 +102,7 @@ void AGalaxyActor::InitializeData() {
 		const TSharedPtr<FOctreeNode>& Node = PointNodes[Index];
 		FRandomStream RandStream(Node->Data.ObjectId);
 		Positions[Index] = FVector(Node->Center.X, Node->Center.Y, Node->Center.Z);
-		Extents[Index] = static_cast<float>(Node->Extent * 2) * RandStream.FRandRange(.5, 1);
+		Extents[Index] = static_cast<float>(Node->Extent * (1 + Node->Data.Density));
 		Colors[Index] = FLinearColor(Node->Data.Composition);
 	}, EParallelForFlags::BackgroundPriority);
 

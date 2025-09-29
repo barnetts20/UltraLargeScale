@@ -1361,13 +1361,15 @@ void GalaxyGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			GeneratedData[i].Data.TypeId = -1; //Set Type -1 and Position to 0 vector so it gets ignored in bulk insert
 			GeneratedData[i].SetPosition(FVector::ZeroVector);
 			double DensityWeight = FMath::Pow(2.0, InOctree->MaxDepth - InsertData.InsertDepth);
-			BlackHole.Data.Density += InsertData.Data.Density * DensityWeight;
-			BlackHole.Data.Composition += InsertData.Data.Composition * BlackHole.Data.Density;
+			BlackHole.Data.Density += InsertData.Data.Density;
+			BlackHole.Data.GasDensity += InsertData.Data.GasDensity * DensityWeight;
+			BlackHole.Data.Composition += InsertData.Data.Composition * BlackHole.Data.GasDensity;
 		}
 	});
 
 	BlackHole.InsertDepth = MinInsertionDepth - 3; //TODO: Calculate approx radius based on end density
 	BlackHole.Data.Density = 1; //TODO: This should be allowed to be the accumulated density but it currently effects gas accumulation too much
+	BlackHole.Data.GasDensity = 1; //TODO: This should be allowed to be the accumulated density but it currently effects gas accumulation too much
 	GeneratedData.Add(BlackHole);
 }
 
@@ -1428,7 +1430,8 @@ void GalaxyGenerator::GenerateBulge()
 					if (Stream.FRand() > acceptanceProbability) continue;
 				}
 
-				InsertData.Data.Density = Stream.FRandRange(0.5f, 1.5f) * GalaxyParams.BulgeBaseDensity;
+				InsertData.Data.Density = Stream.FRand();
+				InsertData.Data.GasDensity = Stream.FRandRange(0.5f, 1.5f) * GalaxyParams.BulgeBaseDensity;
 				InsertData.Data.Composition = Stream.GetUnitVector();
 				InsertData.InsertDepth = ChooseDepth(Stream.FRand(), GalaxyParams.BulgeDepthBias);
 				InsertData.SetPosition(Stream.GetUnitVector() * r * AxisScale + (Stream.GetUnitVector() * Stream.FRand() * BulgeRadius * GalaxyParams.BulgeJitter));
@@ -1645,7 +1648,7 @@ void GalaxyGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, FVect
 
 			InsertData.SetPosition(size < MaxRadius ? P : FVector::ZeroVector);
 			InsertData.InsertDepth = ChooseDepth(Stream.FRand(), InDepthBias);
-			InsertData.Data = FVoxelData(InBaseDensity * Stream.FRandRange(.5, 1.5), Stream.GetUnitVector(), i + StartIndex, 1);
+			InsertData.Data = FVoxelData(Stream.FRand(), InBaseDensity * Stream.FRandRange(.5, 1.5), Stream.GetUnitVector(), i + StartIndex, 1);
 
 			GeneratedData[StartIndex + i] = InsertData;
 		}, EParallelForFlags::BackgroundPriority);
@@ -1711,10 +1714,9 @@ void UniverseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			}
 
 			FPointData InsertData;
-			InsertData.Data = FVoxelData(LocalStream.FRandRange(0.5, 1.5), LocalStream.GetUnitVector(), i, 1);
+			InsertData.Data = FVoxelData(LocalStream.FRand(), LocalStream.FRandRange(0.5, 1.5), LocalStream.GetUnitVector(), i, 1);
 			InsertData.SetPosition(PointCenter);
 			InsertData.InsertDepth = ChooseDepth(LocalStream.FRand(), 1 - NoiseSample * 0.9);
-			InsertData.Data.ObjectId = i;
 			GeneratedData[i] = InsertData;
 			PointInserted = true;
 		}
@@ -1751,7 +1753,7 @@ void UniverseGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, FVe
 			FPointData InsertData;
 			InsertData.SetPosition(size < UniverseParams.Extent ? P : FVector::ZeroVector);
 			InsertData.InsertDepth = ChooseDepth(Stream.FRand(), InDepthBias);
-			InsertData.Data = FVoxelData(InBaseDensity * Stream.FRandRange(.5, 1.5), FVector(Stream.FRandRange(.2,1.2), Stream.FRandRange(.2, 1.2), Stream.FRandRange(.2, 1.2)), i + StartIndex, 1);
+			InsertData.Data = FVoxelData(Stream.FRand(), InBaseDensity * Stream.FRandRange(.5, 1.5), FVector(Stream.FRandRange(.2,1.2), Stream.FRandRange(.2, 1.2), Stream.FRandRange(.2, 1.2)), i + StartIndex, 1);
 
 			GeneratedData[StartIndex + i] = InsertData;
 		}, EParallelForFlags::BackgroundPriority);
@@ -1801,7 +1803,7 @@ void SimpleRandomGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 
 			auto InsertPosition = FInt64Vector(X, Y, Z);
 			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-			auto InsertData = FVoxelData(Stream.FRand(), Stream.GetUnitVector(), i, Type); //For now just placing the index in ObectId, will probably use it to map to object types
+			auto InsertData = FVoxelData(Stream.FRand(), Stream.FRand(), Stream.GetUnitVector(), i, Type); //For now just placing the index in ObectId, will probably use it to map to object types
 
 			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 		});
@@ -1830,7 +1832,7 @@ void SimpleRandomNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			FInt64Vector InsertPosition = ApplyNoiseDerivative(Noise, 1, InOctree->Extent, FInt64Vector(X, Y, Z), OutDensity);
 
 			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-			auto InsertData = FVoxelData(OutDensity, Stream.GetUnitVector(), i, Type);
+			auto InsertData = FVoxelData(Stream.FRand(), OutDensity, Stream.GetUnitVector(), i, Type);
 			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 		});
 }
@@ -1858,7 +1860,7 @@ void GlobularGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
 			auto InsertDepth = Stream.FRandRange(MinInsertionDepth, MaxInsertionDepth);
-			auto InsertData = FVoxelData(Stream.FRand(), Stream.GetUnitVector(), i, Type);
+			auto InsertData = FVoxelData(Stream.FRand(), Stream.FRand(), Stream.GetUnitVector(), i, Type);
 
 			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 		});
@@ -1897,7 +1899,7 @@ void GlobularNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			FLinearColor Color = FLinearColor::MakeRandomSeededColor(i);
 			FVector Composition(Color.R, Color.G, Color.B);
 
-			auto InsertData = FVoxelData(FMath::Max(HorizontalExtent * .8, InsertPosition.Size()), Composition, i, Type);
+			auto InsertData = FVoxelData(Stream.FRand(), FMath::Max(HorizontalExtent * .8, InsertPosition.Size()), Composition, i, Type);
 			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 		}
 	);
@@ -1965,7 +1967,7 @@ void SpiralGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
 			auto InsertDepth = FMath::Lerp(MinInsertionDepth, MaxInsertionDepth, Stream.FRand());//  Stream.FRandRange(MinInsertionDepth, MaxInsertionDepth); //If a different scale distribution is wanted can change the way depth is randomized
-			auto InsertData = FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max(T - .3, 0.000001), 1), Stream.GetUnitVector().GetAbs(), i, Type);
+			auto InsertData = FVoxelData(Stream.FRand(), Stream.FRand() * FMath::Pow(FMath::Max(T - .3, 0.000001), 1), Stream.GetUnitVector().GetAbs(), i, Type);
 			InOctree->InsertPosition(InsertPosition, InsertDepth, InsertData);
 		}, EParallelForFlags::BackgroundPriority);
 }
@@ -2041,7 +2043,7 @@ void SpiralNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 			FLinearColor Color = FLinearColor::MakeRandomSeededColor(i);
 			FVector Composition(Color.R, Color.G, Color.B);
-			InOctree->InsertPosition(InsertPosition, Stream.RandRange(MinInsertionDepth, MaxInsertionDepth), FVoxelData(Stream.FRand() * FMath::Pow(FMath::Max(T, 0.000001), 6), Composition, i, Type));
+			InOctree->InsertPosition(InsertPosition, Stream.RandRange(MinInsertionDepth, MaxInsertionDepth), FVoxelData(Stream.FRand(), Stream.FRand() * FMath::Pow(FMath::Max(T, 0.000001), 6), Composition, i, Type));
 		}
 	, EParallelForFlags::BackgroundPriority);
 }
@@ -2094,7 +2096,7 @@ void BurstGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			);
 
 			int32 InsertDepth = Stream.RandRange(MinInsertionDepth, MaxInsertionDepth);
-			FVoxelData Data(NoiseValue, Stream.GetUnitVector(), i, Type);
+			FVoxelData Data(Stream.FRand(), NoiseValue, Stream.GetUnitVector(), i, Type);
 			Coord = RotateCoordinate(Coord, Rotation);
 			InOctree->InsertPosition(Coord, InsertDepth, Data);
 		});
@@ -2153,7 +2155,7 @@ void BurstNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			InsertPosition = RotateCoordinate(InsertPosition, Rotation);
 
 			int32 InsertDepth = MaxInsertionDepth;// GalaxyGenerator::ChooseDepth(Stream.FRand());
-			FVoxelData Data(OutDensity, Stream.GetUnitVector(), i, Type);
+			FVoxelData Data(Stream.FRand(), OutDensity, Stream.GetUnitVector(), i, Type);
 
 			InOctree->InsertPosition(InsertPosition, InsertDepth, Data);
 		});
