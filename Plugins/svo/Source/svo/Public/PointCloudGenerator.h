@@ -271,6 +271,37 @@ public:
 	TArray<FPointData> GeneratedData;
 };
 
+struct SVO_API StarSystemParams {
+	//Volume Material Params
+	FLinearColor VolumeAmbientColor = FLinearColor(1, 1, 1, 1);
+	FLinearColor VolumeCoolShift = FLinearColor(.2, .5, .8);
+	FLinearColor VolumeHotShift = FLinearColor(.5, 1.5, 3);
+	double VolumeHueVariance = .1;
+	double VolumeHueVarianceScale = .5;
+	double VolumeSaturationVariance = .1;
+	double VolumeTemperatureInfluence = 32;
+	double VolumeTemperatureScale = 1;
+	double VolumeDensity = .5;
+	double VolumeWarpAmount = .05;
+	double VolumeWarpScale = .33;
+	FString VolumeNoise = "/svo/VolumeTextures/VT_PerlinWorley_Balanced";
+};
+
+class SVO_API StarSystemGenerator : public PointCloudGenerator {
+public:
+	StarSystemGenerator() : PointCloudGenerator(8647) {};
+	StarSystemGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
+
+	StarSystemParams SystemParams;
+	// depth probabilities for depths 0..6 (sum = 1.0)
+	static constexpr double DepthProb[7] = { 0.25,0.35,0.20,0.10,0.05,0.04,0.01 };
+
+	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
+	int ChooseDepth(double InRandomSample, double InDepthBias);
+
+	TArray<FPointData> GeneratedData;
+};
+
 //Basic Generators (No Noise)
 class SVO_API SimpleRandomGenerator : public PointCloudGenerator
 {

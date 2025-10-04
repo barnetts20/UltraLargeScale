@@ -351,7 +351,6 @@ public:
 		if (!bIntersects) return;
 
 		const double Distance = FVector::Dist(FVector(InNode->Center), FVector(InCenter));
-
 		// Screen Space Rejection
 		if (Distance > 0.0)
 		{
@@ -379,8 +378,7 @@ public:
 		}
 	}
 
-	TArray<TSharedPtr<FOctreeNode>> GetNodesByScreenSpace(const FInt64Vector& InCenter, int64 InExtent, double ScreenSpaceThreshold, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const
-	{
+	TArray<TSharedPtr<FOctreeNode>> GetNodesByScreenSpace(const FInt64Vector& InCenter, int64 InExtent, double ScreenSpaceThreshold, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
 		TArray<TSharedPtr<FOctreeNode>> Nodes;
 		if (Root.IsValid())
 		{

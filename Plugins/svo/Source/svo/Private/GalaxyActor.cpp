@@ -1,6 +1,7 @@
 #pragma region Includes/ForwardDec
 #include "GalaxyActor.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
+#include "StarSystemActor.h"
 #include <PointCloudGenerator.h>
 #include <Kismet/GameplayStatics.h>
 #include <Camera/CameraComponent.h>
@@ -61,6 +62,21 @@ void AGalaxyActor::Initialize()
 			double TotalDuration = FPlatformTime::Seconds() - StartTime;
 			UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Initialize total duration: %.3f seconds"), TotalDuration);
 	});
+}
+
+void AGalaxyActor::InitializeStarSystemPool() {
+	TPromise<void> CompletionPromise;
+	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
+	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
+		{
+			for (int i = 0; i < StarSystemPoolSize; i++) {
+				AStarSystemActor* System = GetWorld()->SpawnActor<AStarSystemActor>(StarSystemActorClass, FVector::ZeroVector, FRotator::ZeroRotator);
+				System->Galaxy = this;
+				StarSystemPool.Add(System);
+			}
+			CompletionPromise.SetValue();
+		});
+	CompletionFuture.Wait();
 }
 
 void AGalaxyActor::InitializeData() {
@@ -198,6 +214,98 @@ void AGalaxyActor::InitializeNiagara()
 
 	double TotalDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeNiagara total duration: %.3f seconds"), TotalDuration);
+}
+#pragma endregion
+
+#pragma region Star System Pooled Spawn Hooks
+void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
+{
+	if (!InNode.IsValid() || !StarSystemActorClass || SpawnedStarSystems.Contains(InNode) || InitializationState != ELifecycleState::Ready || StarSystemPool.Num() == 0)
+	{
+		return;
+	}
+
+	AStarSystemActor* System = nullptr;
+	if (StarSystemPool.Num() > 0)
+	{
+		System = StarSystemPool.Pop();
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Galaxy pool exhausted, consider increasing GalaxyPoolSize"));
+		return;
+	}
+
+	SpawnedStarSystems.Add(InNode, TWeakObjectPtr<AStarSystemActor>(System));
+	System->ResetForSpawn();
+
+	System->UnitScale = (InNode->Extent * this->UnitScale) / System->Extent;	//Scale is derived from perceived node extent divided by galaxy extent
+	System->SpeedScale = SpeedScale;											//Speed scale is the same across all parallax components in the system
+	System->Seed = InNode->Data.ObjectId;
+	System->ParentColor = FLinearColor(InNode->Data.Composition);
+
+	// Compute correct parallax ratios and spawn location
+	const double SystemParallaxRatio = (SpeedScale / System->UnitScale);
+	const double GalaxyParallaxRatio = (SpeedScale / UnitScale);
+	FVector NodeWorldPosition = FVector(InNode->Center.X, InNode->Center.Y, InNode->Center.Z) + GetActorLocation();
+	FVector PlayerToNode = CurrentFrameOfReferenceLocation - NodeWorldPosition;
+	FVector GalaxySpawnPosition = CurrentFrameOfReferenceLocation - PlayerToNode * (SystemParallaxRatio / GalaxyParallaxRatio);
+	System->SetActorLocation(GalaxySpawnPosition);
+
+	//Compute Axis Tilt >>> TODO: MOVE TO GALAXY PARAM FACTORY/GENERATOR
+	FRandomStream RandStream(InNode->Data.ObjectId);
+	FVector normal = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
+	FMatrix RotationMatrix = FRotationMatrix::MakeFromZX(normal, FVector::ForwardVector);
+	System->AxisRotation = normal * 360;
+
+	System->Initialize();
+	System->SetActorHiddenInGame(false);
+}
+
+void AGalaxyActor::ReturnStarSystemToPool(TSharedPtr<FOctreeNode> InNode)
+{
+	if (!InNode.IsValid())
+	{
+		return;
+	}
+	TWeakObjectPtr<AStarSystemActor> SystemToDestroy;
+
+	// Find the actor in the map and remove the entry simultaneously.
+	if (SpawnedStarSystems.RemoveAndCopyValue(InNode, SystemToDestroy))
+	{
+		AStarSystemActor* PoolSystem = SystemToDestroy.Get();
+
+		// Ensure the actor pointer is still valid before trying to destroy it.
+		if (PoolSystem)
+		{
+			UE_LOG(LogTemp, Log, TEXT("Resetting galaxy for node with ObjectId: %d"), InNode->Data.ObjectId);
+			PoolSystem->ResetForPool();
+
+			AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, PoolSystem]()
+				{
+					double StartTime = FPlatformTime::Seconds();
+
+					//Handle Octree flush here instead of in galaxy, that way we can ensure flush is done before returning it to the pool
+					PoolSystem->Octree->bIsResetting.store(true);
+					FPlatformProcess::Sleep(0.05f);
+					PoolSystem->Octree = MakeShared<FOctree>(PoolSystem->Extent);
+					PoolSystem->Octree->bIsResetting.store(false);
+
+					double ODuration = FPlatformTime::Seconds() - StartTime;
+					UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Flushing Octree took: %.3f seconds"), ODuration);
+
+					// Return to pool on game thread
+					AsyncTask(ENamedThreads::GameThread, [this, PoolSystem, StartTime]()
+						{
+							StarSystemPool.Insert(PoolSystem, 0);
+						});
+				});
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Galaxy actor was already invalid for node with ObjectId: %d"), InNode->Data.ObjectId);
+		}
+	}
 }
 #pragma endregion
 

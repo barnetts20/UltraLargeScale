@@ -1778,6 +1778,14 @@ int UniverseGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
 //END UNIVERSE GENERATOR
 #pragma endregion
 
+#pragma region Star System Generator
+void StarSystemGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
+{
+	//TODO: PARENT STAR SHOULD BE AT 0,0,0
+	//TODO: THEN GENERATE JUST SOME PLACEHOLDER DATA SO WE CAN TEST SPAWNING
+}
+#pragma endregion
+
 #pragma region ExampleGenerators
 void SimpleRandomGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {

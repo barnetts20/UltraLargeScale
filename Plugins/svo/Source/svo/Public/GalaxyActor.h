@@ -11,6 +11,7 @@
 #include "FastNoise/FastNoise.h"
 #include <UniverseActor.h>
 #include "GalaxyActor.generated.h"
+class AStarSystemActor;
 #pragma endregion
 
 UCLASS()
@@ -41,6 +42,11 @@ public:
 	void ResetForSpawn();           //Call externally before calling initialize
 	#pragma endregion
 	
+	#pragma region Pooled Spawn/Despawn Hooks
+	void SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode);
+	void ReturnStarSystemToPool(TSharedPtr<FOctreeNode> InNode);
+	#pragma endregion
+
 	#pragma region Initialization
 	void Initialize();				//Kick of async initialization of system
 	#pragma endregion
@@ -49,6 +55,14 @@ protected:
 	#pragma region Data Initialization
 	GalaxyGenerator GalaxyGenerator;
 	void InitializeData();
+	#pragma endregion
+
+	#pragma region Star System Pool
+	TSubclassOf<AStarSystemActor> StarSystemActorClass;
+	int StarSystemPoolSize = 5;
+	TArray<AStarSystemActor*> StarSystemPool;
+	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AStarSystemActor>> SpawnedStarSystems;
+	void InitializeStarSystemPool();
 	#pragma endregion
 
 	#pragma region Niagara
