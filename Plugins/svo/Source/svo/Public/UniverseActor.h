@@ -27,7 +27,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
 	int Seed = 133780085;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
-	double UnitScale = 10000.0;
+	double UnitScale = 1000000.0;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
 	double SpeedScale = 1.0;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
@@ -45,6 +45,7 @@ public:
 	void ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode);
 	#pragma endregion
 
+	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
 protected:
 	#pragma region Initialization
 	UniverseGenerator UniverseGenerator;
@@ -73,8 +74,9 @@ protected:
 	TSubclassOf<AGalaxyActor> GalaxyActorClass;
 	int GalaxyPoolSize = 5;
 	TArray<AGalaxyActor*> GalaxyPool;
-	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
+
 	void InitializeGalaxyPool();
+	void SampleGalaxies();
 	#pragma endregion
 
 	#pragma region Parallax

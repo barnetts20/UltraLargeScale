@@ -18,7 +18,9 @@ public:
 #pragma endregion
 
 #pragma region Public Parameters
+	UPROPERTY()
 	AGalaxyActor* Galaxy;
+
 	TSharedPtr<FOctree> Octree;
 	int Seed = 133780085;
 	int64 Extent = 2147483648;
@@ -49,14 +51,24 @@ protected:
 	TArray<float> Extents;
 	TArray<FLinearColor> Colors;
 	FString NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
+	
+	UPROPERTY()
 	UNiagaraSystem* PointCloudNiagara;
+	
+	UPROPERTY()
 	UNiagaraComponent* NiagaraComponent;
+	
 	void InitializeNiagara();
 #pragma endregion
 
 #pragma region Volumetric
+	UPROPERTY()
 	UTexture2D* PseudoVolumeTexture;
+	
+	UPROPERTY()
 	UMaterialInstanceDynamic* VolumeMaterial;
+
+	UPROPERTY()
 	UStaticMeshComponent* VolumetricComponent;
 	void InitializeVolumetric();
 #pragma endregion

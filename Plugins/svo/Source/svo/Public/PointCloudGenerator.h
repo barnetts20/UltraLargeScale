@@ -272,6 +272,8 @@ public:
 };
 
 struct SVO_API StarSystemParams {
+	FLinearColor StarColor = FLinearColor(1, 1, 1, 1);
+
 	//Volume Material Params
 	FLinearColor VolumeAmbientColor = FLinearColor(1, 1, 1, 1);
 	FLinearColor VolumeCoolShift = FLinearColor(.2, .5, .8);
@@ -297,6 +299,9 @@ public:
 	static constexpr double DepthProb[7] = { 0.25,0.35,0.20,0.10,0.05,0.04,0.01 };
 
 	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
+	void GeneratePlanets();
+	void GenerateGas();
+	void GenerateDebris();
 	int ChooseDepth(double InRandomSample, double InDepthBias);
 
 	TArray<FPointData> GeneratedData;

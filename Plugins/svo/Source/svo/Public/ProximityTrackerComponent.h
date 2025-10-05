@@ -26,7 +26,7 @@ public:
 	int64 ScanExtent = 2000;
 
 	UPROPERTY(EditAnywhere, Category = "Proximity")
-	bool DebugMode = false;
+	bool DebugMode = true;
 
 	UPROPERTY()
 	AUniverseActor* UniverseActor;
@@ -40,10 +40,13 @@ protected:
 	#pragma region Proximity Polling
 	FTimerHandle UpdateTimerHandle;
 	TSet<TSharedPtr<FOctreeNode>> SpawnedGalaxyNodes;
+	TSet<TSharedPtr<FOctreeNode>> SpawnedStarSystemNodes;
+
 	void OnProximityUpdate();
 	#pragma endregion
 
 	#pragma region Debug
 	void DebugDrawNode(TSharedPtr<FOctreeNode> InNode);
+	void DebugDrawStarSystemNode(FVector NodeCenter, TSharedPtr<FOctreeNode> InNode);
 	#pragma endregion
 };

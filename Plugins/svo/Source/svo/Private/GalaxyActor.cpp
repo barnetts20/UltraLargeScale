@@ -14,6 +14,7 @@ AGalaxyActor::AGalaxyActor()
 	PrimaryActorTick.bCanEverTick = true;
 	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent")));
 	PointCloudNiagara = Cast<UNiagaraSystem>(FSoftObjectPath(NiagaraPath).TryLoad());
+	StarSystemActorClass = AStarSystemActor::StaticClass();
 	Octree = MakeShared<FOctree>(Extent);
 }
 
@@ -48,7 +49,7 @@ void AGalaxyActor::Initialize()
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this]()
 		{
 			double StartTime = FPlatformTime::Seconds();
-
+			InitializeStarSystemPool();
 			if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
 			InitializeData();
 			if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
@@ -239,20 +240,22 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 	SpawnedStarSystems.Add(InNode, TWeakObjectPtr<AStarSystemActor>(System));
 	System->ResetForSpawn();
 
-	System->UnitScale = (InNode->Extent * this->UnitScale) / System->Extent;	//Scale is derived from perceived node extent divided by galaxy extent
-	System->SpeedScale = SpeedScale;											//Speed scale is the same across all parallax components in the system
+	System->UnitScale = (InNode->Extent * this->UnitScale) / System->Extent;
+	System->SpeedScale = Universe->SpeedScale;
 	System->Seed = InNode->Data.ObjectId;
 	System->ParentColor = FLinearColor(InNode->Data.Composition);
 
 	// Compute correct parallax ratios and spawn location
-	const double SystemParallaxRatio = (SpeedScale / System->UnitScale);
-	const double GalaxyParallaxRatio = (SpeedScale / UnitScale);
-	FVector NodeWorldPosition = FVector(InNode->Center.X, InNode->Center.Y, InNode->Center.Z) + GetActorLocation();
-	FVector PlayerToNode = CurrentFrameOfReferenceLocation - NodeWorldPosition;
-	FVector GalaxySpawnPosition = CurrentFrameOfReferenceLocation - PlayerToNode * (SystemParallaxRatio / GalaxyParallaxRatio);
-	System->SetActorLocation(GalaxySpawnPosition);
+	const double SystemParallaxRatio = (Universe->SpeedScale / System->UnitScale);
+	const double GalaxyParallaxRatio = (Universe->SpeedScale / UnitScale);
 
-	//Compute Axis Tilt >>> TODO: MOVE TO GALAXY PARAM FACTORY/GENERATOR
+	FVector NodeWorldPosition = FVector(InNode->Center) + GetActorLocation();
+	FVector PlayerToNode = CurrentFrameOfReferenceLocation - NodeWorldPosition;
+	FVector StarSystemSpawnPosition = CurrentFrameOfReferenceLocation - PlayerToNode * (SystemParallaxRatio / GalaxyParallaxRatio);
+
+	System->SetActorLocation(StarSystemSpawnPosition);
+
+	//Compute Axis Tilt >>> TODO: MOVE TO SYSTEM PARAM FACTORY/GENERATOR
 	FRandomStream RandStream(InNode->Data.ObjectId);
 	FVector normal = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
 	FMatrix RotationMatrix = FRotationMatrix::MakeFromZX(normal, FVector::ForwardVector);

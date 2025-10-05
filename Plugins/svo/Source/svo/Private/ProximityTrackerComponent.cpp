@@ -46,12 +46,19 @@ void UProximityTrackerComponent::OnProximityUpdate()
 
 	//Proximity Query Octree
     //Simple Distance Based Search
-	//TArray<TSharedPtr<FOctreeNode>> NearbyNodes = UniverseActor->Octree->GetNodesInRange(SampleCoordinate, ScanExtent, -1, -1, 1);
+	//TArray<TSharedPtr<FOctreeNode>> NearbyGalaxyNodes = UniverseActor->Octree->GetNodesInRange(SampleCoordinate, ScanExtent, -1, -1, 1);
     //Screen Space Search
-    TArray<TSharedPtr<FOctreeNode>> NearbyNodes = UniverseActor->Octree->GetNodesByScreenSpace(SampleCoordinate, ScanExtent, .001, -1, -1, 1);
+    TArray<TSharedPtr<FOctreeNode>> NearbyGalaxyNodes = UniverseActor->Octree->GetNodesByScreenSpace(SampleCoordinate, ScanExtent, .001, -1, -1, 1);
     //Draw the node bounding boxes in debug mode
+
+
+    //Sample Galaxy nodes if inside a galaxies bounds
+    //TArray<TSharedPtr<FOctreeNode>> NearbyStarSystemNodes = GalaxyActor->Octree->GetNodesByScreenSpace(SampleCoordinate, ScanExtent, .001, -1, -1, 1);
+    
+    
+    ///TArray<TSharedPtr<FOctreeNode>> 
     if (DebugMode) {
-        for (const TSharedPtr<FOctreeNode>& Node : NearbyNodes)
+        for (const TSharedPtr<FOctreeNode>& Node : NearbyGalaxyNodes)
         {
             if (Node.IsValid())
             {
@@ -62,7 +69,7 @@ void UProximityTrackerComponent::OnProximityUpdate()
     
     //Update the currently tracked galaxies and trigger lifecycle changes
     TSet<TSharedPtr<FOctreeNode>> StaleGalaxyNodes = TSet<TSharedPtr<FOctreeNode>>(SpawnedGalaxyNodes);
-    for (const TSharedPtr<FOctreeNode>& Node : NearbyNodes)
+    for (const TSharedPtr<FOctreeNode>& Node : NearbyGalaxyNodes)
     {
         StaleGalaxyNodes.Remove(Node);
         if (UniverseActor)
@@ -81,6 +88,49 @@ void UProximityTrackerComponent::OnProximityUpdate()
             SpawnedGalaxyNodes.Remove(Node);
         }
     }
+
+    for (TSharedPtr<FOctreeNode> GalaxyNode : SpawnedGalaxyNodes) {
+        auto ga = UniverseActor->SpawnedGalaxies.Find(GalaxyNode);
+        if (ga) {
+            auto GalaxyActor = ga->Get();
+            FVector GalaxySampleLocation = WorldLocation - GalaxyActor->GetActorLocation();
+            FInt64Vector GalaxySampleCoordinate = FInt64Vector(FMath::RoundToInt64(GalaxySampleLocation.X), FMath::RoundToInt64(GalaxySampleLocation.Y), FMath::RoundToInt64(GalaxySampleLocation.Z));
+
+            auto NearbyStarSystemNodes = GalaxyActor->Octree->GetNodesByScreenSpace(GalaxySampleCoordinate, ScanExtent, .001, -1, -1, 1);
+            
+            if (DebugMode) {
+                for (const TSharedPtr<FOctreeNode>& Node : NearbyStarSystemNodes)
+                {
+                    if (Node.IsValid())
+                    {
+                        DebugDrawStarSystemNode(GalaxyActor->GetActorLocation() + FVector(Node->Center), Node);
+                    }
+                }
+            }
+
+            //Update the currently tracked Star Systems and trigger lifecycle changes
+            TSet<TSharedPtr<FOctreeNode>> StaleStarSystemNodes = TSet<TSharedPtr<FOctreeNode>>(SpawnedStarSystemNodes);
+            for (const TSharedPtr<FOctreeNode>& Node : NearbyStarSystemNodes)
+            {
+                StaleStarSystemNodes.Remove(Node);
+                if (GalaxyActor)
+                {
+                    if (!SpawnedStarSystemNodes.Contains(Node))
+                    {
+                        SpawnedStarSystemNodes.Add(Node);
+                        GalaxyActor->SpawnStarSystemFromPool(Node);
+                    }
+                }
+            }
+
+            for (const TSharedPtr<FOctreeNode>& Node : StaleStarSystemNodes) {
+                if (GalaxyActor) {
+                    GalaxyActor->ReturnStarSystemToPool(Node);
+                    SpawnedStarSystemNodes.Remove(Node);
+                }
+            }
+        }
+    }
 }
 #pragma endregion
 
@@ -96,6 +146,31 @@ void UProximityTrackerComponent::DebugDrawNode(TSharedPtr<FOctreeNode> InNode)
         static_cast<float>(InNode->Center.Y),
         static_cast<float>(InNode->Center.Z)
     ) + UniverseOrigin;
+
+    const float HalfExtent = static_cast<float>(InNode->Extent);
+    const FVector BoxExtent = FVector(HalfExtent);
+
+    const FColor BoxColor = FColor::Green;
+    const float Lifetime = UpdateInterval;
+    const bool bPersistent = false;
+    const uint8 DepthPriority = 0;
+    const float Thickness = 10.0f;
+
+    DrawDebugBox(
+        GetWorld(),
+        NodeCenter,
+        BoxExtent,
+        BoxColor,
+        bPersistent,
+        Lifetime,
+        DepthPriority,
+        Thickness
+    );
+}
+
+void UProximityTrackerComponent::DebugDrawStarSystemNode(FVector NodeCenter, TSharedPtr<FOctreeNode> InNode)
+{
+    if (!InNode.IsValid() || !UniverseActor) return;
 
     const float HalfExtent = static_cast<float>(InNode->Extent);
     const FVector BoxExtent = FVector(HalfExtent);

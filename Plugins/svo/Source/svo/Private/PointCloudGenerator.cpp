@@ -1781,9 +1781,31 @@ int UniverseGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
 #pragma region Star System Generator
 void StarSystemGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {
-	//TODO: PARENT STAR SHOULD BE AT 0,0,0
-	//TODO: THEN GENERATE JUST SOME PLACEHOLDER DATA SO WE CAN TEST SPAWNING
+	FPointData StarData(FInt64Vector::ZeroValue, 1, FVoxelData(1,1, FVector(SystemParams.StarColor.R, SystemParams.StarColor.G, SystemParams.StarColor.B) * 1000000000, 1, 1));
+	GeneratedData.Add(StarData);
+
+	GeneratePlanets();
+	GenerateGas(); //Insert into type 1 for gas, do not need to necessarily be linked to particles.
+	GenerateDebris();
 }
+
+void StarSystemGenerator::GeneratePlanets() {
+
+}
+
+void StarSystemGenerator::GenerateGas() {
+
+}
+
+void StarSystemGenerator::GenerateDebris() {
+
+}
+
+int StarSystemGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
+{
+	return 0;
+}
+
 #pragma endregion
 
 #pragma region ExampleGenerators

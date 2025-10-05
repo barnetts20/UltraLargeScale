@@ -80,6 +80,7 @@ void AStarSystemActor::InitializeData() {
 	//TODO: If we want a factory approach it would happen here to generate the base params
 
 	SystemGenerator.SystemParams = StarSystemParams();
+	SystemGenerator.SystemParams.StarColor = ParentColor;
 	SystemGenerator.GenerateData(Octree);
 
 	double GenFinish = FPlatformTime::Seconds();
@@ -248,18 +249,33 @@ void AStarSystemActor::ApplyParallaxOffset()
 			}
 		}
 	}
-
 	if (!bHasReference)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("Parallax: No valid reference camera or pawn found."));
 		return;
 	}
+	FVector CurrentActorLocation = GetActorLocation();
 
-	double ParallaxRatio = (Galaxy ? Galaxy->SpeedScale : SpeedScale) / UnitScale;
+	double ParallaxRatio = (Galaxy && Galaxy->Universe ? Galaxy->Universe->SpeedScale : SpeedScale) / UnitScale;
 	FVector PlayerOffset = CurrentFrameOfReferenceLocation - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
 	FVector ParallaxOffset = PlayerOffset * (1.0 - ParallaxRatio);
-	SetActorLocation(GetActorLocation() + ParallaxOffset);
+	FVector NewActorLocation = CurrentActorLocation + ParallaxOffset;
+
+	SetActorLocation(NewActorLocation);
+
+	float DistanceToPlayer = (NewActorLocation - CurrentFrameOfReferenceLocation).Size();
+
+	//UE_LOG(LogTemp, Warning, TEXT("=== Star System Parallax ==="));
+	//UE_LOG(LogTemp, Warning, TEXT("Player Position: %s"), *CurrentFrameOfReferenceLocation.ToString());
+	//UE_LOG(LogTemp, Warning, TEXT("Actor Position (before): %s"), *CurrentActorLocation.ToString());
+	//UE_LOG(LogTemp, Warning, TEXT("Actor Position (after): %s"), *NewActorLocation.ToString());
+	if(ELifecycleState::Ready == this->InitializationState)
+	UE_LOG(LogTemp, Warning, TEXT("Distance to Player: %f"), DistanceToPlayer);
+	//UE_LOG(LogTemp, Warning, TEXT("UnitScale: %f"), UnitScale);
+	//UE_LOG(LogTemp, Warning, TEXT("ParallaxRatio: %f"), ParallaxRatio);
+	//UE_LOG(LogTemp, Warning, TEXT("PlayerOffset: %s"), *PlayerOffset.ToString());
+	//UE_LOG(LogTemp, Warning, TEXT("ParallaxOffset: %s"), *ParallaxOffset.ToString());
 }
 
 void AStarSystemActor::Tick(float DeltaTime)
