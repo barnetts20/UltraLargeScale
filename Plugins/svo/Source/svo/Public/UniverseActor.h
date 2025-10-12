@@ -67,6 +67,7 @@ protected:
 	TArray<uint8> TextureData;
 	UTexture2D* PseudoVolumeTexture;
 	UStaticMeshComponent* VolumetricComponent;
+	FString VolumetricMaterialPath = FString("/svo/Materials/RayMarchers/MT_UniverseRaymarchPseudoVolume_Inst.MT_UniverseRaymarchPseudoVolume_Inst");
 	void InitializeVolumetric();
 	#pragma endregion
 

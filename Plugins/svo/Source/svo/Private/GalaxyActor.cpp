@@ -87,7 +87,7 @@ void AGalaxyActor::InitializeData() {
 	GalaxyGenerator.Seed = Seed;
 	GalaxyGenerator.DepthRange = 7; //With seven levels, assuming our smallest star is say 1/2 the size of the sun, we can cover the vast majority of potential realistic star scales
 	GalaxyGenerator.InsertDepthOffset = 8; //Controlls the depth above max depth the smallest stars will be generated in
-	GalaxyGenerator.Rotation = FRotator(Stream.FRandRange(-35, 35), Stream.FRandRange(-35, 35), Stream.FRandRange(-35, 35));
+	GalaxyGenerator.Rotation = FRotator(AxisRotation.X, AxisRotation.Y, AxisRotation.Z);
 	GalaxyGenerator.GeneratedData.SetNum(0);
 	
 	GalaxyParamFactory GalaxyParamGen;
@@ -149,7 +149,7 @@ void AGalaxyActor::InitializeVolumetric()
 			VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
 
 			VolumeMaterial = UMaterialInstanceDynamic::Create(
-				LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_GalaxyRaymarchPsuedoVolume_Inst.MT_GalaxyRaymarchPsuedoVolume_Inst")),
+				LoadObject<UMaterialInterface>(nullptr, *VolumetricMaterialPath),
 				this
 			);
 
@@ -241,6 +241,7 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 	System->ResetForSpawn();
 
 	System->UnitScale = (InNode->Extent * this->UnitScale) / System->Extent;
+	UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::Star System Unit Scale %.3f CM"), System->UnitScale);
 	System->SpeedScale = Universe->SpeedScale;
 	System->Seed = InNode->Data.ObjectId;
 	System->ParentColor = FLinearColor(InNode->Data.Composition);

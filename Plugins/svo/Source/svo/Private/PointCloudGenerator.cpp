@@ -1781,28 +1781,133 @@ int UniverseGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
 #pragma region Star System Generator
 void StarSystemGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {
-	FPointData StarData(FInt64Vector::ZeroValue, 1, FVoxelData(1,1, FVector(SystemParams.StarColor.R, SystemParams.StarColor.G, SystemParams.StarColor.B) * 1000000000, 1, 1));
+	//This needs to be much deeper but we need to get other stuff generating first
+	FPointData StarData(FInt64Vector::ZeroValue, 2, FVoxelData(1,1, FVector(SystemParams.StarColor.R, SystemParams.StarColor.G, SystemParams.StarColor.B) * 1000000000, 1, 1));
 	GeneratedData.Add(StarData);
+	Extent = InOctree->Extent;
 
-	GeneratePlanets();
-	GenerateGas(); //Insert into type 1 for gas, do not need to necessarily be linked to particles.
-	GenerateDebris();
+	GenerateOrbits();
+	ParallelFor(GeneratedOrbits.Num(), [&](int32 i)
+	{
+		FRandomStream Stream(Seed + i);
+
+		const FOrbit& Orbit = GeneratedOrbits[i];
+
+		switch (Orbit.Type)
+		{
+			case EObjectType::TerrestrialPlanet:
+			case EObjectType::GasPlanet:
+				GeneratePlanet(Orbit);
+				break;
+			case EObjectType::Debris:
+				GenerateDebris(Orbit);
+				break;
+		}
+	});
+
+	//TODO: generate random non orbit debris
+	GenerateUnboundDebris();
+	GenerateGas();
 }
 
-void StarSystemGenerator::GeneratePlanets() {
+void StarSystemGenerator::GenerateOrbits()
+{
+	FRandomStream Stream(Seed);
 
+	int32 NumOrbits = Stream.RandRange(6, 14);
+	GeneratedOrbits.SetNumZeroed(NumOrbits);
+
+	FVector SystemUp = Rotation.RotateVector(FVector::UpVector);
+	double CurrentRadius = Extent * 0.01;
+	double GrowthFactor = Stream.FRandRange(1.15, 1.35);
+	double MaxInclinationDegrees = 25.0;
+
+	// Frost line index: inner orbits mostly rocky, outer orbits gas/ice
+	int32 FrostLineIndex = FMath::Clamp(int32(NumOrbits * 0.35), 1, NumOrbits - 1);
+
+	for (int32 i = 0; i < NumOrbits; i++)
+	{
+		FOrbit& Orbit = GeneratedOrbits[i];
+
+		// Center
+		Orbit.Center = FVector::ZeroVector;
+
+		// Orbit normal: small tilt from system plane
+		double InclinationDeg = Stream.FRandRange(-MaxInclinationDegrees, MaxInclinationDegrees);
+		double InclinationRad = FMath::DegreesToRadians(InclinationDeg);
+
+		FVector TiltAxis = FVector::CrossProduct(SystemUp, FVector(Stream.FRandRange(-1, 1), Stream.FRandRange(-1, 1), 0)).GetSafeNormal();
+		if (TiltAxis.IsNearlyZero()) TiltAxis = Rotation.RotateVector(FVector::RightVector);
+
+		FQuat TiltRotation(TiltAxis, InclinationRad);
+		Orbit.Normal = TiltRotation.RotateVector(SystemUp).GetSafeNormal();
+
+		// SemiMajorAxis
+		Orbit.SemiMajorAxis = CurrentRadius;
+		CurrentRadius = FMath::Min(CurrentRadius * GrowthFactor, Extent * 0.75); // this should probably be derived somehow from the parent scale but for now we can hardcode
+
+		// Eccentricity & phase
+		Orbit.Eccentricity = FMath::Pow(Stream.FRand(), 3.0) * 0.4;
+		Orbit.Phase = Stream.FRandRange(0.0, 2.0 * PI);
+
+		// --- OBJECT TYPE ASSIGNMENT ---
+		double p = Stream.FRand();
+
+		if (i < FrostLineIndex)
+		{
+			// Inner orbits mostly rocky or empty
+			if (p < 0.6) Orbit.Type = EObjectType::TerrestrialPlanet;
+			else Orbit.Type = EObjectType::Debris;
+		}
+		else
+		{
+			// Outer orbits gas giants / ice / belts
+			if (p < 0.3) Orbit.Type = EObjectType::GasPlanet;
+			else if (p < 0.6) Orbit.Type = EObjectType::TerrestrialPlanet;
+			else Orbit.Type = EObjectType::Debris;
+		}
+	}
+}
+
+void StarSystemGenerator::GeneratePlanet(FOrbit InPlanetOrbit) {
+	//2 types gas/terrestrial
+	//temperature should be derived from distance to star
+	//figure out good randomization bounds for scales based on distance from star
+	//substep to create moons
+	FPointData PlanetData;
+	PlanetData.SetPosition(FVector::ZeroVector);//TODO CALCULATE POS FROM ORBIT
+	PlanetData.Data.TypeId = InPlanetOrbit.Type;
+
+	int NumMoons = 3; //TODO RANDOMIZE, PROB PASS IN STREAM TO FUNCTION OR CREATE ONE BASED ON ORBIT
+	TArray<FOrbit> SubOrbits;
+	//TODO POPULATE SUB ORBITS FOR MOONS
+	
+	for (FOrbit Orbit : SubOrbits) {
+		FPointData MoonData;
+		MoonData.SetPosition(FVector::ZeroVector);//TODO: CALC FROMM ORBIT
+		MoonData.Data.TypeId = EObjectType::Moon;
+		//TODO:PROCEDURALIZE
+		//TODO:ALLOW DEBRIS RING/ARCS INSTEAD OF MOONS MAYBE AT LOW PROBABILITY
+	}
+}
+
+void StarSystemGenerator::GenerateDebris(FOrbit InDebrisOrbit) {
+	//Populates debris
+	//TODO: GENERATE DEBRIS RINGS/ARCS ROLL TO SEE IF IT WILL BE FULL OR PARTIAL RING, IF PARTIAL FIGURE OUT WHAT PORTION OF THE ORBIT IS COVERED
+}
+
+void StarSystemGenerator::GenerateUnboundDebris()
+{
+	//TODO: GENERATE MORE RANDOMLY DISTRIBUTED DEBRIS
 }
 
 void StarSystemGenerator::GenerateGas() {
-
-}
-
-void StarSystemGenerator::GenerateDebris() {
-
+	//TODO: Populate a gas layer for the solar system, do not necessarily need to add the the particle data output
 }
 
 int StarSystemGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
 {
+	//May need to be a bit more complex here, different planet/moon/object types will require different depths so this will be partially type dependant
 	return 0;
 }
 

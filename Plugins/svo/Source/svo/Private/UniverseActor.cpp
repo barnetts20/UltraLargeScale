@@ -130,7 +130,7 @@ void AUniverseActor::InitializeVolumetric()
 		VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
 
 		UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(
-			LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_UniverseRaymarchPsuedoVolume_Inst.MT_UniverseRaymarchPsuedoVolume_Inst")),
+			LoadObject<UMaterialInterface>(nullptr, *VolumetricMaterialPath),
 			this
 		);
 

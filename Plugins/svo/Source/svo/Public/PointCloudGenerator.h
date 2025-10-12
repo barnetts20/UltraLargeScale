@@ -295,15 +295,31 @@ public:
 	StarSystemGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
 
 	StarSystemParams SystemParams;
-	// depth probabilities for depths 0..6 (sum = 1.0)
+	enum EObjectType { Star = 0, Gas = 1, TerrestrialPlanet = 2, GasPlanet = 3, Moon = 4, Debris = 5 };
+	
+	struct FOrbit
+	{
+		FVector Center;        // Orbit center (usually star origin)
+		FVector Normal;        // Orbit plane normal
+		double SemiMajorAxis;    // Orbit size
+		double Eccentricity;     // 0-1, ellipse stretch
+		double Phase;            // Starting angle offset 0 - 2pi
+		EObjectType Type;
+	};
+	
+	double Extent;
+
 	static constexpr double DepthProb[7] = { 0.25,0.35,0.20,0.10,0.05,0.04,0.01 };
 
 	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
-	void GeneratePlanets();
-	void GenerateGas();
-	void GenerateDebris();
+	void GenerateOrbits();
+	void GeneratePlanet(FOrbit InPlanetOrbit);
+	void GenerateDebris(FOrbit InDebrisOrbit);
+	void GenerateUnboundDebris(); // should be used to generate low density background debris that does not follow the orbital plane or at least has a lesser relation to it
+	void GenerateGas();// Populate volumetric layer
 	int ChooseDepth(double InRandomSample, double InDepthBias);
 
+	TArray<FOrbit> GeneratedOrbits;
 	TArray<FPointData> GeneratedData;
 };
 

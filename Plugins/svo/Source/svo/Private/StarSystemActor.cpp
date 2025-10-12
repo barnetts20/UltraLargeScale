@@ -74,7 +74,7 @@ void AStarSystemActor::InitializeData() {
 	SystemGenerator.DepthRange = 7; //With seven levels, assuming our smallest star is say 1/2 the size of the sun, we can cover the vast majority of potential realistic star scales
 	SystemGenerator.InsertDepthOffset = 8; //Controlls the depth above max depth the smallest stars will be generated in
 	
-	SystemGenerator.Rotation = FRotator(Stream.FRandRange(-35, 35), Stream.FRandRange(-35, 35), Stream.FRandRange(-35, 35));
+	SystemGenerator.Rotation = FRotator(AxisRotation.X, AxisRotation.Y, AxisRotation.Z);
 	SystemGenerator.GeneratedData.SetNum(0);
 
 	//TODO: If we want a factory approach it would happen here to generate the base params
@@ -137,7 +137,7 @@ void AStarSystemActor::InitializeVolumetric()
 			VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
 
 			VolumeMaterial = UMaterialInstanceDynamic::Create(
-				LoadObject<UMaterialInterface>(nullptr, TEXT("/svo/Materials/RayMarchers/MT_GalaxyRaymarchPsuedoVolume_Inst.MT_GalaxyRaymarchPsuedoVolume_Inst")),
+				LoadObject<UMaterialInterface>(nullptr, *VolumeMaterialPath),
 				this
 			);
 
@@ -270,8 +270,8 @@ void AStarSystemActor::ApplyParallaxOffset()
 	//UE_LOG(LogTemp, Warning, TEXT("Player Position: %s"), *CurrentFrameOfReferenceLocation.ToString());
 	//UE_LOG(LogTemp, Warning, TEXT("Actor Position (before): %s"), *CurrentActorLocation.ToString());
 	//UE_LOG(LogTemp, Warning, TEXT("Actor Position (after): %s"), *NewActorLocation.ToString());
-	if(ELifecycleState::Ready == this->InitializationState)
-	UE_LOG(LogTemp, Warning, TEXT("Distance to Player: %f"), DistanceToPlayer);
+	//if(ELifecycleState::Ready == this->InitializationState)
+	//UE_LOG(LogTemp, Warning, TEXT("Distance to Player: %f"), DistanceToPlayer);
 	//UE_LOG(LogTemp, Warning, TEXT("UnitScale: %f"), UnitScale);
 	//UE_LOG(LogTemp, Warning, TEXT("ParallaxRatio: %f"), ParallaxRatio);
 	//UE_LOG(LogTemp, Warning, TEXT("PlayerOffset: %s"), *PlayerOffset.ToString());

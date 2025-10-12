@@ -23,7 +23,7 @@ public:
 
 	TSharedPtr<FOctree> Octree;
 	int Seed = 133780085;
-	int64 Extent = 2147483648;
+	int64 Extent = 549755813888; // roughly 2x the radius of the solar system in km
 	double UnitScale = 1.0;
 	double SpeedScale = 1.0;
 	ELifecycleState InitializationState = ELifecycleState::Uninitialized;
@@ -50,7 +50,7 @@ protected:
 	TArray<FVector> Positions;
 	TArray<float> Extents;
 	TArray<FLinearColor> Colors;
-	FString NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
+	FString NiagaraPath = FString("/svo/NG_StarSystemCloud.NG_StarSystemCloud");
 	
 	UPROPERTY()
 	UNiagaraSystem* PointCloudNiagara;
@@ -67,7 +67,7 @@ protected:
 	
 	UPROPERTY()
 	UMaterialInstanceDynamic* VolumeMaterial;
-
+	FString VolumeMaterialPath = FString("/svo/Materials/RayMarchers/MT_StarSystemRaymarchPseudoVolume_Inst.MT_StarSystemRaymarchPseudoVolume_Inst");
 	UPROPERTY()
 	UStaticMeshComponent* VolumetricComponent;
 	void InitializeVolumetric();

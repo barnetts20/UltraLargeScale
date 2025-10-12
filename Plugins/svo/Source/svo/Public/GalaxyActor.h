@@ -72,7 +72,7 @@ protected:
 	TArray<float> Extents;
 	TArray<FLinearColor> Colors;
 	FString NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
-	
+
 	UPROPERTY()
 	UNiagaraSystem* PointCloudNiagara;
 
@@ -88,7 +88,8 @@ protected:
 	
 	UPROPERTY()
 	UMaterialInstanceDynamic* VolumeMaterial;
-	
+	FString VolumetricMaterialPath = FString("/svo/Materials/RayMarchers/MT_GalaxyRaymarchPseudoVolume_Inst.MT_GalaxyRaymarchPseudoVolume_Inst");
+
 	UPROPERTY()
 	UStaticMeshComponent* VolumetricComponent;
 	
