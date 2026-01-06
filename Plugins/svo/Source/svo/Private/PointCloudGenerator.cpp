@@ -1782,9 +1782,14 @@ int UniverseGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
 void StarSystemGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {
 	//This needs to be much deeper but we need to get other stuff generating first
-	FPointData StarData(FInt64Vector::ZeroValue, 2, FVoxelData(1,1, FVector(SystemParams.StarColor.R, SystemParams.StarColor.G, SystemParams.StarColor.B) * 1000000000, 1, 1));
+	FPointData StarData(FInt64Vector::ZeroValue, 15, FVoxelData(1,1, FVector(SystemParams.StarColor.R, SystemParams.StarColor.G, SystemParams.StarColor.B) * 1000000000, 1, 1));
 	GeneratedData.Add(StarData);
 	Extent = InOctree->Extent;
+	
+	MinInsertionDepth = 1;
+	MaxInsertionDepth = InOctree->MaxDepth;
+
+	//I think we need depth ranges for debris, terrestrial planets, moons (could also be relative to the parent planet), and gas planets 
 
 	GenerateOrbits();
 	ParallelFor(GeneratedOrbits.Num(), [&](int32 i)
@@ -1832,7 +1837,7 @@ void StarSystemGenerator::GenerateOrbits()
 		// Center
 		Orbit.Center = FVector::ZeroVector;
 
-		// Orbit normal: small tilt from system plane
+		// SubOrbit normal: small tilt from system plane
 		double InclinationDeg = Stream.FRandRange(-MaxInclinationDegrees, MaxInclinationDegrees);
 		double InclinationRad = FMath::DegreesToRadians(InclinationDeg);
 
@@ -1870,27 +1875,64 @@ void StarSystemGenerator::GenerateOrbits()
 }
 
 void StarSystemGenerator::GeneratePlanet(FOrbit InPlanetOrbit) {
-	//2 types gas/terrestrial
-	//temperature should be derived from distance to star
-	//figure out good randomization bounds for scales based on distance from star
-	//substep to create moons
-	FPointData PlanetData;
-	PlanetData.SetPosition(FVector::ZeroVector);//TODO CALCULATE POS FROM ORBIT
-	PlanetData.Data.TypeId = InPlanetOrbit.Type;
+	FRandomStream Stream(Seed + 69);
 
-	int NumMoons = 3; //TODO RANDOMIZE, PROB PASS IN STREAM TO FUNCTION OR CREATE ONE BASED ON ORBIT
-	TArray<FOrbit> SubOrbits;
-	//TODO POPULATE SUB ORBITS FOR MOONS
+	double normDist = InPlanetOrbit.SemiMajorAxis / (Extent * 0.45); // normalized 0-1 distance from star
+	double scale = 0;
+	FVector composition;
+	if (InPlanetOrbit.Type == EObjectType::TerrestrialPlanet)
+	{
+		// inner planets → bigger
+		if (normDist < 0.35) scale = Stream.FRandRange(3000, 8000);
+		else scale = Stream.FRandRange(500, 4000);
+		composition = FVector(0, .5, 1); //Blue green for terrestrial planet for now
+	}
+	else if (InPlanetOrbit.Type == EObjectType::GasPlanet)
+	{
+		scale = Stream.FRandRange(10000, 70000); // normal gas giant size
+		composition = FVector(1, 0, .5); //Pinkish for gas giants for now
+	}
+	else {
+		return;
+	}
+
+	FPointData PlanetData = MakePointDataFromScale(scale); //Sets insertion depth and density
+	PlanetData.Data.TypeId = InPlanetOrbit.Type;
+	PlanetData.Data.Composition = composition;
+	PlanetData.SetPosition(GetOrbitPosition(InPlanetOrbit));	//Calculate position from orbit
 	
-	for (FOrbit Orbit : SubOrbits) {
-		FPointData MoonData;
-		MoonData.SetPosition(FVector::ZeroVector);//TODO: CALC FROMM ORBIT
-		MoonData.Data.TypeId = EObjectType::Moon;
-		//TODO:PROCEDURALIZE
-		//TODO:ALLOW DEBRIS RING/ARCS INSTEAD OF MOONS MAYBE AT LOW PROBABILITY
+	GeneratedData.Add(PlanetData);
+
+	int NumMoons = Stream.RandRange(0,4); //TODO RANDOMIZE, More complex determination based on planet type/size/sellar distance
+	TArray<FOrbit> SubOrbits;
+	for (int i = 0; i < NumMoons; i++) {
+		FOrbit SubOrbit;
+		SubOrbit.Center = PlanetData.GetPosition();
+		SubOrbit.SemiMajorAxis = Stream.FRandRange(2 * scale, 30 * scale);
+		SubOrbit.Eccentricity = Stream.FRandRange(0, .2);
+		SubOrbit.Normal = Stream.GetUnitVector();
+		SubOrbit.Phase = Stream.FRandRange(0, 2 * PI);
+		SubOrbit.Type = EObjectType::Moon;
+		if (Stream.FRand() < .2) SubOrbit.Type = EObjectType::Debris; // Chance for orbiting debris belts
+		SubOrbits.Add(SubOrbit);
+	}
+	
+	for (FOrbit SubOrbit : SubOrbits) {
+		if (SubOrbit.Type == EObjectType::Debris) {
+			GenerateDebris(SubOrbit);
+		}
+		else if (SubOrbit.Type == EObjectType::Moon) {
+			double moonScale = Stream.FRandRange(scale * .05, scale * .3);
+			FPointData MoonData = MakePointDataFromScale(moonScale);
+			MoonData.Data.TypeId = EObjectType::Moon;
+			MoonData.Data.Composition = FVector(1, 1, 1);
+			MoonData.SetPosition(GetOrbitPosition(SubOrbit));
+			GeneratedData.Add(MoonData);
+		}
 	}
 }
 
+//Needs sub parameters. Some way to define partial arcs, a count of debris objects to generate etc, jitter
 void StarSystemGenerator::GenerateDebris(FOrbit InDebrisOrbit) {
 	//Populates debris
 	//TODO: GENERATE DEBRIS RINGS/ARCS ROLL TO SEE IF IT WILL BE FULL OR PARTIAL RING, IF PARTIAL FIGURE OUT WHAT PORTION OF THE ORBIT IS COVERED
@@ -1905,12 +1947,55 @@ void StarSystemGenerator::GenerateGas() {
 	//TODO: Populate a gas layer for the solar system, do not necessarily need to add the the particle data output
 }
 
-int StarSystemGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
+FVector StarSystemGenerator::GetOrbitPosition(const FOrbit& Orbit) const
 {
-	//May need to be a bit more complex here, different planet/moon/object types will require different depths so this will be partially type dependant
-	return 0;
+	double a = Orbit.SemiMajorAxis;
+	double b = a * FMath::Sqrt(1.0 - Orbit.Eccentricity * Orbit.Eccentricity);
+
+	FVector UpRef = FVector::UpVector;
+	FVector OrbitRight = FVector::CrossProduct(Orbit.Normal, UpRef);
+	if (OrbitRight.IsNearlyZero())
+		OrbitRight = FVector::CrossProduct(Orbit.Normal, FVector::ForwardVector);
+	OrbitRight.Normalize();
+
+	FVector OrbitForward = FVector::CrossProduct(Orbit.Normal, OrbitRight).GetSafeNormal();
+
+	double theta = Orbit.Phase;
+	FVector Pos = Orbit.Center
+		+ OrbitRight * a * FMath::Cos(theta)
+		+ OrbitForward * b * FMath::Sin(theta);
+
+	return Pos;
 }
 
+FPointData StarSystemGenerator::MakePointDataFromScale(double InScaleKm)
+{
+	// Convert real scale to local octree units
+	double LocalSize = InScaleKm / UnitScale;
+
+	// Find depth where this should live
+	int Depth = 0;
+	int64 NodeExtent = Extent;
+	for (int d = 0; d <= MaxInsertionDepth; d++)
+	{
+		if (NodeExtent <= LocalSize)
+		{
+			Depth = FMath::Clamp(d, MinInsertionDepth, MaxInsertionDepth);
+			break;
+		}
+		NodeExtent >>= 1; // divide by 2
+	}
+
+	// Compute density from size fit
+	float Density = (LocalSize - NodeExtent) / NodeExtent;
+	Density = FMath::Clamp(Density, 0.01f, 1.0f);
+
+	FVoxelData Data;
+	Data.Density = Density;
+
+	FPointData PointData(FInt64Vector::ZeroValue, Depth, Data);
+	return PointData;
+}
 #pragma endregion
 
 #pragma region ExampleGenerators

@@ -308,16 +308,20 @@ public:
 	};
 	
 	double Extent;
+	double UnitScale;
 
-	static constexpr double DepthProb[7] = { 0.25,0.35,0.20,0.10,0.05,0.04,0.01 };
+	static constexpr double DepthProb[7] = { 0.25, 0.35, 0.20, 0.10, 0.05, 0.04, 0.01 };
 
 	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
 	void GenerateOrbits();
 	void GeneratePlanet(FOrbit InPlanetOrbit);
 	void GenerateDebris(FOrbit InDebrisOrbit);
 	void GenerateUnboundDebris(); // should be used to generate low density background debris that does not follow the orbital plane or at least has a lesser relation to it
-	void GenerateGas();// Populate volumetric layer
-	int ChooseDepth(double InRandomSample, double InDepthBias);
+	void GenerateGas();
+	FVector GetOrbitPosition(const FOrbit& Orbit) const;
+	// Populate volumetric layer
+
+	FPointData MakePointDataFromScale(double InScaleKm); //Convert a scale in KM into an Insertion Depth + Density - Perceived scale = Extent + Extent * Density
 
 	TArray<FOrbit> GeneratedOrbits;
 	TArray<FPointData> GeneratedData;
