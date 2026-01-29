@@ -85,8 +85,8 @@ void AGalaxyActor::InitializeData() {
 	
 	FRandomStream Stream(Seed);
 	GalaxyGenerator.Seed = Seed;
-	GalaxyGenerator.DepthRange = 7; //With seven levels, assuming our smallest star is say 1/2 the size of the sun, we can cover the vast majority of potential realistic star scales
-	GalaxyGenerator.InsertDepthOffset = 8; //Controlls the depth above max depth the smallest stars will be generated in
+	GalaxyGenerator.DepthRange = 10; //With seven levels, assuming our smallest star is say 1/2 the size of the sun, we can cover the vast majority of potential realistic star scales
+	GalaxyGenerator.InsertDepthOffset = 7; //Controlls the depth above max depth the smallest stars will be generated in
 	GalaxyGenerator.Rotation = FRotator(AxisRotation.X, AxisRotation.Y, AxisRotation.Z);
 	GalaxyGenerator.GeneratedData.SetNum(0);
 	
@@ -233,7 +233,7 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("Galaxy pool exhausted, consider increasing GalaxyPoolSize"));
+		UE_LOG(LogTemp, Warning, TEXT("Star System pool exhausted, consider increasing StarSystemPoolSize"));
 		return;
 	}
 
@@ -369,9 +369,50 @@ void AGalaxyActor::ApplyParallaxOffset()
 	FVector ParallaxOffset = PlayerOffset * (1.0 - ParallaxRatio);
 	SetActorLocation(GetActorLocation() + ParallaxOffset);
 }
+void AGalaxyActor::DrawDebugBounds()
+{
+	// Draw debug box for the octree root node
+	if (Octree.IsValid() && InitializationState == ELifecycleState::Ready)
+	{
+		if (UWorld* World = GetWorld())
+		{
+			FVector ActorLocation = GetActorLocation();
 
+			// Convert octree extent to world scale
+			// WorldExtent = OctreeExtent * UnitScale
+			double WorldExtent = Octree->Extent;
+
+			FVector BoxExtent(WorldExtent, WorldExtent, WorldExtent);
+
+			// Draw the box centered at the actor location
+			DrawDebugBox(
+				World,
+				ActorLocation,
+				BoxExtent,
+				FColor::Green,
+				false,
+				-1.0f,
+				0,
+				WorldExtent * 0.005f  // Thickness relative to world extent
+			);
+
+			// Draw coordinate axes at the center
+			DrawDebugCoordinateSystem(
+				World,
+				ActorLocation,
+				FRotator::ZeroRotator,
+				WorldExtent * 0.1f,
+				false,
+				-1.0f,
+				0,
+				WorldExtent * 0.001f
+			);
+		}
+	}
+}
 void AGalaxyActor::Tick(float DeltaTime)
 {
 	ApplyParallaxOffset();
+	if(IsDebug) DrawDebugBounds();
 }
 #pragma endregion

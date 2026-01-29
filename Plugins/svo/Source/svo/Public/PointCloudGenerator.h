@@ -214,14 +214,17 @@ public:
 	TArray<FPointData> GeneratedData;
 	
 	// depth probabilities for depths 0..6 (sum = 1.0)
-	static constexpr double DepthProb[7] = {
-		0.7246688105348869,
-		0.18633259810092362,
-		0.060410870884541834,
-		0.019585801723497227,
-		0.006349910596145782,
-		0.0020587038073948565,
-		0.0005933043526099457
+	static constexpr double DepthProb[10] = {
+		0.25,               // 0.5×  ultra-small stars
+		0.5,				// 1×    small main-sequence
+		0.1875,             // 2×
+		0.046875,           // 4×
+		0.01171875,         // 8×
+		0.0029296875,       // 16×
+		0.000732421875,     // 32×
+		0.00018310546875,   // 64×
+		0.0000457763671875,	// 128×
+		0.000011444091796875// 256×
 	};
 
 	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
@@ -261,7 +264,18 @@ public:
 
 	UniverseParams UniverseParams;
 	// depth probabilities for depths 0..6 (sum = 1.0)
-	static constexpr double DepthProb[7] = {0.25,0.35,0.20,0.10,0.05,0.04,0.01};
+	static constexpr double DepthProb[10] = {
+		0.05,	// ultra-faint dwarfs
+		0.1,	// dwarfs
+		0.17,   // large dwarfs
+		0.22,   // small
+		0.33,   // Milky-Way scale
+		0.08,   // large
+		0.05,   // giant
+		0.015,  // BCGs
+		0.01,   // extreme cD
+		0.005   // near-unique monsters
+	};
 
 	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
 	void GenerateCluster(int InSeed, FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity = 1, double InDepthBias = 1);
@@ -295,7 +309,7 @@ public:
 	StarSystemGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
 
 	StarSystemParams SystemParams;
-	enum EObjectType { Star = 0, Gas = 1, TerrestrialPlanet = 2, GasPlanet = 3, Moon = 4, Debris = 5 };
+	enum EObjectType { Star = 0, Gas = 1, TerrestrialPlanet = 2, GasPlanet = 3, Moon = 4, Debris = 5, None = 6 };
 	
 	struct FOrbit
 	{
@@ -310,12 +324,23 @@ public:
 	double Extent;
 	double UnitScale;
 
-	static constexpr double DepthProb[7] = { 0.25, 0.35, 0.20, 0.10, 0.05, 0.04, 0.01 };
+	static constexpr double DepthProb[10] = {
+		0.12,  // moonlets / large asteroids
+		0.15,  // large moons
+		0.18,  // Mars–Mercury class
+		0.20,  // Earth-sized (peak)
+		0.14,  // Super-Earths
+		0.09,  // Sub-Neptunes
+		0.06,  // Neptune-class
+		0.03,  // Saturn-class
+		0.02,  // Jupiter-class
+		0.01   // Super-Jupiters
+	};
 
 	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
 	void GenerateOrbits();
-	void GeneratePlanet(FOrbit InPlanetOrbit);
-	void GenerateDebris(FOrbit InDebrisOrbit);
+	void GeneratePlanet(const FOrbit& InPlanetOrbit, int32 InOrbitIndex);
+	void GenerateDebris(const FOrbit& InDebrisOrbit, int32 InOrbitIndex);
 	void GenerateUnboundDebris(); // should be used to generate low density background debris that does not follow the orbital plane or at least has a lesser relation to it
 	void GenerateGas();
 	FVector GetOrbitPosition(const FOrbit& Orbit) const;

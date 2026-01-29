@@ -19,9 +19,10 @@ public:
 
 #pragma region Public Parameters
 	UPROPERTY()
+	//May be worthwile to hold pointer to the universe here as well
 	AGalaxyActor* Galaxy;
-
 	TSharedPtr<FOctree> Octree;
+	bool IsDebug = true;
 	int Seed = 133780085;
 	int64 Extent = 549755813888; // roughly 2x the radius of the solar system in km
 	double UnitScale = 1.0;
@@ -77,6 +78,7 @@ protected:
 	FVector LastFrameOfReferenceLocation = FVector(0, 0, 0);
 	FVector CurrentFrameOfReferenceLocation;
 	void ApplyParallaxOffset();
+	void DrawDebugBounds();
 	virtual void Tick(float DeltaTime) override;
 #pragma endregion
 

@@ -35,6 +35,7 @@ public:
 	#pragma endregion
 
 	#pragma region Public Parameters
+	bool IsDebug = true;
 	int64 Extent = 2147483648;
 	ELifecycleState InitializationState = ELifecycleState::Initializing;
 	TSharedPtr<FOctree> Octree;
@@ -77,13 +78,13 @@ protected:
 	TArray<AGalaxyActor*> GalaxyPool;
 
 	void InitializeGalaxyPool();
-	void SampleGalaxies();
 	#pragma endregion
 
 	#pragma region Parallax
 	FVector LastFrameOfReferenceLocation;
 	FVector CurrentFrameOfReferenceLocation;
 	void ApplyParallaxOffset();
+	void DrawDebugBounds();
 	#pragma endregion
 
 	#pragma region Overrides

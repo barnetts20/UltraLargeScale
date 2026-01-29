@@ -85,8 +85,8 @@ void AUniverseActor::InitializeData() {
 	//TODO: Proceduralize universe generator params / make a factory
 	UniverseGenerator.UniverseParams = UniverseParams;
 	UniverseGenerator.Rotation = FRotator(0);
-	UniverseGenerator.DepthRange = 7; 
-	UniverseGenerator.InsertDepthOffset = 5;
+	UniverseGenerator.DepthRange = 10; 
+	UniverseGenerator.InsertDepthOffset = 4;
 	UniverseGenerator.GenerateData(Octree);
 
 	TArray<TSharedPtr<FOctreeNode>> VolumeNodes;
@@ -221,7 +221,7 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	// Compute correct parallax ratios and spawn location
 	const double GalaxyParallaxRatio = (SpeedScale / Galaxy->UnitScale);
 	const double UniverseParallaxRatio = (SpeedScale / UnitScale);
-	FVector NodeWorldPosition = FVector(InNode->Center.X, InNode->Center.Y, InNode->Center.Z) + GetActorLocation();
+	FVector NodeWorldPosition = FVector(InNode->Center) + GetActorLocation();
 	FVector PlayerToNode = CurrentFrameOfReferenceLocation - NodeWorldPosition;
 	FVector GalaxySpawnPosition = CurrentFrameOfReferenceLocation - PlayerToNode * (GalaxyParallaxRatio / UniverseParallaxRatio);
 	Galaxy->SetActorLocation(GalaxySpawnPosition);
@@ -311,9 +311,50 @@ void AUniverseActor::ApplyParallaxOffset()
 	FVector ParallaxOffset = PlayerOffset * (1.0 - ParallaxRatio);
 	SetActorLocation(GetActorLocation() + ParallaxOffset);
 }
+void AUniverseActor::DrawDebugBounds()
+{
+	// Draw debug box for the octree root node
+	if (Octree.IsValid() && InitializationState == ELifecycleState::Ready)
+	{
+		if (UWorld* World = GetWorld())
+		{
+			FVector ActorLocation = GetActorLocation();
 
+			// Convert octree extent to world scale
+			// WorldExtent = OctreeExtent * UnitScale
+			double WorldExtent = Octree->Extent;
+
+			FVector BoxExtent(WorldExtent, WorldExtent, WorldExtent);
+
+			// Draw the box centered at the actor location
+			DrawDebugBox(
+				World,
+				ActorLocation,
+				BoxExtent,
+				FColor::Green,
+				false,
+				-1.0f,
+				0,
+				WorldExtent * 0.005f  // Thickness relative to world extent
+			);
+
+			// Draw coordinate axes at the center
+			DrawDebugCoordinateSystem(
+				World,
+				ActorLocation,
+				FRotator::ZeroRotator,
+				WorldExtent * 0.1f,
+				false,
+				-1.0f,
+				0,
+				WorldExtent * 0.001f
+			);
+		}
+	}
+}
 void AUniverseActor::Tick(float DeltaTime)
 {
 	ApplyParallaxOffset();
+	if(IsDebug) DrawDebugBounds();
 }
 #pragma endregion

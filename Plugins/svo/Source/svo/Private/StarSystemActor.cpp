@@ -59,7 +59,7 @@ void AStarSystemActor::Initialize()
 			InitializationState = ELifecycleState::Ready;
 
 			double TotalDuration = FPlatformTime::Seconds() - StartTime;
-			UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Initialize total duration: %.3f seconds"), TotalDuration);
+			UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::Initialize total duration: %.3f seconds"), TotalDuration);
 		});
 }
 
@@ -85,7 +85,7 @@ void AStarSystemActor::InitializeData() {
 
 	double GenFinish = FPlatformTime::Seconds();
 	double GenDuration = GenFinish - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Data Generation took: %.3f seconds"), GenDuration);
+	UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::Data Generation took: %.3f seconds"), GenDuration);
 
 	if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
 
@@ -95,7 +95,7 @@ void AStarSystemActor::InitializeData() {
 
 	double InsertFinish = FPlatformTime::Seconds();
 	GenDuration = InsertFinish - GenFinish;
-	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Bulk Insert took: %.3f seconds"), GenDuration);
+	UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::Bulk Insert took: %.3f seconds"), GenDuration);
 
 	if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
 
@@ -115,10 +115,10 @@ void AStarSystemActor::InitializeData() {
 
 	double RemapFinish = FPlatformTime::Seconds();
 	GenDuration = RemapFinish - InsertFinish;
-	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Data Remap took: %.3f seconds"), GenDuration);
+	UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::Data Remap took: %.3f seconds"), GenDuration);
 
 	GenDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeData took: %.3f seconds"), GenDuration);
+	UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::InitializeData took: %.3f seconds"), GenDuration);
 }
 
 void AStarSystemActor::InitializeVolumetric()
@@ -163,7 +163,7 @@ void AStarSystemActor::InitializeVolumetric()
 	CompletionFuture.Wait();
 
 	double VolumetricDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Volumetric initialization took: %.3f seconds"), VolumetricDuration);
+	UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::Volumetric initialization took: %.3f seconds"), VolumetricDuration);
 }
 
 void AStarSystemActor::InitializeNiagara()
@@ -202,7 +202,7 @@ void AStarSystemActor::InitializeNiagara()
 	CompletionFuture.Wait();
 
 	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeNiagara total duration: %.3f seconds"), TotalDuration);
+	UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::InitializeNiagara total duration: %.3f seconds"), TotalDuration);
 }
 #pragma endregion
 
@@ -230,7 +230,7 @@ void AStarSystemActor::ResetForPool() {
 	}
 
 	double Duration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::ResetForPool took: %.3f seconds"), Duration);
+	UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::ResetForPool took: %.3f seconds"), Duration);
 }
 #pragma endregion
 
@@ -278,8 +278,50 @@ void AStarSystemActor::ApplyParallaxOffset()
 	//UE_LOG(LogTemp, Warning, TEXT("ParallaxOffset: %s"), *ParallaxOffset.ToString());
 }
 
+void AStarSystemActor::DrawDebugBounds()
+{
+	// Draw debug box for the octree root node
+	if (Octree.IsValid() && InitializationState == ELifecycleState::Ready)
+	{
+		if (UWorld* World = GetWorld())
+		{
+			FVector ActorLocation = GetActorLocation();
+
+			// Convert octree extent to world scale
+			// WorldExtent = OctreeExtent * UnitScale
+			double WorldExtent = Octree->Extent;
+
+			FVector BoxExtent(WorldExtent, WorldExtent, WorldExtent);
+
+			// Draw the box centered at the actor location
+			DrawDebugBox(
+				World,
+				ActorLocation,
+				BoxExtent,
+				FColor::Green,
+				false,
+				-1.0f,
+				0,
+				WorldExtent * 0.005f  // Thickness relative to world extent
+			);
+
+			// Draw coordinate axes at the center
+			DrawDebugCoordinateSystem(
+				World,
+				ActorLocation,
+				FRotator::ZeroRotator,
+				WorldExtent * 0.1f,
+				false,
+				-1.0f,
+				0,
+				WorldExtent * 0.001f
+			);
+		}
+	}
+}
 void AStarSystemActor::Tick(float DeltaTime)
 {
 	ApplyParallaxOffset();
+	if(IsDebug) DrawDebugBounds();
 }
 #pragma endregion

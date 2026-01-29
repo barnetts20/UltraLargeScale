@@ -30,6 +30,7 @@ public:
 	AUniverseActor* Universe;
 
 	TSharedPtr<FOctree> Octree;
+	bool IsDebug = true;
 	int Seed = 133780085;
 	int64 Extent = 2147483648;
 	double UnitScale = 100.0;
@@ -100,6 +101,7 @@ protected:
 	FVector LastFrameOfReferenceLocation = FVector(0, 0, 0);
 	FVector CurrentFrameOfReferenceLocation;
 	void ApplyParallaxOffset();
+	void DrawDebugBounds();
 	virtual void Tick(float DeltaTime) override;
 	#pragma endregion
 };

@@ -1658,8 +1658,8 @@ int GalaxyGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
 {
 	double biasedSample = FMath::Clamp(FMath::Pow(InRandomSample, InDepthBias),0,1);
 	double cumulative = 0.0;
-	int chosenDepth = 6;
-	for (int d = 0; d < 7; ++d)
+	int chosenDepth = 9;
+	for (int d = 0; d < 10; ++d)
 	{
 		cumulative += DepthProb[d];
 		if (biasedSample <= cumulative)
@@ -1763,8 +1763,8 @@ int UniverseGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
 {
 	double biasedSample = FMath::Clamp(FMath::Pow(InRandomSample, InDepthBias), 0, 1);
 	double cumulative = 0.0;
-	int chosenDepth = 6;
-	for (int d = 0; d < 7; ++d)
+	int chosenDepth = 9;
+	for (int d = 0; d < 10; ++d)
 	{
 		cumulative += DepthProb[d];
 		if (biasedSample <= cumulative)
@@ -1781,36 +1781,35 @@ int UniverseGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
 #pragma region Star System Generator
 void StarSystemGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {
-	//This needs to be much deeper but we need to get other stuff generating first
-	FPointData StarData(FInt64Vector::ZeroValue, 15, FVoxelData(1,1, FVector(SystemParams.StarColor.R, SystemParams.StarColor.G, SystemParams.StarColor.B) * 1000000000, 1, 1));
+	// Star at center with massive scale
+	FPointData StarData(FInt64Vector::ZeroValue, 15,
+		FVoxelData(1, 1, FVector(SystemParams.StarColor.R, SystemParams.StarColor.G, SystemParams.StarColor.B) * 1000000000, 1, 1));
 	GeneratedData.Add(StarData);
 	Extent = InOctree->Extent;
-	
+
 	MinInsertionDepth = 1;
 	MaxInsertionDepth = InOctree->MaxDepth;
 
-	//I think we need depth ranges for debris, terrestrial planets, moons (could also be relative to the parent planet), and gas planets 
-
 	GenerateOrbits();
-	ParallelFor(GeneratedOrbits.Num(), [&](int32 i)
-	{
-		FRandomStream Stream(Seed + i);
 
+	// Process each orbit with unique seed
+	for (int32 i = 0; i < GeneratedOrbits.Num(); i++)
+	{
+		FRandomStream Stream(Seed + i * 1000); // Unique seed per orbit
 		const FOrbit& Orbit = GeneratedOrbits[i];
 
 		switch (Orbit.Type)
 		{
-			case EObjectType::TerrestrialPlanet:
-			case EObjectType::GasPlanet:
-				GeneratePlanet(Orbit);
-				break;
-			case EObjectType::Debris:
-				GenerateDebris(Orbit);
-				break;
+		case EObjectType::TerrestrialPlanet:
+		case EObjectType::GasPlanet:
+			GeneratePlanet(Orbit, i);
+			break;
+		case EObjectType::Debris:
+			GenerateDebris(Orbit, i);
+			break;
 		}
-	});
+	}
 
-	//TODO: generate random non orbit debris
 	GenerateUnboundDebris();
 	GenerateGas();
 }
@@ -1823,135 +1822,325 @@ void StarSystemGenerator::GenerateOrbits()
 	GeneratedOrbits.SetNumZeroed(NumOrbits);
 
 	FVector SystemUp = Rotation.RotateVector(FVector::UpVector);
-	double CurrentRadius = Extent * 0.01;
-	double GrowthFactor = Stream.FRandRange(1.15, 1.35);
-	double MaxInclinationDegrees = 25.0;
 
-	// Frost line index: inner orbits mostly rocky, outer orbits gas/ice
-	int32 FrostLineIndex = FMath::Clamp(int32(NumOrbits * 0.35), 1, NumOrbits - 1);
+	// Start orbits at reasonable distance from star (not too close)
+	double StarRadius = Extent * 0.005; // Estimate star size
+	double CurrentRadius = StarRadius * 10.0; // First orbit well clear of star
+	double GrowthFactor = Stream.FRandRange(1.4, 4); // Increased spacing
+	double MaxInclinationDegrees = 45.0; // Reduced for more planar system
+
+	int32 FrostLineIndex = FMath::Clamp(int32(NumOrbits * 0.4), 2, NumOrbits - 2);
 
 	for (int32 i = 0; i < NumOrbits; i++)
 	{
 		FOrbit& Orbit = GeneratedOrbits[i];
-
-		// Center
 		Orbit.Center = FVector::ZeroVector;
 
-		// SubOrbit normal: small tilt from system plane
+		// Orbital inclination with bias toward planar
 		double InclinationDeg = Stream.FRandRange(-MaxInclinationDegrees, MaxInclinationDegrees);
 		double InclinationRad = FMath::DegreesToRadians(InclinationDeg);
 
-		FVector TiltAxis = FVector::CrossProduct(SystemUp, FVector(Stream.FRandRange(-1, 1), Stream.FRandRange(-1, 1), 0)).GetSafeNormal();
-		if (TiltAxis.IsNearlyZero()) TiltAxis = Rotation.RotateVector(FVector::RightVector);
+		FVector TiltAxis = FVector::CrossProduct(SystemUp,
+			FVector(Stream.FRandRange(-1, 1), Stream.FRandRange(-1, 1), 0)).GetSafeNormal();
+		if (TiltAxis.IsNearlyZero())
+			TiltAxis = Rotation.RotateVector(FVector::RightVector);
 
 		FQuat TiltRotation(TiltAxis, InclinationRad);
 		Orbit.Normal = TiltRotation.RotateVector(SystemUp).GetSafeNormal();
 
-		// SemiMajorAxis
+		// Set semi-major axis with proper spacing
 		Orbit.SemiMajorAxis = CurrentRadius;
-		CurrentRadius = FMath::Min(CurrentRadius * GrowthFactor, Extent * 0.75); // this should probably be derived somehow from the parent scale but for now we can hardcode
 
-		// Eccentricity & phase
-		Orbit.Eccentricity = FMath::Pow(Stream.FRand(), 3.0) * 0.4;
+		// Grow radius for next orbit
+		double GrowthMultiplier = GrowthFactor * Stream.FRandRange(0.9, 1.1);
+		CurrentRadius = FMath::Min(CurrentRadius * GrowthMultiplier, Extent * 0.65);
+
+		// Low eccentricity for stability
+		Orbit.Eccentricity = FMath::Pow(Stream.FRand(), 3.0) * 0.3;
 		Orbit.Phase = Stream.FRandRange(0.0, 2.0 * PI);
 
-		// --- OBJECT TYPE ASSIGNMENT ---
+		// Object type assignment
 		double p = Stream.FRand();
 
 		if (i < FrostLineIndex)
 		{
-			// Inner orbits mostly rocky or empty
-			if (p < 0.6) Orbit.Type = EObjectType::TerrestrialPlanet;
-			else Orbit.Type = EObjectType::Debris;
+			// Inner system: rocky planets and asteroid belts
+			if (p < 0.5)
+				Orbit.Type = EObjectType::TerrestrialPlanet;
+			else if (p < 0.85)
+				Orbit.Type = EObjectType::Debris;
+			else
+				Orbit.Type = EObjectType::None; // Empty orbit
 		}
 		else
 		{
-			// Outer orbits gas giants / ice / belts
-			if (p < 0.3) Orbit.Type = EObjectType::GasPlanet;
-			else if (p < 0.6) Orbit.Type = EObjectType::TerrestrialPlanet;
-			else Orbit.Type = EObjectType::Debris;
+			// Outer system: gas giants, ice worlds, Kuiper belt
+			if (p < 0.25)
+				Orbit.Type = EObjectType::GasPlanet;
+			else if (p < 0.45)
+				Orbit.Type = EObjectType::TerrestrialPlanet; // Ice worlds
+			else if (p < 0.80)
+				Orbit.Type = EObjectType::Debris;
+			else
+				Orbit.Type = EObjectType::None;
 		}
 	}
 }
 
-void StarSystemGenerator::GeneratePlanet(FOrbit InPlanetOrbit) {
-	FRandomStream Stream(Seed + 69);
+void StarSystemGenerator::GeneratePlanet(const FOrbit& InPlanetOrbit, int32 OrbitIndex)
+{
+	FRandomStream Stream(Seed + OrbitIndex * 1000 + 100);
 
-	double normDist = InPlanetOrbit.SemiMajorAxis / (Extent * 0.45); // normalized 0-1 distance from star
+	double normDist = InPlanetOrbit.SemiMajorAxis / (Extent * 0.65);
 	double scale = 0;
 	FVector composition;
+
 	if (InPlanetOrbit.Type == EObjectType::TerrestrialPlanet)
 	{
-		// inner planets → bigger
-		if (normDist < 0.35) scale = Stream.FRandRange(3000, 8000);
-		else scale = Stream.FRandRange(500, 4000);
-		composition = FVector(0, .5, 1); //Blue green for terrestrial planet for now
+		// Distance-based sizing: inner planets can be larger (Venus/Earth-like)
+		if (normDist < 0.3)
+			scale = Stream.FRandRange(4000, 12000); // Mercury to Earth
+		else if (normDist < 0.6)
+			scale = Stream.FRandRange(3000, 7000); // Mars-like
+		else
+			scale = Stream.FRandRange(1500, 5000); // Icy dwarfs
+
+		// Color variation for terrestrial
+		composition = FVector(
+			Stream.FRandRange(0.0, 0.3),
+			Stream.FRandRange(0.4, 0.7),
+			Stream.FRandRange(0.6, 1.0)
+		);
 	}
 	else if (InPlanetOrbit.Type == EObjectType::GasPlanet)
 	{
-		scale = Stream.FRandRange(10000, 70000); // normal gas giant size
-		composition = FVector(1, 0, .5); //Pinkish for gas giants for now
+		// Gas giants larger in middle/outer system
+		if (normDist < 0.4)
+			scale = Stream.FRandRange(40000, 100000); // Jupiter-like
+		else
+			scale = Stream.FRandRange(20000, 60000); // Neptune-like
+
+		// Color variation for gas giants
+		float hue = Stream.FRand();
+		if (hue < 0.3)
+			composition = FVector(1, 0.8, 0.6); // Jupiter browns/oranges
+		else if (hue < 0.6)
+			composition = FVector(0.9, 0.9, 0.7); // Saturn yellows
+		else
+			composition = FVector(0.6, 0.8, 1.0); // Neptune blues
 	}
-	else {
+	else
+	{
 		return;
 	}
 
-	FPointData PlanetData = MakePointDataFromScale(scale); //Sets insertion depth and density
+	FPointData PlanetData = MakePointDataFromScale(scale);
 	PlanetData.Data.TypeId = InPlanetOrbit.Type;
 	PlanetData.Data.Composition = composition;
-	PlanetData.SetPosition(GetOrbitPosition(InPlanetOrbit));	//Calculate position from orbit
-	
+	PlanetData.SetPosition(GetOrbitPosition(InPlanetOrbit));
+
 	GeneratedData.Add(PlanetData);
 
-	int NumMoons = Stream.RandRange(0,4); //TODO RANDOMIZE, More complex determination based on planet type/size/sellar distance
-	TArray<FOrbit> SubOrbits;
-	for (int i = 0; i < NumMoons; i++) {
+	// Moon generation based on planet type and size
+	int NumMoons = 0;
+	if (InPlanetOrbit.Type == EObjectType::GasPlanet)
+	{
+		NumMoons = Stream.RandRange(2, 12); // Gas giants have many moons
+	}
+	else if (scale > 6000)
+	{
+		NumMoons = Stream.RandRange(0, 3); // Large terrestrials
+	}
+	else if (Stream.FRand() < 0.3)
+	{
+		NumMoons = Stream.RandRange(0, 1); // Small chance for small planets
+	}
+
+	// Generate moons
+	for (int i = 0; i < NumMoons; i++)
+	{
 		FOrbit SubOrbit;
 		SubOrbit.Center = PlanetData.GetPosition();
-		SubOrbit.SemiMajorAxis = Stream.FRandRange(2 * scale, 30 * scale);
-		SubOrbit.Eccentricity = Stream.FRandRange(0, .2);
+
+		// Moon orbits at multiples of planet radius (Hill sphere consideration)
+		double minDistance = scale * 2.5;
+		double maxDistance = scale * Stream.FRandRange(15, 50);
+		SubOrbit.SemiMajorAxis = Stream.FRandRange(minDistance, maxDistance);
+
+		SubOrbit.Eccentricity = Stream.FRandRange(0, 0.15);
 		SubOrbit.Normal = Stream.GetUnitVector();
 		SubOrbit.Phase = Stream.FRandRange(0, 2 * PI);
-		SubOrbit.Type = EObjectType::Moon;
-		if (Stream.FRand() < .2) SubOrbit.Type = EObjectType::Debris; // Chance for orbiting debris belts
-		SubOrbits.Add(SubOrbit);
-	}
-	
-	for (FOrbit SubOrbit : SubOrbits) {
-		if (SubOrbit.Type == EObjectType::Debris) {
-			GenerateDebris(SubOrbit);
+
+		// 10% chance for debris ring instead of moon
+		if (Stream.FRand() < 0.1)
+		{
+			SubOrbit.Type = EObjectType::Debris;
+			GenerateDebris(SubOrbit, OrbitIndex * 100 + i);
 		}
-		else if (SubOrbit.Type == EObjectType::Moon) {
-			double moonScale = Stream.FRandRange(scale * .05, scale * .3);
+		else
+		{
+			// Moon size scales with planet
+			double moonScale = Stream.FRandRange(scale * 0.05, scale * 0.35);
 			FPointData MoonData = MakePointDataFromScale(moonScale);
 			MoonData.Data.TypeId = EObjectType::Moon;
-			MoonData.Data.Composition = FVector(1, 1, 1);
+
+			// Gray/brown moons with variation
+			MoonData.Data.Composition = FVector(
+				Stream.FRandRange(0.4, 0.7),
+				Stream.FRandRange(0.4, 0.7),
+				Stream.FRandRange(0.4, 0.7)
+			);
+
 			MoonData.SetPosition(GetOrbitPosition(SubOrbit));
 			GeneratedData.Add(MoonData);
 		}
 	}
 }
 
-//Needs sub parameters. Some way to define partial arcs, a count of debris objects to generate etc, jitter
-void StarSystemGenerator::GenerateDebris(FOrbit InDebrisOrbit) {
-	//Populates debris
-	//TODO: GENERATE DEBRIS RINGS/ARCS ROLL TO SEE IF IT WILL BE FULL OR PARTIAL RING, IF PARTIAL FIGURE OUT WHAT PORTION OF THE ORBIT IS COVERED
+void StarSystemGenerator::GenerateDebris(const FOrbit& InDebrisOrbit, int32 OrbitIndex)
+{
+	FRandomStream Stream(Seed + OrbitIndex * 1000 + 500);
+
+	// Determine debris belt characteristics
+	bool isFullRing = Stream.FRand() < 0.7; // 70% full rings, 30% arcs
+	double arcStartPhase = Stream.FRandRange(0, 2 * PI);
+	double arcLength = isFullRing ? 2 * PI : Stream.FRandRange(PI * 0.3, PI * 1.5);
+
+	// Number of debris objects based on orbit size
+	double orbitCircumference = 2 * PI * InDebrisOrbit.SemiMajorAxis;
+	int32 BaseCount = FMath::RoundToInt(orbitCircumference / (Extent * 0.01));
+	int32 DebrisCount = Stream.RandRange(
+		FMath::Max(50, BaseCount / 2),
+		FMath::Max(200, BaseCount * 2)
+	);
+
+	// Belt thickness as fraction of orbital radius
+	double radialThickness = InDebrisOrbit.SemiMajorAxis * Stream.FRandRange(0.05, 0.15);
+	double verticalThickness = radialThickness * Stream.FRandRange(0.1, 0.3);
+
+	for (int32 i = 0; i < DebrisCount; i++)
+	{
+		// Distribute along arc
+		double phaseOffset;
+		if (isFullRing)
+		{
+			phaseOffset = Stream.FRandRange(0, 2 * PI);
+		}
+		else
+		{
+			phaseOffset = arcStartPhase + Stream.FRandRange(0, arcLength);
+		}
+
+		// Create perturbed orbit for this debris piece
+		FOrbit DebrisOrbit = InDebrisOrbit;
+		DebrisOrbit.Phase = phaseOffset;
+
+		// Add radial variation
+		DebrisOrbit.SemiMajorAxis += Stream.FRandRange(-radialThickness, radialThickness);
+		DebrisOrbit.Eccentricity += Stream.FRandRange(-0.05, 0.05);
+		DebrisOrbit.Eccentricity = FMath::Clamp(DebrisOrbit.Eccentricity, 0.0, 0.5);
+
+		// Get base position on orbit
+		FVector BasePos = GetOrbitPosition(DebrisOrbit);
+
+		// Add vertical scatter perpendicular to orbital plane
+		FVector VerticalOffset = DebrisOrbit.Normal * Stream.FRandRange(-verticalThickness, verticalThickness);
+		FVector FinalPos = BasePos + VerticalOffset;
+
+		// Debris size variation
+		double debrisScale = Stream.FRandRange(10, 500); // 10km to 500km asteroids
+		if (Stream.FRand() < 0.05) // 5% chance of larger object
+			debrisScale = Stream.FRandRange(500, 2000);
+
+		FPointData DebrisData = MakePointDataFromScale(debrisScale);
+		DebrisData.Data.TypeId = EObjectType::Debris;
+
+		// Rocky/icy composition
+		DebrisData.Data.Composition = FVector(
+			Stream.FRandRange(0.3, 0.6),
+			Stream.FRandRange(0.3, 0.5),
+			Stream.FRandRange(0.3, 0.5)
+		);
+
+		DebrisData.SetPosition(FinalPos);
+		GeneratedData.Add(DebrisData);
+	}
 }
 
 void StarSystemGenerator::GenerateUnboundDebris()
 {
-	//TODO: GENERATE MORE RANDOMLY DISTRIBUTED DEBRIS
+	FRandomStream Stream(Seed + 9999);
+
+	// Sparse debris field throughout system
+	int32 UnboundCount = Stream.RandRange(100, 500);
+
+	for (int32 i = 0; i < UnboundCount; i++)
+	{
+		// Random position within system bounds (favor outer regions)
+		double r = FMath::Pow(Stream.FRand(), 0.5) * Extent * 0.7; // Square root for volume distribution
+		double theta = Stream.FRandRange(0, 2 * PI);
+		double phi = Stream.FRandRange(0, PI);
+
+		FVector Pos(
+			r * FMath::Sin(phi) * FMath::Cos(theta),
+			r * FMath::Sin(phi) * FMath::Sin(theta),
+			r * FMath::Cos(phi)
+		);
+
+		// Small debris objects
+		double debrisScale = Stream.FRandRange(5, 200);
+
+		FPointData DebrisData = MakePointDataFromScale(debrisScale);
+		DebrisData.Data.TypeId = EObjectType::Debris;
+		DebrisData.Data.Composition = FVector(0.4, 0.4, 0.4);
+		DebrisData.SetPosition(Pos);
+
+		GeneratedData.Add(DebrisData);
+	}
 }
 
-void StarSystemGenerator::GenerateGas() {
-	//TODO: Populate a gas layer for the solar system, do not necessarily need to add the the particle data output
+void StarSystemGenerator::GenerateGas()
+{
+	// Generate nebulous gas layer for stellar system
+	// This could be represented as low-density points or a separate gas field
+	FRandomStream Stream(Seed + 7777);
+
+	int32 GasParticleCount = Stream.RandRange(50, 200);
+
+	for (int32 i = 0; i < GasParticleCount; i++)
+	{
+		// Distribute throughout system with concentration toward plane
+		double r = FMath::Pow(Stream.FRand(), 0.3) * Extent * 0.8;
+		double theta = Stream.FRandRange(0, 2 * PI);
+
+		// Flatten to disk using exponential distribution
+		double z = Stream.FRandRange(-1, 1);
+		z = FMath::Sign(z) * FMath::Pow(FMath::Abs(z), 2.0) * Extent * 0.1;
+
+		FVector Pos(
+			r * FMath::Cos(theta),
+			r * FMath::Sin(theta),
+			z
+		);
+
+		// Very large, very low density gas clouds
+		FPointData GasData = MakePointDataFromScale(Stream.FRandRange(5000, 20000));
+		GasData.Data.Density = Stream.FRandRange(0.001, 0.01); // Very diffuse
+		GasData.Data.TypeId = EObjectType::Gas;
+		GasData.Data.Composition = FVector(0.1, 0.1, 0.15); // Faint blue
+		GasData.SetPosition(Pos);
+
+		GeneratedData.Add(GasData);
+	}
 }
 
 FVector StarSystemGenerator::GetOrbitPosition(const FOrbit& Orbit) const
 {
 	double a = Orbit.SemiMajorAxis;
-	double b = a * FMath::Sqrt(1.0 - Orbit.Eccentricity * Orbit.Eccentricity);
+	double e = Orbit.Eccentricity;
+	double b = a * FMath::Sqrt(1.0 - e * e);
 
+	// Build orbital basis vectors
 	FVector UpRef = FVector::UpVector;
 	FVector OrbitRight = FVector::CrossProduct(Orbit.Normal, UpRef);
 	if (OrbitRight.IsNearlyZero())
@@ -1960,10 +2149,11 @@ FVector StarSystemGenerator::GetOrbitPosition(const FOrbit& Orbit) const
 
 	FVector OrbitForward = FVector::CrossProduct(Orbit.Normal, OrbitRight).GetSafeNormal();
 
+	// Calculate position on ellipse
 	double theta = Orbit.Phase;
 	FVector Pos = Orbit.Center
-		+ OrbitRight * a * FMath::Cos(theta)
-		+ OrbitForward * b * FMath::Sin(theta);
+		+ OrbitRight * (a * FMath::Cos(theta))
+		+ OrbitForward * (b * FMath::Sin(theta));
 
 	return Pos;
 }
@@ -1973,22 +2163,28 @@ FPointData StarSystemGenerator::MakePointDataFromScale(double InScaleKm)
 	// Convert real scale to local octree units
 	double LocalSize = InScaleKm / UnitScale;
 
-	// Find depth where this should live
-	int Depth = 0;
+	// Find depth where node size is closest to object size
+	int Depth = MinInsertionDepth;
 	int64 NodeExtent = Extent;
-	for (int d = 0; d <= MaxInsertionDepth; d++)
+	int64 BestNodeExtent = NodeExtent >> MinInsertionDepth;
+	double BestRatio = FMath::Abs(1.0 - LocalSize / static_cast<double>(BestNodeExtent));
+
+	for (int d = MinInsertionDepth; d <= MaxInsertionDepth; d++)
 	{
-		if (NodeExtent <= LocalSize)
+		int64 ExtentAtDepth = NodeExtent >> d;
+		double Ratio = FMath::Abs(1.0 - LocalSize / static_cast<double>(ExtentAtDepth));
+
+		// Find depth where object size to node size ratio is closest to 1
+		if (Ratio < BestRatio)
 		{
-			Depth = FMath::Clamp(d, MinInsertionDepth, MaxInsertionDepth);
-			break;
+			BestRatio = Ratio;
+			Depth = d;
+			BestNodeExtent = ExtentAtDepth;
 		}
-		NodeExtent >>= 1; // divide by 2
 	}
 
 	// Compute density from size fit
-	float Density = (LocalSize - NodeExtent) / NodeExtent;
-	Density = FMath::Clamp(Density, 0.01f, 1.0f);
+	float Density = FMath::Clamp(static_cast<float>(LocalSize / static_cast<double>(BestNodeExtent)), 0.01f, 1.0f);
 
 	FVoxelData Data;
 	Data.Density = Density;
