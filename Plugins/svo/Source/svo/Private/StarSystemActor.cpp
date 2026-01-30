@@ -211,6 +211,37 @@ void AStarSystemActor::ResetForSpawn() {
 	InitializationState = ELifecycleState::Uninitialized;
 }
 
+void AStarSystemActor::SpawnEntityFromPool(TSharedPtr<FOctreeNode> InNode)
+{
+	if (!InNode.IsValid()) return;
+
+	UE_LOG(LogTemp, Log, TEXT("=== Star System Entity Spawn Request ==="));
+	UE_LOG(LogTemp, Log, TEXT("Node Center: (%s, %s, %s)"),
+		*FString::Printf(TEXT("%lld"), InNode->Center.X),
+		*FString::Printf(TEXT("%lld"), InNode->Center.Y),
+		*FString::Printf(TEXT("%lld"), InNode->Center.Z));
+	UE_LOG(LogTemp, Log, TEXT("Node Extent: %s"), *FString::Printf(TEXT("%lld"), InNode->Extent));
+	UE_LOG(LogTemp, Log, TEXT("Node Depth: %d"), InNode->Depth);
+	UE_LOG(LogTemp, Log, TEXT("Object Type: %d"), static_cast<int32>(InNode->Data.TypeId));
+	UE_LOG(LogTemp, Log, TEXT("Density: %.4f"), InNode->Data.Density);
+	UE_LOG(LogTemp, Log, TEXT("Composition: (%.2f, %.2f, %.2f)"),
+		InNode->Data.Composition.X,
+		InNode->Data.Composition.Y,
+		InNode->Data.Composition.Z);
+}
+
+void AStarSystemActor::ReturnEntityToPool(TSharedPtr<FOctreeNode> InNode)
+{
+	if (!InNode.IsValid()) return;
+
+	UE_LOG(LogTemp, Log, TEXT("=== Star System Entity Despawn Request ==="));
+	UE_LOG(LogTemp, Log, TEXT("Node Center: (%s, %s, %s)"),
+		*FString::Printf(TEXT("%lld"), InNode->Center.X),
+		*FString::Printf(TEXT("%lld"), InNode->Center.Y),
+		*FString::Printf(TEXT("%lld"), InNode->Center.Z));
+	UE_LOG(LogTemp, Log, TEXT("Object Type: %d"), static_cast<int32>(InNode->Data.TypeId));
+}
+
 void AStarSystemActor::ResetForPool() {
 	double StartTime = FPlatformTime::Seconds();
 

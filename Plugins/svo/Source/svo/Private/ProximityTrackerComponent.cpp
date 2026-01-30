@@ -144,7 +144,7 @@ void UProximityTrackerComponent::OnProximityUpdate()
                         .001,
                         -1,
                         -1,
-                        1
+                        -1
                     );
 
                     if (DebugMode) {
@@ -250,5 +250,27 @@ void UProximityTrackerComponent::DebugDrawStarSystemNode(FVector NodeCenter, TSh
 
 void UProximityTrackerComponent::DebugDrawSystemEntityNode(FVector NodeCenter, TSharedPtr<FOctreeNode> InNode)
 {
+    if (!InNode.IsValid()) return;
+
+    const float HalfExtent = static_cast<float>(InNode->Extent);
+    const FVector BoxExtent = FVector(HalfExtent);
+
+    // Use different color for entities to distinguish them
+    const FColor BoxColor = FColor::Cyan;
+    const float Lifetime = UpdateInterval;
+    const bool bPersistent = false;
+    const uint8 DepthPriority = 0;
+    const float Thickness = 10.0f;
+
+    DrawDebugBox(
+        GetWorld(),
+        NodeCenter,
+        BoxExtent,
+        BoxColor,
+        bPersistent,
+        Lifetime,
+        DepthPriority,
+        Thickness
+    );
 }
 #pragma endregion

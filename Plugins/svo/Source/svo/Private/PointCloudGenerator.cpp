@@ -2161,7 +2161,7 @@ FVector StarSystemGenerator::GetOrbitPosition(const FOrbit& Orbit) const
 FPointData StarSystemGenerator::MakePointDataFromScale(double InScaleKm)
 {
 	// Convert real scale to local octree units
-	double LocalSize = InScaleKm * 10000000 / UnitScale; //Desired scale in KM converted to CM and then normalized by the octree scale, we want our base level star system in m precision not cm, so we have to multiply * 100000 (convert km to cm) * 100
+	double LocalSize = InScaleKm * 100000 / UnitScale; //Desired scale in KM converted to CM and then normalized by the octree scale, we want our base level star system in m precision not cm, so we have to multiply * 100000 (convert km to cm) * 100
 
 	// Find depth where node size is closest to object size
 	int Depth = MinInsertionDepth;

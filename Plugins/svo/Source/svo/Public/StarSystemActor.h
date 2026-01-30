@@ -24,7 +24,7 @@ public:
 	TSharedPtr<FOctree> Octree;
 	bool IsDebug = false;
 	int Seed = 133780085;
-	int64 Extent = 549755813888; // roughly 2x the radius of the solar system in at meter scale precision
+	int64 Extent = 2147483648;// 549755813888; // roughly 2x the radius of the solar system in at meter scale precision
 	double UnitScale = 1.0;
 	double SpeedScale = 1.0;
 	ELifecycleState InitializationState = ELifecycleState::Uninitialized;
