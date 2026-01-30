@@ -2161,13 +2161,20 @@ FVector StarSystemGenerator::GetOrbitPosition(const FOrbit& Orbit) const
 FPointData StarSystemGenerator::MakePointDataFromScale(double InScaleKm)
 {
 	// Convert real scale to local octree units
-	double LocalSize = InScaleKm / UnitScale;
+	double LocalSize = InScaleKm * 100000000 / UnitScale;
 
 	// Find depth where node size is closest to object size
 	int Depth = MinInsertionDepth;
 	int64 NodeExtent = Extent;
 	int64 BestNodeExtent = NodeExtent >> MinInsertionDepth;
 	double BestRatio = FMath::Abs(1.0 - LocalSize / static_cast<double>(BestNodeExtent));
+
+	//UE_LOG(LogTemp, Warning, TEXT("=== MakePointDataFromScale Debug ==="));
+	//UE_LOG(LogTemp, Warning, TEXT("Input Scale (km): %.2f"), InScaleKm);
+	//UE_LOG(LogTemp, Warning, TEXT("Scale (cm): %.2f"), InScaleKm * 100000);
+	//UE_LOG(LogTemp, Warning, TEXT("UnitScale: %.20f"), UnitScale);
+	//UE_LOG(LogTemp, Warning, TEXT("LocalSize (octree units): %.2f"), LocalSize);
+	//UE_LOG(LogTemp, Warning, TEXT("Extent: %s"), *FString::Printf(TEXT("%lld"), Extent));
 
 	for (int d = MinInsertionDepth; d <= MaxInsertionDepth; d++)
 	{
@@ -2188,8 +2195,13 @@ FPointData StarSystemGenerator::MakePointDataFromScale(double InScaleKm)
 
 	FVoxelData Data;
 	Data.Density = Density;
-
+	Data.Composition = FVector(.5, .5, 1);
 	FPointData PointData(FInt64Vector::ZeroValue, Depth, Data);
+	//UE_LOG(LogTemp, Warning, TEXT("MinInsertionDepth: %d, MaxInsertionDepth: %d"), MinInsertionDepth, MaxInsertionDepth);
+	//UE_LOG(LogTemp, Warning, TEXT("Chosen Depth: %d"), Depth);
+	//UE_LOG(LogTemp, Warning, TEXT("Node Extent at Depth: %s"), *FString::Printf(TEXT("%lld"), BestNodeExtent));
+	//UE_LOG(LogTemp, Warning, TEXT("Ratio of LocalSize to NodeExtent: %.6f"), LocalSize / static_cast<double>(BestNodeExtent));
+	//UE_LOG(LogTemp, Warning, TEXT("Density: %.4f"), Density);
 	return PointData;
 }
 #pragma endregion
