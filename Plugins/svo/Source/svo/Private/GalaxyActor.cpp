@@ -389,7 +389,7 @@ void AGalaxyActor::DrawDebugBounds()
 				World,
 				ActorLocation,
 				BoxExtent,
-				FColor::Green,
+				FColor::Blue,
 				false,
 				-1.0f,
 				0,
@@ -397,16 +397,16 @@ void AGalaxyActor::DrawDebugBounds()
 			);
 
 			// Draw coordinate axes at the center
-			DrawDebugCoordinateSystem(
-				World,
-				ActorLocation,
-				FRotator::ZeroRotator,
-				WorldExtent * 0.1f,
-				false,
-				-1.0f,
-				0,
-				WorldExtent * 0.001f
-			);
+			//DrawDebugCoordinateSystem(
+			//	World,
+			//	ActorLocation,
+			//	FRotator::ZeroRotator,
+			//	WorldExtent * 0.1f,
+			//	false,
+			//	-1.0f,
+			//	0,
+			//	WorldExtent * 0.001f
+			//);
 		}
 	}
 }

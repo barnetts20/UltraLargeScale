@@ -1781,9 +1781,9 @@ int UniverseGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
 #pragma region Star System Generator
 void StarSystemGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {
-	// Star at center with massive scale
-	FPointData StarData(FInt64Vector::ZeroValue, 15,
-		FVoxelData(1, 1, FVector(SystemParams.StarColor.R, SystemParams.StarColor.G, SystemParams.StarColor.B) * 1000000000, 1, 1));
+	// TODO: Star at center with massive scale (We should base this on actual math, just jamming in depth 9 for now
+	FPointData StarData(FInt64Vector::ZeroValue, 9,
+		FVoxelData(1, 0, FVector(SystemParams.StarColor.R, SystemParams.StarColor.G, SystemParams.StarColor.B) * 10, 1, EObjectType::Star));
 	GeneratedData.Add(StarData);
 	Extent = InOctree->Extent;
 
@@ -2125,7 +2125,7 @@ void StarSystemGenerator::GenerateGas()
 
 		// Very large, very low density gas clouds
 		FPointData GasData = MakePointDataFromScale(Stream.FRandRange(5000, 20000));
-		GasData.Data.Density = Stream.FRandRange(0.001, 0.01); // Very diffuse
+		GasData.Data.GasDensity = Stream.FRandRange(0.001, 0.01); // Very diffuse
 		GasData.Data.TypeId = EObjectType::Gas;
 		GasData.Data.Composition = FVector(0.1, 0.1, 0.15); // Faint blue
 		GasData.SetPosition(Pos);
@@ -2161,7 +2161,7 @@ FVector StarSystemGenerator::GetOrbitPosition(const FOrbit& Orbit) const
 FPointData StarSystemGenerator::MakePointDataFromScale(double InScaleKm)
 {
 	// Convert real scale to local octree units
-	double LocalSize = InScaleKm * 100000000 / UnitScale;
+	double LocalSize = InScaleKm * 10000000 / UnitScale; //Desired scale in KM converted to CM and then normalized by the octree scale, we want our base level star system in m precision not cm, so we have to multiply * 100000 (convert km to cm) * 100
 
 	// Find depth where node size is closest to object size
 	int Depth = MinInsertionDepth;

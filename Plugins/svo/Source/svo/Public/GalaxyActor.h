@@ -30,7 +30,7 @@ public:
 	AUniverseActor* Universe;
 
 	TSharedPtr<FOctree> Octree;
-	bool IsDebug = true;
+	bool IsDebug = false;
 	int Seed = 133780085;
 	int64 Extent = 2147483648;
 	double UnitScale = 100.0;
