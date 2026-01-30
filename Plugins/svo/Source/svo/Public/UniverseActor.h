@@ -42,11 +42,11 @@ public:
 	#pragma endregion
 	
 	#pragma region Pooled Spawn/Despawn Hooks
+	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
 	void SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode);
 	void ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode);
 	#pragma endregion
 
-	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
 protected:
 	#pragma region Initialization
 	UniverseGenerator UniverseGenerator;

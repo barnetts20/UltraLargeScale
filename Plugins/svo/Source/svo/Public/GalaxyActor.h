@@ -46,6 +46,7 @@ public:
 	#pragma endregion
 	
 	#pragma region Pooled Spawn/Despawn Hooks
+	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AStarSystemActor>> SpawnedStarSystems;
 	void SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode);
 	void ReturnStarSystemToPool(TSharedPtr<FOctreeNode> InNode);
 	#pragma endregion
@@ -64,7 +65,7 @@ protected:
 	TSubclassOf<AStarSystemActor> StarSystemActorClass;
 	int StarSystemPoolSize = 5;
 	TArray<AStarSystemActor*> StarSystemPool;
-	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AStarSystemActor>> SpawnedStarSystems;
+
 	void InitializeStarSystemPool();
 	#pragma endregion
 

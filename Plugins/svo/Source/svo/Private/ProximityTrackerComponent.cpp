@@ -34,29 +34,19 @@ void UProximityTrackerComponent::BeginPlay()
 #pragma region Proximity Polling
 void UProximityTrackerComponent::OnProximityUpdate()
 {
-	if (!UniverseActor) return;
+    if (!UniverseActor) return;
 
-	//Get parent position
-	AActor* Owner = GetOwner();
-	if (!Owner) return;
+    //Get parent position
+    AActor* Owner = GetOwner();
+    if (!Owner) return;
     if (!UniverseActor || UniverseActor->InitializationState != ELifecycleState::Ready) return;
-	FVector WorldLocation = Owner->GetActorLocation();
-	FVector SampleLocation = WorldLocation - UniverseActor->GetActorLocation();
+    FVector WorldLocation = Owner->GetActorLocation();
+    FVector SampleLocation = WorldLocation - UniverseActor->GetActorLocation();
     FInt64Vector SampleCoordinate = FInt64Vector(FMath::RoundToInt64(SampleLocation.X), FMath::RoundToInt64(SampleLocation.Y), FMath::RoundToInt64(SampleLocation.Z));
 
-	//Proximity Query Octree
-    //Simple Distance Based Search
-	//TArray<TSharedPtr<FOctreeNode>> NearbyGalaxyNodes = UniverseActor->Octree->GetNodesInRange(SampleCoordinate, ScanExtent, -1, -1, 1);
-    //Screen Space Search
+    //Proximity Query Octree
     TArray<TSharedPtr<FOctreeNode>> NearbyGalaxyNodes = UniverseActor->Octree->GetNodesByScreenSpace(SampleCoordinate, ScanExtent, .001, -1, -1, 1);
-    //Draw the node bounding boxes in debug mode
 
-
-    //Sample Galaxy nodes if inside a galaxies bounds
-    //TArray<TSharedPtr<FOctreeNode>> NearbyStarSystemNodes = GalaxyActor->Octree->GetNodesByScreenSpace(SampleCoordinate, ScanExtent, .001, -1, -1, 1);
-    
-    
-    ///TArray<TSharedPtr<FOctreeNode>> 
     if (DebugMode) {
         for (const TSharedPtr<FOctreeNode>& Node : NearbyGalaxyNodes)
         {
@@ -66,7 +56,7 @@ void UProximityTrackerComponent::OnProximityUpdate()
             }
         }
     }
-    
+
     //Update the currently tracked galaxies and trigger lifecycle changes
     TSet<TSharedPtr<FOctreeNode>> StaleGalaxyNodes = TSet<TSharedPtr<FOctreeNode>>(SpawnedGalaxyNodes);
     for (const TSharedPtr<FOctreeNode>& Node : NearbyGalaxyNodes)
@@ -89,15 +79,18 @@ void UProximityTrackerComponent::OnProximityUpdate()
         }
     }
 
+    // Process each spawned galaxy
     for (TSharedPtr<FOctreeNode> GalaxyNode : SpawnedGalaxyNodes) {
         auto ga = UniverseActor->SpawnedGalaxies.Find(GalaxyNode);
         if (ga) {
             auto GalaxyActor = ga->Get();
+            if (!GalaxyActor || GalaxyActor->InitializationState != ELifecycleState::Ready) continue;
+
             FVector GalaxySampleLocation = WorldLocation - GalaxyActor->GetActorLocation();
             FInt64Vector GalaxySampleCoordinate = FInt64Vector(FMath::RoundToInt64(GalaxySampleLocation.X), FMath::RoundToInt64(GalaxySampleLocation.Y), FMath::RoundToInt64(GalaxySampleLocation.Z));
 
             auto NearbyStarSystemNodes = GalaxyActor->Octree->GetNodesByScreenSpace(GalaxySampleCoordinate, ScanExtent, .001, -1, -1, 1);
-            
+
             if (DebugMode) {
                 for (const TSharedPtr<FOctreeNode>& Node : NearbyStarSystemNodes)
                 {
@@ -127,6 +120,68 @@ void UProximityTrackerComponent::OnProximityUpdate()
                 if (GalaxyActor) {
                     GalaxyActor->ReturnStarSystemToPool(Node);
                     SpawnedStarSystemNodes.Remove(Node);
+                }
+            }
+
+            // NEW: Process each spawned star system for nearby entities
+            for (TSharedPtr<FOctreeNode> StarSystemNode : SpawnedStarSystemNodes) {
+                auto ssa = GalaxyActor->SpawnedStarSystems.Find(StarSystemNode);
+                if (ssa) {
+                    auto StarSystemActor = ssa->Get();
+                    if (!StarSystemActor || StarSystemActor->InitializationState != ELifecycleState::Ready) continue;
+
+                    FVector StarSystemSampleLocation = WorldLocation - StarSystemActor->GetActorLocation();
+                    FInt64Vector StarSystemSampleCoordinate = FInt64Vector(
+                        FMath::RoundToInt64(StarSystemSampleLocation.X),
+                        FMath::RoundToInt64(StarSystemSampleLocation.Y),
+                        FMath::RoundToInt64(StarSystemSampleLocation.Z)
+                    );
+
+                    // Query star system octree for nearby entities (planets, moons, debris, etc.)
+                    auto NearbyEntityNodes = StarSystemActor->Octree->GetNodesByScreenSpace(
+                        StarSystemSampleCoordinate,
+                        ScanExtent,
+                        .001,
+                        -1,
+                        -1,
+                        1
+                    );
+
+                    if (DebugMode) {
+                        for (const TSharedPtr<FOctreeNode>& Node : NearbyEntityNodes)
+                        {
+                            if (Node.IsValid())
+                            {
+                                DebugDrawSystemEntityNode(
+                                    StarSystemActor->GetActorLocation() + FVector(Node->Center),
+                                    Node
+                                );
+                            }
+                        }
+                    }
+
+                    // Update the currently tracked entities and trigger lifecycle changes
+                    TSet<TSharedPtr<FOctreeNode>> StaleEntityNodes = TSet<TSharedPtr<FOctreeNode>>(SpawnedEntityNodes);
+                    for (const TSharedPtr<FOctreeNode>& Node : NearbyEntityNodes)
+                    {
+                        StaleEntityNodes.Remove(Node);
+                        if (StarSystemActor)
+                        {
+                            if (!SpawnedEntityNodes.Contains(Node))
+                            {
+                                SpawnedEntityNodes.Add(Node);
+                                // This will spawn actual interactable world objects
+                                StarSystemActor->SpawnEntityFromPool(Node);
+                            }
+                        }
+                    }
+
+                    for (const TSharedPtr<FOctreeNode>& Node : StaleEntityNodes) {
+                        if (StarSystemActor) {
+                            StarSystemActor->DespawnEntity(Node);
+                            SpawnedEntityNodes.Remove(Node);
+                        }
+                    }
                 }
             }
         }
@@ -191,5 +246,9 @@ void UProximityTrackerComponent::DebugDrawStarSystemNode(FVector NodeCenter, TSh
         DepthPriority,
         Thickness
     );
+}
+
+void UProximityTrackerComponent::DebugDrawSystemEntityNode(FVector NodeCenter, TSharedPtr<FOctreeNode> InNode)
+{
 }
 #pragma endregion

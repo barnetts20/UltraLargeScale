@@ -37,6 +37,12 @@ public:
 	void ResetForSpawn();           //Call externally before calling initialize
 #pragma endregion
 
+#pragma region Pooled Spawn/Despawn Hooks
+	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AActor>> SpawnedEntities;
+	void SpawnEntityFromPool(TSharedPtr<FOctreeNode> InNode);
+	void ReturnEntityToPool(TSharedPtr<FOctreeNode> InNode);
+#pragma endregion
+
 #pragma region Initialization
 	void Initialize();				//Kick of async initialization of system
 #pragma endregion

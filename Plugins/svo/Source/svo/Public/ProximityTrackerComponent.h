@@ -5,6 +5,7 @@
 #include "Components/ActorComponent.h"
 #include <UniverseActor.h>
 #include <GalaxyActor.h>
+#include <StarSystemActor.h>
 #include "ProximityTrackerComponent.generated.h"
 #pragma endregion
 
@@ -41,6 +42,7 @@ protected:
 	FTimerHandle UpdateTimerHandle;
 	TSet<TSharedPtr<FOctreeNode>> SpawnedGalaxyNodes;
 	TSet<TSharedPtr<FOctreeNode>> SpawnedStarSystemNodes;
+	TSet<TSharedPtr<FOctreeNode>> SpawnedEntityNodes;
 
 	void OnProximityUpdate();
 	#pragma endregion
@@ -48,5 +50,6 @@ protected:
 	#pragma region Debug
 	void DebugDrawNode(TSharedPtr<FOctreeNode> InNode);
 	void DebugDrawStarSystemNode(FVector NodeCenter, TSharedPtr<FOctreeNode> InNode);
+	void DebugDrawSystemEntityNode(FVector NodeCenter, TSharedPtr<FOctreeNode> InNode);
 	#pragma endregion
 };
