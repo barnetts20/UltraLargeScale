@@ -178,7 +178,7 @@ void UProximityTrackerComponent::OnProximityUpdate()
 
                     for (const TSharedPtr<FOctreeNode>& Node : StaleEntityNodes) {
                         if (StarSystemActor) {
-                            StarSystemActor->DespawnEntity(Node);
+                            StarSystemActor->ReturnEntityToPool(Node);
                             SpawnedEntityNodes.Remove(Node);
                         }
                     }
