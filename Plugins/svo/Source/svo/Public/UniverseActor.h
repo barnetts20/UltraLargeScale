@@ -36,7 +36,8 @@ public:
 
 	#pragma region Public Parameters
 	bool IsDebug = false;
-	int64 Extent = 549755813888;
+	//int64 Extent = 549755813888;
+	int64 Extent = 2147483648;
 	ELifecycleState InitializationState = ELifecycleState::Initializing;
 	TSharedPtr<FOctree> Octree;
 	#pragma endregion

@@ -15,6 +15,9 @@ AParallaxStaticMeshActor::AParallaxStaticMeshActor()
 	MeshComponent->SetMobility(EComponentMobility::Movable);
 	MeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	MeshComponent->SetCollisionResponseToAllChannels(ECR_Block);
+	MeshComponent->SetRenderCustomDepth(true);
+
+	MeshComponent->SetCustomDepthStencilValue(1);
 
 	UnitScale = 1.0;
 	SpeedScale = 1.0;
