@@ -45,7 +45,7 @@ void UProximityTrackerComponent::OnProximityUpdate()
     FInt64Vector SampleCoordinate = FInt64Vector(FMath::RoundToInt64(SampleLocation.X), FMath::RoundToInt64(SampleLocation.Y), FMath::RoundToInt64(SampleLocation.Z));
 
     //Proximity Query Octree
-    TArray<TSharedPtr<FOctreeNode>> NearbyGalaxyNodes = UniverseActor->Octree->GetNodesByScreenSpace(SampleCoordinate, ScanExtent, .001, -1, -1, 1);
+    TArray<TSharedPtr<FOctreeNode>> NearbyGalaxyNodes = UniverseActor->Octree->GetNodesByScreenSpace(SampleCoordinate, ScanExtent, .0001, -1, -1, 1);
 
     if (DebugMode) {
         for (const TSharedPtr<FOctreeNode>& Node : NearbyGalaxyNodes)
@@ -89,7 +89,7 @@ void UProximityTrackerComponent::OnProximityUpdate()
             FVector GalaxySampleLocation = WorldLocation - GalaxyActor->GetActorLocation();
             FInt64Vector GalaxySampleCoordinate = FInt64Vector(FMath::RoundToInt64(GalaxySampleLocation.X), FMath::RoundToInt64(GalaxySampleLocation.Y), FMath::RoundToInt64(GalaxySampleLocation.Z));
 
-            auto NearbyStarSystemNodes = GalaxyActor->Octree->GetNodesByScreenSpace(GalaxySampleCoordinate, ScanExtent, .001, -1, -1, 1);
+            auto NearbyStarSystemNodes = GalaxyActor->Octree->GetNodesByScreenSpace(GalaxySampleCoordinate, ScanExtent, .0001, -1, -1, 1);
 
             if (DebugMode) {
                 for (const TSharedPtr<FOctreeNode>& Node : NearbyStarSystemNodes)
@@ -141,7 +141,7 @@ void UProximityTrackerComponent::OnProximityUpdate()
                     auto NearbyEntityNodes = StarSystemActor->Octree->GetNodesByScreenSpace(
                         StarSystemSampleCoordinate,
                         ScanExtent,
-                        .001,
+                        .0001,
                         -1,
                         -1,
                         -1

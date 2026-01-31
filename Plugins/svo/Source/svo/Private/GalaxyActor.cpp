@@ -145,6 +145,8 @@ void AGalaxyActor::InitializeVolumetric()
 			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));  //TODO: THESE NEED TO MOVE INTO SEPERATE RUN ONCE INIT
 			VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
 			VolumetricComponent->TranslucencySortPriority = 1;
+			VolumetricComponent->DepthPriorityGroup = ESceneDepthPriorityGroup::SDPG_MAX;
+			VolumetricComponent->bRenderInDepthPass = false;
 			VolumetricComponent->RegisterComponent();
 			VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
 
@@ -369,6 +371,14 @@ void AGalaxyActor::ApplyParallaxOffset()
 	FVector ParallaxOffset = PlayerOffset * (1.0 - ParallaxRatio);
 	SetActorLocation(GetActorLocation() + ParallaxOffset);
 }
+
+void AGalaxyActor::Tick(float DeltaTime)
+{
+	ApplyParallaxOffset();
+	if(IsDebug) DrawDebugBounds();
+}
+#pragma endregion
+#pragma region Debug
 void AGalaxyActor::DrawDebugBounds()
 {
 	// Draw debug box for the octree root node
@@ -409,10 +419,5 @@ void AGalaxyActor::DrawDebugBounds()
 			//);
 		}
 	}
-}
-void AGalaxyActor::Tick(float DeltaTime)
-{
-	ApplyParallaxOffset();
-	if(IsDebug) DrawDebugBounds();
 }
 #pragma endregion

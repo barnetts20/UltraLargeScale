@@ -2,9 +2,11 @@
 #include "StarSystemActor.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include <PointCloudGenerator.h>
+#include <Engine/StaticMeshActor.h>
 #include <Kismet/GameplayStatics.h>
 #include <Camera/CameraComponent.h>
 #include <GameFramework/SpringArmComponent.h>
+#include <ParallaxStaticMeshActor.h>
 #pragma endregion
 
 #pragma region Constructor/Destructor
@@ -215,19 +217,98 @@ void AStarSystemActor::SpawnEntityFromPool(TSharedPtr<FOctreeNode> InNode)
 {
 	if (!InNode.IsValid()) return;
 
+	// Don't spawn duplicates
+	if (SpawnedEntities.Contains(InNode)) return;
+
 	UE_LOG(LogTemp, Log, TEXT("=== Star System Entity Spawn Request ==="));
-	UE_LOG(LogTemp, Log, TEXT("Node Center: (%s, %s, %s)"),
-		*FString::Printf(TEXT("%lld"), InNode->Center.X),
-		*FString::Printf(TEXT("%lld"), InNode->Center.Y),
-		*FString::Printf(TEXT("%lld"), InNode->Center.Z));
-	UE_LOG(LogTemp, Log, TEXT("Node Extent: %s"), *FString::Printf(TEXT("%lld"), InNode->Extent));
-	UE_LOG(LogTemp, Log, TEXT("Node Depth: %d"), InNode->Depth);
-	UE_LOG(LogTemp, Log, TEXT("Object Type: %d"), static_cast<int32>(InNode->Data.TypeId));
-	UE_LOG(LogTemp, Log, TEXT("Density: %.4f"), InNode->Data.Density);
-	UE_LOG(LogTemp, Log, TEXT("Composition: (%.2f, %.2f, %.2f)"),
-		InNode->Data.Composition.X,
-		InNode->Data.Composition.Y,
-		InNode->Data.Composition.Z);
+
+	// Get player position for parallax calculation
+	FVector PlayerPosition = FVector::ZeroVector;
+	if (const auto* World = GetWorld())
+	{
+		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
+		{
+			if (APawn* Pawn = Controller->GetPawn())
+			{
+				PlayerPosition = Pawn->GetActorLocation();
+			}
+		}
+	}
+
+	// Now we need to "reverse" the parallax to get the real world position
+	// The star system has parallax ratio: (SpeedScale / UnitScale)
+	// Compute correct parallax ratios and spawn location
+	double MeshScale = InNode->Extent * (1.0 + InNode->Data.Density) * UnitScale;
+
+	// Spawn the static mesh actor on game thread
+	AsyncTask(ENamedThreads::GameThread, [this, InNode, MeshScale]()
+		{
+			const double EntityParallaxRatio = Galaxy->Universe->SpeedScale;
+			const double SystemParallaxRatio = Galaxy->Universe->SpeedScale / UnitScale;
+
+			FVector NodeWorldPosition = FVector(InNode->Center) + GetActorLocation();
+			FVector PlayerToNode = CurrentFrameOfReferenceLocation - NodeWorldPosition;
+			FVector EntitySpawnPosition = CurrentFrameOfReferenceLocation - PlayerToNode * (EntityParallaxRatio / SystemParallaxRatio);
+
+			if (UWorld* World = GetWorld())
+			{
+				FActorSpawnParameters SpawnParams;
+				SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+				AParallaxStaticMeshActor* MeshActor = World->SpawnActor<AParallaxStaticMeshActor>(
+					AParallaxStaticMeshActor::StaticClass(),
+					EntitySpawnPosition,
+					FRotator::ZeroRotator,
+					SpawnParams
+				);
+				MeshActor->System = this;
+				if (MeshActor)
+				{
+					// Load and set the unit sphere mesh
+					UStaticMesh* SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitSphere.UnitSphere"));
+					if (SphereMesh)
+					{
+						UStaticMeshComponent* MeshComponent = MeshActor->MeshComponent;
+						if (MeshComponent)
+						{
+							MeshComponent->SetMobility(EComponentMobility::Movable);
+							MeshComponent->SetStaticMesh(SphereMesh);
+							MeshComponent->SetWorldScale3D(FVector(MeshScale));
+
+							// Enable collision
+							MeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+							MeshComponent->SetCollisionResponseToAllChannels(ECR_Block);
+
+							// Create dynamic material to set color based on composition
+							UMaterialInterface* BaseMaterial = MeshComponent->GetMaterial(0);
+							if (BaseMaterial)
+							{
+								UMaterialInstanceDynamic* DynMaterial = UMaterialInstanceDynamic::Create(BaseMaterial, MeshComponent);
+								FLinearColor NodeColor = FLinearColor(InNode->Data.Composition);
+
+								// Try to set base color parameter (common parameter name)
+								DynMaterial->SetVectorParameterValue(FName("BaseColor"), NodeColor);
+								MeshComponent->SetMaterial(0, DynMaterial);
+							}
+
+							UE_LOG(LogTemp, Log, TEXT("Successfully spawned entity mesh at %s with scale %.2f"),
+								*EntitySpawnPosition.ToString(), MeshScale);
+						}
+					}
+					else
+					{
+						UE_LOG(LogTemp, Error, TEXT("Failed to load UnitSphere mesh"));
+					}
+
+					// Store the spawned actor as AActor (upcast)
+					SpawnedEntities.Add(InNode, TWeakObjectPtr<AActor>(MeshActor));
+				}
+				else
+				{
+					UE_LOG(LogTemp, Error, TEXT("Failed to spawn static mesh actor"));
+				}
+			}
+		});
 }
 
 void AStarSystemActor::ReturnEntityToPool(TSharedPtr<FOctreeNode> InNode)
@@ -235,11 +316,25 @@ void AStarSystemActor::ReturnEntityToPool(TSharedPtr<FOctreeNode> InNode)
 	if (!InNode.IsValid()) return;
 
 	UE_LOG(LogTemp, Log, TEXT("=== Star System Entity Despawn Request ==="));
-	UE_LOG(LogTemp, Log, TEXT("Node Center: (%s, %s, %s)"),
-		*FString::Printf(TEXT("%lld"), InNode->Center.X),
-		*FString::Printf(TEXT("%lld"), InNode->Center.Y),
-		*FString::Printf(TEXT("%lld"), InNode->Center.Z));
 	UE_LOG(LogTemp, Log, TEXT("Object Type: %d"), static_cast<int32>(InNode->Data.TypeId));
+
+	// Find and destroy the spawned actor
+	TWeakObjectPtr<AActor>* FoundActor = SpawnedEntities.Find(InNode);
+	if (FoundActor && FoundActor->IsValid())
+	{
+		AActor* ActorToDestroy = FoundActor->Get();
+
+		AsyncTask(ENamedThreads::GameThread, [ActorToDestroy]()
+			{
+				if (ActorToDestroy && IsValid(ActorToDestroy))
+				{
+					ActorToDestroy->Destroy();
+					UE_LOG(LogTemp, Log, TEXT("Successfully destroyed entity actor"));
+				}
+			});
+
+		SpawnedEntities.Remove(InNode);
+	}
 }
 
 void AStarSystemActor::ResetForPool() {
@@ -309,6 +404,13 @@ void AStarSystemActor::ApplyParallaxOffset()
 	//UE_LOG(LogTemp, Warning, TEXT("ParallaxOffset: %s"), *ParallaxOffset.ToString());
 }
 
+void AStarSystemActor::Tick(float DeltaTime)
+{
+	ApplyParallaxOffset();
+	if(IsDebug) DrawDebugBounds();
+}
+#pragma endregion
+#pragma region Debug
 void AStarSystemActor::DrawDebugBounds()
 {
 	// Draw debug box for the octree root node
@@ -349,10 +451,5 @@ void AStarSystemActor::DrawDebugBounds()
 			//);
 		}
 	}
-}
-void AStarSystemActor::Tick(float DeltaTime)
-{
-	ApplyParallaxOffset();
-	if(IsDebug) DrawDebugBounds();
 }
 #pragma endregion
