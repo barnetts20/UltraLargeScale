@@ -15,6 +15,23 @@ AGalaxyActor::AGalaxyActor()
 	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent")));
 	PointCloudNiagara = Cast<UNiagaraSystem>(FSoftObjectPath(NiagaraPath).TryLoad());
 	StarSystemActorClass = AStarSystemActor::StaticClass();
+	
+	//TODO:: Generate a curve that resembles our current star scale distribution array
+	double min = 69600000000 * .08;
+	double max = 69600000000 * 1500;
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0, 0);
+	//static constexpr double DepthProb[10] = {
+	//	0.25,               // 0.5×  ultra-small stars
+	//	0.5,				// 1×    small main-sequence
+	//	0.1875,             // 2×
+	//	0.046875,           // 4×
+	//	0.01171875,         // 8×
+	//	0.0029296875,       // 16×
+	//	0.000732421875,     // 32×
+	//	0.00018310546875,   // 64×
+	//	0.0000457763671875,	// 128×
+	//	0.000011444091796875// 256×
+	//};
 	Octree = MakeShared<FOctree>(Extent);
 }
 
@@ -85,6 +102,8 @@ void AGalaxyActor::InitializeData() {
 	
 	FRandomStream Stream(Seed);
 	GalaxyGenerator.Seed = Seed;
+	GalaxyGenerator.Extent = Extent;
+	GalaxyGenerator.UnitScale = UnitScale;
 	GalaxyGenerator.DepthRange = 10; //With seven levels, assuming our smallest star is say 1/2 the size of the sun, we can cover the vast majority of potential realistic star scales
 	GalaxyGenerator.InsertDepthOffset = 7; //Controlls the depth above max depth the smallest stars will be generated in
 	GalaxyGenerator.Rotation = FRotator(AxisRotation.X, AxisRotation.Y, AxisRotation.Z);

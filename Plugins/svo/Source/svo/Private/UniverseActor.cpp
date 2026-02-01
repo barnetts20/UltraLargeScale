@@ -16,6 +16,18 @@ AUniverseActor::AUniverseActor()
 	PointCloudNiagara = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/NG_UniverseCloud.NG_UniverseCloud"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
 	Octree = MakeShared<FOctree>(Extent);
+
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.0f, 0.0f);      // Start
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.05f, 0.111f);   // 5% are ultra-faint dwarfs (1/9 of scale range)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.15f, 0.222f);   // 15% are dwarfs (2/9)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.32f, 0.333f);   // 32% are large dwarfs (3/9)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.54f, 0.444f);   // 54% are small galaxies (4/9)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.87f, 0.556f);   // 87% are Milky Way scale (5/9)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.95f, 0.667f);   // 95% are large (6/9)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.985f, 0.778f);  // 98.5% are giants (7/9)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.995f, 0.889f);  // 99.5% are BCGs (8/9)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(1.0f, 1.0f);
+
 }
 #pragma endregion
 
@@ -85,8 +97,11 @@ void AUniverseActor::InitializeData() {
 	//TODO: Proceduralize universe generator params / make a factory
 	UniverseGenerator.UniverseParams = UniverseParams;
 	UniverseGenerator.Rotation = FRotator(0);
-	UniverseGenerator.DepthRange = 10; 
-	UniverseGenerator.InsertDepthOffset = 4;
+	UniverseGenerator.Extent = Extent;
+	UniverseGenerator.UnitScale = UnitScale;
+	UniverseGenerator.MinSize = MinGalaxyScale;
+	UniverseGenerator.MaxSize = MaxGalaxyScale;
+	UniverseGenerator.ScaleCurve = ScaleDistributionCurve;
 	UniverseGenerator.GenerateData(Octree);
 
 	TArray<TSharedPtr<FOctreeNode>> VolumeNodes;

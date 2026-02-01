@@ -204,6 +204,9 @@ public:
 	GalaxyGenerator() : PointCloudGenerator(69) {};
 	GalaxyGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
 
+	double Extent;
+	double UnitScale;
+
 	double MaxRadius;
 	double GalaxyRadius;
 	double BulgeRadius;
@@ -263,6 +266,12 @@ public:
 	UniverseGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
 
 	UniverseParams UniverseParams;
+	double Extent;
+	double UnitScale;
+
+	double MinSize;
+	double MaxSize;
+	FRuntimeFloatCurve ScaleCurve;
 	// depth probabilities for depths 0..6 (sum = 1.0)
 	static constexpr double DepthProb[10] = {
 		0.05,	// ultra-faint dwarfs

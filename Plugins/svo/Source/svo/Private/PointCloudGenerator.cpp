@@ -1408,7 +1408,9 @@ void GalaxyGenerator::GenerateBulge()
 			int32 ThreadIdx = FPlatformTLS::GetCurrentThreadId() % NumThreads;
 			FRandomStream& Stream = ThreadStreams[ThreadIdx];
 
+
 			FPointData& InsertData = GeneratedData[StartIndex + i];
+			// TODO:: switch to real world scales GeneratedData[StartIndex + i] = FPointData::MakePointDataFromWorldScale(scale, UnitScale, Extent);
 			InsertData.Data.ObjectId = i;
 			InsertData.Data.TypeId = 1;
 
@@ -1645,6 +1647,7 @@ void GalaxyGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, FVect
 			double size = P.Length();
 
 			FPointData InsertData;
+			//TODO: switch to using real world scales and letting it convert to depth/density FPointData InsertData = FPointData::MakePointDataFromWorldScale(scale, UnitScale, Extent);
 
 			InsertData.SetPosition(size < MaxRadius ? P : FVector::ZeroVector);
 			InsertData.InsertDepth = ChooseDepth(Stream.FRand(), InDepthBias);
@@ -1713,10 +1716,19 @@ void UniverseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 				continue; // Reject this point
 			}
 
-			FPointData InsertData;
-			InsertData.Data = FVoxelData(LocalStream.FRand(), LocalStream.FRandRange(0.5, 1.5), LocalStream.GetUnitVector(), i, 1);
+			double scale = FPointData::SampleScaleFromDistribution(MinSize, MaxSize, NoiseVal, ScaleCurve);
+			FPointData InsertData = FPointData::MakePointDataFromWorldScale(scale, UnitScale, Extent);
+			InsertData.Data.GasDensity = LocalStream.FRandRange(0.5, 1.5);
+			InsertData.Data.Composition = LocalStream.GetUnitVector();
+			InsertData.Data.ObjectId = i;
+			InsertData.Data.TypeId = 1;
+			double jitter = .02;
+			PointCenter = FVector(
+				PointCenter.X + PointCenter.X * LocalStream.FRandRange(-jitter, jitter), 
+				PointCenter.Y + PointCenter.Y * LocalStream.FRandRange(-jitter, jitter), 
+				PointCenter.Z + PointCenter.Z * LocalStream.FRandRange(-jitter, jitter));
 			InsertData.SetPosition(PointCenter);
-			InsertData.InsertDepth = ChooseDepth(LocalStream.FRand(), 1 - NoiseSample * 0.9);
+			
 			GeneratedData[i] = InsertData;
 			PointInserted = true;
 		}
@@ -1934,7 +1946,7 @@ void StarSystemGenerator::GeneratePlanet(const FOrbit& InPlanetOrbit, int32 Orbi
 		return;
 	}
 
-	FPointData PlanetData = MakePointDataFromScale(scale);
+	FPointData PlanetData = FPointData::MakePointDataFromWorldScale(scale, UnitScale, Extent);// MakePointDataFromScale(scale);
 	PlanetData.Data.TypeId = InPlanetOrbit.Type;
 	PlanetData.Data.Composition = composition;
 	PlanetData.SetPosition(GetOrbitPosition(InPlanetOrbit));
@@ -1981,7 +1993,7 @@ void StarSystemGenerator::GeneratePlanet(const FOrbit& InPlanetOrbit, int32 Orbi
 		{
 			// Moon size scales with planet
 			double moonScale = Stream.FRandRange(scale * 0.05, scale * 0.35);
-			FPointData MoonData = MakePointDataFromScale(moonScale);
+			FPointData MoonData = FPointData::MakePointDataFromWorldScale(moonScale, UnitScale, Extent);
 			MoonData.Data.TypeId = EObjectType::Moon;
 
 			// Gray/brown moons with variation
@@ -2052,7 +2064,7 @@ void StarSystemGenerator::GenerateDebris(const FOrbit& InDebrisOrbit, int32 Orbi
 		if (Stream.FRand() < 0.05) // 5% chance of larger object
 			debrisScale = Stream.FRandRange(500, 2000);
 
-		FPointData DebrisData = MakePointDataFromScale(debrisScale);
+		FPointData DebrisData = FPointData::MakePointDataFromWorldScale(debrisScale, UnitScale, Extent);
 		DebrisData.Data.TypeId = EObjectType::Debris;
 
 		// Rocky/icy composition
@@ -2090,7 +2102,7 @@ void StarSystemGenerator::GenerateUnboundDebris()
 		// Small debris objects
 		double debrisScale = Stream.FRandRange(5, 200);
 
-		FPointData DebrisData = MakePointDataFromScale(debrisScale);
+		FPointData DebrisData = FPointData::MakePointDataFromWorldScale(debrisScale, UnitScale, Extent);
 		DebrisData.Data.TypeId = EObjectType::Debris;
 		DebrisData.Data.Composition = FVector(0.4, 0.4, 0.4);
 		DebrisData.SetPosition(Pos);
@@ -2124,7 +2136,7 @@ void StarSystemGenerator::GenerateGas()
 		);
 
 		// Very large, very low density gas clouds
-		FPointData GasData = MakePointDataFromScale(Stream.FRandRange(5000, 20000));
+		FPointData GasData = FPointData::MakePointDataFromWorldScale(Stream.FRandRange(5000, 20000), UnitScale, Extent);
 		GasData.Data.GasDensity = Stream.FRandRange(0.001, 0.01); // Very diffuse
 		GasData.Data.TypeId = EObjectType::Gas;
 		GasData.Data.Composition = FVector(0.1, 0.1, 0.15); // Faint blue
@@ -2156,53 +2168,6 @@ FVector StarSystemGenerator::GetOrbitPosition(const FOrbit& Orbit) const
 		+ OrbitForward * (b * FMath::Sin(theta));
 
 	return Pos;
-}
-
-FPointData StarSystemGenerator::MakePointDataFromScale(double InScaleKm)
-{
-	// Convert real scale to local octree units
-	double LocalSize = InScaleKm * 100000 / UnitScale; //Desired scale in KM converted to CM and then normalized by the octree scale, we want our base level star system in m precision not cm, so we have to multiply * 100000 (convert km to cm) * 100
-
-	// Find depth where node size is closest to object size
-	int Depth = MinInsertionDepth;
-	int64 NodeExtent = Extent;
-	int64 BestNodeExtent = NodeExtent >> MinInsertionDepth;
-	double BestRatio = FMath::Abs(1.0 - LocalSize / static_cast<double>(BestNodeExtent));
-
-	//UE_LOG(LogTemp, Warning, TEXT("=== MakePointDataFromScale Debug ==="));
-	//UE_LOG(LogTemp, Warning, TEXT("Input Scale (km): %.2f"), InScaleKm);
-	//UE_LOG(LogTemp, Warning, TEXT("Scale (cm): %.2f"), InScaleKm * 100000);
-	//UE_LOG(LogTemp, Warning, TEXT("UnitScale: %.20f"), UnitScale);
-	//UE_LOG(LogTemp, Warning, TEXT("LocalSize (octree units): %.2f"), LocalSize);
-	//UE_LOG(LogTemp, Warning, TEXT("Extent: %s"), *FString::Printf(TEXT("%lld"), Extent));
-
-	for (int d = MinInsertionDepth; d <= MaxInsertionDepth; d++)
-	{
-		int64 ExtentAtDepth = NodeExtent >> d;
-		double Ratio = FMath::Abs(1.0 - LocalSize / static_cast<double>(ExtentAtDepth));
-
-		// Find depth where object size to node size ratio is closest to 1
-		if (Ratio < BestRatio)
-		{
-			BestRatio = Ratio;
-			Depth = d;
-			BestNodeExtent = ExtentAtDepth;
-		}
-	}
-
-	// Compute density from size fit
-	float Density = FMath::Clamp(static_cast<float>(LocalSize / static_cast<double>(BestNodeExtent)), 0.01f, 1.0f);
-
-	FVoxelData Data;
-	Data.Density = Density;
-	Data.Composition = FVector(.5, .5, 1);
-	FPointData PointData(FInt64Vector::ZeroValue, Depth, Data);
-	//UE_LOG(LogTemp, Warning, TEXT("MinInsertionDepth: %d, MaxInsertionDepth: %d"), MinInsertionDepth, MaxInsertionDepth);
-	//UE_LOG(LogTemp, Warning, TEXT("Chosen Depth: %d"), Depth);
-	//UE_LOG(LogTemp, Warning, TEXT("Node Extent at Depth: %s"), *FString::Printf(TEXT("%lld"), BestNodeExtent));
-	//UE_LOG(LogTemp, Warning, TEXT("Ratio of LocalSize to NodeExtent: %.6f"), LocalSize / static_cast<double>(BestNodeExtent));
-	//UE_LOG(LogTemp, Warning, TEXT("Density: %.4f"), Density);
-	return PointData;
 }
 #pragma endregion
 
@@ -2575,9 +2540,9 @@ void BurstNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			// Snap to voxel
 			float OutDensity;
 			auto InsertPosition = FInt64Vector(
-				FMath::RoundToInt64(WarpedPoint.X),
-				FMath::RoundToInt64(WarpedPoint.Y),
-				FMath::RoundToInt64(WarpedPoint.Z)
+				FMath::RoundToInt64(WarpedPoint.X + WarpedPoint.X * Stream.FRandRange(-.05, .05)),
+				FMath::RoundToInt64(WarpedPoint.Y + WarpedPoint.Y * Stream.FRandRange(-.05, .05)),
+				FMath::RoundToInt64(WarpedPoint.Z + WarpedPoint.Z * Stream.FRandRange(-.05, .05))
 			);
 			InsertPosition = ApplyNoiseDerivative(DistortionNoise, 6, InOctree->Extent, InsertPosition, OutDensity);
 			InsertPosition = RotateCoordinate(InsertPosition, Rotation);

@@ -36,8 +36,14 @@ public:
 
 	#pragma region Public Parameters
 	bool IsDebug = false;
+
 	//int64 Extent = 549755813888;
 	int64 Extent = 2147483648;
+	
+	FRuntimeFloatCurve ScaleDistributionCurve;
+	double MinGalaxyScale = 1e19;
+	double MaxGalaxyScale = 1e22;
+
 	ELifecycleState InitializationState = ELifecycleState::Initializing;
 	TSharedPtr<FOctree> Octree;
 	#pragma endregion

@@ -24,7 +24,7 @@ public:
 	double UpdateInterval = .05;
 
 	UPROPERTY(EditAnywhere, Category = "Proximity")
-	int64 ScanExtent = 2000000000;
+	int64 ScanExtent = 5000000;
 
 	UPROPERTY(EditAnywhere, Category = "Proximity")
 	bool DebugMode = true;

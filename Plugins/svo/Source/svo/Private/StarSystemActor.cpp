@@ -76,6 +76,7 @@ void AStarSystemActor::InitializeData() {
 	SystemGenerator.DepthRange = 7; //With seven levels, assuming our smallest star is say 1/2 the size of the sun, we can cover the vast majority of potential realistic star scales
 	SystemGenerator.InsertDepthOffset = 8; //Controlls the depth above max depth the smallest stars will be generated in
 	SystemGenerator.UnitScale = UnitScale;
+	SystemGenerator.Extent = Extent;
 	SystemGenerator.Rotation = FRotator(AxisRotation.X, AxisRotation.Y, AxisRotation.Z);
 	SystemGenerator.GeneratedData.SetNum(0);
 

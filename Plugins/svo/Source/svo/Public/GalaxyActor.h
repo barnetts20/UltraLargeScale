@@ -32,9 +32,16 @@ public:
 	TSharedPtr<FOctree> Octree;
 	bool IsDebug = false;
 	int Seed = 133780085;
+	
 	//int64 Extent = 549755813888; 
 	int64 Extent = 2147483648;
+	
 	double UnitScale = 100.0;
+
+	double MinStarSystemScale;
+	double MaxStarSystemScale;
+	FRuntimeFloatCurve ScaleDistributionCurve;
+
 	double SpeedScale = 1.0;
 	ELifecycleState InitializationState = ELifecycleState::Uninitialized;
 	FVector AxisRotation = FVector::ZeroVector;

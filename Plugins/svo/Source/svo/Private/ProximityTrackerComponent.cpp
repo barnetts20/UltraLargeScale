@@ -35,7 +35,9 @@ void UProximityTrackerComponent::BeginPlay()
 void UProximityTrackerComponent::OnProximityUpdate()
 {
     if (!UniverseActor) return;
-
+    //TODO: THIS SHOULD BE ORDERED AND SHORT CIRCUITING
+    // IF WE ARE IN A STAR SYSTEM, WE DONT NEED TO SCAN GALAXY AND UNIVERSE
+    // IF WE ARE IN A GALAXY, WE DONT NEED TO SCAN UNIVERSE
     //Get parent position
     AActor* Owner = GetOwner();
     if (!Owner) return;
