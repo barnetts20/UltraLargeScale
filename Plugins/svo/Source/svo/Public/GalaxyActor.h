@@ -10,6 +10,7 @@
 #include "PointCloudGenerator.h"
 #include "FastNoise/FastNoise.h"
 #include <UniverseActor.h>
+#include <GalaxyDataGenerator.h>
 #include "GalaxyActor.generated.h"
 class AStarSystemActor;
 #pragma endregion
@@ -26,25 +27,22 @@ public:
 	#pragma endregion
 
 	#pragma region Public Parameters
-	UPROPERTY()
+	TSharedPtr<FOctree> Octree;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Galaxy Parent Actor")
 	AUniverseActor* Universe;
 
-	TSharedPtr<FOctree> Octree;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy Properties")
 	bool IsDebug = false;
-	int Seed = 133780085;
-	
-	//int64 Extent = 549755813888; 
-	int64 Extent = 2147483648;
-	double UnitScale = 100.0;
 
-	double MinStarSystemScale = 1.496e12;
-	double MaxStarSystemScale = 1.496e16;
-	FRuntimeFloatCurve ScaleDistributionCurve;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy Properties")
+	FGalaxyParams Params;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Galaxy Properties")
 	double SpeedScale = 1.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Galaxy Parent Actor")
 	ELifecycleState InitializationState = ELifecycleState::Uninitialized;
-	FVector AxisRotation = FVector::ZeroVector;
-	FLinearColor ParentColor = FLinearColor(1, 1, 1, 0);
 	#pragma endregion
 
 	#pragma region Lifecycle Management
@@ -64,7 +62,7 @@ public:
 
 protected:
 	#pragma region Data Initialization
-	GalaxyGenerator GalaxyGenerator;
+	GalaxyDataGenerator GalaxyGenerator;
 	void InitializeData();
 	#pragma endregion
 

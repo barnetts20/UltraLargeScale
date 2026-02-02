@@ -8,6 +8,7 @@
 #include "NiagaraFunctionLibrary.h"
 #include "PointCloudGenerator.h"
 #include "NiagaraSystem.h"
+#include <UniverseDataGenerator.h>
 #include "UniverseActor.generated.h"
 
 class AGalaxyActor;
@@ -25,24 +26,15 @@ public:
 
 	#pragma region Editor Exposed Parameters
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
-	int Seed = 133780085;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
-	double UnitScale = 1000000.0;
+	FUniverseParams Params;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
 	double SpeedScale = 1.0;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
-	int Count = 2000000; //TODO: NIAGARA STREAMING, ASYNC POINT GENERATION IN BATCHES TO OPTIMIZE LOAD TIME/STREAMING... 2 million is max spawn burst, more than this would need chunking
+
 	#pragma endregion
 
 	#pragma region Public Parameters
 	bool IsDebug = false;
-
-	//int64 Extent = 549755813888;
-	int64 Extent = 2147483648;
-	
-	FRuntimeFloatCurve ScaleDistributionCurve;
-	double MinGalaxyScale = 1e19;
-	double MaxGalaxyScale = 1e22;
 
 	ELifecycleState InitializationState = ELifecycleState::Initializing;
 	TSharedPtr<FOctree> Octree;
@@ -56,7 +48,7 @@ public:
 
 protected:
 	#pragma region Initialization
-	UniverseGenerator UniverseGenerator;
+	UniverseDataGenerator UniverseGenerator;
 	void Initialize();
 	void InitializeData();
 	#pragma endregion
@@ -72,7 +64,6 @@ protected:
 	#pragma endregion
 
 	#pragma region Volumetric Parameters and Components
-	TArray<uint8> TextureData;
 	UTexture2D* PseudoVolumeTexture;
 	UStaticMeshComponent* VolumetricComponent;
 	FString VolumetricMaterialPath = FString("/svo/Materials/RayMarchers/MT_UniverseRaymarchPseudoVolume_Inst.MT_UniverseRaymarchPseudoVolume_Inst");

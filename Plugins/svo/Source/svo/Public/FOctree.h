@@ -21,20 +21,20 @@ public:
 	int Depth;
 	TWeakPtr<FOctreeNode> Parent;
 	TSharedPtr<FOctreeNode> Children[8];
-	FInt64Vector Center;
-	int64 Extent;
+	FVector Center;
+	double Extent;
 	FVoxelData Data = FVoxelData(); //Default constructor with 0 Density -1 ObectId
 	#pragma endregion
 
 	#pragma region Constructor/Destructor
 	FOctreeNode() {
 		Index = TArray<uint8>();
-		Center = FInt64Vector();
+		Center = FVector::ZeroVector;
 		Extent = 0;
 		Depth = Index.Num();
 	};
 
-	FOctreeNode(FInt64Vector InCenter, int64 InExtent, TArray<uint8> InIndex, TWeakPtr<FOctreeNode> InParent) {
+	FOctreeNode(FVector InCenter, double InExtent, TArray<uint8> InIndex, TWeakPtr<FOctreeNode> InParent) {
 		Index = InIndex;
 		Center = InCenter;
 		Extent = InExtent;
@@ -48,7 +48,7 @@ class SVO_API FOctree : public TSharedFromThis<FOctree>
 {
 public:
 	#pragma region Public Parameters
-	int64 Extent; //Must be power of 2, eg 1024 2048 etc
+	double Extent; //Must be power of 2, eg 1024 2048 etc
 	TSharedPtr<FOctreeNode> Root;
 
 	double DepthMaxDensity = 0;
@@ -75,18 +75,18 @@ public:
 
 		// ---------------- Point Distribution ----------------
 		for (const FPointData& Point : InPointData) {
-			int32 ChunkIndex = FindChunkIndexForPosition(Point.GetInt64Position(), OutVolumeChunks);
+			int ChunkIndex = FindChunkIndexForPosition(Point.GetPosition(), OutVolumeChunks);
 			if (ChunkIndex >= 0 && ChunkIndex < ChunkPointData.Num()) {
 				ChunkPointData[ChunkIndex].Add(Point);
 			}
 		}
 
 		// ---------------- Parallel Chunk Inserts ----------------
-		const int32 NumChunks = OutVolumeChunks.Num();
+		const int NumChunks = OutVolumeChunks.Num();
 		TArray<TArray<TSharedPtr<FOctreeNode>>> PerChunkResults;
 		PerChunkResults.SetNum(NumChunks);
 
-		ParallelFor(NumChunks, [&](int32 i) {
+		ParallelFor(NumChunks, [&](int i) {
 			if (bIsResetting.load()) {
 				return; // Early exit if shutting down
 			}
@@ -100,7 +100,7 @@ public:
 					return; // Early exit if shutting down
 				}
 
-				TSharedPtr<FOctreeNode> Result = InsertPosition(Point.GetInt64Position(), Point.InsertDepth, Point.Data, Chunk);
+				TSharedPtr<FOctreeNode> Result = InsertPosition(Point.GetPosition(), Point.InsertDepth, Point.Data, Chunk);
 				if (Result.IsValid()) {
 					ChunkResults.Add(Result);
 				}
@@ -112,13 +112,13 @@ public:
 		// ---------------- Recombine Results ----------------
 		OutInsertedNodes.Empty();
 
-		int32 TotalResults = 0;
+		int TotalResults = 0;
 		for (const auto& Arr : PerChunkResults) {
 			TotalResults += Arr.Num();
 		}
 		OutInsertedNodes.Reserve(TotalResults);
 
-		for (int32 i = 0; i < NumChunks; ++i) {
+		for (int i = 0; i < NumChunks; ++i) {
 			if (PerChunkResults[i].Num() > 0) {
 				OutInsertedNodes.Append(PerChunkResults[i]);
 			}
@@ -129,43 +129,40 @@ public:
 		UE_LOG(LogTemp, Log, TEXT("BulkInsert: Total duration %.3f sec"), EndTime - StartTime);
 	}
 
-	int32 FindChunkIndexForPosition(FInt64Vector Position, const TArray<TSharedPtr<FOctreeNode>>& VolumeChunks) {
-		// Calculate which chunk this position belongs to based on volume depth grid
-		int64 NodesPerSide = 1LL << VolumeDepth;
-		int64 ChunkSize = (Extent * 2) / NodesPerSide;
-		int64 HalfExtent = Extent;
+	int64 FindChunkIndexForPosition(FVector Position, const TArray<TSharedPtr<FOctreeNode>>& VolumeChunks) const {
+		const int NodesPerSide = 1 << VolumeDepth;
+		const double ChunkSize = (Extent * 2.0) / NodesPerSide;
+		const double HalfExtent = Extent;
 
-		// Convert world position to grid coordinates
-		int64 GridX = (Position.X + HalfExtent) / ChunkSize;
-		int64 GridY = (Position.Y + HalfExtent) / ChunkSize;
-		int64 GridZ = (Position.Z + HalfExtent) / ChunkSize;
+		const double GridX = (Position.X + HalfExtent) / ChunkSize;
+		const double GridY = (Position.Y + HalfExtent) / ChunkSize;
+		const double GridZ = (Position.Z + HalfExtent) / ChunkSize;
 
-		// Clamp to valid range
-		GridX = FMath::Clamp(GridX, 0LL, NodesPerSide - 1);
-		GridY = FMath::Clamp(GridY, 0LL, NodesPerSide - 1);
-		GridZ = FMath::Clamp(GridZ, 0LL, NodesPerSide - 1);
+		// Convert to int and clamp
+		const int iGridX = FMath::Clamp(FMath::FloorToInt(GridX), 0, NodesPerSide - 1);
+		const int iGridY = FMath::Clamp(FMath::FloorToInt(GridY), 0, NodesPerSide - 1);
+		const int iGridZ = FMath::Clamp(FMath::FloorToInt(GridZ), 0, NodesPerSide - 1);
 
-		// Convert 3D grid coordinates to linear index
-		return GridX + GridY * NodesPerSide + GridZ * NodesPerSide * NodesPerSide;
+		return (int64)iGridX + (int64)iGridY * NodesPerSide + (int64)iGridZ * NodesPerSide * NodesPerSide;
 	}
 
 	void PrePopulateVolumeLayer(TArray<TSharedPtr<FOctreeNode>>& OutVolumeChunks, TArray<TArray<FPointData>>& OutChunkPointData) {
-		int64 NodesPerSide = 1LL << VolumeDepth;
-		int64 ChunkExtent = Extent >> VolumeDepth;
-		int64 TotalNodeCount = NodesPerSide * NodesPerSide * NodesPerSide;
+		const int NodesPerSide = 1 << VolumeDepth;
+		const double ChunkExtent = Extent / (1 << VolumeDepth);
+		const int TotalNodeCount = NodesPerSide * NodesPerSide * NodesPerSide;
 		OutVolumeChunks.SetNum(TotalNodeCount);
 		OutChunkPointData.SetNum(TotalNodeCount);
 
-		for (int64 x = 0; x < NodesPerSide; ++x) {
-			for (int64 y = 0; y < NodesPerSide; ++y) {
-				for (int64 z = 0; z < NodesPerSide; ++z) {
+		for (int x = 0; x < NodesPerSide; ++x) {
+			for (int y = 0; y < NodesPerSide; ++y) {
+				for (int z = 0; z < NodesPerSide; ++z) {
 					// Calculate index directly
-					int32 idx = x + y * NodesPerSide + z * NodesPerSide * NodesPerSide;
+					int idx = x + y * NodesPerSide + z * NodesPerSide * NodesPerSide;
 
-					FInt64Vector ChunkCenter = FInt64Vector(
-						(x - NodesPerSide / 2) * ChunkExtent * 2 + ChunkExtent,
-						(y - NodesPerSide / 2) * ChunkExtent * 2 + ChunkExtent,
-						(z - NodesPerSide / 2) * ChunkExtent * 2 + ChunkExtent
+					FVector ChunkCenter = FVector(
+						(x - NodesPerSide / 2) * ChunkExtent * 2.0 + ChunkExtent,
+						(y - NodesPerSide / 2) * ChunkExtent * 2.0 + ChunkExtent,
+						(z - NodesPerSide / 2) * ChunkExtent * 2.0 + ChunkExtent
 					);
 
 					TSharedPtr<FOctreeNode> ChunkNode = InsertPosition(ChunkCenter, VolumeDepth, FVoxelData(0, 0, FVector::ZeroVector, -1, 2));
@@ -177,19 +174,18 @@ public:
 		}
 	}
 	
-	TSharedPtr<FOctreeNode> InsertPosition(FInt64Vector InPosition, int InDepth, FVoxelData InData, TSharedPtr<FOctreeNode> InCurrent = nullptr) {
+	TSharedPtr<FOctreeNode> InsertPosition(FVector InPosition, int InDepth, FVoxelData InData, TSharedPtr<FOctreeNode> InCurrent = nullptr) {
 		if (bIsResetting.load()) {
 			return nullptr; // Early exit if shutting down
 		}
-		if (InData.TypeId == -1 && InPosition == FInt64Vector::ZeroValue) return nullptr; //Ignore typeless inserts into 0,0,0
+		if (InData.TypeId == -1 && InPosition == FVector::ZeroVector) return nullptr; //Ignore typeless inserts into 0,0,0
 		
 		TSharedPtr<FOctreeNode> Current = Root;
-		int64 CurrentExtent = Extent;
+		double CurrentExtent = Extent;
 
 		if (InCurrent) {
 			Current = InCurrent;
 			CurrentExtent = Current->Extent;
-			//double DensityWeight = static_cast<double>(CurrentExtent) / static_cast<double>(LeafExtent);
 			double DensityWeight = FMath::Pow(2.0, MaxDepth - InDepth);
 			Current->Data.GasDensity += InData.GasDensity * DensityWeight; //Roughly scale density contribution by insert depth
 			Current->Data.Composition += InData.Composition * InData.GasDensity * DensityWeight;
@@ -212,11 +208,11 @@ public:
 
 			if (!Current->Children[ChildIndex].IsValid()) {
 				// Compute new center for the child
-				int64 OffsetX = ((ChildIndex & 1) ? 1 : -1) * CurrentExtent;
-				int64 OffsetY = ((ChildIndex & 2) ? 1 : -1) * CurrentExtent;
-				int64 OffsetZ = ((ChildIndex & 4) ? 1 : -1) * CurrentExtent;
+				double OffsetX = ((ChildIndex & 1) ? 1 : -1) * CurrentExtent;
+				double OffsetY = ((ChildIndex & 2) ? 1 : -1) * CurrentExtent;
+				double OffsetZ = ((ChildIndex & 4) ? 1 : -1) * CurrentExtent;
 
-				FInt64Vector ChildCenter = FInt64Vector(
+				FVector ChildCenter = FVector(
 					Current->Center.X + OffsetX,
 					Current->Center.Y + OffsetY,
 					Current->Center.Z + OffsetZ
@@ -296,14 +292,14 @@ public:
 		return Nodes;
 	}
 
-	void CollectNodesInRange(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, const FInt64Vector& InCenter, int64 InExtent, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
+	void CollectNodesInRange(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, const FVector& InCenter, const double InExtent, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
 		if (!InNode.IsValid()) return;
 
 		// Get Query and Node Bounds
-		const FInt64Vector QueryMin = InCenter - FInt64Vector(InExtent, InExtent, InExtent);
-		const FInt64Vector QueryMax = InCenter + FInt64Vector(InExtent, InExtent, InExtent);
-		const FInt64Vector NodeMin = InNode->Center - FInt64Vector(InNode->Extent, InNode->Extent, InNode->Extent);
-		const FInt64Vector NodeMax = InNode->Center + FInt64Vector(InNode->Extent, InNode->Extent, InNode->Extent);
+		const FVector QueryMin = InCenter - FVector(InExtent, InExtent, InExtent);
+		const FVector QueryMax = InCenter + FVector(InExtent, InExtent, InExtent);
+		const FVector NodeMin = InNode->Center - FVector(InNode->Extent, InNode->Extent, InNode->Extent);
+		const FVector NodeMax = InNode->Center + FVector(InNode->Extent, InNode->Extent, InNode->Extent);
 
 		// Early reject if node doesn't intersect the query bounds
 		const bool bIntersects = NodeMin.X <= QueryMax.X && NodeMax.X >= QueryMin.X && NodeMin.Y <= QueryMax.Y && NodeMax.Y >= QueryMin.Y && NodeMin.Z <= QueryMax.Z && NodeMax.Z >= QueryMin.Z;
@@ -328,7 +324,7 @@ public:
 		}
 	}
 
-	TArray<TSharedPtr<FOctreeNode>> GetNodesInRange(FInt64Vector InCenter, int64 InExtent, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
+	TArray<TSharedPtr<FOctreeNode>> GetNodesInRange(FVector InCenter, double InExtent, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
 		TArray<TSharedPtr<FOctreeNode>> Nodes;
 		if (Root.IsValid())
 		{
@@ -337,25 +333,25 @@ public:
 		return Nodes;
 	}
 
-	void CollectNodesByScreenSpace(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, const FInt64Vector& InCenter, int64 InExtent, double ScreenSpaceThreshold, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
+	void CollectNodesByScreenSpace(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, const FVector& InCenter, const double InExtent, double ScreenSpaceThreshold, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
 		if (!InNode.IsValid()) return;
 
 		// Get Query and Node Bounds
-		const FInt64Vector QueryMin = InCenter - FInt64Vector(InExtent, InExtent, InExtent);
-		const FInt64Vector QueryMax = InCenter + FInt64Vector(InExtent, InExtent, InExtent);
-		const FInt64Vector NodeMin = InNode->Center - FInt64Vector(InNode->Extent, InNode->Extent, InNode->Extent);
-		const FInt64Vector NodeMax = InNode->Center + FInt64Vector(InNode->Extent, InNode->Extent, InNode->Extent);
+		const FVector QueryMin = InCenter - FVector(InExtent, InExtent, InExtent);
+		const FVector QueryMax = InCenter + FVector(InExtent, InExtent, InExtent);
+		const FVector NodeMin = InNode->Center - FVector(InNode->Extent, InNode->Extent, InNode->Extent);
+		const FVector NodeMax = InNode->Center + FVector(InNode->Extent, InNode->Extent, InNode->Extent);
 
 		// Intersection Rejection
 		const bool bIntersects = NodeMin.X <= QueryMax.X && NodeMax.X >= QueryMin.X && NodeMin.Y <= QueryMax.Y && NodeMax.Y >= QueryMin.Y && NodeMin.Z <= QueryMax.Z && NodeMax.Z >= QueryMin.Z;
 		if (!bIntersects) return;
 
-		const double Distance = FVector::Dist(FVector(InNode->Center), FVector(InCenter));
+		const double Distance = FVector::Dist(InNode->Center, InCenter);
 		// Screen Space Rejection
 		if (Distance > 0.0)
 		{
 			// Reject if too small on screen
-			if ((double)InNode->Extent * (1.0 + InNode->Data.Density) / Distance < ScreenSpaceThreshold) return;
+			if (InNode->Extent * (1.0 + InNode->Data.Density) / Distance < ScreenSpaceThreshold) return;
 		}
 
 		// Recurse
@@ -378,7 +374,7 @@ public:
 		}
 	}
 
-	TArray<TSharedPtr<FOctreeNode>> GetNodesByScreenSpace(const FInt64Vector& InCenter, int64 InExtent, double ScreenSpaceThreshold, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
+	TArray<TSharedPtr<FOctreeNode>> GetNodesByScreenSpace(const FVector& InCenter, const double InExtent, const double ScreenSpaceThreshold, const int InMinDepth = -1, const int InMaxDepth = -1, const int InTypeIdFilter = -1) const {
 		TArray<TSharedPtr<FOctreeNode>> Nodes;
 		if (Root.IsValid())
 		{
@@ -389,11 +385,11 @@ public:
 	#pragma endregion
 
 	#pragma region Constructor/Destructor 
-	FOctree(int64 InExtent) {
+	FOctree(double InExtent) {
 		Extent = InExtent;
-		MaxDepth = static_cast<int32>(FMath::Log2(static_cast<double>(Extent)));
+		MaxDepth = static_cast<int>(FMath::Log2(Extent));
 		DepthMaxDensity = 0;
-		Root = MakeShared<FOctreeNode>(FInt64Vector(), Extent, TArray<uint8>(), nullptr);
+		Root = MakeShared<FOctreeNode>(FVector::ZeroVector, Extent, TArray<uint8>(), nullptr);
 	}
 	#pragma endregion
 };
@@ -401,21 +397,21 @@ public:
 class SVO_API FOctreeTextureProcessor {
 public:
 	#pragma region Extract Mip Data From Volume Nodes
-	static TArray<uint8> GenerateVolumeMipDataFromOctree(TArray<TSharedPtr<FOctreeNode>> InVolumeNodes, int32 InResolution, int64 InExtent, double InMaxDensity)
+	static TArray<uint8> GenerateVolumeMipDataFromOctree(TArray<TSharedPtr<FOctreeNode>> InVolumeNodes, int InResolution, double InExtent, double InMaxDensity)
 	{
 		double StartTime = FPlatformTime::Seconds();
 
 		// --- Octree + setup ---
-		const int32 TargetDepth = FMath::FloorLog2(InResolution);
-		const int64 NodeExtentAtDepth = (InExtent >> TargetDepth);
-		const int64 OctreeExtent = InExtent;
+		const int TargetDepth = FMath::FloorLog2(InResolution);
+		const double NodeExtentAtDepth = InExtent / FMath::Pow(2.0, TargetDepth);
+		const double OctreeExtent = InExtent;
 
 		// Precompute reciprocal for fast coordinate mapping
 		const double Scale = 1.0 / (2.0 * NodeExtentAtDepth);
 
 		// --- Texture allocation ---
+		const int BytesPerVoxel = 4; // BGRA8
 		const int64 TotalVoxels = (int64)InResolution * InResolution * InResolution;
-		const int64 BytesPerVoxel = 4; // BGRA8
 		const int64 TotalBytes = TotalVoxels * BytesPerVoxel;
 
 		TArray<uint8> TextureData;
@@ -423,22 +419,22 @@ public:
 
 		// --- Parallel fill ---
 		// Use chunked ParallelFor to reduce scheduling overhead
-		const int32 ChunkSize = 512;
-		const int32 NumChunks = (InVolumeNodes.Num() + ChunkSize - 1) / ChunkSize;
+		const int ChunkSize = 512;
+		const int NumChunks = (InVolumeNodes.Num() + ChunkSize - 1) / ChunkSize;
 
-		ParallelFor(NumChunks, [&](int32 ChunkIdx){
-			const int32 Start = ChunkIdx * ChunkSize;
-			const int32 End = FMath::Min(Start + ChunkSize, InVolumeNodes.Num());
+		ParallelFor(NumChunks, [&](int ChunkIdx){
+			const int Start = ChunkIdx * ChunkSize;
+			const int End = FMath::Min(Start + ChunkSize, InVolumeNodes.Num());
 
-			for (int32 NodeIndex = Start; NodeIndex < End; NodeIndex++)
+			for (int NodeIndex = Start; NodeIndex < End; NodeIndex++)
 			{
 				const auto& Node = InVolumeNodes[NodeIndex];
 				if (!Node.IsValid()) continue;
 
 				// --- Compute voxel coords (multiply instead of divide) ---
-				int32 VolumeX = static_cast<int32>((Node->Center.X + OctreeExtent) * Scale);
-				int32 VolumeY = static_cast<int32>((Node->Center.Y + OctreeExtent) * Scale);
-				int32 VolumeZ = static_cast<int32>((Node->Center.Z + OctreeExtent) * Scale);
+				int VolumeX = static_cast<int>((Node->Center.X + OctreeExtent) * Scale);
+				int VolumeY = static_cast<int>((Node->Center.Y + OctreeExtent) * Scale);
+				int VolumeZ = static_cast<int>((Node->Center.Z + OctreeExtent) * Scale);
 
 				if (VolumeX < 0 || VolumeX >= InResolution ||
 					VolumeY < 0 || VolumeY >= InResolution ||
@@ -477,23 +473,23 @@ public:
 	#pragma endregion
 	
 	#pragma region Upscale Mip Data From InResolution^3 to 4096^2 Pseudo-volume
-	static TArray<uint8> UpscalePseudoVolumeDensityData(const TArray<uint8>& InMipData, int32 InResolution)
+	static TArray<uint8> UpscalePseudoVolumeDensityData(const TArray<uint8>& InMipData, int InResolution)
 	{
 		double StartTime = FPlatformTime::Seconds();
 
 		#pragma region 256^3 Constants
-		constexpr int32 Out3DRes = 256;												// fixed target 3D resolution
-		constexpr int32 BytesPerVoxel = 4;											// RGBA8
-		constexpr int32 tilesPerSide = 16;											// 16x16 = 256 slices
-		constexpr int32 Out2DRes = 4096;   // 4096
-		constexpr int32 OutBytes = 67108864; // 4096 * 4096 * 4
-		const int32 InSlice = InResolution * InResolution;
+		constexpr int Out3DRes = 256;												// fixed target 3D resolution
+		constexpr int BytesPerVoxel = 4;											// RGBA8
+		constexpr int tilesPerSide = 16;											// 16x16 = 256 slices
+		constexpr int Out2DRes = 4096;   // 4096
+		constexpr int OutBytes = 67108864; // 4096 * 4096 * 4
+		const int InSlice = InResolution * InResolution;
 		#pragma endregion
 
 		#pragma region Precompute Coordinates
 		struct SampleCoord { int i0, i1; float t; };
 		static TArray<SampleCoord> Precomputed;
-		static int32 CachedInRes = 0;
+		static int CachedInRes = 0;
 		if (Precomputed.Num() == 0 || CachedInRes != InResolution)
 		{
 			Precomputed.SetNum(Out3DRes);
@@ -516,14 +512,14 @@ public:
 		uint8* OutPtrBase = OutData.GetData();
 
 		// Lambda to compute base index into input voxel array
-		auto InIndexBase = [InResolution, InSlice, BytesPerVoxel](int x, int y, int z)->int32 {
+		auto InIndexBase = [InResolution, InSlice, BytesPerVoxel](int x, int y, int z)->int {
 			return ((z * InSlice) + (y * InResolution) + x) * BytesPerVoxel;
 		};
 		#pragma endregion
 
 		#pragma region Parallel Slice Processing
 		// --- Parallel slice processing ---
-		ParallelFor(Out3DRes, [&](int32 z)
+		ParallelFor(Out3DRes, [&](int z)
 			{
 				const auto& Zc = Precomputed[z];
 				const int z0 = Zc.i0;
@@ -610,10 +606,10 @@ public:
 		double StartTime = FPlatformTime::Seconds();
 		
 		// Calculate expected 2D pseudo-volume layout parameters, will always output 256^3 to match noise texture dimensions
-		const int32 BytesPerVoxel = 4;
-		int32 tilesPerSide = 16;
-		int32 OutRes = 4096;
-		const int32 ExpectedBytes = 67108864; // 4096 * 4096 * 4
+		const int BytesPerVoxel = 4;
+		const int tilesPerSide = 16;
+		const int OutRes = 4096;
+		const int ExpectedBytes = 67108864; // 4096 * 4096 * 4
 
 		if (InMipData.Num() != ExpectedBytes)
 		{

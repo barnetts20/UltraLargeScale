@@ -73,23 +73,18 @@ void UProximityTrackerComponent::OnProximityUpdate()
         if (!StarSystemActor || StarSystemActor->InitializationState != ELifecycleState::Ready) continue;
 
         FVector StarSystemSampleLocation = WorldLocation - StarSystemActor->GetActorLocation();
-        FInt64Vector StarSystemSampleCoordinate = FInt64Vector(
-            FMath::RoundToInt64(StarSystemSampleLocation.X),
-            FMath::RoundToInt64(StarSystemSampleLocation.Y),
-            FMath::RoundToInt64(StarSystemSampleLocation.Z)
-        );
 
         // Check if we're inside this star system's bounds
-        int64 StarSystemExtent = StarSystemActor->Octree->Extent;
-        if (FMath::Abs(StarSystemSampleCoordinate.X) <= StarSystemExtent &&
-            FMath::Abs(StarSystemSampleCoordinate.Y) <= StarSystemExtent &&
-            FMath::Abs(StarSystemSampleCoordinate.Z) <= StarSystemExtent)
+        double StarSystemExtent = StarSystemActor->Octree->Extent;
+        if (FMath::Abs(StarSystemSampleLocation.X) <= StarSystemExtent &&
+            FMath::Abs(StarSystemSampleLocation.Y) <= StarSystemExtent &&
+            FMath::Abs(StarSystemSampleLocation.Z) <= StarSystemExtent)
         {
             bInsideStarSystem = true;
 
             // We're inside this star system - only scan entities here
             auto NearbyEntityNodes = StarSystemActor->Octree->GetNodesByScreenSpace(
-                StarSystemSampleCoordinate,
+                StarSystemSampleLocation,
                 ScanExtent,
                 .0001,
                 -1,
@@ -101,7 +96,7 @@ void UProximityTrackerComponent::OnProximityUpdate()
                 for (const TSharedPtr<FOctreeNode>& Node : NearbyEntityNodes) {
                     if (Node.IsValid()) {
                         DebugDrawSystemEntityNode(
-                            StarSystemActor->GetActorLocation() + FVector(Node->Center),
+                            StarSystemActor->GetActorLocation() + Node->Center,
                             Node
                         );
                     }
@@ -164,23 +159,18 @@ void UProximityTrackerComponent::OnProximityUpdate()
         if (!GalaxyActor || GalaxyActor->InitializationState != ELifecycleState::Ready) continue;
 
         FVector GalaxySampleLocation = WorldLocation - GalaxyActor->GetActorLocation();
-        FInt64Vector GalaxySampleCoordinate = FInt64Vector(
-            FMath::RoundToInt64(GalaxySampleLocation.X),
-            FMath::RoundToInt64(GalaxySampleLocation.Y),
-            FMath::RoundToInt64(GalaxySampleLocation.Z)
-        );
 
         // Check if we're inside this galaxy's bounds
-        int64 GalaxyExtent = GalaxyActor->Octree->Extent;
-        if (FMath::Abs(GalaxySampleCoordinate.X) <= GalaxyExtent &&
-            FMath::Abs(GalaxySampleCoordinate.Y) <= GalaxyExtent &&
-            FMath::Abs(GalaxySampleCoordinate.Z) <= GalaxyExtent)
+        double GalaxyExtent = GalaxyActor->Octree->Extent;
+        if (FMath::Abs(GalaxySampleLocation.X) <= GalaxyExtent &&
+            FMath::Abs(GalaxySampleLocation.Y) <= GalaxyExtent &&
+            FMath::Abs(GalaxySampleLocation.Z) <= GalaxyExtent)
         {
             bInsideGalaxy = true;
 
             // We're inside this galaxy - only scan star systems here
             auto NearbyStarSystemNodes = GalaxyActor->Octree->GetNodesByScreenSpace(
-                GalaxySampleCoordinate,
+                GalaxySampleLocation,
                 ScanExtent,
                 .0001,
                 -1,
@@ -191,7 +181,7 @@ void UProximityTrackerComponent::OnProximityUpdate()
             if (DebugMode) {
                 for (const TSharedPtr<FOctreeNode>& Node : NearbyStarSystemNodes) {
                     if (Node.IsValid()) {
-                        DebugDrawStarSystemNode(GalaxyActor->GetActorLocation() + FVector(Node->Center), Node);
+                        DebugDrawStarSystemNode(GalaxyActor->GetActorLocation() + Node->Center, Node);
                     }
                 }
             }
@@ -236,14 +226,9 @@ void UProximityTrackerComponent::OnProximityUpdate()
     // LEVEL 1: Galaxies (shallowest)
     // If we're not in a star system or galaxy, scan the universe
     FVector SampleLocation = WorldLocation - UniverseActor->GetActorLocation();
-    FInt64Vector SampleCoordinate = FInt64Vector(
-        FMath::RoundToInt64(SampleLocation.X),
-        FMath::RoundToInt64(SampleLocation.Y),
-        FMath::RoundToInt64(SampleLocation.Z)
-    );
 
     TArray<TSharedPtr<FOctreeNode>> NearbyGalaxyNodes = UniverseActor->Octree->GetNodesByScreenSpace(
-        SampleCoordinate,
+        SampleLocation,
         ScanExtent,
         .0001,
         -1,
@@ -283,13 +268,8 @@ void UProximityTrackerComponent::DebugDrawNode(TSharedPtr<FOctreeNode> InNode)
 
     // Convert FInt64Coordinate to FVector in world space
     const FVector UniverseOrigin = UniverseActor->GetActorLocation(); // world-space offset
-    const FVector NodeCenter = FVector(
-        static_cast<float>(InNode->Center.X),
-        static_cast<float>(InNode->Center.Y),
-        static_cast<float>(InNode->Center.Z)
-    ) + UniverseOrigin;
-
-    const float HalfExtent = static_cast<float>(InNode->Extent);
+    const FVector NodeCenter = InNode->Center + UniverseOrigin;
+    const double HalfExtent = InNode->Extent;
     const FVector BoxExtent = FVector(HalfExtent);
 
     const FColor BoxColor = FColor::Green;
@@ -314,7 +294,7 @@ void UProximityTrackerComponent::DebugDrawStarSystemNode(FVector NodeCenter, TSh
 {
     if (!InNode.IsValid() || !UniverseActor) return;
 
-    const float HalfExtent = static_cast<float>(InNode->Extent);
+    const double HalfExtent = InNode->Extent;
     const FVector BoxExtent = FVector(HalfExtent);
 
     const FColor BoxColor = FColor::Green;
@@ -339,7 +319,7 @@ void UProximityTrackerComponent::DebugDrawSystemEntityNode(FVector NodeCenter, T
 {
     if (!InNode.IsValid()) return;
 
-    const float HalfExtent = static_cast<float>(InNode->Extent);
+    const double HalfExtent = InNode->Extent;
     const FVector BoxExtent = FVector(HalfExtent);
 
     // Use different color for entities to distinguish them

@@ -15,16 +15,7 @@ AGalaxyActor::AGalaxyActor()
 	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent")));
 	PointCloudNiagara = Cast<UNiagaraSystem>(FSoftObjectPath(NiagaraPath).TryLoad());
 	StarSystemActorClass = AStarSystemActor::StaticClass();
-
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.0f, 0.0f);        // 10 AU minimum
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.25f, 0.01f);      // 25% are ~20 AU (ultra-small)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.75f, 0.04f);      // 75% are ~50 AU (small main-sequence)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.9375f, 0.10f);    // 93.75% are ~110 AU (medium)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.984375f, 0.20f);  // 98.4% are ~208 AU (moderately large)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.996f, 0.40f);     // 99.6% are ~406 AU (large)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.999f, 0.70f);     // 99.9% are ~703 AU (very large)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(1.0f, 1.0f);        // 100% includes 1,000 AU extreme cases
-	Octree = MakeShared<FOctree>(Extent);
+	Octree = MakeShared<FOctree>(Params.Extent);
 }
 
 AGalaxyActor::~AGalaxyActor()
@@ -92,21 +83,12 @@ void AGalaxyActor::InitializeStarSystemPool() {
 void AGalaxyActor::InitializeData() {
 	double StartTime = FPlatformTime::Seconds();
 	
-	FRandomStream Stream(Seed);
-	GalaxyGenerator.Seed = Seed;
-	GalaxyGenerator.Extent = Extent;
-	GalaxyGenerator.UnitScale = UnitScale;
-	GalaxyGenerator.MinSystemScale = MinStarSystemScale;
-	GalaxyGenerator.MaxSystemScale = MaxStarSystemScale;
-	GalaxyGenerator.ScaleDistributionCurve = ScaleDistributionCurve;
-	//GalaxyGenerator.DepthRange = 10; //With seven levels, assuming our smallest star is say 1/2 the size of the sun, we can cover the vast majority of potential realistic star scales
-	//GalaxyGenerator.InsertDepthOffset = 7; //Controlls the depth above max depth the smallest stars will be generated in
-	GalaxyGenerator.Rotation = FRotator(AxisRotation.X, AxisRotation.Y, AxisRotation.Z);
-	GalaxyGenerator.GeneratedData.SetNum(0);
+	GalaxyGenerator.Params = Params;
+	GalaxyGenerator.GeneratedData.SetNum(0); //TODO: MOVE INIT LOGIC LIKE THIS INTO GENERATOR ITSELF
 	
 	GalaxyParamFactory GalaxyParamGen;
-	GalaxyParamGen.Seed = this->Seed;
-	GalaxyGenerator.GalaxyParams = GalaxyParamGen.GenerateParams();
+	GalaxyParamGen.Seed = Params.Seed;
+	GalaxyGenerator.Params = GalaxyParamGen.GenerateParams();
 	GalaxyGenerator.GenerateData(Octree);
 	
 	double GenFinish = FPlatformTime::Seconds();
@@ -137,7 +119,7 @@ void AGalaxyActor::InitializeData() {
 		Colors[Index] = FLinearColor(Node->Data.Composition);
 	}, EParallelForFlags::BackgroundPriority);
 
-	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree( VolumeNodes, 32, Extent, Octree->DepthMaxDensity), 32));
+	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree( VolumeNodes, 32, Params.Extent, Octree->DepthMaxDensity), 32));
 
 	double RemapFinish = FPlatformTime::Seconds();
 	GenDuration = RemapFinish - InsertFinish;
@@ -162,7 +144,7 @@ void AGalaxyActor::InitializeVolumetric()
 			VolumetricComponent->DepthPriorityGroup = ESceneDepthPriorityGroup::SDPG_MAX;
 			VolumetricComponent->bRenderInDepthPass = false;
 			VolumetricComponent->RegisterComponent();
-			VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
+			VolumetricComponent->SetWorldScale3D(FVector(2 * Params.Extent));
 
 			VolumeMaterial = UMaterialInstanceDynamic::Create(
 				LoadObject<UMaterialInterface>(nullptr, *VolumetricMaterialPath),
@@ -170,18 +152,18 @@ void AGalaxyActor::InitializeVolumetric()
 			);
 
 			VolumeMaterial->SetTextureParameterValue(FName("VolumeTexture"), PseudoVolumeTexture);
-			VolumeMaterial->SetTextureParameterValue(FName("NoiseTexture"), LoadObject<UVolumeTexture>(nullptr, *GalaxyGenerator.GalaxyParams.VolumeNoise));
-			VolumeMaterial->SetVectorParameterValue(FName("AmbientColor"), GalaxyGenerator.GalaxyParams.VolumeAmbientColor);
-			VolumeMaterial->SetVectorParameterValue(FName("CoolShift"), GalaxyGenerator.GalaxyParams.VolumeCoolShift);
-			VolumeMaterial->SetVectorParameterValue(FName("HotShift"), GalaxyGenerator.GalaxyParams.VolumeHotShift);
-			VolumeMaterial->SetScalarParameterValue(FName("HueVariance"), GalaxyGenerator.GalaxyParams.VolumeHueVariance);
-			VolumeMaterial->SetScalarParameterValue(FName("HueVarianceScale"), GalaxyGenerator.GalaxyParams.VolumeHueVarianceScale);
-			VolumeMaterial->SetScalarParameterValue(FName("SaturationVariance"), GalaxyGenerator.GalaxyParams.VolumeSaturationVariance);
-			VolumeMaterial->SetScalarParameterValue(FName("TemperatureInfluence"), GalaxyGenerator.GalaxyParams.VolumeTemperatureInfluence);
-			VolumeMaterial->SetScalarParameterValue(FName("TemperatureScale"), GalaxyGenerator.GalaxyParams.VolumeTemperatureScale);
-			VolumeMaterial->SetScalarParameterValue(FName("Density"), GalaxyGenerator.GalaxyParams.VolumeDensity);
-			VolumeMaterial->SetScalarParameterValue(FName("WarpAmount"), GalaxyGenerator.GalaxyParams.VolumeWarpAmount);
-			VolumeMaterial->SetScalarParameterValue(FName("WarpScale"), GalaxyGenerator.GalaxyParams.VolumeWarpScale);
+			VolumeMaterial->SetTextureParameterValue(FName("NoiseTexture"), LoadObject<UVolumeTexture>(nullptr, *GalaxyGenerator.Params.VolumeNoise));
+			VolumeMaterial->SetVectorParameterValue(FName("AmbientColor"), GalaxyGenerator.Params.VolumeAmbientColor);
+			VolumeMaterial->SetVectorParameterValue(FName("CoolShift"), GalaxyGenerator.Params.VolumeCoolShift);
+			VolumeMaterial->SetVectorParameterValue(FName("HotShift"), GalaxyGenerator.Params.VolumeHotShift);
+			VolumeMaterial->SetScalarParameterValue(FName("HueVariance"), GalaxyGenerator.Params.VolumeHueVariance);
+			VolumeMaterial->SetScalarParameterValue(FName("HueVarianceScale"), GalaxyGenerator.Params.VolumeHueVarianceScale);
+			VolumeMaterial->SetScalarParameterValue(FName("SaturationVariance"), GalaxyGenerator.Params.VolumeSaturationVariance);
+			VolumeMaterial->SetScalarParameterValue(FName("TemperatureInfluence"), GalaxyGenerator.Params.VolumeTemperatureInfluence);
+			VolumeMaterial->SetScalarParameterValue(FName("TemperatureScale"), GalaxyGenerator.Params.VolumeTemperatureScale);
+			VolumeMaterial->SetScalarParameterValue(FName("Density"), GalaxyGenerator.Params.VolumeDensity);
+			VolumeMaterial->SetScalarParameterValue(FName("WarpAmount"), GalaxyGenerator.Params.VolumeWarpAmount);
+			VolumeMaterial->SetScalarParameterValue(FName("WarpScale"), GalaxyGenerator.Params.VolumeWarpScale);
 			
 			VolumetricComponent->SetMaterial(0, VolumeMaterial);
 			VolumetricComponent->SetVisibility(true);
@@ -212,8 +194,8 @@ void AGalaxyActor::InitializeNiagara()
 			true,
 			false
 		);
-		NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Extent), FVector(Extent)));
-		NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Extent); //TODO: Might not need this, check niagara component
+		NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Params.Extent), FVector(Params.Extent)));
+		NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Params.Extent);
 		NiagaraComponent->TranslucencySortPriority = 1;
 
 		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable {
@@ -256,7 +238,7 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 	SpawnedStarSystems.Add(InNode, TWeakObjectPtr<AStarSystemActor>(System));
 	System->ResetForSpawn();
 
-	System->UnitScale = (InNode->Extent * this->UnitScale) / System->Extent;
+	System->UnitScale = (InNode->Extent * Params.UnitScale) / System->Extent;
 	UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::Star System Unit Scale %.3f CM"), System->UnitScale);
 	System->SpeedScale = Universe->SpeedScale;
 	System->Seed = InNode->Data.ObjectId;
@@ -264,7 +246,7 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 
 	// Compute correct parallax ratios and spawn location
 	const double SystemParallaxRatio = (Universe->SpeedScale / System->UnitScale);
-	const double GalaxyParallaxRatio = (Universe->SpeedScale / UnitScale);
+	const double GalaxyParallaxRatio = (Universe->SpeedScale / Params.UnitScale);
 
 	FVector NodeWorldPosition = FVector(InNode->Center) + GetActorLocation();
 	FVector PlayerToNode = CurrentFrameOfReferenceLocation - NodeWorldPosition;
@@ -379,7 +361,7 @@ void AGalaxyActor::ApplyParallaxOffset()
 		return;
 	}
 
-	double ParallaxRatio = (Universe ? Universe->SpeedScale : SpeedScale) / UnitScale;
+	double ParallaxRatio = (Universe ? Universe->SpeedScale : SpeedScale) / Params.UnitScale;
 	FVector PlayerOffset = CurrentFrameOfReferenceLocation - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
 	FVector ParallaxOffset = PlayerOffset * (1.0 - ParallaxRatio);
@@ -421,16 +403,16 @@ void AGalaxyActor::DrawDebugBounds()
 			);
 
 			// Draw coordinate axes at the center
-			//DrawDebugCoordinateSystem(
-			//	World,
-			//	ActorLocation,
-			//	FRotator::ZeroRotator,
-			//	WorldExtent * 0.1f,
-			//	false,
-			//	-1.0f,
-			//	0,
-			//	WorldExtent * 0.001f
-			//);
+			DrawDebugCoordinateSystem(
+				World,
+				ActorLocation,
+				FRotator::ZeroRotator,
+				WorldExtent * 0.1f,
+				false,
+				-1.0f,
+				0,
+				WorldExtent * 0.001f
+			);
 		}
 	}
 }

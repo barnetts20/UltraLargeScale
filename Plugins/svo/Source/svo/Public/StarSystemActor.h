@@ -4,6 +4,7 @@
 #include "GameFramework/Actor.h"
 #include <GalaxyActor.h>
 #include <FOctree.h>
+#include <StarSystemDataGenerator.h>
 #include "StarSystemActor.generated.h"
 
 UCLASS()
@@ -50,7 +51,7 @@ public:
 
 protected:
 #pragma region Data Initialization
-	StarSystemGenerator SystemGenerator;
+	StarSystemDataGenerator SystemGenerator;
 	void InitializeData();
 #pragma endregion
 

@@ -15,19 +15,7 @@ AUniverseActor::AUniverseActor()
 	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent")));
 	PointCloudNiagara = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/NG_UniverseCloud.NG_UniverseCloud"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
-	Octree = MakeShared<FOctree>(Extent);
-
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.0f, 0.0f);        // ~100 ly (ultra-faint dwarfs)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.05f, 0.005f);     // 5% are ~400 ly (ultra-faint)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.15f, 0.015f);     // 15% are ~1,000 ly (dwarfs)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.3f, 0.035f);     // 32% are ~2,200 ly (large dwarfs)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.5f, 0.08f);      // 54% are ~4,900 ly (small galaxies)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.9f, 0.165f);     // 87% are ~10,000 ly (MW-scale at ~0.165 = ~100k ly)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.975f, 0.35f);      // 95% are ~210,000 ly (large galaxies)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.99f, 0.60f);     // 98.5% are ~600,000 ly (giants)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.99999f, 0.80f);     // 99.5% are ~1.4M ly (BCGs)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(1.0f, 1.0f);        // 100% includes ~6M ly (IC 1101)
-
+	Octree = MakeShared<FOctree>(Params.Extent);
 }
 #pragma endregion
 
@@ -89,19 +77,7 @@ void AUniverseActor::InitializeGalaxyPool() {
 void AUniverseActor::InitializeData() {
 	double StartTime = FPlatformTime::Seconds();
 
-	FRandomStream Stream(Seed);
-	UniverseGenerator.Seed = Seed;
-	UniverseParams UniverseParams;
-	UniverseParams.Extent = Extent;
-
-	//TODO: Proceduralize universe generator params / make a factory
-	UniverseGenerator.UniverseParams = UniverseParams;
-	UniverseGenerator.Rotation = FRotator(0);
-	UniverseGenerator.Extent = Extent;
-	UniverseGenerator.UnitScale = UnitScale;
-	UniverseGenerator.MinSize = MinGalaxyScale;
-	UniverseGenerator.MaxSize = MaxGalaxyScale;
-	UniverseGenerator.ScaleCurve = ScaleDistributionCurve;
+	UniverseGenerator.Params = Params;
 	UniverseGenerator.GenerateData(Octree);
 
 	TArray<TSharedPtr<FOctreeNode>> VolumeNodes;
@@ -117,12 +93,12 @@ void AUniverseActor::InitializeData() {
 		const TSharedPtr<FOctreeNode>& Node = PointNodes[Index];
 		FRandomStream RandStream(Node->Data.ObjectId);
 		Rotations[Index] = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
-		Positions[Index] = FVector(Node->Center.X, Node->Center.Y, Node->Center.Z);
+		Positions[Index] = Node->Center;
 		Extents[Index] = static_cast<float>(Node->Extent * (1 + Node->Data.Density));
 		Colors[Index] = FLinearColor(Node->Data.Composition);
 	}, EParallelForFlags::BackgroundPriority);
 
-	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(VolumeNodes, 32, Extent, Octree->DepthMaxDensity), 32));
+	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(VolumeNodes, 32, Params.Extent, Octree->DepthMaxDensity), 32));
 
 	double GenDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Universe data generation took: %.3f seconds"), GenDuration);
@@ -142,7 +118,7 @@ void AUniverseActor::InitializeVolumetric()
 		VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
 		VolumetricComponent->TranslucencySortPriority = 1;
 		VolumetricComponent->RegisterComponent();
-		VolumetricComponent->SetWorldScale3D(FVector(2 * Extent));
+		VolumetricComponent->SetWorldScale3D(FVector(2 * Params.Extent));
 
 		UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(
 			LoadObject<UMaterialInterface>(nullptr, *VolumetricMaterialPath),
@@ -182,7 +158,7 @@ void AUniverseActor::InitializeNiagara()
 			true,
 			false
 		);
-		NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Extent), FVector(Extent)));
+		NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Params.Extent), FVector(Params.Extent)));
 		NiagaraComponent->TranslucencySortPriority = 0;
 
 		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
@@ -209,44 +185,52 @@ void AUniverseActor::InitializeNiagara()
 #pragma region Galaxy Pooled Spawn Hooks
 void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 {
-	if (!InNode.IsValid() || !GalaxyActorClass || SpawnedGalaxies.Contains(InNode) || InitializationState != ELifecycleState::Ready || GalaxyPool.Num() == 0)
+	if (!InNode.IsValid() || !GalaxyActorClass || SpawnedGalaxies.Contains(InNode) || InitializationState != ELifecycleState::Ready)
 	{
 		return;
 	}
 
-	AGalaxyActor* Galaxy = nullptr;
-	if (GalaxyPool.Num() > 0)
-	{
-		Galaxy = GalaxyPool.Pop();
-	}
-	else
+	if (GalaxyPool.Num() == 0)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("Galaxy pool exhausted, consider increasing GalaxyPoolSize"));
 		return;
 	}
 
+	AGalaxyActor* Galaxy = GalaxyPool.Pop();
+
 	SpawnedGalaxies.Add(InNode, TWeakObjectPtr<AGalaxyActor>(Galaxy));
 	Galaxy->ResetForSpawn();
 
-	Galaxy->UnitScale = (InNode->Extent * this->UnitScale) / Galaxy->Extent;	//Scale is derived from perceived node extent divided by galaxy extent
-	Galaxy->SpeedScale = SpeedScale;											//Speed scale is the same across all parallax components in the system
-	Galaxy->Seed = InNode->Data.ObjectId;
-	Galaxy->ParentColor = FLinearColor(InNode->Data.Composition);
+	Galaxy->Params.UnitScale = (InNode->Extent * this->Params.UnitScale) / Galaxy->Params.Extent;	//Scale is derived from perceived node extent divided by galaxy extent
+	Galaxy->SpeedScale = SpeedScale;												//Speed scale is the same across all parallax components in the system and subsystems
+	Galaxy->Params.Seed = InNode->Data.ObjectId;
+	Galaxy->Params.ParentColor = FLinearColor(InNode->Data.Composition);
 
 	// Compute correct parallax ratios and spawn location
-	const double GalaxyParallaxRatio = (SpeedScale / Galaxy->UnitScale);
-	const double UniverseParallaxRatio = (SpeedScale / UnitScale);
-	FVector NodeWorldPosition = FVector(InNode->Center) + GetActorLocation();
+	const double GalaxyParallaxRatio = (SpeedScale / Galaxy->Params.UnitScale);
+	const double UniverseParallaxRatio = (SpeedScale / Params.UnitScale);
+	FVector NodeWorldPosition = InNode->Center + GetActorLocation();
 	FVector PlayerToNode = CurrentFrameOfReferenceLocation - NodeWorldPosition;
 	FVector GalaxySpawnPosition = CurrentFrameOfReferenceLocation - PlayerToNode * (GalaxyParallaxRatio / UniverseParallaxRatio);
 	Galaxy->SetActorLocation(GalaxySpawnPosition);
 
 	//Compute Axis Tilt >>> TODO: MOVE TO GALAXY PARAM FACTORY/GENERATOR
 	FRandomStream RandStream(InNode->Data.ObjectId);
-	FVector normal = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
-	FMatrix RotationMatrix = FRotationMatrix::MakeFromZX(normal, FVector::ForwardVector);
-	Galaxy->AxisRotation = normal * 360;
-	
+	const float u1 = RandStream.FRand();
+	const float u2 = RandStream.FRand();
+	const float u3 = RandStream.FRand();
+
+	const float sqrt1MinusU1 = FMath::Sqrt(1.f - u1);
+	const float sqrtU1 = FMath::Sqrt(u1);
+
+	FQuat Quat(
+		sqrt1MinusU1 * FMath::Sin(2.f * PI * u2),
+		sqrt1MinusU1 * FMath::Cos(2.f * PI * u2),
+		sqrtU1 * FMath::Sin(2.f * PI * u3),
+		sqrtU1 * FMath::Cos(2.f * PI * u3)
+	);
+	Galaxy->Params.Rotation = Quat.Rotator();
+
 	Galaxy->Initialize();				
 	Galaxy->SetActorHiddenInGame(false);
 }
@@ -277,14 +261,14 @@ void AUniverseActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 				//Handle Octree flush here instead of in galaxy, that way we can ensure flush is done before returning it to the pool
 				PoolGalaxy->Octree->bIsResetting.store(true);
 				FPlatformProcess::Sleep(0.05f);
-				PoolGalaxy->Octree = MakeShared<FOctree>(PoolGalaxy->Extent);
+				PoolGalaxy->Octree = MakeShared<FOctree>(PoolGalaxy->Params.Extent);
 				PoolGalaxy->Octree->bIsResetting.store(false);
 
 				double ODuration = FPlatformTime::Seconds() - StartTime;
 				UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Flushing Octree took: %.3f seconds"), ODuration);
 
 				// Return to pool on game thread
-				AsyncTask(ENamedThreads::GameThread, [this, PoolGalaxy, StartTime]()
+				AsyncTask(ENamedThreads::GameThread, [this, PoolGalaxy]()
 				{
 					GalaxyPool.Insert(PoolGalaxy, 0);
 				});
@@ -320,7 +304,7 @@ void AUniverseActor::ApplyParallaxOffset()
 		return;
 	}
 
-	double ParallaxRatio = SpeedScale / UnitScale;
+	double ParallaxRatio = SpeedScale / Params.UnitScale;
 	FVector PlayerOffset = CurrentFrameOfReferenceLocation - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
 	FVector ParallaxOffset = PlayerOffset * (1.0 - ParallaxRatio);
@@ -354,16 +338,16 @@ void AUniverseActor::DrawDebugBounds()
 			);
 
 			// Draw coordinate axes at the center
-			//DrawDebugCoordinateSystem(
-			//	World,
-			//	ActorLocation,
-			//	FRotator::ZeroRotator,
-			//	WorldExtent * 0.1f,
-			//	false,
-			//	-1.0f,
-			//	0,
-			//	WorldExtent * 0.001f
-			//);
+			DrawDebugCoordinateSystem(
+				World,
+				ActorLocation,
+				FRotator::ZeroRotator,
+				WorldExtent * 0.1f,
+				false,
+				-1.0f,
+				0,
+				WorldExtent * 0.001f
+			);
 		}
 	}
 }
