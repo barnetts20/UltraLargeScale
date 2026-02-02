@@ -17,16 +17,16 @@ AUniverseActor::AUniverseActor()
 	GalaxyActorClass = AGalaxyActor::StaticClass();
 	Octree = MakeShared<FOctree>(Extent);
 
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.0f, 0.0f);      // Start
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.05f, 0.111f);   // 5% are ultra-faint dwarfs (1/9 of scale range)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.15f, 0.222f);   // 15% are dwarfs (2/9)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.32f, 0.333f);   // 32% are large dwarfs (3/9)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.54f, 0.444f);   // 54% are small galaxies (4/9)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.87f, 0.556f);   // 87% are Milky Way scale (5/9)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.95f, 0.667f);   // 95% are large (6/9)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.985f, 0.778f);  // 98.5% are giants (7/9)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0.995f, 0.889f);  // 99.5% are BCGs (8/9)
-	ScaleDistributionCurve.GetRichCurve()->AddKey(1.0f, 1.0f);
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.0f, 0.0f);        // ~100 ly (ultra-faint dwarfs)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.05f, 0.005f);     // 5% are ~400 ly (ultra-faint)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.15f, 0.015f);     // 15% are ~1,000 ly (dwarfs)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.3f, 0.035f);     // 32% are ~2,200 ly (large dwarfs)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.5f, 0.08f);      // 54% are ~4,900 ly (small galaxies)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.9f, 0.165f);     // 87% are ~10,000 ly (MW-scale at ~0.165 = ~100k ly)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.975f, 0.35f);      // 95% are ~210,000 ly (large galaxies)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.99f, 0.60f);     // 98.5% are ~600,000 ly (giants)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.99999f, 0.80f);     // 99.5% are ~1.4M ly (BCGs)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(1.0f, 1.0f);        // 100% includes ~6M ly (IC 1101)
 
 }
 #pragma endregion

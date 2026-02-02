@@ -15,23 +15,15 @@ AGalaxyActor::AGalaxyActor()
 	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent")));
 	PointCloudNiagara = Cast<UNiagaraSystem>(FSoftObjectPath(NiagaraPath).TryLoad());
 	StarSystemActorClass = AStarSystemActor::StaticClass();
-	
-	//TODO:: Generate a curve that resembles our current star scale distribution array
-	double min = 69600000000 * .08;
-	double max = 69600000000 * 1500;
-	ScaleDistributionCurve.GetRichCurve()->AddKey(0, 0);
-	//static constexpr double DepthProb[10] = {
-	//	0.25,               // 0.5×  ultra-small stars
-	//	0.5,				// 1×    small main-sequence
-	//	0.1875,             // 2×
-	//	0.046875,           // 4×
-	//	0.01171875,         // 8×
-	//	0.0029296875,       // 16×
-	//	0.000732421875,     // 32×
-	//	0.00018310546875,   // 64×
-	//	0.0000457763671875,	// 128×
-	//	0.000011444091796875// 256×
-	//};
+
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.0f, 0.0f);        // 10 AU minimum
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.25f, 0.01f);      // 25% are ~20 AU (ultra-small)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.75f, 0.04f);      // 75% are ~50 AU (small main-sequence)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.9375f, 0.10f);    // 93.75% are ~110 AU (medium)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.984375f, 0.20f);  // 98.4% are ~208 AU (moderately large)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.996f, 0.40f);     // 99.6% are ~406 AU (large)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(0.999f, 0.70f);     // 99.9% are ~703 AU (very large)
+	ScaleDistributionCurve.GetRichCurve()->AddKey(1.0f, 1.0f);        // 100% includes 1,000 AU extreme cases
 	Octree = MakeShared<FOctree>(Extent);
 }
 
@@ -104,8 +96,11 @@ void AGalaxyActor::InitializeData() {
 	GalaxyGenerator.Seed = Seed;
 	GalaxyGenerator.Extent = Extent;
 	GalaxyGenerator.UnitScale = UnitScale;
-	GalaxyGenerator.DepthRange = 10; //With seven levels, assuming our smallest star is say 1/2 the size of the sun, we can cover the vast majority of potential realistic star scales
-	GalaxyGenerator.InsertDepthOffset = 7; //Controlls the depth above max depth the smallest stars will be generated in
+	GalaxyGenerator.MinSystemScale = MinStarSystemScale;
+	GalaxyGenerator.MaxSystemScale = MaxStarSystemScale;
+	GalaxyGenerator.ScaleDistributionCurve = ScaleDistributionCurve;
+	//GalaxyGenerator.DepthRange = 10; //With seven levels, assuming our smallest star is say 1/2 the size of the sun, we can cover the vast majority of potential realistic star scales
+	//GalaxyGenerator.InsertDepthOffset = 7; //Controlls the depth above max depth the smallest stars will be generated in
 	GalaxyGenerator.Rotation = FRotator(AxisRotation.X, AxisRotation.Y, AxisRotation.Z);
 	GalaxyGenerator.GeneratedData.SetNum(0);
 	

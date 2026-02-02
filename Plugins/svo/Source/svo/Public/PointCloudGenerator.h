@@ -206,6 +206,9 @@ public:
 
 	double Extent;
 	double UnitScale;
+	double MinSystemScale;
+	double MaxSystemScale;
+	FRuntimeFloatCurve ScaleDistributionCurve;
 
 	double MaxRadius;
 	double GalaxyRadius;
@@ -216,19 +219,19 @@ public:
 
 	TArray<FPointData> GeneratedData;
 	
-	// depth probabilities for depths 0..6 (sum = 1.0)
-	static constexpr double DepthProb[10] = {
-		0.25,               // 0.5×  ultra-small stars
-		0.5,				// 1×    small main-sequence
-		0.1875,             // 2×
-		0.046875,           // 4×
-		0.01171875,         // 8×
-		0.0029296875,       // 16×
-		0.000732421875,     // 32×
-		0.00018310546875,   // 64×
-		0.0000457763671875,	// 128×
-		0.000011444091796875// 256×
-	};
+	//// depth probabilities for depths 0..6 (sum = 1.0)
+	//static constexpr double DepthProb[10] = {
+	//	0.25,               // 0.5×  ultra-small stars
+	//	0.5,				// 1×    small main-sequence
+	//	0.1875,             // 2×
+	//	0.046875,           // 4×
+	//	0.01171875,         // 8×
+	//	0.0029296875,       // 16×
+	//	0.000732421875,     // 32×
+	//	0.00018310546875,   // 64×
+	//	0.0000457763671875,	// 128×
+	//	0.000011444091796875// 256×
+	//};
 
 	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
 
@@ -240,7 +243,6 @@ public:
 	void GenerateBackground();
 	void ApplyRotation();
 	void GenerateCluster(int InSeed, FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity = 1, double InDepthBias = 1);
-	int ChooseDepth(double InRandomSample, double InDepthBias);
 };
 
 /// <summary>

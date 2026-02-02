@@ -35,11 +35,10 @@ public:
 	
 	//int64 Extent = 549755813888; 
 	int64 Extent = 2147483648;
-	
 	double UnitScale = 100.0;
 
-	double MinStarSystemScale;
-	double MaxStarSystemScale;
+	double MinStarSystemScale = 1.496e12;
+	double MaxStarSystemScale = 1.496e16;
 	FRuntimeFloatCurve ScaleDistributionCurve;
 
 	double SpeedScale = 1.0;

@@ -1408,7 +1408,6 @@ void GalaxyGenerator::GenerateBulge()
 			int32 ThreadIdx = FPlatformTLS::GetCurrentThreadId() % NumThreads;
 			FRandomStream& Stream = ThreadStreams[ThreadIdx];
 
-
 			FPointData& InsertData = GeneratedData[StartIndex + i];
 			// TODO:: switch to real world scales GeneratedData[StartIndex + i] = FPointData::MakePointDataFromWorldScale(scale, UnitScale, Extent);
 			InsertData.Data.ObjectId = i;
@@ -1432,10 +1431,13 @@ void GalaxyGenerator::GenerateBulge()
 					if (Stream.FRand() > acceptanceProbability) continue;
 				}
 
-				InsertData.Data.Density = Stream.FRand();
+				double scale = FPointData::SampleScaleFromDistribution(MinSystemScale, MaxSystemScale, Stream.FRand(), ScaleDistributionCurve);
+				FPointData idata = FPointData::MakePointDataFromWorldScale(scale, UnitScale, Extent);
+
+				InsertData.Data.Density = idata.Data.Density;
 				InsertData.Data.GasDensity = Stream.FRandRange(0.5f, 1.5f) * GalaxyParams.BulgeBaseDensity;
 				InsertData.Data.Composition = Stream.GetUnitVector();
-				InsertData.InsertDepth = ChooseDepth(Stream.FRand(), GalaxyParams.BulgeDepthBias);
+				InsertData.InsertDepth = idata.InsertDepth;
 				InsertData.SetPosition(Stream.GetUnitVector() * r * AxisScale + (Stream.GetUnitVector() * Stream.FRand() * BulgeRadius * GalaxyParams.BulgeJitter));
 				PointInserted = true;
 			}
@@ -1646,33 +1648,35 @@ void GalaxyGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, FVect
 			FVector P = InClusterCenter + Offset;
 			double size = P.Length();
 
-			FPointData InsertData;
-			//TODO: switch to using real world scales and letting it convert to depth/density FPointData InsertData = FPointData::MakePointDataFromWorldScale(scale, UnitScale, Extent);
-
+			double scale = FPointData::SampleScaleFromDistribution(MinSystemScale, MaxSystemScale, Stream.FRand(), ScaleDistributionCurve);
+			FPointData InsertData = FPointData::MakePointDataFromWorldScale(scale, UnitScale, Extent);
 			InsertData.SetPosition(size < MaxRadius ? P : FVector::ZeroVector);
-			InsertData.InsertDepth = ChooseDepth(Stream.FRand(), InDepthBias);
-			InsertData.Data = FVoxelData(Stream.FRand(), InBaseDensity * Stream.FRandRange(.5, 1.5), Stream.GetUnitVector(), i + StartIndex, 1);
+
+			InsertData.Data.GasDensity = InBaseDensity * Stream.FRandRange(.5, 1.5);
+			InsertData.Data.Composition = Stream.GetUnitVector();
+			InsertData.Data.ObjectId = i + StartIndex;
+			InsertData.Data.TypeId = 1;
 
 			GeneratedData[StartIndex + i] = InsertData;
 		}, EParallelForFlags::BackgroundPriority);
 }
 
-int GalaxyGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
-{
-	double biasedSample = FMath::Clamp(FMath::Pow(InRandomSample, InDepthBias),0,1);
-	double cumulative = 0.0;
-	int chosenDepth = 9;
-	for (int d = 0; d < 10; ++d)
-	{
-		cumulative += DepthProb[d];
-		if (biasedSample <= cumulative)
-		{
-			chosenDepth = d;
-			break;
-		}
-	}
-	return FMath::Clamp(MaxInsertionDepth - chosenDepth, MinInsertionDepth, MaxInsertionDepth);
-}
+//int GalaxyGenerator::ChooseDepth(double InRandomSample, double InDepthBias)
+//{
+//	double biasedSample = FMath::Clamp(FMath::Pow(InRandomSample, InDepthBias),0,1);
+//	double cumulative = 0.0;
+//	int chosenDepth = 9;
+//	for (int d = 0; d < 10; ++d)
+//	{
+//		cumulative += DepthProb[d];
+//		if (biasedSample <= cumulative)
+//		{
+//			chosenDepth = d;
+//			break;
+//		}
+//	}
+//	return FMath::Clamp(MaxInsertionDepth - chosenDepth, MinInsertionDepth, MaxInsertionDepth);
+//}
 #pragma endregion
 
 #pragma endregion

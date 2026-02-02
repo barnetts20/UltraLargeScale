@@ -35,158 +35,243 @@ void UProximityTrackerComponent::BeginPlay()
 void UProximityTrackerComponent::OnProximityUpdate()
 {
     if (!UniverseActor) return;
-    //TODO: THIS SHOULD BE ORDERED AND SHORT CIRCUITING
-    // IF WE ARE IN A STAR SYSTEM, WE DONT NEED TO SCAN GALAXY AND UNIVERSE
-    // IF WE ARE IN A GALAXY, WE DONT NEED TO SCAN UNIVERSE
-    //Get parent position
+
     AActor* Owner = GetOwner();
     if (!Owner) return;
     if (!UniverseActor || UniverseActor->InitializationState != ELifecycleState::Ready) return;
+
     FVector WorldLocation = Owner->GetActorLocation();
-    FVector SampleLocation = WorldLocation - UniverseActor->GetActorLocation();
-    FInt64Vector SampleCoordinate = FInt64Vector(FMath::RoundToInt64(SampleLocation.X), FMath::RoundToInt64(SampleLocation.Y), FMath::RoundToInt64(SampleLocation.Z));
 
-    //Proximity Query Octree
-    TArray<TSharedPtr<FOctreeNode>> NearbyGalaxyNodes = UniverseActor->Octree->GetNodesByScreenSpace(SampleCoordinate, ScanExtent, .0001, -1, -1, 1);
+    // ============================================
+    // HIERARCHICAL SHORT-CIRCUIT SEARCH
+    // Check from deepest to shallowest level
+    // ============================================
 
-    if (DebugMode) {
-        for (const TSharedPtr<FOctreeNode>& Node : NearbyGalaxyNodes)
-        {
-            if (Node.IsValid())
-            {
-                DebugDrawNode(Node);
+    // LEVEL 3: Star System Entities (deepest)
+    // Check if we're inside any spawned star system
+    bool bInsideStarSystem = false;
+    for (TSharedPtr<FOctreeNode> StarSystemNode : SpawnedStarSystemNodes) {
+        // Find the galaxy this star system belongs to
+        AGalaxyActor* ParentGalaxy = nullptr;
+        for (TSharedPtr<FOctreeNode> GalaxyNode : SpawnedGalaxyNodes) {
+            auto ga = UniverseActor->SpawnedGalaxies.Find(GalaxyNode);
+            if (ga && ga->IsValid()) {
+                auto GalaxyActor = ga->Get();
+                if (GalaxyActor && GalaxyActor->SpawnedStarSystems.Contains(StarSystemNode)) {
+                    ParentGalaxy = GalaxyActor;
+                    break;
+                }
             }
         }
-    }
 
-    //Update the currently tracked galaxies and trigger lifecycle changes
-    TSet<TSharedPtr<FOctreeNode>> StaleGalaxyNodes = TSet<TSharedPtr<FOctreeNode>>(SpawnedGalaxyNodes);
-    for (const TSharedPtr<FOctreeNode>& Node : NearbyGalaxyNodes)
-    {
-        StaleGalaxyNodes.Remove(Node);
-        if (UniverseActor)
+        if (!ParentGalaxy) continue;
+
+        auto ssa = ParentGalaxy->SpawnedStarSystems.Find(StarSystemNode);
+        if (!ssa || !ssa->IsValid()) continue;
+
+        auto StarSystemActor = ssa->Get();
+        if (!StarSystemActor || StarSystemActor->InitializationState != ELifecycleState::Ready) continue;
+
+        FVector StarSystemSampleLocation = WorldLocation - StarSystemActor->GetActorLocation();
+        FInt64Vector StarSystemSampleCoordinate = FInt64Vector(
+            FMath::RoundToInt64(StarSystemSampleLocation.X),
+            FMath::RoundToInt64(StarSystemSampleLocation.Y),
+            FMath::RoundToInt64(StarSystemSampleLocation.Z)
+        );
+
+        // Check if we're inside this star system's bounds
+        int64 StarSystemExtent = StarSystemActor->Octree->Extent;
+        if (FMath::Abs(StarSystemSampleCoordinate.X) <= StarSystemExtent &&
+            FMath::Abs(StarSystemSampleCoordinate.Y) <= StarSystemExtent &&
+            FMath::Abs(StarSystemSampleCoordinate.Z) <= StarSystemExtent)
         {
-            if (!SpawnedGalaxyNodes.Contains(Node))
-            {
-                SpawnedGalaxyNodes.Add(Node);
-                UniverseActor->SpawnGalaxyFromPool(Node);
-            }
-        }
-    }
+            bInsideStarSystem = true;
 
-    for (const TSharedPtr<FOctreeNode>& Node : StaleGalaxyNodes) {
-        if (UniverseActor) {
-            UniverseActor->ReturnGalaxyToPool(Node);
-            SpawnedGalaxyNodes.Remove(Node);
-        }
-    }
-
-    // Process each spawned galaxy
-    for (TSharedPtr<FOctreeNode> GalaxyNode : SpawnedGalaxyNodes) {
-        auto ga = UniverseActor->SpawnedGalaxies.Find(GalaxyNode);
-        if (ga) {
-            auto GalaxyActor = ga->Get();
-            if (!GalaxyActor || GalaxyActor->InitializationState != ELifecycleState::Ready) continue;
-
-            FVector GalaxySampleLocation = WorldLocation - GalaxyActor->GetActorLocation();
-            FInt64Vector GalaxySampleCoordinate = FInt64Vector(FMath::RoundToInt64(GalaxySampleLocation.X), FMath::RoundToInt64(GalaxySampleLocation.Y), FMath::RoundToInt64(GalaxySampleLocation.Z));
-
-            auto NearbyStarSystemNodes = GalaxyActor->Octree->GetNodesByScreenSpace(GalaxySampleCoordinate, ScanExtent, .0001, -1, -1, 1);
+            // We're inside this star system - only scan entities here
+            auto NearbyEntityNodes = StarSystemActor->Octree->GetNodesByScreenSpace(
+                StarSystemSampleCoordinate,
+                ScanExtent,
+                .0001,
+                -1,
+                -1,
+                -1
+            );
 
             if (DebugMode) {
-                for (const TSharedPtr<FOctreeNode>& Node : NearbyStarSystemNodes)
-                {
-                    if (Node.IsValid())
-                    {
+                for (const TSharedPtr<FOctreeNode>& Node : NearbyEntityNodes) {
+                    if (Node.IsValid()) {
+                        DebugDrawSystemEntityNode(
+                            StarSystemActor->GetActorLocation() + FVector(Node->Center),
+                            Node
+                        );
+                    }
+                }
+            }
+
+            // Update tracked entities
+            TSet<TSharedPtr<FOctreeNode>> StaleEntityNodes = TSet<TSharedPtr<FOctreeNode>>(SpawnedEntityNodes);
+            for (const TSharedPtr<FOctreeNode>& Node : NearbyEntityNodes) {
+                StaleEntityNodes.Remove(Node);
+                if (!SpawnedEntityNodes.Contains(Node)) {
+                    SpawnedEntityNodes.Add(Node);
+                    StarSystemActor->SpawnEntityFromPool(Node);
+                }
+            }
+
+            for (const TSharedPtr<FOctreeNode>& Node : StaleEntityNodes) {
+                StarSystemActor->ReturnEntityToPool(Node);
+                SpawnedEntityNodes.Remove(Node);
+            }
+
+            // SHORT CIRCUIT - we're in a star system, don't check galaxies or universe
+            return;
+        }
+    }
+
+    // If we're here, we're not inside any star system
+    // Clean up all entity nodes since we've left all star systems
+    if (!bInsideStarSystem && SpawnedEntityNodes.Num() > 0) {
+        for (TSharedPtr<FOctreeNode> StarSystemNode : SpawnedStarSystemNodes) {
+            for (TSharedPtr<FOctreeNode> GalaxyNode : SpawnedGalaxyNodes) {
+                auto ga = UniverseActor->SpawnedGalaxies.Find(GalaxyNode);
+                if (ga && ga->IsValid()) {
+                    auto GalaxyActor = ga->Get();
+                    if (GalaxyActor && GalaxyActor->SpawnedStarSystems.Contains(StarSystemNode)) {
+                        auto ssa = GalaxyActor->SpawnedStarSystems.Find(StarSystemNode);
+                        if (ssa && ssa->IsValid()) {
+                            auto StarSystemActor = ssa->Get();
+                            if (StarSystemActor) {
+                                for (const TSharedPtr<FOctreeNode>& Node : SpawnedEntityNodes) {
+                                    StarSystemActor->ReturnEntityToPool(Node);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        SpawnedEntityNodes.Empty();
+    }
+
+    // LEVEL 2: Star Systems (middle)
+    // Check if we're inside any spawned galaxy
+    bool bInsideGalaxy = false;
+    for (TSharedPtr<FOctreeNode> GalaxyNode : SpawnedGalaxyNodes) {
+        auto ga = UniverseActor->SpawnedGalaxies.Find(GalaxyNode);
+        if (!ga || !ga->IsValid()) continue;
+
+        auto GalaxyActor = ga->Get();
+        if (!GalaxyActor || GalaxyActor->InitializationState != ELifecycleState::Ready) continue;
+
+        FVector GalaxySampleLocation = WorldLocation - GalaxyActor->GetActorLocation();
+        FInt64Vector GalaxySampleCoordinate = FInt64Vector(
+            FMath::RoundToInt64(GalaxySampleLocation.X),
+            FMath::RoundToInt64(GalaxySampleLocation.Y),
+            FMath::RoundToInt64(GalaxySampleLocation.Z)
+        );
+
+        // Check if we're inside this galaxy's bounds
+        int64 GalaxyExtent = GalaxyActor->Octree->Extent;
+        if (FMath::Abs(GalaxySampleCoordinate.X) <= GalaxyExtent &&
+            FMath::Abs(GalaxySampleCoordinate.Y) <= GalaxyExtent &&
+            FMath::Abs(GalaxySampleCoordinate.Z) <= GalaxyExtent)
+        {
+            bInsideGalaxy = true;
+
+            // We're inside this galaxy - only scan star systems here
+            auto NearbyStarSystemNodes = GalaxyActor->Octree->GetNodesByScreenSpace(
+                GalaxySampleCoordinate,
+                ScanExtent,
+                .0001,
+                -1,
+                -1,
+                1
+            );
+
+            if (DebugMode) {
+                for (const TSharedPtr<FOctreeNode>& Node : NearbyStarSystemNodes) {
+                    if (Node.IsValid()) {
                         DebugDrawStarSystemNode(GalaxyActor->GetActorLocation() + FVector(Node->Center), Node);
                     }
                 }
             }
 
-            //Update the currently tracked Star Systems and trigger lifecycle changes
+            // Update tracked star systems
             TSet<TSharedPtr<FOctreeNode>> StaleStarSystemNodes = TSet<TSharedPtr<FOctreeNode>>(SpawnedStarSystemNodes);
-            for (const TSharedPtr<FOctreeNode>& Node : NearbyStarSystemNodes)
-            {
+            for (const TSharedPtr<FOctreeNode>& Node : NearbyStarSystemNodes) {
                 StaleStarSystemNodes.Remove(Node);
-                if (GalaxyActor)
-                {
-                    if (!SpawnedStarSystemNodes.Contains(Node))
-                    {
-                        SpawnedStarSystemNodes.Add(Node);
-                        GalaxyActor->SpawnStarSystemFromPool(Node);
-                    }
+                if (!SpawnedStarSystemNodes.Contains(Node)) {
+                    SpawnedStarSystemNodes.Add(Node);
+                    GalaxyActor->SpawnStarSystemFromPool(Node);
                 }
             }
 
             for (const TSharedPtr<FOctreeNode>& Node : StaleStarSystemNodes) {
-                if (GalaxyActor) {
-                    GalaxyActor->ReturnStarSystemToPool(Node);
-                    SpawnedStarSystemNodes.Remove(Node);
-                }
+                GalaxyActor->ReturnStarSystemToPool(Node);
+                SpawnedStarSystemNodes.Remove(Node);
             }
 
-            // NEW: Process each spawned star system for nearby entities
-            for (TSharedPtr<FOctreeNode> StarSystemNode : SpawnedStarSystemNodes) {
-                auto ssa = GalaxyActor->SpawnedStarSystems.Find(StarSystemNode);
-                if (ssa) {
-                    auto StarSystemActor = ssa->Get();
-                    if (!StarSystemActor || StarSystemActor->InitializationState != ELifecycleState::Ready) continue;
+            // SHORT CIRCUIT - we're in a galaxy, don't check universe
+            return;
+        }
+    }
 
-                    FVector StarSystemSampleLocation = WorldLocation - StarSystemActor->GetActorLocation();
-                    FInt64Vector StarSystemSampleCoordinate = FInt64Vector(
-                        FMath::RoundToInt64(StarSystemSampleLocation.X),
-                        FMath::RoundToInt64(StarSystemSampleLocation.Y),
-                        FMath::RoundToInt64(StarSystemSampleLocation.Z)
-                    );
-
-                    // Query star system octree for nearby entities (planets, moons, debris, etc.)
-                    auto NearbyEntityNodes = StarSystemActor->Octree->GetNodesByScreenSpace(
-                        StarSystemSampleCoordinate,
-                        ScanExtent,
-                        .0001,
-                        -1,
-                        -1,
-                        -1
-                    );
-
-                    if (DebugMode) {
-                        for (const TSharedPtr<FOctreeNode>& Node : NearbyEntityNodes)
-                        {
-                            if (Node.IsValid())
-                            {
-                                DebugDrawSystemEntityNode(
-                                    StarSystemActor->GetActorLocation() + FVector(Node->Center),
-                                    Node
-                                );
-                            }
-                        }
-                    }
-
-                    // Update the currently tracked entities and trigger lifecycle changes
-                    TSet<TSharedPtr<FOctreeNode>> StaleEntityNodes = TSet<TSharedPtr<FOctreeNode>>(SpawnedEntityNodes);
-                    for (const TSharedPtr<FOctreeNode>& Node : NearbyEntityNodes)
-                    {
-                        StaleEntityNodes.Remove(Node);
-                        if (StarSystemActor)
-                        {
-                            if (!SpawnedEntityNodes.Contains(Node))
-                            {
-                                SpawnedEntityNodes.Add(Node);
-                                // This will spawn actual interactable world objects
-                                StarSystemActor->SpawnEntityFromPool(Node);
-                            }
-                        }
-                    }
-
-                    for (const TSharedPtr<FOctreeNode>& Node : StaleEntityNodes) {
-                        if (StarSystemActor) {
-                            StarSystemActor->ReturnEntityToPool(Node);
-                            SpawnedEntityNodes.Remove(Node);
-                        }
+    // If we're here, we're not inside any galaxy
+    // Clean up all star system nodes since we've left all galaxies
+    if (!bInsideGalaxy && SpawnedStarSystemNodes.Num() > 0) {
+        for (TSharedPtr<FOctreeNode> GalaxyNode : SpawnedGalaxyNodes) {
+            auto ga = UniverseActor->SpawnedGalaxies.Find(GalaxyNode);
+            if (ga && ga->IsValid()) {
+                auto GalaxyActor = ga->Get();
+                if (GalaxyActor) {
+                    for (const TSharedPtr<FOctreeNode>& Node : SpawnedStarSystemNodes) {
+                        GalaxyActor->ReturnStarSystemToPool(Node);
                     }
                 }
             }
         }
+        SpawnedStarSystemNodes.Empty();
+    }
+
+    // LEVEL 1: Galaxies (shallowest)
+    // If we're not in a star system or galaxy, scan the universe
+    FVector SampleLocation = WorldLocation - UniverseActor->GetActorLocation();
+    FInt64Vector SampleCoordinate = FInt64Vector(
+        FMath::RoundToInt64(SampleLocation.X),
+        FMath::RoundToInt64(SampleLocation.Y),
+        FMath::RoundToInt64(SampleLocation.Z)
+    );
+
+    TArray<TSharedPtr<FOctreeNode>> NearbyGalaxyNodes = UniverseActor->Octree->GetNodesByScreenSpace(
+        SampleCoordinate,
+        ScanExtent,
+        .0001,
+        -1,
+        -1,
+        1
+    );
+
+    if (DebugMode) {
+        for (const TSharedPtr<FOctreeNode>& Node : NearbyGalaxyNodes) {
+            if (Node.IsValid()) {
+                DebugDrawNode(Node);
+            }
+        }
+    }
+
+    // Update tracked galaxies
+    TSet<TSharedPtr<FOctreeNode>> StaleGalaxyNodes = TSet<TSharedPtr<FOctreeNode>>(SpawnedGalaxyNodes);
+    for (const TSharedPtr<FOctreeNode>& Node : NearbyGalaxyNodes) {
+        StaleGalaxyNodes.Remove(Node);
+        if (!SpawnedGalaxyNodes.Contains(Node)) {
+            SpawnedGalaxyNodes.Add(Node);
+            UniverseActor->SpawnGalaxyFromPool(Node);
+        }
+    }
+
+    for (const TSharedPtr<FOctreeNode>& Node : StaleGalaxyNodes) {
+        UniverseActor->ReturnGalaxyToPool(Node);
+        SpawnedGalaxyNodes.Remove(Node);
     }
 }
 #pragma endregion
