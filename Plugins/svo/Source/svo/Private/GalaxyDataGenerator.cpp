@@ -1317,7 +1317,7 @@ void GalaxyDataGenerator::GenerateBulge()
 		{
 			// Each thread gets its own random stream with unique seed
 			int32 ThreadIdx = FPlatformTLS::GetCurrentThreadId() % NumThreads;
-			FRandomStream& Stream = ThreadStreams[ThreadIdx];
+			FRandomStream Stream(Seed + 99 + i * 997);
 
 			FPointData& InsertData = GeneratedData[StartIndex + i];
 			// TODO:: switch to real world scales GeneratedData[StartIndex + i] = FPointData::MakePointDataFromWorldScale(scale, UnitScale, Extent);
@@ -1481,8 +1481,7 @@ void GalaxyDataGenerator::ApplyTwist()
 	ParallelFor(GeneratedData.Num(), [&](int32 i)
 		{
 			FVector P = GeneratedData[i].GetPosition();
-			//double rXY = (P * FVector(1,1,0)).Length(); // Can add this in if you want to bias twist factor for an axis
-			double rXY = P.Length();
+			double rXY = FVector(P.X, P.Y, 0).Length();
 			if (rXY < KINDA_SMALL_NUMBER) return;
 			double theta = FMath::Atan2(P.Y, P.X);
 			double normalizedRadius = FMath::Clamp(rXY / Params.Extent, 0.0, 1.0);
