@@ -216,20 +216,7 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 
 	//Compute Axis Tilt >>> TODO: MOVE TO GALAXY PARAM FACTORY/GENERATOR
 	FRandomStream RandStream(InNode->Data.ObjectId);
-	const float u1 = RandStream.FRand();
-	const float u2 = RandStream.FRand();
-	const float u3 = RandStream.FRand();
-
-	const float sqrt1MinusU1 = FMath::Sqrt(1.f - u1);
-	const float sqrtU1 = FMath::Sqrt(u1);
-
-	FQuat Quat(
-		sqrt1MinusU1 * FMath::Sin(2.f * PI * u2),
-		sqrt1MinusU1 * FMath::Cos(2.f * PI * u2),
-		sqrtU1 * FMath::Sin(2.f * PI * u3),
-		sqrtU1 * FMath::Cos(2.f * PI * u3)
-	);
-	Galaxy->Params.Rotation = Quat.Rotator();
+	Galaxy->Params.Rotation = RandStream.GetUnitVector().Rotation();
 
 	Galaxy->Initialize();				
 	Galaxy->SetActorHiddenInGame(false);
