@@ -4,27 +4,18 @@
 
 #include "CoreMinimal.h"
 #include "PointCloudGenerator.h"
+#include "ProceduralSpaceActor.h"
 #include "UniverseDataGenerator.generated.h"
 
 /// <summary>
 /// UNIVERSE GENERATION PARAM STRUCT
 /// </summary>
 USTRUCT(BlueprintType)
-struct SVO_API FUniverseParams {
+struct SVO_API FUniverseParams : public FBaseParams {
 	GENERATED_BODY()
-
-	// Generation parameters (affect WHAT is generated)
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	int Seed = 69;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
 	int Count = 2000000;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	double Extent = 2147483648;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	double UnitScale = 1e18;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
 	double MinGalaxyScale = 1e19;
@@ -33,17 +24,20 @@ struct SVO_API FUniverseParams {
 	double MaxGalaxyScale = 1e24;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	double Jitter = .02;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	FRotator Rotation = FRotator::ZeroRotator;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
 	FRuntimeFloatCurve ScaleDistributionCurve;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
+	double Jitter = .02;
 
 	static constexpr const char* EncodedTree = "EwAAAEBAFwAAAAAAmpmZPgAAAAAAAIA/HwAgABAAzcyMQBcAAACAvwAAgD8AAAAAzcxMPhsAFwAAAAAAAACAPwAAgL8AAIA/JAALAAAACwABAAAAAAAAAAEAAAAEAAAAAAAAgD8AAAAAQAAK16M9AAAAAAAAAAAAPwCamZk+AAAAAD8=";
 
 	FUniverseParams() {
+		Seed = 69;
+		Extent = 2147483648;
+		UnitScale = 1e18;
+		Rotation = FRotator::ZeroRotator;
+		ParentColor = FLinearColor(1,1,1);
+
 		ScaleDistributionCurve.GetRichCurve()->AddKey(0.0f, 0.0f);
 		ScaleDistributionCurve.GetRichCurve()->AddKey(0.05f, 0.0025f);
 		ScaleDistributionCurve.GetRichCurve()->AddKey(0.15f, 0.005f);
