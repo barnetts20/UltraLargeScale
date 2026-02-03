@@ -33,10 +33,10 @@ void AProceduralSpaceActor::Initialize()
             InitializeData();
             if (InitializationState == ELifecycleState::Pooling) return;
 
-            InitializeVolumetric();
+            InitializeNiagara();
             if (InitializationState == ELifecycleState::Pooling) return;
 
-            InitializeNiagara();
+            InitializeVolumetric();
             if (InitializationState == ELifecycleState::Pooling) return;
 
             InitializationState = ELifecycleState::Ready;
@@ -96,11 +96,12 @@ void AProceduralSpaceActor::InitializeChildPool()
 
 FVector AProceduralSpaceActor::ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const
 {
-    const double ChildParallaxRatio = GetParentSpeedScale() / ChildUnitScale;
-    const double ParentParallaxRatio = GetParentSpeedScale() / GetUnitScale();
+    //const double ChildParallaxRatio = GetParentSpeedScale() / ChildUnitScale;
+    //const double ParentParallaxRatio = GetParentSpeedScale() / GetUnitScale();
+    const double ParallaxRatio = GetUnitScale() / ChildUnitScale;
     FVector NodeWorldPosition = NodeCenter + GetActorLocation();
     FVector PlayerToNode = CurrentFrameOfReferenceLocation - NodeWorldPosition;
-    return CurrentFrameOfReferenceLocation - PlayerToNode * (ChildParallaxRatio / ParentParallaxRatio);
+    return CurrentFrameOfReferenceLocation - PlayerToNode * ParallaxRatio;
 }
 
 void AProceduralSpaceActor::ApplyParallaxOffset()

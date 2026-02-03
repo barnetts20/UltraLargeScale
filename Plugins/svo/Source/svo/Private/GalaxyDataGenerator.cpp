@@ -1282,6 +1282,7 @@ void GalaxyDataGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 	BlackHole.Data.Density = 1; //TODO: This should be allowed to be the accumulated density but it currently effects gas accumulation too much
 	BlackHole.Data.GasDensity = 1; //TODO: This should be allowed to be the accumulated density but it currently effects gas accumulation too much
 	GeneratedData.Add(BlackHole);
+	FPlatformProcess::Sleep(0.01f);
 }
 
 void GalaxyDataGenerator::GenerateBulge()

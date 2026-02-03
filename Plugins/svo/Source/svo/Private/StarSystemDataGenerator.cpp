@@ -124,11 +124,11 @@ void StarSystemDataGenerator::GeneratePlanet(const FOrbit& InPlanetOrbit, int32 
 	{
 		// Distance-based sizing: inner planets can be larger (Venus/Earth-like)
 		if (normDist < 0.3)
-			scale = Stream.FRandRange(4000, 12000); // Mercury to Earth
+			scale = Stream.FRandRange(400000000, 1200000000); // Mercury to Earth
 		else if (normDist < 0.6)
-			scale = Stream.FRandRange(3000, 7000); // Mars-like
+			scale = Stream.FRandRange(300000000, 700000000); // Mars-like
 		else
-			scale = Stream.FRandRange(1500, 5000); // Icy dwarfs
+			scale = Stream.FRandRange(150000000, 500000000); // Icy dwarfs
 
 		// Color variation for terrestrial
 		composition = FVector(
@@ -141,9 +141,9 @@ void StarSystemDataGenerator::GeneratePlanet(const FOrbit& InPlanetOrbit, int32 
 	{
 		// Gas giants larger in middle/outer system
 		if (normDist < 0.4)
-			scale = Stream.FRandRange(40000, 100000); // Jupiter-like
+			scale = Stream.FRandRange(4000000000, 10000000000); // Jupiter-like
 		else
-			scale = Stream.FRandRange(20000, 60000); // Neptune-like
+			scale = Stream.FRandRange(2000000000, 60000000000); // Neptune-like
 
 		// Color variation for gas giants
 		float hue = Stream.FRand();
@@ -181,15 +181,19 @@ void StarSystemDataGenerator::GeneratePlanet(const FOrbit& InPlanetOrbit, int32 
 		NumMoons = Stream.RandRange(0, 1); // Small chance for small planets
 	}
 
-	// Generate moons
 	for (int i = 0; i < NumMoons; i++)
 	{
 		FOrbit SubOrbit;
 		SubOrbit.Center = PlanetData.GetPosition();
 
-		// Moon orbits at multiples of planet radius (Hill sphere consideration)
-		double minDistance = scale * 2.5;
-		double maxDistance = scale * Stream.FRandRange(15, 50);
+		// FIXED: Convert world-space distances to octree-space
+		double minDistanceWorld = scale * 2.5;  // In cm
+		double maxDistanceWorld = scale * Stream.FRandRange(15, 50);  // In cm
+
+		// Convert to octree coordinates by dividing by UnitScale
+		double minDistance = minDistanceWorld / UnitScale;
+		double maxDistance = maxDistanceWorld / UnitScale;
+
 		SubOrbit.SemiMajorAxis = Stream.FRandRange(minDistance, maxDistance);
 
 		SubOrbit.Eccentricity = Stream.FRandRange(0, 0.15);
@@ -273,9 +277,9 @@ void StarSystemDataGenerator::GenerateDebris(const FOrbit& InDebrisOrbit, int32 
 		FVector FinalPos = BasePos + VerticalOffset;
 
 		// Debris size variation
-		double debrisScale = Stream.FRandRange(10, 500); // 10km to 500km asteroids
+		double debrisScale = Stream.FRandRange(100000, 500000); // 1km to 5km asteroids
 		if (Stream.FRand() < 0.05) // 5% chance of larger object
-			debrisScale = Stream.FRandRange(500, 2000);
+			debrisScale = Stream.FRandRange(500000, 4000000);
 
 		FPointData DebrisData = FPointData::MakePointDataFromWorldScale(debrisScale, UnitScale, Extent);
 		DebrisData.Data.TypeId = EObjectType::Debris;
@@ -313,7 +317,7 @@ void StarSystemDataGenerator::GenerateUnboundDebris()
 		);
 
 		// Small debris objects
-		double debrisScale = Stream.FRandRange(5, 200);
+		double debrisScale = Stream.FRandRange(50000, 200000);
 
 		FPointData DebrisData = FPointData::MakePointDataFromWorldScale(debrisScale, UnitScale, Extent);
 		DebrisData.Data.TypeId = EObjectType::Debris;
@@ -330,7 +334,7 @@ void StarSystemDataGenerator::GenerateGas()
 	// This could be represented as low-density points or a separate gas field
 	FRandomStream Stream(Seed + 7777);
 
-	int32 GasParticleCount = Stream.RandRange(50, 200);
+	int32 GasParticleCount = Stream.RandRange(500, 2000);
 
 	for (int32 i = 0; i < GasParticleCount; i++)
 	{
@@ -349,7 +353,7 @@ void StarSystemDataGenerator::GenerateGas()
 		);
 
 		// Very large, very low density gas clouds
-		FPointData GasData = FPointData::MakePointDataFromWorldScale(Stream.FRandRange(5000, 20000), UnitScale, Extent);
+		FPointData GasData = FPointData::MakePointDataFromWorldScale(Stream.FRandRange(500000, 2000000), UnitScale, Extent);
 		GasData.Data.GasDensity = Stream.FRandRange(0.001, 0.01); // Very diffuse
 		GasData.Data.TypeId = EObjectType::Gas;
 		GasData.Data.Composition = FVector(0.1, 0.1, 0.15); // Faint blue

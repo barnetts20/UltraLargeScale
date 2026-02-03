@@ -175,15 +175,15 @@ void AStarSystemActor::SpawnEntityFromPool(TSharedPtr<FOctreeNode> InNode)
 
 	double MeshScale = InNode->Extent * (1.0 + InNode->Data.Density) * Params.UnitScale;
 
-	AsyncTask(ENamedThreads::GameThread, [this, InNode, MeshScale]()
-		{
+	//AsyncTask(ENamedThreads::GameThread, [this, InNode, MeshScale]()
+	//	{
 			if (UWorld* World = GetWorld())
 			{
 				FActorSpawnParameters SpawnParams;
 				SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
 				// Use base class helper for spawn location calculation
-				FVector EntitySpawnPosition = ComputeChildSpawnLocation(InNode->Center, 1.0);
+				FVector EntitySpawnPosition = ComputeChildSpawnLocation(InNode->Center, 1.0); //Convert to real world scale
 
 				AParallaxStaticMeshActor* MeshActor = World->SpawnActor<AParallaxStaticMeshActor>(
 					AParallaxStaticMeshActor::StaticClass(),
@@ -224,7 +224,7 @@ void AStarSystemActor::SpawnEntityFromPool(TSharedPtr<FOctreeNode> InNode)
 					SpawnedEntities.Add(InNode, TWeakObjectPtr<AActor>(MeshActor));
 				}
 			}
-		});
+		//});
 }
 
 void AStarSystemActor::ReturnEntityToPool(TSharedPtr<FOctreeNode> InNode)
