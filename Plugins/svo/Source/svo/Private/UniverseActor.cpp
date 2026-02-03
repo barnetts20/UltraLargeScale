@@ -4,6 +4,7 @@
 #include <PointCloudGenerator.h>
 #include <Kismet/GameplayStatics.h>
 #include <GalaxyActor.h>
+#include <NiagaraFunctionLibrary.h>
 #pragma endregion
 
 #pragma region Constructor

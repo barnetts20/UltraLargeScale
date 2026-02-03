@@ -1,113 +1,69 @@
 #pragma once
-
-#pragma region Includes/ForwardDec
 #include "CoreMinimal.h"
-#include "FOctree.h"
-#include "GameFramework/Actor.h"
-#include "NiagaraComponent.h"
-#include "NiagaraFunctionLibrary.h"
-#include "NiagaraSystem.h"
-#include "PointCloudGenerator.h"
-#include "FastNoise/FastNoise.h"
-#include <UniverseActor.h>
-#include <GalaxyDataGenerator.h>
+#include "ProceduralSpaceActor.h"
+#include "GalaxyDataGenerator.h"
+#include "UniverseActor.h" 
 #include "GalaxyActor.generated.h"
+
 class AStarSystemActor;
-#pragma endregion
 
 UCLASS()
-class SVO_API AGalaxyActor : public AActor
+class SVO_API AGalaxyActor : public AProceduralSpaceActor
 {
 	GENERATED_BODY()
 
 public:
-	#pragma region Constructor/Destructor
 	AGalaxyActor();
 	~AGalaxyActor();
-	#pragma endregion
 
-	#pragma region Public Parameters
-	TSharedPtr<FOctree> Octree;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Galaxy Parent Actor")
-	AUniverseActor* Universe;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy Properties")
-	bool IsDebug = false;
-
+#pragma region Editor Exposed Parameters
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy Properties")
 	FGalaxyParams Params;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Galaxy Properties")
-	double SpeedScale = 1.0;
-
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Galaxy Parent Actor")
-	ELifecycleState InitializationState = ELifecycleState::Uninitialized;
-	#pragma endregion
+	AUniverseActor* Universe;
+	// SpeedScale, IsDebug, InitializationState, Octree inherited from base class
+#pragma endregion
 
-	#pragma region Lifecycle Management
-	void ResetForPool();			//Call externally before returning to pool
-	void ResetForSpawn();           //Call externally before calling initialize
-	#pragma endregion
-	
-	#pragma region Pooled Spawn/Despawn Hooks
+#pragma region Pooled Spawn/Despawn Hooks
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AStarSystemActor>> SpawnedStarSystems;
 	void SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode);
 	void ReturnStarSystemToPool(TSharedPtr<FOctreeNode> InNode);
-	#pragma endregion
-
-	#pragma region Initialization
-	void Initialize();				//Kick of async initialization of system
-	#pragma endregion
+#pragma endregion
 
 protected:
-	#pragma region Data Initialization
-	GalaxyDataGenerator GalaxyGenerator;
-	void InitializeData();
-	#pragma endregion
+#pragma region Params Accessors (implement pure virtuals from base)
+	virtual double GetUnitScale() const override { return Params.UnitScale; }
+	virtual double GetExtent() const override { return Params.Extent; }
+	virtual double GetParentSpeedScale() const override {
+		return Universe ? Universe->SpeedScale : SpeedScale;
+	}
+#pragma endregion
 
-	#pragma region Star System Pool
+#pragma region Initialization (implement pure virtuals from base)
+	virtual void InitializeData() override;
+	virtual void InitializeVolumetric() override;
+	virtual void InitializeNiagara() override;
+	virtual void InitializeChildPool() override;  // Star system pool initialization
+#pragma endregion
+
+#pragma region Data Generation
+	GalaxyDataGenerator GalaxyGenerator;
+#pragma endregion
+
+#pragma region Niagara (galaxy-specific)
+	FString NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
+	// Positions, Extents, Colors, PointCloudNiagara, NiagaraComponent inherited from base
+#pragma endregion
+
+#pragma region Volumetric (galaxy-specific)
+	FString VolumetricMaterialPath = FString("/svo/Materials/RayMarchers/MT_GalaxyRaymarchPseudoVolume_Inst.MT_GalaxyRaymarchPseudoVolume_Inst");
+	// PseudoVolumeTexture, VolumetricComponent, VolumeMaterial inherited from base
+#pragma endregion
+
+#pragma region Star System Pool
 	TSubclassOf<AStarSystemActor> StarSystemActorClass;
 	int StarSystemPoolSize = 5;
 	TArray<AStarSystemActor*> StarSystemPool;
-
-	void InitializeStarSystemPool();
-	#pragma endregion
-
-	#pragma region Niagara
-	TArray<FVector> Positions;
-	TArray<float> Extents;
-	TArray<FLinearColor> Colors;
-	FString NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
-
-	UPROPERTY()
-	UNiagaraSystem* PointCloudNiagara;
-
-	UPROPERTY()
-	UNiagaraComponent* NiagaraComponent;
-	
-	void InitializeNiagara();
-	#pragma endregion
-
-	#pragma region Volumetric
-	UPROPERTY()
-	UTexture2D* PseudoVolumeTexture;
-	
-	UPROPERTY()
-	UMaterialInstanceDynamic* VolumeMaterial;
-	FString VolumetricMaterialPath = FString("/svo/Materials/RayMarchers/MT_GalaxyRaymarchPseudoVolume_Inst.MT_GalaxyRaymarchPseudoVolume_Inst");
-
-	UPROPERTY()
-	UStaticMeshComponent* VolumetricComponent;
-	
-	void InitializeVolumetric();
-	#pragma endregion
-
-	#pragma region Parallax
-	FVector LastFrameOfReferenceLocation = FVector(0, 0, 0);
-	FVector CurrentFrameOfReferenceLocation;
-	void ApplyParallaxOffset();
-	void DrawDebugBounds();
-	virtual void Tick(float DeltaTime) override;
-	#pragma endregion
+#pragma endregion
 };

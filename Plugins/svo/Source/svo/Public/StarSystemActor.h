@@ -1,42 +1,28 @@
 #pragma once
-
 #include "CoreMinimal.h"
-#include "GameFramework/Actor.h"
-#include <GalaxyActor.h>
-#include <FOctree.h>
-#include <StarSystemDataGenerator.h>
+#include "ProceduralSpaceActor.h"
+#include "StarSystemDataGenerator.h"
+#include "GalaxyActor.h"
 #include "StarSystemActor.generated.h"
 
+class AUniverseActor;
+
 UCLASS()
-class SVO_API AStarSystemActor : public AActor
+class SVO_API AStarSystemActor : public AProceduralSpaceActor
 {
 	GENERATED_BODY()
-	
+
 public:
-#pragma region Constructor/Destructor
 	AStarSystemActor();
 	~AStarSystemActor();
-#pragma endregion
 
-#pragma region Public Parameters
-	UPROPERTY()
-	//May be worthwile to hold pointer to the universe here as well
+#pragma region Editor Exposed Parameters
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "StarSystem Properties")
+	FStarSystemParams Params;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "StarSystem Parent Actor")
 	AGalaxyActor* Galaxy;
-	TSharedPtr<FOctree> Octree;
-	bool IsDebug = false;
-	int Seed = 133780085;
-	//int64 Extent = 549755813888;// 549755813888; // roughly 2x the radius of the solar system in at meter scale precision
-	int64 Extent = 2147483648;
-	double UnitScale = 1.0;
-	double SpeedScale = 1.0;
-	ELifecycleState InitializationState = ELifecycleState::Uninitialized;
-	FVector AxisRotation = FVector::ZeroVector;
-	FLinearColor ParentColor = FLinearColor(1, 1, 1, 0);
-#pragma endregion
-
-#pragma region Lifecycle Management
-	void ResetForPool();			//Call externally before returning to pool
-	void ResetForSpawn();           //Call externally before calling initialize
+	// SpeedScale, IsDebug, InitializationState, Octree inherited from base class
 #pragma endregion
 
 #pragma region Pooled Spawn/Despawn Hooks
@@ -45,49 +31,33 @@ public:
 	void ReturnEntityToPool(TSharedPtr<FOctreeNode> InNode);
 #pragma endregion
 
-#pragma region Initialization
-	void Initialize();				//Kick of async initialization of system
-#pragma endregion
-
 protected:
-#pragma region Data Initialization
+#pragma region Params Accessors (implement pure virtuals from base)
+	virtual double GetUnitScale() const override { return Params.UnitScale; }
+	virtual double GetExtent() const override { return Params.Extent; }
+	virtual double GetParentSpeedScale() const override {
+		return Galaxy && Galaxy->Universe ? Galaxy->Universe->SpeedScale : SpeedScale;
+	}
+#pragma endregion
+
+#pragma region Initialization (implement pure virtuals from base)
+	virtual void InitializeData() override;
+	virtual void InitializeVolumetric() override;
+	virtual void InitializeNiagara() override;
+	// No InitializeChildPool() - star systems don't spawn child pools
+#pragma endregion
+
+#pragma region Data Generation
 	StarSystemDataGenerator SystemGenerator;
-	void InitializeData();
 #pragma endregion
 
-#pragma region Niagara
-	TArray<FVector> Positions;
-	TArray<float> Extents;
-	TArray<FLinearColor> Colors;
+#pragma region Niagara (star system-specific)
 	FString NiagaraPath = FString("/svo/NG_StarSystemCloud.NG_StarSystemCloud");
-	
-	UPROPERTY()
-	UNiagaraSystem* PointCloudNiagara;
-	
-	UPROPERTY()
-	UNiagaraComponent* NiagaraComponent;
-	
-	void InitializeNiagara();
+	// Positions, Extents, Colors, PointCloudNiagara, NiagaraComponent inherited from base
 #pragma endregion
 
-#pragma region Volumetric
-	UPROPERTY()
-	UTexture2D* PseudoVolumeTexture;
-	
-	UPROPERTY()
-	UMaterialInstanceDynamic* VolumeMaterial;
+#pragma region Volumetric (star system-specific)
 	FString VolumeMaterialPath = FString("/svo/Materials/RayMarchers/MT_StarSystemRaymarchPseudoVolume_Inst.MT_StarSystemRaymarchPseudoVolume_Inst");
-	UPROPERTY()
-	UStaticMeshComponent* VolumetricComponent;
-	void InitializeVolumetric();
+	// PseudoVolumeTexture, VolumetricComponent, VolumeMaterial inherited from base
 #pragma endregion
-
-#pragma region Parallax
-	FVector LastFrameOfReferenceLocation = FVector(0, 0, 0);
-	FVector CurrentFrameOfReferenceLocation;
-	void ApplyParallaxOffset();
-	void DrawDebugBounds();
-	virtual void Tick(float DeltaTime) override;
-#pragma endregion
-
 };

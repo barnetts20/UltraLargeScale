@@ -3,9 +3,14 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "ProceduralSpaceActor.h"
 #include "PointCloudGenerator.h"
+#include "StarSystemDataGenerator.generated.h"
 
-struct SVO_API StarSystemParams {
+USTRUCT(BlueprintType)
+struct SVO_API FStarSystemParams : public FBaseParams {
+	GENERATED_BODY()
+
 	FLinearColor StarColor = FLinearColor(1, 1, 1, 1);
 
 	//Volume Material Params
@@ -28,7 +33,7 @@ public:
 	StarSystemDataGenerator() : PointCloudGenerator(8647) {};
 	StarSystemDataGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
 
-	StarSystemParams SystemParams;
+	FStarSystemParams SystemParams;
 	enum EObjectType { Star = 0, Gas = 1, TerrestrialPlanet = 2, GasPlanet = 3, Moon = 4, Debris = 5, None = 6 };
 
 	struct FOrbit
@@ -65,8 +70,6 @@ public:
 	void GenerateGas();
 	FVector GetOrbitPosition(const FOrbit& Orbit) const;
 	// Populate volumetric layer
-
-	FPointData MakePointDataFromScale(double InScaleKm); //Convert a scale in KM into an Insertion Depth + Density - Perceived scale = Extent + Extent * Density
 
 	TArray<FOrbit> GeneratedOrbits;
 	TArray<FPointData> GeneratedData;

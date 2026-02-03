@@ -4,23 +4,19 @@
 #include "StarSystemActor.h"
 #include <PointCloudGenerator.h>
 #include <Kismet/GameplayStatics.h>
-#include <Camera/CameraComponent.h>
-#include <GameFramework/SpringArmComponent.h>
+#include <NiagaraFunctionLibrary.h>
 #pragma endregion
 
 #pragma region Constructor/Destructor
 AGalaxyActor::AGalaxyActor()
 {
-	PrimaryActorTick.bCanEverTick = true;
-	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent")));
 	PointCloudNiagara = Cast<UNiagaraSystem>(FSoftObjectPath(NiagaraPath).TryLoad());
 	StarSystemActorClass = AStarSystemActor::StaticClass();
 	Octree = MakeShared<FOctree>(Params.Extent);
 }
 
 AGalaxyActor::~AGalaxyActor()
-{	
-	//Release all populated data
+{
 	Positions.Empty();
 	Extents.Empty();
 	Colors.Empty();
@@ -30,42 +26,8 @@ AGalaxyActor::~AGalaxyActor()
 #pragma endregion
 
 #pragma region Initialization
-void AGalaxyActor::Initialize()
+void AGalaxyActor::InitializeChildPool()
 {
-	InitializationState = ELifecycleState::Initializing;
-
-	// Set initial frame of reference position
-	if (const auto* World = GetWorld())
-	{
-		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-		{
-			if (APawn* Pawn = Controller->GetPawn())
-			{
-				LastFrameOfReferenceLocation = Pawn->GetActorLocation();
-			}
-		}
-	}
-
-	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this]()
-		{
-			double StartTime = FPlatformTime::Seconds();
-			InitializeStarSystemPool();
-			if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
-			InitializeData();
-			if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
-			InitializeVolumetric();
-			if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
-			InitializeNiagara();
-			if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
-
-			InitializationState = ELifecycleState::Ready;
-
-			double TotalDuration = FPlatformTime::Seconds() - StartTime;
-			UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Initialize total duration: %.3f seconds"), TotalDuration);
-	});
-}
-
-void AGalaxyActor::InitializeStarSystemPool() {
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
@@ -80,22 +42,23 @@ void AGalaxyActor::InitializeStarSystemPool() {
 	CompletionFuture.Wait();
 }
 
-void AGalaxyActor::InitializeData() {
+void AGalaxyActor::InitializeData()
+{
 	double StartTime = FPlatformTime::Seconds();
-	
+
 	GalaxyGenerator.Params = Params;
-	GalaxyGenerator.GeneratedData.SetNum(0); //TODO: MOVE INIT LOGIC LIKE THIS INTO GENERATOR ITSELF
-	
+	GalaxyGenerator.GeneratedData.SetNum(0);
+
 	GalaxyParamFactory GalaxyParamGen;
 	GalaxyParamGen.Seed = Params.Seed;
 	GalaxyGenerator.Params = GalaxyParamGen.GenerateParams();
 	GalaxyGenerator.GenerateData(Octree);
-	
+
 	double GenFinish = FPlatformTime::Seconds();
 	double GenDuration = GenFinish - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Data Generation took: %.3f seconds"), GenDuration);
 
-	if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
+	if (InitializationState == ELifecycleState::Pooling) return;
 
 	TArray<TSharedPtr<FOctreeNode>> VolumeNodes;
 	TArray<TSharedPtr<FOctreeNode>> PointNodes;
@@ -105,21 +68,26 @@ void AGalaxyActor::InitializeData() {
 	GenDuration = InsertFinish - GenFinish;
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Bulk Insert took: %.3f seconds"), GenDuration);
 
-	if (InitializationState == ELifecycleState::Pooling) return; //Early exit if destroying
+	if (InitializationState == ELifecycleState::Pooling) return;
 
 	Positions.SetNumUninitialized(PointNodes.Num());
 	Extents.SetNumUninitialized(PointNodes.Num());
 	Colors.SetNumUninitialized(PointNodes.Num());
 
-	ParallelFor(PointNodes.Num(), [&](int32 Index){
+	ParallelFor(PointNodes.Num(), [&](int32 Index) {
 		const TSharedPtr<FOctreeNode>& Node = PointNodes[Index];
 		FRandomStream RandStream(Node->Data.ObjectId);
-		Positions[Index] = FVector(Node->Center.X, Node->Center.Y, Node->Center.Z);
+		Positions[Index] = Node->Center;
 		Extents[Index] = static_cast<float>(Node->Extent * (1 + Node->Data.Density));
 		Colors[Index] = FLinearColor(Node->Data.Composition);
-	}, EParallelForFlags::BackgroundPriority);
+		}, EParallelForFlags::BackgroundPriority);
 
-	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree( VolumeNodes, 32, Params.Extent, Octree->DepthMaxDensity), 32));
+	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(
+		FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(
+			FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(VolumeNodes, 32, Params.Extent, Octree->DepthMaxDensity),
+			32
+		)
+	);
 
 	double RemapFinish = FPlatformTime::Seconds();
 	GenDuration = RemapFinish - InsertFinish;
@@ -136,9 +104,9 @@ void AGalaxyActor::InitializeVolumetric()
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
-			VolumetricComponent = NewObject<UStaticMeshComponent>(this); //TODO: THESE NEED TO MOVE INTO SEPERATE RUN ONCE INIT
+			VolumetricComponent = NewObject<UStaticMeshComponent>(this);
 			VolumetricComponent->SetVisibility(false);
-			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));  //TODO: THESE NEED TO MOVE INTO SEPERATE RUN ONCE INIT
+			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));
 			VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
 			VolumetricComponent->TranslucencySortPriority = 1;
 			VolumetricComponent->DepthPriorityGroup = ESceneDepthPriorityGroup::SDPG_MAX;
@@ -164,10 +132,10 @@ void AGalaxyActor::InitializeVolumetric()
 			VolumeMaterial->SetScalarParameterValue(FName("Density"), GalaxyGenerator.Params.VolumeDensity);
 			VolumeMaterial->SetScalarParameterValue(FName("WarpAmount"), GalaxyGenerator.Params.VolumeWarpAmount);
 			VolumeMaterial->SetScalarParameterValue(FName("WarpScale"), GalaxyGenerator.Params.VolumeWarpScale);
-			
+
 			VolumetricComponent->SetMaterial(0, VolumeMaterial);
 			VolumetricComponent->SetVisibility(true);
-			
+
 			CompletionPromise.SetValue();
 		});
 	CompletionFuture.Wait();
@@ -183,32 +151,32 @@ void AGalaxyActor::InitializeNiagara()
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-	{
-		NiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
-			PointCloudNiagara,
-			GetRootComponent(),
-			NAME_None,
-			FVector::ZeroVector,
-			FRotator::ZeroRotator,
-			EAttachLocation::SnapToTarget,
-			true,
-			false
-		);
-		NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Params.Extent), FVector(Params.Extent)));
-		NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Params.Extent);
-		NiagaraComponent->TranslucencySortPriority = 1;
+		{
+			NiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
+				PointCloudNiagara,
+				GetRootComponent(),
+				NAME_None,
+				FVector::ZeroVector,
+				FRotator::ZeroRotator,
+				EAttachLocation::SnapToTarget,
+				true,
+				false
+			);
+			NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Params.Extent), FVector(Params.Extent)));
+			NiagaraComponent->SetVariableFloat(FName("MaxExtent"), Params.Extent);
+			NiagaraComponent->TranslucencySortPriority = 1;
 
-		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable {
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), Positions);
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), Colors);
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), Extents);
+			AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable {
+				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), Positions);
+				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), Colors);
+				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), Extents);
 
-			AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable {
-				NiagaraComponent->Activate(true);
-				CompletionPromise.SetValue();
-			});
+				AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable {
+					NiagaraComponent->Activate(true);
+					CompletionPromise.SetValue();
+					});
+				});
 		});
-	});
 	CompletionFuture.Wait();
 
 	double TotalDuration = FPlatformTime::Seconds() - StartTime;
@@ -219,46 +187,30 @@ void AGalaxyActor::InitializeNiagara()
 #pragma region Star System Pooled Spawn Hooks
 void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 {
-	if (!InNode.IsValid() || !StarSystemActorClass || SpawnedStarSystems.Contains(InNode) || InitializationState != ELifecycleState::Ready || StarSystemPool.Num() == 0)
+	if (!InNode.IsValid() || !StarSystemActorClass || SpawnedStarSystems.Contains(InNode) ||
+		InitializationState != ELifecycleState::Ready)
 	{
 		return;
 	}
 
-	AStarSystemActor* System = nullptr;
-	if (StarSystemPool.Num() > 0)
-	{
-		System = StarSystemPool.Pop();
-	}
-	else
+	if (StarSystemPool.Num() == 0)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("Star System pool exhausted, consider increasing StarSystemPoolSize"));
 		return;
 	}
 
+	AStarSystemActor* System = StarSystemPool.Pop();
 	SpawnedStarSystems.Add(InNode, TWeakObjectPtr<AStarSystemActor>(System));
 	System->ResetForSpawn();
 
-	System->UnitScale = (InNode->Extent * Params.UnitScale) / System->Extent;
-	UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::Star System Unit Scale %.3f CM"), System->UnitScale);
+	System->Params.UnitScale = (InNode->Extent * Params.UnitScale) / System->Params.Extent;
 	System->SpeedScale = Universe->SpeedScale;
-	System->Seed = InNode->Data.ObjectId;
-	System->ParentColor = FLinearColor(InNode->Data.Composition);
+	System->Params.Seed = InNode->Data.ObjectId;
+	System->Params.ParentColor = FLinearColor(InNode->Data.Composition);
+	System->Params.Rotation = FRandomStream(InNode->Data.ObjectId).GetUnitVector().Rotation();
 
-	// Compute correct parallax ratios and spawn location
-	const double SystemParallaxRatio = (Universe->SpeedScale / System->UnitScale);
-	const double GalaxyParallaxRatio = (Universe->SpeedScale / Params.UnitScale);
-
-	FVector NodeWorldPosition = FVector(InNode->Center) + GetActorLocation();
-	FVector PlayerToNode = CurrentFrameOfReferenceLocation - NodeWorldPosition;
-	FVector StarSystemSpawnPosition = CurrentFrameOfReferenceLocation - PlayerToNode * (SystemParallaxRatio / GalaxyParallaxRatio);
-
-	System->SetActorLocation(StarSystemSpawnPosition);
-
-	//Compute Axis Tilt >>> TODO: MOVE TO SYSTEM PARAM FACTORY/GENERATOR
-	FRandomStream RandStream(InNode->Data.ObjectId);
-	FVector normal = FVector(RandStream.FRand(), RandStream.FRand(), RandStream.FRand()).GetSafeNormal();
-	FMatrix RotationMatrix = FRotationMatrix::MakeFromZX(normal, FVector::ForwardVector);
-	System->AxisRotation = normal * 360;
+	// Compute spawn location using base class helper
+	System->SetActorLocation(ComputeChildSpawnLocation(InNode->Center, System->Params.UnitScale));
 
 	System->Initialize();
 	System->SetActorHiddenInGame(false);
@@ -270,34 +222,31 @@ void AGalaxyActor::ReturnStarSystemToPool(TSharedPtr<FOctreeNode> InNode)
 	{
 		return;
 	}
-	TWeakObjectPtr<AStarSystemActor> SystemToDestroy;
 
-	// Find the actor in the map and remove the entry simultaneously.
+	TWeakObjectPtr<AStarSystemActor> SystemToDestroy;
 	if (SpawnedStarSystems.RemoveAndCopyValue(InNode, SystemToDestroy))
 	{
 		AStarSystemActor* PoolSystem = SystemToDestroy.Get();
-
-		// Ensure the actor pointer is still valid before trying to destroy it.
 		if (PoolSystem)
 		{
-			UE_LOG(LogTemp, Log, TEXT("Resetting galaxy for node with ObjectId: %d"), InNode->Data.ObjectId);
+			UE_LOG(LogTemp, Log, TEXT("Resetting star system for node with ObjectId: %d"), InNode->Data.ObjectId);
 			PoolSystem->ResetForPool();
 
 			AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, PoolSystem]()
 				{
 					double StartTime = FPlatformTime::Seconds();
 
-					//Handle Octree flush here instead of in galaxy, that way we can ensure flush is done before returning it to the pool
+					// Flush octree
 					PoolSystem->Octree->bIsResetting.store(true);
 					FPlatformProcess::Sleep(0.05f);
-					PoolSystem->Octree = MakeShared<FOctree>(PoolSystem->Extent);
+					PoolSystem->Octree = MakeShared<FOctree>(PoolSystem->Params.Extent);
 					PoolSystem->Octree->bIsResetting.store(false);
 
 					double ODuration = FPlatformTime::Seconds() - StartTime;
-					UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Flushing Octree took: %.3f seconds"), ODuration);
+					UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::Flushing Octree took: %.3f seconds"), ODuration);
 
 					// Return to pool on game thread
-					AsyncTask(ENamedThreads::GameThread, [this, PoolSystem, StartTime]()
+					AsyncTask(ENamedThreads::GameThread, [this, PoolSystem]()
 						{
 							StarSystemPool.Insert(PoolSystem, 0);
 						});
@@ -305,114 +254,7 @@ void AGalaxyActor::ReturnStarSystemToPool(TSharedPtr<FOctreeNode> InNode)
 		}
 		else
 		{
-			UE_LOG(LogTemp, Warning, TEXT("Galaxy actor was already invalid for node with ObjectId: %d"), InNode->Data.ObjectId);
-		}
-	}
-}
-#pragma endregion
-
-#pragma region Lifecycle Management
-void AGalaxyActor::ResetForSpawn() {
-	InitializationState = ELifecycleState::Uninitialized;
-}
-
-void AGalaxyActor::ResetForPool() {
-	double StartTime = FPlatformTime::Seconds();
-
-	InitializationState = ELifecycleState::Pooling; //Set to pooling to stop any further init operations
-
-	if (VolumetricComponent)
-	{
-		VolumetricComponent->DetachFromParent();
-		VolumetricComponent->DestroyComponent();
-		VolumetricComponent = nullptr;
-	}
-	if (NiagaraComponent)
-	{
-		NiagaraComponent->DetachFromParent();
-		NiagaraComponent->DestroyComponent();
-		NiagaraComponent = nullptr;
-	}
-
-	double Duration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::ResetForPool took: %.3f seconds"), Duration);
-}
-#pragma endregion
-
-#pragma region Parallax
-void AGalaxyActor::ApplyParallaxOffset()
-{
-	bool bHasReference = false;
-	if (const auto* World = GetWorld())
-	{
-		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-		{
-			if (APawn* Pawn = Controller->GetPawn())
-			{
-				CurrentFrameOfReferenceLocation = Pawn->GetActorLocation();
-				bHasReference = true;
-			}
-		}
-	}
-
-	if (!bHasReference)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("Parallax: No valid reference camera or pawn found."));
-		return;
-	}
-
-	double ParallaxRatio = (Universe ? Universe->SpeedScale : SpeedScale) / Params.UnitScale;
-	FVector PlayerOffset = CurrentFrameOfReferenceLocation - LastFrameOfReferenceLocation;
-	LastFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
-	FVector ParallaxOffset = PlayerOffset * (1.0 - ParallaxRatio);
-	SetActorLocation(GetActorLocation() + ParallaxOffset);
-}
-
-void AGalaxyActor::Tick(float DeltaTime)
-{
-	ApplyParallaxOffset();
-	if(IsDebug) DrawDebugBounds();
-}
-#pragma endregion
-#pragma region Debug
-void AGalaxyActor::DrawDebugBounds()
-{
-	// Draw debug box for the octree root node
-	if (Octree.IsValid() && InitializationState == ELifecycleState::Ready)
-	{
-		if (UWorld* World = GetWorld())
-		{
-			FVector ActorLocation = GetActorLocation();
-
-			// Convert octree extent to world scale
-			// WorldExtent = OctreeExtent * UnitScale
-			double WorldExtent = Octree->Extent;
-
-			FVector BoxExtent(WorldExtent, WorldExtent, WorldExtent);
-
-			// Draw the box centered at the actor location
-			DrawDebugBox(
-				World,
-				ActorLocation,
-				BoxExtent,
-				FColor::Blue,
-				false,
-				-1.0f,
-				0,
-				WorldExtent * 0.005f  // Thickness relative to world extent
-			);
-
-			// Draw coordinate axes at the center
-			DrawDebugCoordinateSystem(
-				World,
-				ActorLocation,
-				FRotator::ZeroRotator,
-				WorldExtent * 0.1f,
-				false,
-				-1.0f,
-				0,
-				WorldExtent * 0.001f
-			);
+			UE_LOG(LogTemp, Warning, TEXT("Star system was already invalid for node with ObjectId: %d"), InNode->Data.ObjectId);
 		}
 	}
 }
