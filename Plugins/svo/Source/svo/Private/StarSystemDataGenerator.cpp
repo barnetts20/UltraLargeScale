@@ -172,7 +172,7 @@ void StarSystemDataGenerator::GeneratePlanet(const FOrbit& InPlanetOrbit, int32 
 	{
 		NumMoons = Stream.RandRange(2, 12); // Gas giants have many moons
 	}
-	else if (scale > 6000)
+	else if (scale > 600000000)
 	{
 		NumMoons = Stream.RandRange(0, 3); // Large terrestrials
 	}
@@ -277,9 +277,9 @@ void StarSystemDataGenerator::GenerateDebris(const FOrbit& InDebrisOrbit, int32 
 		FVector FinalPos = BasePos + VerticalOffset;
 
 		// Debris size variation
-		double debrisScale = Stream.FRandRange(100000, 500000); // 1km to 5km asteroids
+		double debrisScale = Stream.FRandRange(500000, 1500000); // 1km to 5km asteroids
 		if (Stream.FRand() < 0.05) // 5% chance of larger object
-			debrisScale = Stream.FRandRange(500000, 4000000);
+			debrisScale = Stream.FRandRange(1500000, 40000000);
 
 		FPointData DebrisData = FPointData::MakePointDataFromWorldScale(debrisScale, UnitScale, Extent);
 		DebrisData.Data.TypeId = EObjectType::Debris;
@@ -317,7 +317,7 @@ void StarSystemDataGenerator::GenerateUnboundDebris()
 		);
 
 		// Small debris objects
-		double debrisScale = Stream.FRandRange(50000, 200000);
+		double debrisScale = Stream.FRandRange(500000, 2000000);
 
 		FPointData DebrisData = FPointData::MakePointDataFromWorldScale(debrisScale, UnitScale, Extent);
 		DebrisData.Data.TypeId = EObjectType::Debris;
