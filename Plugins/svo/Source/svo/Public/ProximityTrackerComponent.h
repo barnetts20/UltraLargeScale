@@ -21,10 +21,10 @@ public:
 
 	#pragma region Editor Exposed Parameters
 	UPROPERTY(EditAnywhere, Category = "Proximity")
-	double UpdateInterval = .05;
+	double UpdateInterval = .1;
 
 	UPROPERTY(EditAnywhere, Category = "Proximity")
-	int64 ScanExtent = 5000000;
+	int64 ScanExtent = 200000;
 
 	UPROPERTY(EditAnywhere, Category = "Proximity")
 	bool DebugMode = true;

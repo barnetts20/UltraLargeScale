@@ -351,7 +351,7 @@ public:
 		if (Distance > 0.0)
 		{
 			// Reject if too small on screen
-			if (InNode->Extent * (1.0 + InNode->Data.Density) / Distance < ScreenSpaceThreshold) return;
+			if ((InNode->Extent * (1.0 + InNode->Data.Density)) / Distance < ScreenSpaceThreshold) return;
 		}
 
 		// Recurse
