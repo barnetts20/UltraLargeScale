@@ -10,7 +10,7 @@
 #pragma region Constructor
 ASectorActor::ASectorActor()
 {
-	PointCloudNiagara = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/NG_UniverseCloud.NG_UniverseCloud"));
+	PointCloudNiagara = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/NG_SectorParallaxCloud.NG_SectorParallaxCloud"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
 	Octree = MakeShared<FOctree>(Params.Extent);
 }
@@ -20,11 +20,28 @@ ASectorActor::ASectorActor()
 void ASectorActor::BeginPlay()
 {
 	Super::BeginPlay();
-	Initialize();  // Calls base class Initialize()
+
+	// Initialize last frame location to player position to avoid first-frame jump
+	if (const auto* World = GetWorld())
+	{
+		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
+		{
+			if (APawn* Pawn = Controller->GetPawn())
+			{
+				LastFrameOfReferenceLocation = Pawn->GetActorLocation();
+				CurrentFrameOfReferenceLocation = LastFrameOfReferenceLocation;
+			}
+		}
+	}
+
+	Initialize();
 }
 
 void ASectorActor::InitializeChildPool()
 {
+	// TODO: Re-enable when galaxy spawning is wired up to SectorActor
+	// Galaxy pool disabled for parallax prototype testing
+	/*
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
@@ -37,6 +54,7 @@ void ASectorActor::InitializeChildPool()
 			CompletionPromise.SetValue();
 		});
 	CompletionFuture.Wait();
+	*/
 }
 
 void ASectorActor::InitializeData()
@@ -116,6 +134,16 @@ void ASectorActor::InitializeNiagara()
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
+			// Capture player position at the moment we set up Niagara
+			FVector PlayerPos = FVector::ZeroVector;
+			if (auto* Controller = UGameplayStatics::GetPlayerController(GetWorld(), 0))
+			{
+				if (APawn* Pawn = Controller->GetPawn())
+				{
+					PlayerPos = Pawn->GetActorLocation();
+				}
+			}
+
 			NiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
 				PointCloudNiagara,
 				GetRootComponent(),
@@ -129,9 +157,20 @@ void ASectorActor::InitializeNiagara()
 			NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Params.Extent), FVector(Params.Extent)));
 			NiagaraComponent->TranslucencySortPriority = 0;
 
-			AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
+			// Center the Niagara system on the player immediately
+			NiagaraComponent->SetWorldLocation(PlayerPos);
+
+			AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, PlayerPos, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 				{
-					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), Positions);
+					// Compute player-relative positions for Niagara
+					// Octree positions (Positions array) stay as absolute ground truth
+					TArray<FVector> RelativePositions;
+					RelativePositions.SetNumUninitialized(Positions.Num());
+					ParallelFor(Positions.Num(), [&](int32 i) {
+						RelativePositions[i] = Positions[i] - PlayerPos;
+						}, EParallelForFlags::BackgroundPriority);
+
+					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), RelativePositions);
 					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Rotations"), Rotations);
 					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), Colors);
 					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), Extents);
@@ -147,6 +186,51 @@ void ASectorActor::InitializeNiagara()
 
 	double TotalDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeNiagara total duration: %.3f seconds"), TotalDuration);
+}
+#pragma endregion
+
+#pragma region Player-Centered Parallax
+void ASectorActor::ApplyParallaxOffset()
+{
+	if (!NiagaraComponent || InitializationState != ELifecycleState::Ready)
+	{
+		return;
+	}
+
+	// Get player position
+	bool bHasReference = false;
+	FVector CurrentPlayerPos = FVector::ZeroVector;
+	if (const auto* World = GetWorld())
+	{
+		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
+		{
+			if (APawn* Pawn = Controller->GetPawn())
+			{
+				CurrentPlayerPos = Pawn->GetActorLocation();
+				bHasReference = true;
+			}
+		}
+	}
+
+	if (!bHasReference)
+	{
+		return;
+	}
+
+	// Compute parallax offset for this frame
+	FVector PlayerDelta = CurrentPlayerPos - LastFrameOfReferenceLocation;
+	LastFrameOfReferenceLocation = CurrentPlayerPos;
+	CurrentFrameOfReferenceLocation = CurrentPlayerPos;
+
+	// ParallaxRatio = SpeedScale / UnitScale
+	ParallaxRatio = GetParentSpeedScale() / GetUnitScale();
+	FVector ParallaxOffset = -PlayerDelta * ParallaxRatio;
+
+	// Push offset to Niagara — all particles shift by this amount
+	NiagaraComponent->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
+
+	// Keep the Niagara system centered on the player
+	NiagaraComponent->SetWorldLocation(CurrentPlayerPos);
 }
 #pragma endregion
 

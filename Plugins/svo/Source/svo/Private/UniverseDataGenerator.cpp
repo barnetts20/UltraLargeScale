@@ -26,10 +26,10 @@ void UniverseDataGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			const double NZ = PointCenter.Z * ScaleFactor;
 
 
-			const double RadialWeight = FMath::Pow(1.0 - FMath::Clamp(PointCenter.Size() / Params.Extent, 0.0, 1.0), .3);
+			//const double RadialWeight = FMath::Pow(1.0 - FMath::Clamp(PointCenter.Size() / Params.Extent, 0.0, 1.0), .3);
 
 			const double NoiseVal = LocalStream.FRand();
-			const double NoiseSample = FMath::Pow(LocalNoise->GenSingle3D(NX, NY, NZ, Seed), 2.0) * RadialWeight;
+			const double NoiseSample = FMath::Pow(LocalNoise->GenSingle3D(NX, NY, NZ, Seed), 2.0);// *RadialWeight;
 
 			if (NoiseVal >= NoiseSample)
 			{

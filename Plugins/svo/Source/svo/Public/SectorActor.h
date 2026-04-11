@@ -63,6 +63,10 @@ protected:
 
 #pragma region Overrides
 	virtual void BeginPlay() override;
-	// Tick() inherited from base class - handles parallax automatically
+	virtual void ApplyParallaxOffset() override;
+#pragma endregion
+
+#pragma region Player-Centered Parallax
+	double ParallaxRatio = 0.0;
 #pragma endregion
 };

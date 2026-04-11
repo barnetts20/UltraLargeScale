@@ -15,13 +15,13 @@ struct SVO_API FUniverseParams : public FBaseParams {
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	int Count = 20000;
+	int Count = 2000;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	double MinGalaxyScale = 1e18;
+	double MinGalaxyScale = 5e23;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	double MaxGalaxyScale = 1e24;
+	double MaxGalaxyScale = 3e25;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
 	FRuntimeFloatCurve ScaleDistributionCurve;
