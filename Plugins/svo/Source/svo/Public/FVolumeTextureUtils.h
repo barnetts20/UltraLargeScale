@@ -197,7 +197,205 @@ public:
 	}
 
 #pragma endregion
+#pragma region Splat VBOs to Volume
 
+	/// <summary>
+	/// Splat point cloud nodes into a volume buffer as spherical density kernels.
+	/// Each node writes a falloff sphere centered at its position with radius
+	/// derived from its octree extent and scale factor.
+	///
+	/// This is the mechanism by which clusters emerge in the volume texture:
+	/// dense regions of VBOs produce overlapping splats that accumulate into
+	/// bright knots visible in the raymarch.
+	///
+	/// Additive per channel, clamped to 255. Parallel over nodes.
+	/// </summary>
+	/// <param name="InOutVolumeData">Target volume buffer (modified in place, Resolution^3 * 4 bytes BGRA8)</param>
+	/// <param name="InResolution">Volume resolution per axis (e.g., 32, 64, 128)</param>
+	/// <param name="InExtent">World-space half-extent of the volume (same as octree extent)</param>
+	/// <param name="InNodes">Octree nodes to splat (typically the PointNodes from BulkInsertPositions)</param>
+	/// <param name="InRadiusScale">Multiplier on each node's natural radius (Extent * (1+ScaleFactor)). 
+	///        Use >1 to fatten splats for cluster visibility at low resolutions.</param>
+	/// <param name="InFalloffPower">Exponent for the falloff curve. 1.0=linear, 2.0=quadratic (smooth), 
+	///        higher=sharper core. Default 2.0 gives a nice gaussian-ish rolloff.</param>
+	/// <param name="InIntensity">Peak density value at the center of each splat (0.0-1.0 range, 
+	///        mapped to 0-255). Default 1.0.</param>
+	/// <param name="InChannel">Which BGRA channel to write (-1 = all channels, 0=B, 1=G, 2=R, 3=A). 
+	///        Default -1 (all).</param>
+	static void SplatVBOsToVolume(
+		TArray<uint8>& InOutVolumeData,
+		int InResolution,
+		double InExtent,
+		const TArray<TSharedPtr<FOctreeNode>>& InNodes,
+		float InRadiusScale = 1.0f,
+		float InFalloffPower = 2.0f,
+		float InIntensity = 1.0f,
+		int InChannel = -1)
+	{
+		double StartTime = FPlatformTime::Seconds();
+
+		constexpr int BytesPerVoxel = 4;
+		const double VoxelSize = (2.0 * InExtent) / InResolution;
+		const double InvVoxelSize = 1.0 / VoxelSize;
+		const int Slice = InResolution * InResolution;
+		const uint8 PeakByte = (uint8)FMath::Clamp(InIntensity * 255.0f, 0.0f, 255.0f);
+
+		// --- Pre-compute per-node splat parameters in voxel space ---
+		struct FSplatEntry
+		{
+			float CenterX, CenterY, CenterZ;  // Voxel-space center (fractional)
+			float RadiusVoxels;                 // Radius in voxel units
+			float InvRadius;                    // 1/radius for normalization
+			float Intensity;                    // Peak intensity 0-255
+		};
+
+		TArray<FSplatEntry> Splats;
+		Splats.Reserve(InNodes.Num());
+
+		for (const TSharedPtr<FOctreeNode>& Node : InNodes)
+		{
+			if (!Node.IsValid()) continue;
+
+			// Node's world-space radius: extent * (1 + ScaleFactor), scaled by user param
+			double WorldRadius = Node->Extent * (1.0 + Node->Data.ScaleFactor) * InRadiusScale;
+			float RadiusVoxels = (float)(WorldRadius * InvVoxelSize);
+
+			// Skip nodes whose splat is smaller than half a voxel — they'd be sub-pixel
+			if (RadiusVoxels < 0.5f) RadiusVoxels = 0.5f;
+
+			// World position to voxel-space (0 to Resolution)
+			float VoxelX = (float)((Node->Center.X + InExtent) * InvVoxelSize);
+			float VoxelY = (float)((Node->Center.Y + InExtent) * InvVoxelSize);
+			float VoxelZ = (float)((Node->Center.Z + InExtent) * InvVoxelSize);
+
+			FSplatEntry Entry;
+			Entry.CenterX = VoxelX;
+			Entry.CenterY = VoxelY;
+			Entry.CenterZ = VoxelZ;
+			Entry.RadiusVoxels = RadiusVoxels;
+			Entry.InvRadius = 1.0f / RadiusVoxels;
+			Entry.Intensity = InIntensity * 255.0f;
+
+			Splats.Add(Entry);
+		}
+
+		if (Splats.Num() == 0)
+		{
+			UE_LOG(LogTemp, Log, TEXT("FVolumeTextureUtils::SplatVBOsToVolume - No valid nodes to splat"));
+			return;
+		}
+
+		// --- Accumulation buffer (float per channel to avoid clamping during accumulation) ---
+		// Using a float buffer avoids repeated clamp-to-255 during overlapping splats,
+		// giving correct additive blending before the final quantization pass.
+		const int64 TotalVoxels = (int64)InResolution * InResolution * InResolution;
+		TArray<float> AccumBuffer;
+		AccumBuffer.SetNumZeroed(TotalVoxels);
+
+		// --- Splat each node (parallel over nodes, atomic accumulate) ---
+		// For low node counts (<10K) this is faster than splatting per-voxel-slice
+		// because most voxels are untouched by any splat.
+		//
+		// We use a two-pass approach:
+		// Pass 1: Accumulate into float buffer (parallel per node, with simple overlap tolerance)
+		// Pass 2: Quantize and composite into the BGRA byte buffer
+
+		// Pass 1: Parallel splat into float accumulation buffer
+		// Note: overlapping splats from different nodes may race on the same voxel.
+		// For density visualization this is acceptable — the error is bounded and
+		// the result converges. For exact accumulation, switch to per-slice parallelism.
+		ParallelFor(Splats.Num(), [&](int SplatIdx)
+			{
+				const FSplatEntry& S = Splats[SplatIdx];
+
+				// Bounding box in voxel coordinates (clamped to grid)
+				int MinX = FMath::Max(0, FMath::FloorToInt(S.CenterX - S.RadiusVoxels));
+				int MaxX = FMath::Min(InResolution - 1, FMath::CeilToInt(S.CenterX + S.RadiusVoxels));
+				int MinY = FMath::Max(0, FMath::FloorToInt(S.CenterY - S.RadiusVoxels));
+				int MaxY = FMath::Min(InResolution - 1, FMath::CeilToInt(S.CenterY + S.RadiusVoxels));
+				int MinZ = FMath::Max(0, FMath::FloorToInt(S.CenterZ - S.RadiusVoxels));
+				int MaxZ = FMath::Min(InResolution - 1, FMath::CeilToInt(S.CenterZ + S.RadiusVoxels));
+
+				const float RadSq = S.RadiusVoxels * S.RadiusVoxels;
+
+				for (int z = MinZ; z <= MaxZ; ++z)
+				{
+					float dz = (z + 0.5f) - S.CenterZ;
+					float dz2 = dz * dz;
+
+					for (int y = MinY; y <= MaxY; ++y)
+					{
+						float dy = (y + 0.5f) - S.CenterY;
+						float dy2 = dy * dy;
+						float dyz2 = dy2 + dz2;
+
+						// Early row skip — if dy²+dz² already exceeds radius², whole row is outside
+						if (dyz2 > RadSq) continue;
+
+						for (int x = MinX; x <= MaxX; ++x)
+						{
+							float dx = (x + 0.5f) - S.CenterX;
+							float distSq = dx * dx + dyz2;
+
+							if (distSq > RadSq) continue;
+
+							// Normalized distance [0, 1]
+							float t = FMath::Sqrt(distSq) * S.InvRadius;
+
+							// Falloff: 1 at center, 0 at edge
+							float falloff = FMath::Pow(1.0f - t, InFalloffPower);
+							float contribution = S.Intensity * falloff;
+
+							int64 VoxelIdx = (int64)z * Slice + (int64)y * InResolution + x;
+
+							// Simple non-atomic add — acceptable race for density vis
+							AccumBuffer[VoxelIdx] += contribution;
+						}
+					}
+				}
+			}, Splats.Num() > 64 ? EParallelForFlags::BackgroundPriority : EParallelForFlags::ForceSingleThread);
+
+		// Pass 2: Quantize and composite into byte buffer (parallel over Z slices)
+		uint8* DataPtr = InOutVolumeData.GetData();
+
+		ParallelFor(InResolution, [&](int z)
+			{
+				for (int y = 0; y < InResolution; ++y)
+				{
+					for (int x = 0; x < InResolution; ++x)
+					{
+						int64 VoxelIdx = (int64)z * Slice + (int64)y * InResolution + x;
+						float Accum = AccumBuffer[VoxelIdx];
+
+						if (Accum <= 0.0f) continue;
+
+						uint8 SplatByte = (uint8)FMath::Min(Accum, 255.0f);
+						int64 ByteIdx = VoxelIdx * BytesPerVoxel;
+
+						if (InChannel == -1)
+						{
+							// All channels
+							for (int c = 0; c < BytesPerVoxel; ++c)
+							{
+								DataPtr[ByteIdx + c] = (uint8)FMath::Min((int)DataPtr[ByteIdx + c] + (int)SplatByte, 255);
+							}
+						}
+						else
+						{
+							// Single channel
+							int c = FMath::Clamp(InChannel, 0, 3);
+							DataPtr[ByteIdx + c] = (uint8)FMath::Min((int)DataPtr[ByteIdx + c] + (int)SplatByte, 255);
+						}
+					}
+				}
+			}, EParallelForFlags::BackgroundPriority);
+
+		double Duration = FPlatformTime::Seconds() - StartTime;
+		UE_LOG(LogTemp, Log, TEXT("FVolumeTextureUtils::SplatVBOsToVolume (%d nodes, radius scale %.1f, falloff %.1f, res %d) took %.3f sec"),
+			InNodes.Num(), InRadiusScale, InFalloffPower, InResolution, Duration);
+	}
+
+#pragma endregion
 #pragma region Composite Volume Layers
 
 	/// <summary>

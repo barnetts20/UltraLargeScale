@@ -61,30 +61,54 @@ void ASectorActor::InitializeChildPool()
 void ASectorActor::InitializeData()
 {
 	double StartTime = FPlatformTime::Seconds();
-	// --- Density volume ---
-// Sample the same noise used for object placement directly into the octree
-// and volume buffer, so the volumetric aligns with galaxy density.
-	int resolution = 128;
+
+	// --- Phase 1: Gas density from noise (low-res) ---
+	int noiseResolution = 64;
 	auto DensityNoise = FastNoise::NewFromEncodedNodeTree(Params.EncodedTree);
-	TArray<uint8> VolumeData = FVolumeTextureUtils::SampleNoiseToVolume(
+	TArray<uint8> LowResData = FVolumeTextureUtils::SampleNoiseToVolume(
 		DensityNoise,
 		Params.Seed,
-		resolution,
+		noiseResolution,
 		Params.Extent,
 		Octree,
-		FMath::FloorLog2(resolution),
-		1.0f,  // power curve — matches the squaring used in UniverseDataGenerator
+		FMath::FloorLog2(noiseResolution),
+		1.0f,
 		3      // write to alpha channel (density)
 	);
 
 	if (InitializationState == ELifecycleState::Pooling) return;
-	// --- Object generation ---
+
+	// --- Upscale noise to 256^3 ---
+	TArray<uint8> VolumeData = FVolumeTextureUtils::UpscaleVolumeData(LowResData, noiseResolution);
+	LowResData.Empty(); // Free low-res buffer
+
+	if (InitializationState == ELifecycleState::Pooling) return;
+
+	// --- Phase 2: Object generation (VBOs) ---
 	UniverseGenerator.Params = Params;
 	UniverseGenerator.GenerateData(Octree);
 	TArray<TSharedPtr<FOctreeNode>> VolumeChunks;
 	TArray<TSharedPtr<FOctreeNode>> PointNodes;
 	Octree->BulkInsertPositions(UniverseGenerator.GeneratedData, PointNodes, VolumeChunks);
 
+	// --- Phase 2b: Splat VBO density into 256^3 volume ---
+	// Each galaxy VBO contributes a spherical density kernel at depth-8 resolution.
+	// Where galaxies cluster, splats overlap and accumulate — clusters emerge
+	// from the density overlap, no dedicated detection needed.
+	FVolumeTextureUtils::SplatVBOsToVolume(
+		VolumeData,
+		256,            // Always splat at full volume resolution
+		Params.Extent,
+		PointNodes,
+		2.0f,           // RadiusScale — fatten splats so clusters read at 256^3
+		2.0f,           // FalloffPower — quadratic smooth falloff
+		8.0f,           // Intensity — leave headroom for overlap accumulation
+		-1              // Channel — all channels (grayscale density for now)
+	);
+
+	if (InitializationState == ELifecycleState::Pooling) return;
+
+	// --- Build Niagara arrays from point nodes ---
 	Positions.SetNumUninitialized(PointNodes.Num());
 	Rotations.SetNumUninitialized(PointNodes.Num());
 	Extents.SetNumUninitialized(PointNodes.Num());
@@ -104,10 +128,10 @@ void ASectorActor::InitializeData()
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
+	// --- Pack and create texture (volume data already at 256^3) ---
 	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(
-		FVolumeTextureUtils::PackToPseudoVolumeLayout(
-			FVolumeTextureUtils::UpscaleVolumeData(VolumeData, resolution)
-		), "/svo/Generated/BakedTest"
+		FVolumeTextureUtils::PackToPseudoVolumeLayout(VolumeData)
+		//, "/svo/Generated/BakedTest"
 	);
 
 	double GenDuration = FPlatformTime::Seconds() - StartTime;
@@ -149,6 +173,7 @@ void ASectorActor::InitializeVolumetric()
 
 void ASectorActor::InitializeNiagara()
 {
+	//return; //
 	double StartTime = FPlatformTime::Seconds();
 
 	TPromise<void> CompletionPromise;
