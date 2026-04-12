@@ -20,6 +20,9 @@ void UniverseDataGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 				LocalStream.FRandRange(-Params.Extent, Params.Extent)
 			);
 
+			auto areaDensity = InOctree->SampleDensityAtPosition(PointCenter);
+			if (LocalStream.FRand() > areaDensity) continue;
+
 			const double ScaleFactor = 1.0 / static_cast<double>(Params.Extent);
 			const double NX = PointCenter.X * ScaleFactor;
 			const double NY = PointCenter.Y * ScaleFactor;
@@ -38,7 +41,7 @@ void UniverseDataGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 
 			double scale = FPointData::SampleScaleFromDistribution(Params.MinGalaxyScale, Params.MaxGalaxyScale, NoiseVal, Params.ScaleDistributionCurve);
 			FPointData InsertData = FPointData::MakePointDataFromWorldScale(scale, Params.UnitScale, Params.Extent);
-			InsertData.Data.GasDensity = LocalStream.FRandRange(0.5, 1.5);
+			InsertData.Data.Density = LocalStream.FRandRange(0.5, 1.5);
 			InsertData.Data.Composition = LocalStream.GetUnitVector();
 			InsertData.Data.ObjectId = i;
 			InsertData.Data.TypeId = 1;

@@ -354,7 +354,7 @@ void StarSystemDataGenerator::GenerateGas()
 
 		// Very large, very low density gas clouds
 		FPointData GasData = FPointData::MakePointDataFromWorldScale(Stream.FRandRange(500000, 2000000), UnitScale, Extent);
-		GasData.Data.GasDensity = Stream.FRandRange(0.001, 0.01); // Very diffuse
+		GasData.Data.Density = Stream.FRandRange(0.001, 0.01); // Very diffuse
 		GasData.Data.TypeId = EObjectType::Gas;
 		GasData.Data.Composition = FVector(0.1, 0.1, 0.15); // Faint blue
 		GasData.SetPosition(Pos);

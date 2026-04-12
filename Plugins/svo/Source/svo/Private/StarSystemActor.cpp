@@ -1,6 +1,7 @@
 #pragma region Includes/ForwardDec
 #include "StarSystemActor.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
+#include "FVolumeTextureUtils.h"
 #include <PointCloudGenerator.h>
 #include <Engine/StaticMeshActor.h>
 #include <Kismet/GameplayStatics.h>
@@ -64,16 +65,11 @@ void AStarSystemActor::InitializeData()
 		const TSharedPtr<FOctreeNode>& Node = PointNodes[Index];
 		FRandomStream RandStream(Node->Data.ObjectId);
 		Positions[Index] = Node->Center;
-		Extents[Index] = static_cast<float>(Node->Extent * (1 + Node->Data.Density));
+		Extents[Index] = static_cast<float>(Node->Extent * (1 + Node->Data.ScaleFactor));
 		Colors[Index] = FLinearColor(Node->Data.Composition);
 		}, EParallelForFlags::BackgroundPriority);
 
-	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(
-		FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(
-			FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(VolumeNodes, 32, Params.Extent, Octree->DepthMaxDensity),
-			32
-		)
-	);
+	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(FVolumeTextureUtils::UpscaleVolumeData(FVolumeTextureUtils::GenerateVolumeMipDataFromOctree(VolumeNodes, 32, Params.Extent, 1), 32));
 
 	double RemapFinish = FPlatformTime::Seconds();
 	GenDuration = RemapFinish - InsertFinish;
@@ -113,7 +109,7 @@ void AStarSystemActor::InitializeVolumetric()
 			VolumeMaterial->SetScalarParameterValue(FName("SaturationVariance"), SystemGenerator.SystemParams.VolumeSaturationVariance);
 			VolumeMaterial->SetScalarParameterValue(FName("TemperatureInfluence"), SystemGenerator.SystemParams.VolumeTemperatureInfluence);
 			VolumeMaterial->SetScalarParameterValue(FName("TemperatureScale"), SystemGenerator.SystemParams.VolumeTemperatureScale);
-			VolumeMaterial->SetScalarParameterValue(FName("Density"), SystemGenerator.SystemParams.VolumeDensity);
+			VolumeMaterial->SetScalarParameterValue(FName("ScaleFactor"), SystemGenerator.SystemParams.VolumeDensity);
 			VolumeMaterial->SetScalarParameterValue(FName("WarpAmount"), SystemGenerator.SystemParams.VolumeWarpAmount);
 			VolumeMaterial->SetScalarParameterValue(FName("WarpScale"), SystemGenerator.SystemParams.VolumeWarpScale);
 
@@ -173,7 +169,7 @@ void AStarSystemActor::SpawnEntityFromPool(TSharedPtr<FOctreeNode> InNode)
 {
 	if (!InNode.IsValid() || SpawnedEntities.Contains(InNode)) return;
 
-	double MeshScale = InNode->Extent * (1.0 + InNode->Data.Density) * Params.UnitScale;
+	double MeshScale = InNode->Extent * (1.0 + InNode->Data.ScaleFactor) * Params.UnitScale;
 
 	//AsyncTask(ENamedThreads::GameThread, [this, InNode, MeshScale]()
 	//	{

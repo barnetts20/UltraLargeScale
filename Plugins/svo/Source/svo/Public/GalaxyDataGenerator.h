@@ -60,8 +60,8 @@ struct SVO_API FGalaxyParams {
 	double ArmStartRatio = .5; //Where will the arm start relative to the bulge
 	double ArmHeightRatio = .5; //Height squish
 	double ArmProgressExponent = 1;
-	double ArmRadialDensityExponent = 2; //Density falloff towards center
-	double ArmRadialDensityMax = 8; //Density multiplier as points are further from center
+	double ArmRadialDensityExponent = 2; //ScaleFactor falloff towards center
+	double ArmRadialDensityMax = 8; //ScaleFactor multiplier as points are further from center
 	double ArmRadialDensityMin = .5; //Min radial density multiplier
 
 	//Bulge Params - Controls the galactic bulge

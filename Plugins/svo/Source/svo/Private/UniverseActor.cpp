@@ -1,6 +1,7 @@
 #pragma region Includes/ForwardDec
 #include "UniverseActor.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
+#include "FVolumeTextureUtils.h"
 #include <PointCloudGenerator.h>
 #include <Kismet/GameplayStatics.h>
 #include <GalaxyActor.h>
@@ -60,16 +61,11 @@ void AUniverseActor::InitializeData()
 		FRandomStream RandStream(Node->Data.ObjectId);
 		Rotations[Index] = RandStream.GetUnitVector();
 		Positions[Index] = Node->Center;
-		Extents[Index] = static_cast<float>(Node->Extent * (1 + Node->Data.Density));
+		Extents[Index] = static_cast<float>(Node->Extent * (1 + Node->Data.ScaleFactor));
 		Colors[Index] = FLinearColor(Node->Data.Composition);
 		}, EParallelForFlags::BackgroundPriority);
 
-	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(
-		FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(
-			FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(VolumeNodes, 32, Params.Extent, Octree->DepthMaxDensity),
-			32
-		)
-	);
+	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(FVolumeTextureUtils::UpscaleVolumeData(FVolumeTextureUtils::GenerateVolumeMipDataFromOctree(VolumeNodes, 32, Params.Extent, 1),32));
 
 	double GenDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Universe data generation took: %.3f seconds"), GenDuration);

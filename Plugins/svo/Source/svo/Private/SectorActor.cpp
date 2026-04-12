@@ -1,6 +1,7 @@
 #pragma region Includes/ForwardDec
 #include "SectorActor.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
+#include "FVolumeTextureUtils.h"
 #include <PointCloudGenerator.h>
 #include <Kismet/GameplayStatics.h>
 #include <GalaxyActor.h>
@@ -60,13 +61,29 @@ void ASectorActor::InitializeChildPool()
 void ASectorActor::InitializeData()
 {
 	double StartTime = FPlatformTime::Seconds();
+	// --- Density volume ---
+// Sample the same noise used for object placement directly into the octree
+// and volume buffer, so the volumetric aligns with galaxy density.
+	int resolution = 128;
+	auto DensityNoise = FastNoise::NewFromEncodedNodeTree(Params.EncodedTree);
+	TArray<uint8> VolumeData = FVolumeTextureUtils::SampleNoiseToVolume(
+		DensityNoise,
+		Params.Seed,
+		resolution,
+		Params.Extent,
+		Octree,
+		FMath::FloorLog2(resolution),
+		1.0f,  // power curve — matches the squaring used in UniverseDataGenerator
+		3      // write to alpha channel (density)
+	);
 
+	if (InitializationState == ELifecycleState::Pooling) return;
+	// --- Object generation ---
 	UniverseGenerator.Params = Params;
 	UniverseGenerator.GenerateData(Octree);
-
-	TArray<TSharedPtr<FOctreeNode>> VolumeNodes;
+	TArray<TSharedPtr<FOctreeNode>> VolumeChunks;
 	TArray<TSharedPtr<FOctreeNode>> PointNodes;
-	Octree->BulkInsertPositions(UniverseGenerator.GeneratedData, PointNodes, VolumeNodes);
+	Octree->BulkInsertPositions(UniverseGenerator.GeneratedData, PointNodes, VolumeChunks);
 
 	Positions.SetNumUninitialized(PointNodes.Num());
 	Rotations.SetNumUninitialized(PointNodes.Num());
@@ -78,19 +95,23 @@ void ASectorActor::InitializeData()
 		FRandomStream RandStream(Node->Data.ObjectId);
 		Rotations[Index] = RandStream.GetUnitVector();
 		Positions[Index] = Node->Center;
-		Extents[Index] = static_cast<float>(Node->Extent * (1 + Node->Data.Density));
+		Extents[Index] = static_cast<float>(Node->Extent * (1 + Node->Data.ScaleFactor));
 		Colors[Index] = FLinearColor(Node->Data.Composition);
 		}, EParallelForFlags::BackgroundPriority);
 
-	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(
-		FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(
-			FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(VolumeNodes, 32, Params.Extent, Octree->DepthMaxDensity),
-			32
-		)
+	double ObjectDuration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("ASectorActor::Object generation took: %.3f seconds"), ObjectDuration);
+
+	if (InitializationState == ELifecycleState::Pooling) return;
+
+	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(
+		FVolumeTextureUtils::PackToPseudoVolumeLayout(
+			FVolumeTextureUtils::UpscaleVolumeData(VolumeData, resolution)
+		), "BakedTest"
 	);
 
 	double GenDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("ASectorActor::Universe data generation took: %.3f seconds"), GenDuration);
+	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeData total took: %.3f seconds"), GenDuration);
 }
 
 void ASectorActor::InitializeVolumetric()
@@ -192,6 +213,7 @@ void ASectorActor::InitializeNiagara()
 #pragma region Player-Centered Parallax
 void ASectorActor::ApplyParallaxOffset()
 {
+	
 	if (!NiagaraComponent || InitializationState != ELifecycleState::Ready)
 	{
 		return;
@@ -229,8 +251,10 @@ void ASectorActor::ApplyParallaxOffset()
 	// Push offset to Niagara — all particles shift by this amount
 	NiagaraComponent->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
 
+	SetActorLocation(GetActorLocation() + ParallaxOffset);
 	// Keep the Niagara system centered on the player
 	NiagaraComponent->SetWorldLocation(CurrentPlayerPos);
+
 }
 #pragma endregion
 

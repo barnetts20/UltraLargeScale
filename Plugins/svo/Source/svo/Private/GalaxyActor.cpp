@@ -2,6 +2,7 @@
 #include "GalaxyActor.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include "StarSystemActor.h"
+#include "FVolumeTextureUtils.h"
 #include <PointCloudGenerator.h>
 #include <Kismet/GameplayStatics.h>
 #include <NiagaraFunctionLibrary.h>
@@ -78,16 +79,11 @@ void AGalaxyActor::InitializeData()
 		const TSharedPtr<FOctreeNode>& Node = PointNodes[Index];
 		FRandomStream RandStream(Node->Data.ObjectId);
 		Positions[Index] = Node->Center;
-		Extents[Index] = static_cast<float>(Node->Extent * (1 + Node->Data.Density));
+		Extents[Index] = static_cast<float>(Node->Extent * (1 + Node->Data.ScaleFactor));
 		Colors[Index] = FLinearColor(Node->Data.Composition);
 		}, EParallelForFlags::BackgroundPriority);
 
-	PseudoVolumeTexture = FOctreeTextureProcessor::GeneratePseudoVolumeTextureFromMipData(
-		FOctreeTextureProcessor::UpscalePseudoVolumeDensityData(
-			FOctreeTextureProcessor::GenerateVolumeMipDataFromOctree(VolumeNodes, 32, Params.Extent, Octree->DepthMaxDensity),
-			32
-		)
-	);
+	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(FVolumeTextureUtils::UpscaleVolumeData(FVolumeTextureUtils::GenerateVolumeMipDataFromOctree(VolumeNodes, 32, Params.Extent, 1), 32));
 
 	double RemapFinish = FPlatformTime::Seconds();
 	GenDuration = RemapFinish - InsertFinish;
@@ -129,7 +125,7 @@ void AGalaxyActor::InitializeVolumetric()
 			VolumeMaterial->SetScalarParameterValue(FName("SaturationVariance"), GalaxyGenerator.Params.VolumeSaturationVariance);
 			VolumeMaterial->SetScalarParameterValue(FName("TemperatureInfluence"), GalaxyGenerator.Params.VolumeTemperatureInfluence);
 			VolumeMaterial->SetScalarParameterValue(FName("TemperatureScale"), GalaxyGenerator.Params.VolumeTemperatureScale);
-			VolumeMaterial->SetScalarParameterValue(FName("Density"), GalaxyGenerator.Params.VolumeDensity);
+			VolumeMaterial->SetScalarParameterValue(FName("ScaleFactor"), GalaxyGenerator.Params.VolumeDensity);
 			VolumeMaterial->SetScalarParameterValue(FName("WarpAmount"), GalaxyGenerator.Params.VolumeWarpAmount);
 			VolumeMaterial->SetScalarParameterValue(FName("WarpScale"), GalaxyGenerator.Params.VolumeWarpScale);
 

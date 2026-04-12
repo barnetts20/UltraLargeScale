@@ -15,13 +15,13 @@ struct SVO_API FUniverseParams : public FBaseParams {
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	int Count = 2000;
+	int Count = 1000;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	double MinGalaxyScale = 5e23;
+	double MinGalaxyScale = 3e23;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	double MaxGalaxyScale = 3e25;
+	double MaxGalaxyScale = 3e26;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
 	FRuntimeFloatCurve ScaleDistributionCurve;
@@ -29,12 +29,12 @@ struct SVO_API FUniverseParams : public FBaseParams {
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
 	double Jitter = .02;
 
-	static constexpr const char* EncodedTree = "EwAAAEBAFwAAAAAAmpmZPgAAAAAAAIA/HwAgABAAzcyMQBcAAACAvwAAgD8AAAAAzcxMPhsAFwAAAAAAAACAPwAAgL8AAIA/JAALAAAACwABAAAAAAAAAAEAAAAEAAAAAAAAgD8AAAAAQAAK16M9AAAAAAAAAAAAPwCamZk+AAAAAD8=";
+	static constexpr const char* EncodedTree = "EAAAAEBAJAAEAAAADQAIAAAAAAAAQAsAAQAAAAAAAAABAAAABAAAAAAAAIA/AAAAAD8AAAAAAADNzMw9";//"EwAAAEBAFwAAAAAAmpmZPgAAAAAAAIA/HwAgABAAzcyMQBcAAACAvwAAgD8AAAAAzcxMPhsAFwAAAAAAAACAPwAAgL8AAIA/JAALAAAACwABAAAAAAAAAAEAAAAEAAAAAAAAgD8AAAAAQAAK16M9AAAAAAAAAAAAPwCamZk+AAAAAD8=";
 
 	FUniverseParams() {
 		Seed = 69;
 		Extent = 2147483648;
-		UnitScale = 1e18;
+		UnitScale = 2e17;
 		Rotation = FRotator::ZeroRotator;
 		ParentColor = FLinearColor(1,1,1);
 

@@ -1272,15 +1272,15 @@ void GalaxyDataGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			GeneratedData[i].Data.TypeId = -1; //Set Type -1 and Position to 0 vector so it gets ignored in bulk insert
 			GeneratedData[i].SetPosition(FVector::ZeroVector);
 			double DensityWeight = FMath::Pow(2.0, InOctree->MaxDepth - InsertData.InsertDepth);
-			BlackHole.Data.Density += InsertData.Data.Density;
-			BlackHole.Data.GasDensity += InsertData.Data.GasDensity * DensityWeight;
-			BlackHole.Data.Composition += InsertData.Data.Composition * BlackHole.Data.GasDensity;
+			BlackHole.Data.ScaleFactor += InsertData.Data.ScaleFactor;
+			BlackHole.Data.Density += InsertData.Data.Density * DensityWeight;
+			BlackHole.Data.Composition += InsertData.Data.Composition * BlackHole.Data.Density;
 		}
 		});
 
 	BlackHole.InsertDepth = MinInsertionDepth - 3; //TODO: Calculate approx radius based on end density
+	BlackHole.Data.ScaleFactor = 1; //TODO: This should be allowed to be the accumulated density but it currently effects gas accumulation too much
 	BlackHole.Data.Density = 1; //TODO: This should be allowed to be the accumulated density but it currently effects gas accumulation too much
-	BlackHole.Data.GasDensity = 1; //TODO: This should be allowed to be the accumulated density but it currently effects gas accumulation too much
 	//GeneratedData.Add(BlackHole);
 }
 
@@ -1344,8 +1344,8 @@ void GalaxyDataGenerator::GenerateBulge()
 				double scale = FPointData::SampleScaleFromDistribution(Params.MinStarSystemScale, Params.MaxStarSystemScale, Stream.FRand(), Params.ScaleDistributionCurve);
 				FPointData idata = FPointData::MakePointDataFromWorldScale(scale, Params.UnitScale, Params.Extent);
 
-				InsertData.Data.Density = idata.Data.Density;
-				InsertData.Data.GasDensity = Stream.FRandRange(0.5f, 1.5f) * Params.BulgeBaseDensity;
+				InsertData.Data.ScaleFactor = idata.Data.ScaleFactor;
+				InsertData.Data.Density = Stream.FRandRange(0.5f, 1.5f) * Params.BulgeBaseDensity;
 				InsertData.Data.Composition = Stream.GetUnitVector();
 				InsertData.InsertDepth = idata.InsertDepth;
 				InsertData.SetPosition(Stream.GetUnitVector() * r * AxisScale + (Stream.GetUnitVector() * Stream.FRand() * Params.BulgeRadius * Params.BulgeJitter));
@@ -1561,7 +1561,7 @@ void GalaxyDataGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, F
 			FPointData InsertData = FPointData::MakePointDataFromWorldScale(scale, Params.UnitScale, Params.Extent);
 			InsertData.SetPosition(size < Params.Extent ? P : FVector::ZeroVector);
 
-			InsertData.Data.GasDensity = InBaseDensity * Stream.FRandRange(.5, 1.5);
+			InsertData.Data.Density = InBaseDensity * Stream.FRandRange(.5, 1.5);
 			InsertData.Data.Composition = Stream.GetUnitVector();
 			InsertData.Data.ObjectId = i + StartIndex;
 			InsertData.Data.TypeId = 1;

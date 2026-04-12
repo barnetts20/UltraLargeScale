@@ -8,11 +8,11 @@
 
 struct SVO_API FVoxelData {
 public:
-	FVoxelData() : Density(0.0), GasDensity(0.0), Composition(0, 0, 0), ObjectId(-1), TypeId(-1) {};
-	FVoxelData(float InDensity, float InGasDensity, FVector InComposition, int InObjectId, int InTypeId = -1) : Density(InDensity), GasDensity(InGasDensity), Composition(InComposition), ObjectId(InObjectId), TypeId(InTypeId) {};
+	FVoxelData() : ScaleFactor(0.0), Density(0.0), Composition(0, 0, 0), ObjectId(-1), TypeId(-1) {};
+	FVoxelData(float InDensity, float InGasDensity, FVector InComposition, int InObjectId, int InTypeId = -1) : ScaleFactor(InDensity), Density(InGasDensity), Composition(InComposition), ObjectId(InObjectId), TypeId(InTypeId) {};
 
+	float ScaleFactor;
 	float Density;
-	float GasDensity;
 	FVector Composition;
 	int ObjectId;
 	int TypeId;
@@ -98,16 +98,16 @@ public:
         }
 
         // Calculate density to encode sub-node precision
-        // Actual object size = NodeExtent * (1 + Density)
-        // Density = (LocalSize / BestNodeExtent) - 1
-        float Density = FMath::Clamp(
+        // Actual object size = NodeExtent * (1 + ScaleFactor)
+        // ScaleFactor = (LocalSize / BestNodeExtent) - 1
+        float ScaleFactor = FMath::Clamp(
             static_cast<float>((LocalSize / static_cast<double>(BestNodeExtent)) - 1.0),
             0.0001f,
             1.0f
         );
 
         FVoxelData Data;
-        Data.Density = Density;
+        Data.ScaleFactor = ScaleFactor;
 
         return FPointData(FInt64Vector::ZeroValue, BestDepth, Data);
     }
