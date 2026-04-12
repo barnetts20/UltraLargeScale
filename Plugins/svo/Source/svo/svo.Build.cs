@@ -25,13 +25,14 @@ public class svo : ModuleRules
                 "Niagara",
 				"Projects",
 				"EnhancedInput"
-				// ... add other public dependencies that you statically link with here ...
-			}
+        // ... add other public dependencies that you statically link with here ...
+    }
 		);
         PrivateDependencyModuleNames.AddRange(new string[]
 		{
             "TraceLog",         // Add this for trace channels
-            "RHICore"           // Add this if available in your UE5 version
-		});
+            "RHICore",          // Add this if available in your UE5 version
+			"ContentBrowser"
+        });
     }
 }

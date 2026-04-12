@@ -107,7 +107,7 @@ void ASectorActor::InitializeData()
 	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(
 		FVolumeTextureUtils::PackToPseudoVolumeLayout(
 			FVolumeTextureUtils::UpscaleVolumeData(VolumeData, resolution)
-		), "BakedTest"
+		), "/svo/Generated/BakedTest"
 	);
 
 	double GenDuration = FPlatformTime::Seconds() - StartTime;

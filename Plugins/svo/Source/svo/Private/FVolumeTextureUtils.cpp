@@ -150,7 +150,13 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 						uint8 densityByte = (uint8)FMath::Clamp(density * 255.0f, 0.0f, 255.0f);
 
 						int64 idx = ((int64)z * InResolution * InResolution + (int64)y * InResolution + x) * BytesPerVoxel;
-						TextureData[idx + InChannel] = densityByte;
+						// TODO: Revisit channel semantics when we have proper RGB data from cluster
+						// light temperature/intensity propagation. For now, broadcast density to all
+						// channels so the texture previews and raymarch correctly in grayscale.
+						TextureData[idx + 0] = densityByte; // B
+						TextureData[idx + 1] = densityByte; // G
+						TextureData[idx + 2] = densityByte; // R
+						TextureData[idx + 3] = densityByte; // A
 
 						if (bWriteOctree && ChunkNode.IsValid())
 						{

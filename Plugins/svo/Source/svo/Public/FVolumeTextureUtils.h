@@ -8,6 +8,8 @@
 #include "Engine/VolumeTexture.h"
 #include "UObject/SavePackage.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "ContentBrowserModule.h"
+#include "IContentBrowserSingleton.h"
 #include "FastNoise/FastNoise.h"
 
 class FOctree;
@@ -380,7 +382,9 @@ public:
 		LinkDoneEvent->Wait();
 		FPlatformProcess::ReturnSynchEventToPool(LinkDoneEvent);
 
-		// Optional: save to disk if path provided
+		// Optional: save to disk if path provided.
+		// NOTE: InSavePath must be a /Game/... content-relative package path with NO extension.
+		// e.g. TEXT("/Game/GeneratedTextures/SectorVolume_0")
 		if (!InSavePath.IsEmpty())
 		{
 			SaveTextureToDisk(PseudoVolumeTexture, InMipData, OutRes, InSavePath);
@@ -400,20 +404,39 @@ private:
 
 	/// <summary>
 	/// Save a pseudo-volume texture to disk as a persistent .uasset.
+	/// InSavePath must be a content-relative package path with NO file extension,
+	/// e.g. "/Game/GeneratedTextures/SectorVolume_0". The .uasset extension is
+	/// appended internally by LongPackageNameToFilename.
+	///
+	/// NOTE: This creates a NEW UTexture2D in the target package using Source mip data
+	/// (the editor-facing source representation). PlatformData alone is not sufficient
+	/// for SavePackage -- without Source data the asset saves but loads as blank in
+	/// the editor and content browser.
+	/// InTexture (the transient runtime texture) is intentionally NOT reused here;
+	/// it lives in GetTransientPackage() and cannot be moved to a persistent package.
 	/// </summary>
 	static void SaveTextureToDisk(
-		UTexture2D* InTexture,
+		UTexture2D* InTexture,   // Unused directly -- kept for API clarity/future use
 		const TArray<uint8>& InMipData,
 		int InResolution,
 		const FString& InSavePath)
 	{
 		double StartTime = FPlatformTime::Seconds();
 
+		// Capture by value -- this is called from a background thread and the caller
+		// may return before the AsyncTask executes on the game thread.
+		TArray<uint8> MipDataCopy = InMipData;
+		FString SavePathCopy = InSavePath;
+
 		FEvent* SaveDoneEvent = FPlatformProcess::GetSynchEventFromPool(true);
 		SaveDoneEvent->Reset();
-		AsyncTask(ENamedThreads::GameThread, [InTexture, &InMipData, InResolution, &InSavePath, SaveDoneEvent]()
+		AsyncTask(ENamedThreads::GameThread, [MipDataCopy = MoveTemp(MipDataCopy), SavePathCopy = MoveTemp(SavePathCopy), InResolution, SaveDoneEvent]()
 			{
-				FString PackagePath = InSavePath;
+				// Package path must be a UE content-relative path (e.g. /Game/Folder/AssetName).
+				// Note: /Game/ maps to your project's Content/ folder on disk.
+				// Do NOT pass filesystem paths like /Content/... or paths with .uasset extension.
+
+				FString PackagePath = SavePathCopy;
 				FString AssetName = FPackageName::GetShortName(PackagePath);
 
 				UPackage* Package = CreatePackage(*PackagePath);
@@ -423,15 +446,17 @@ private:
 					SaveDoneEvent->Trigger();
 					return;
 				}
+				Package->FullyLoad();
 
 				UTexture2D* SaveTexture = NewObject<UTexture2D>(Package, *AssetName, RF_Public | RF_Standalone);
 				if (!SaveTexture)
 				{
-					UE_LOG(LogTemp, Error, TEXT("FVolumeTextureUtils::SaveTextureToDisk - Failed to create texture object"));
+					UE_LOG(LogTemp, Error, TEXT("FVolumeTextureUtils::SaveTextureToDisk - Failed to create texture object in package"));
 					SaveDoneEvent->Trigger();
 					return;
 				}
 
+				// --- Texture settings ---
 				SaveTexture->NeverStream = true;
 				SaveTexture->SRGB = false;
 				SaveTexture->CompressionSettings = TC_VectorDisplacementmap;
@@ -440,27 +465,53 @@ private:
 				SaveTexture->MipGenSettings = TMGS_NoMipmaps;
 				SaveTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
 
-				FTexturePlatformData* PlatformData = new FTexturePlatformData();
-				PlatformData->SizeX = InResolution;
-				PlatformData->SizeY = InResolution;
-				PlatformData->PixelFormat = PF_B8G8R8A8;
+				// --- Populate SOURCE data ---
+				// Source is the editor-facing representation that SavePackage persists.
+				// PlatformData is the cooked runtime form and is NOT written by SavePackage.
+				const int ExpectedBytes = InResolution * InResolution * 4;
+				UE_LOG(LogTemp, Log, TEXT("FVolumeTextureUtils::SaveTextureToDisk - Initializing source %dx%d, data size %d, expected %d"),
+					InResolution, InResolution, MipDataCopy.Num(), ExpectedBytes);
 
-				FTexture2DMipMap* Mip = new FTexture2DMipMap();
-				Mip->SizeX = InResolution;
-				Mip->SizeY = InResolution;
-				Mip->BulkData.Lock(LOCK_READ_WRITE);
-				void* TextureDataPtr = Mip->BulkData.Realloc(InMipData.Num());
-				if (TextureDataPtr)
+				SaveTexture->Source.Init(
+					InResolution,
+					InResolution,
+					/*NumSlices=*/1,
+					/*NumMips=*/1,
+					TSF_BGRA8
+				);
+
+				UE_LOG(LogTemp, Log, TEXT("FVolumeTextureUtils::SaveTextureToDisk - Source valid after Init: %s, size: %lld"),
+					SaveTexture->Source.IsValid() ? TEXT("yes") : TEXT("no"),
+					SaveTexture->Source.CalcMipSize(0));
+
+				uint8* SourceDataPtr = SaveTexture->Source.LockMip(0);
+				if (SourceDataPtr)
 				{
-					FMemory::Memcpy(TextureDataPtr, InMipData.GetData(), InMipData.Num());
+					if (MipDataCopy.Num() == ExpectedBytes)
+					{
+						FMemory::Memcpy(SourceDataPtr, MipDataCopy.GetData(), ExpectedBytes);
+						UE_LOG(LogTemp, Log, TEXT("FVolumeTextureUtils::SaveTextureToDisk - Source data copied OK"));
+					}
+					else
+					{
+						FMemory::Memzero(SourceDataPtr, SaveTexture->Source.CalcMipSize(0));
+						UE_LOG(LogTemp, Error, TEXT("FVolumeTextureUtils::SaveTextureToDisk - Size mismatch, zeroed source (expected %d, got %d)"),
+							ExpectedBytes, MipDataCopy.Num());
+					}
 				}
-				Mip->BulkData.Unlock();
+				else
+				{
+					UE_LOG(LogTemp, Error, TEXT("FVolumeTextureUtils::SaveTextureToDisk - Source.LockMip(0) returned null"));
+				}
+				SaveTexture->Source.UnlockMip(0);
 
-				PlatformData->Mips.Add(Mip);
-				SaveTexture->SetPlatformData(PlatformData);
-				SaveTexture->UpdateResource();
-
+				// Do NOT call UpdateResource() -- this texture is never rendered.
+				// Do NOT call PostEditChange() -- on a 4096^2 texture it kicks off a full
+				// async compression job (hence "Waiting for textures to be ready") even with
+				// CompressionNone=true, because it still schedules a build task.
+				// We just need the source data written; SavePackage handles the rest.
 				Package->MarkPackageDirty();
+
 				FString PackageFileName = FPackageName::LongPackageNameToFilename(PackagePath, FPackageName::GetAssetPackageExtension());
 
 				FSavePackageArgs SaveArgs;
@@ -469,12 +520,24 @@ private:
 
 				if (bSaved)
 				{
-					FAssetRegistryModule::AssetCreated(SaveTexture);
+					FAssetRegistryModule& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+					AssetRegistry.Get().AssetCreated(SaveTexture);
+
+					TArray<FString> PathsToScan;
+					PathsToScan.Add(FPackageName::GetLongPackagePath(PackagePath));
+					AssetRegistry.Get().ScanPathsSynchronous(PathsToScan, /*bForceRescan=*/true);
+
+#if WITH_EDITOR
+					// Explicitly notify the Content Browser to refresh — ScanPathsSynchronous
+					// updates the registry but doesn't always force a visible refresh.
+					FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
+					ContentBrowserModule.Get().SyncBrowserToAssets(TArray<FAssetData>{ FAssetData(SaveTexture) });
+#endif
 					UE_LOG(LogTemp, Log, TEXT("FVolumeTextureUtils::SaveTextureToDisk - Saved to: %s"), *PackageFileName);
 				}
 				else
 				{
-					UE_LOG(LogTemp, Error, TEXT("FVolumeTextureUtils::SaveTextureToDisk - Failed to save: %s"), *PackageFileName);
+					UE_LOG(LogTemp, Error, TEXT("FVolumeTextureUtils::SaveTextureToDisk - SavePackage failed for: %s"), *PackageFileName);
 				}
 
 				SaveDoneEvent->Trigger();
