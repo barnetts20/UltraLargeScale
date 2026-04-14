@@ -33,10 +33,10 @@ void AProceduralSpaceActor::Initialize()
             InitializeData();
             if (InitializationState == ELifecycleState::Pooling) return;
 
-            InitializeNiagara();
+            InitializeVolumetric();
             if (InitializationState == ELifecycleState::Pooling) return;
 
-            InitializeVolumetric();
+            InitializeNiagara();
             if (InitializationState == ELifecycleState::Pooling) return;
 
             InitializationState = ELifecycleState::Ready;

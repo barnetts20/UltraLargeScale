@@ -17,7 +17,6 @@ public:
 #pragma region Editor Exposed Parameters
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
 	FUniverseParams Params;
-	// SpeedScale is inherited from base class
 #pragma endregion
 
 #pragma region Pooled Spawn/Despawn Hooks
@@ -27,31 +26,28 @@ public:
 #pragma endregion
 
 protected:
-#pragma region Params Accessors (implement pure virtuals from base)
+#pragma region Params Accessors
 	virtual double GetUnitScale() const override { return Params.UnitScale; }
 	virtual double GetExtent() const override { return Params.Extent; }
-	virtual double GetParentSpeedScale() const override { return SpeedScale; }  // Root level - no parent
-
+	virtual double GetParentSpeedScale() const override { return SpeedScale; }
 #pragma endregion
 
-#pragma region Initialization (implement pure virtuals from base)
+#pragma region Initialization
 	virtual void InitializeData() override;
 	virtual void InitializeVolumetric() override;
 	virtual void InitializeNiagara() override;
-	virtual void InitializeChildPool() override;  // Galaxy pool initialization
+	virtual void InitializeChildPool() override;
 #pragma endregion
 
 #pragma region Data Generation
 	UniverseDataGenerator UniverseGenerator;
 #pragma endregion
 
-#pragma region Niagara (additional universe-specific members)
-	TArray<FVector> Rotations;  // Universe needs rotations, base class doesn't
-	// Positions, Extents, Colors, PointCloudNiagara, NiagaraComponent inherited from base
+#pragma region Niagara
+	TArray<FVector> Rotations;
 #pragma endregion
 
-#pragma region Volumetric (universe-specific)
-// PseudoVolumeTexture, VolumetricComponent inherited from base
+#pragma region Volumetric
 	FString VolumetricMaterialPath = FString("/svo/Materials/RayMarchers/MT_UniverseRaymarchPseudoVolume_Inst.MT_UniverseRaymarchPseudoVolume_Inst");
 #pragma endregion
 
@@ -64,9 +60,46 @@ protected:
 #pragma region Overrides
 	virtual void BeginPlay() override;
 	virtual void ApplyParallaxOffset() override;
+	virtual void Tick(float DeltaTime) override;
 #pragma endregion
 
 #pragma region Player-Centered Parallax
 	double ParallaxRatio = 0.0;
+#pragma endregion
+
+#pragma region Proximity Galaxy Streaming
+	// --- Configuration ---
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Proximity")
+	int32 ScanDepth = 10;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Proximity")
+	int32 MaxParticlesPerNode = 1000;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Proximity")
+	int32 RejectionOversampleFactor = 4;
+
+	// --- State ---
+	FIntVector CurrentScanCoord = FIntVector(INT32_MIN);
+	TMap<FIntVector, int32> ActiveNodeSlots;
+	TArray<int32> FreeSlots;
+	TArray<int32> SlotParticleCounts;
+
+	// --- Flat particle buffers (27 * MaxParticlesPerNode) ---
+	TArray<FVector> ProximityPositions;
+	TArray<float> ProximityExtents;
+	TArray<FLinearColor> ProximityColors;
+
+	// --- Proximity Niagara ---
+	UPROPERTY()
+	UNiagaraComponent* ProximityNiagaraComponent;
+
+	// --- Methods ---
+	void InitializeProximitySystem();
+	void UpdateProximityNodes();
+	FIntVector PositionToScanCoord(const FVector& InLocalPos) const;
+	FVector ScanCoordToCenter(const FIntVector& InCoord) const;
+	double GetScanNodeExtent() const;
+	void GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InSlotIndex);
+	void PushProximityToNiagara();
 #pragma endregion
 };
