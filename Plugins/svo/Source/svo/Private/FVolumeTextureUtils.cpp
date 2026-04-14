@@ -85,7 +85,7 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 	float InNoisePower,
 	int InChannel)
 {
-	FVector NoiseScale(1, 1, 1);
+	FVector NoiseScale(2, 2, 2);
 	double StartTime = FPlatformTime::Seconds();
 
 	const int BytesPerVoxel = 4;
@@ -98,8 +98,6 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 	const double InvExtent = 1.0 / InExtent;
 
 	// --- Octree setup ---
-	// Pre-populate volume chunks serially so parallel inserts can use InCurrent,
-	// bypassing the octree mutex entirely (same pattern as BulkInsertPositions).
 	bool bWriteOctree = InOctree.IsValid() && InOctreeDepth > 0;
 	TArray<TSharedPtr<FOctreeNode>> VolumeChunks;
 	const int ChunkRes = bWriteOctree ? (1 << InOctree->VolumeDepth) : 32;
@@ -112,6 +110,7 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 
 	const int SubSamplesPerAxis = FMath::Max(1, InResolution / ChunkRes);
 	const int NumChunks = ChunkRes * ChunkRes * ChunkRes;
+	const int SamplesPerChunk = SubSamplesPerAxis * SubSamplesPerAxis * SubSamplesPerAxis;
 
 	ParallelFor(NumChunks, [&](int ChunkIdx)
 		{
@@ -127,6 +126,14 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 				? VolumeChunks[ChunkIdx]
 				: nullptr;
 
+			// --- Build coordinate arrays for batch sampling ---
+			TArray<float> XCoords, YCoords, ZCoords, NoiseOut;
+			XCoords.SetNumUninitialized(SamplesPerChunk);
+			YCoords.SetNumUninitialized(SamplesPerChunk);
+			ZCoords.SetNumUninitialized(SamplesPerChunk);
+			NoiseOut.SetNumUninitialized(SamplesPerChunk);
+
+			int SampleIdx = 0;
 			for (int lz = 0; lz < SubSamplesPerAxis; ++lz)
 			{
 				int z = zStart + lz;
@@ -141,37 +148,77 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 						double wy = -InExtent + (y + 0.5) * VoxelSize;
 						double wz = -InExtent + (z + 0.5) * VoxelSize;
 
-						float nx = (float)(wx * InvExtent * (1.0 / NoiseScale.X));
-						float ny = (float)(wy * InvExtent * (1.0 / NoiseScale.Y));
-						float nz = (float)(wz * InvExtent * (1.0 / NoiseScale.Z));
+						XCoords[SampleIdx] = (float)(wx * InvExtent * (1.0 / NoiseScale.X));
+						YCoords[SampleIdx] = (float)(wy * InvExtent * (1.0 / NoiseScale.Y));
+						ZCoords[SampleIdx] = (float)(wz * InvExtent * (1.0 / NoiseScale.Z));
 
-						float rawNoise = InNoise->GenSingle3D(nx, ny, nz, InSeed); //We should be batching these samples
+						SampleIdx++;
+					}
+				}
+			}
+
+			// --- Batch SIMD noise sample ---
+			InNoise->GenPositionArray3D(
+				NoiseOut.GetData(),
+				SamplesPerChunk,
+				XCoords.GetData(),
+				YCoords.GetData(),
+				ZCoords.GetData(),
+				0.0f, 0.0f, 0.0f,
+				InSeed
+			);
+
+			// --- Write results to texture and octree ---
+			SampleIdx = 0;
+			for (int lz = 0; lz < SubSamplesPerAxis; ++lz)
+			{
+				int z = zStart + lz;
+				for (int ly = 0; ly < SubSamplesPerAxis; ++ly)
+				{
+					int y = yStart + ly;
+					for (int lx = 0; lx < SubSamplesPerAxis; ++lx)
+					{
+						int x = xStart + lx;
+
+						float rawNoise = NoiseOut[SampleIdx];
 						float density = FMath::Pow(FMath::Clamp(rawNoise, 0.0f, 1.0f), InNoisePower);
 						uint8 densityByte = (uint8)FMath::Clamp(density * 255.0f, 0.0f, 255.0f);
 
 						int64 idx = ((int64)z * InResolution * InResolution + (int64)y * InResolution + x) * BytesPerVoxel;
-						// TODO: Revisit channel semantics when we have proper RGB data from cluster
-						// light temperature/intensity propagation. For now, broadcast density to all
-						// channels so the texture previews and raymarch correctly in grayscale.
-						TextureData[idx + 0] = densityByte; // B
-						TextureData[idx + 1] = densityByte; // G
-						TextureData[idx + 2] = densityByte; // R
-						TextureData[idx + 3] = densityByte; // A
+
+						if (InChannel == -1)
+						{
+							TextureData[idx + 0] = densityByte;
+							TextureData[idx + 1] = densityByte;
+							TextureData[idx + 2] = densityByte;
+							TextureData[idx + 3] = densityByte;
+						}
+						else
+						{
+							int c = FMath::Clamp(InChannel, 0, 3);
+							TextureData[idx + c] = densityByte;
+						}
 
 						if (bWriteOctree && ChunkNode.IsValid())
 						{
+							double wx = -InExtent + (x + 0.5) * VoxelSize;
+							double wy = -InExtent + (y + 0.5) * VoxelSize;
+							double wz = -InExtent + (z + 0.5) * VoxelSize;
+
 							FVoxelData VoxelData;
 							VoxelData.Density = density;
 							InOctree->InsertPosition(FVector(wx, wy, wz), InOctreeDepth, VoxelData, ChunkNode);
 						}
+
+						SampleIdx++;
 					}
 				}
 			}
 		}, EParallelForFlags::BackgroundPriority);
 
 	double Duration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("FVolumeTextureUtils::SampleNoiseToVolume @%d^3 took %.3f sec (octree write: %s)"),
-		InResolution, Duration, bWriteOctree ? TEXT("yes") : TEXT("no"));
+	UE_LOG(LogTemp, Log, TEXT("FVolumeTextureUtils::SampleNoiseToVolume @%d^3 took %.3f sec (octree write: %s, channel: %d, batch SIMD)"),
+		InResolution, Duration, bWriteOctree ? TEXT("yes") : TEXT("no"), InChannel);
 
 	return TextureData;
 }

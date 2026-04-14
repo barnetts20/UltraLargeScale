@@ -62,8 +62,8 @@ void ASectorActor::InitializeData()
 {
 	double StartTime = FPlatformTime::Seconds();
 
-	// --- Phase 1: Gas density from noise (low-res) ---
-	int noiseResolution = 64;
+	// --- Phase 1: Gas density from noise (low-res, alpha channel only) ---
+	int noiseResolution = 128;
 	auto DensityNoise = FastNoise::NewFromEncodedNodeTree(Params.EncodedTree);
 	TArray<uint8> LowResData = FVolumeTextureUtils::SampleNoiseToVolume(
 		DensityNoise,
@@ -73,14 +73,14 @@ void ASectorActor::InitializeData()
 		Octree,
 		FMath::FloorLog2(noiseResolution),
 		1.0f,
-		3      // write to alpha channel (density)
+		3      // Alpha only (gas density)
 	);
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
 	// --- Upscale noise to 256^3 ---
 	TArray<uint8> VolumeData = FVolumeTextureUtils::UpscaleVolumeData(LowResData, noiseResolution);
-	LowResData.Empty(); // Free low-res buffer
+	LowResData.Empty();
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
@@ -91,19 +91,25 @@ void ASectorActor::InitializeData()
 	TArray<TSharedPtr<FOctreeNode>> PointNodes;
 	Octree->BulkInsertPositions(UniverseGenerator.GeneratedData, PointNodes, VolumeChunks);
 
-	// --- Phase 2b: Splat VBO density into 256^3 volume ---
-	// Each galaxy VBO contributes a spherical density kernel at depth-8 resolution.
-	// Where galaxies cluster, splats overlap and accumulate — clusters emerge
-	// from the density overlap, no dedicated detection needed.
+	// --- Phase 2b: Splat VBO density into R channel + octree at depth 8 ---
+	// R channel = luminous cluster density, readable in the raymarch as emission.
+	// Alpha = gas density from noise (Phase 1). Separate channels let the shader
+	// treat gas absorption and cluster emission independently.
+	FRandomStream testStream(69);
 	FVolumeTextureUtils::SplatVBOsToVolume(
 		VolumeData,
-		256,            // Always splat at full volume resolution
+		256,
 		Params.Extent,
 		PointNodes,
-		2.0f,           // RadiusScale — fatten splats so clusters read at 256^3
-		2.0f,           // FalloffPower — quadratic smooth falloff
-		8.0f,           // Intensity — leave headroom for overlap accumulation
-		-1              // Channel — all channels (grayscale density for now)
+		FVector(6, 6, 6),      // Min radius per axis
+		FVector(12, 12, 12),    // Max radius per axis
+		2.0f,                   // Min falloff K
+		4.0f,                   // Max falloff K
+		0.5f,                   // Min intensity
+		1.5f,                   // Max intensity
+		2,                      // R channel
+		Octree,
+		8
 	);
 
 	if (InitializationState == ELifecycleState::Pooling) return;
@@ -128,10 +134,10 @@ void ASectorActor::InitializeData()
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
-	// --- Pack and create texture (volume data already at 256^3) ---
+	// --- Pack and create texture (already at 256^3, no second upscale) ---
 	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(
-		FVolumeTextureUtils::PackToPseudoVolumeLayout(VolumeData)
-		//, "/svo/Generated/BakedTest"
+		FVolumeTextureUtils::PackToPseudoVolumeLayout(VolumeData),
+		"/svo/Generated/BakedTest"
 	);
 
 	double GenDuration = FPlatformTime::Seconds() - StartTime;

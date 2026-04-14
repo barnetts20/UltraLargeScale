@@ -200,37 +200,31 @@ public:
 #pragma region Splat VBOs to Volume
 
 	/// <summary>
-	/// Splat point cloud nodes into a volume buffer as spherical density kernels.
-	/// Each node writes a falloff sphere centered at its position with radius
-	/// derived from its octree extent and scale factor.
+	/// Splat point cloud nodes into a 256^3 volume buffer as randomly-oriented
+	/// ellipsoidal density kernels, and optionally write the resulting density
+	/// into the octree at a target depth.
 	///
-	/// This is the mechanism by which clusters emerge in the volume texture:
-	/// dense regions of VBOs produce overlapping splats that accumulate into
-	/// bright knots visible in the raymarch.
+	/// Each node gets a randomized splat seeded from its ObjectId:
+	/// per-axis radius, orientation, falloff sharpness, and intensity.
+	/// The random rotation breaks axis-alignment so ellipsoids point in
+	/// arbitrary directions — no grid artifacts.
 	///
-	/// Additive per channel, clamped to 255. Parallel over nodes.
+	/// Uses Lorentzian falloff: 1 / (1 + k * t^2) — sharp spike, long tail.
 	/// </summary>
-	/// <param name="InOutVolumeData">Target volume buffer (modified in place, Resolution^3 * 4 bytes BGRA8)</param>
-	/// <param name="InResolution">Volume resolution per axis (e.g., 32, 64, 128)</param>
-	/// <param name="InExtent">World-space half-extent of the volume (same as octree extent)</param>
-	/// <param name="InNodes">Octree nodes to splat (typically the PointNodes from BulkInsertPositions)</param>
-	/// <param name="InRadiusScale">Multiplier on each node's natural radius (Extent * (1+ScaleFactor)). 
-	///        Use >1 to fatten splats for cluster visibility at low resolutions.</param>
-	/// <param name="InFalloffPower">Exponent for the falloff curve. 1.0=linear, 2.0=quadratic (smooth), 
-	///        higher=sharper core. Default 2.0 gives a nice gaussian-ish rolloff.</param>
-	/// <param name="InIntensity">Peak density value at the center of each splat (0.0-1.0 range, 
-	///        mapped to 0-255). Default 1.0.</param>
-	/// <param name="InChannel">Which BGRA channel to write (-1 = all channels, 0=B, 1=G, 2=R, 3=A). 
-	///        Default -1 (all).</param>
 	static void SplatVBOsToVolume(
 		TArray<uint8>& InOutVolumeData,
 		int InResolution,
 		double InExtent,
 		const TArray<TSharedPtr<FOctreeNode>>& InNodes,
-		float InRadiusScale = 1.0f,
-		float InFalloffPower = 2.0f,
-		float InIntensity = 1.0f,
-		int InChannel = -1)
+		FVector InMinRadiusVoxels = FVector(7.0f),
+		FVector InMaxRadiusVoxels = FVector(32.0f),
+		float InMinFalloff = 1.0f,
+		float InMaxFalloff = 4.0f,
+		float InMinIntensity = 0.8f,
+		float InMaxIntensity = 2.0f,
+		int InChannel = -1,
+		TSharedPtr<FOctree> InOctree = nullptr,
+		int InOctreeDepth = 8)
 	{
 		double StartTime = FPlatformTime::Seconds();
 
@@ -238,15 +232,22 @@ public:
 		const double VoxelSize = (2.0 * InExtent) / InResolution;
 		const double InvVoxelSize = 1.0 / VoxelSize;
 		const int Slice = InResolution * InResolution;
-		const uint8 PeakByte = (uint8)FMath::Clamp(InIntensity * 255.0f, 0.0f, 255.0f);
 
-		// --- Pre-compute per-node splat parameters in voxel space ---
+		// --- Per-node splat: randomized oriented ellipsoid ---
 		struct FSplatEntry
 		{
-			float CenterX, CenterY, CenterZ;  // Voxel-space center (fractional)
-			float RadiusVoxels;                 // Radius in voxel units
-			float InvRadius;                    // 1/radius for normalization
-			float Intensity;                    // Peak intensity 0-255
+			float CenterX, CenterY, CenterZ;
+			float RadiusX, RadiusY, RadiusZ;
+			float InvRadiusX, InvRadiusY, InvRadiusZ;
+			float FalloffK;
+			float Intensity;
+			float MaxRadius;  // Largest axis radius — for AABB bounding box
+
+			// Inverse rotation matrix rows (rotates world-space delta into ellipsoid-local space)
+			// Stored as 3 row vectors for cache-friendly dot products
+			float R00, R01, R02;
+			float R10, R11, R12;
+			float R20, R21, R22;
 		};
 
 		TArray<FSplatEntry> Splats;
@@ -256,25 +257,48 @@ public:
 		{
 			if (!Node.IsValid()) continue;
 
-			// Node's world-space radius: extent * (1 + ScaleFactor), scaled by user param
-			double WorldRadius = Node->Extent * (1.0 + Node->Data.ScaleFactor) * InRadiusScale;
-			float RadiusVoxels = (float)(WorldRadius * InvVoxelSize);
+			FRandomStream NodeStream(Node->Data.ObjectId);
 
-			// Skip nodes whose splat is smaller than half a voxel — they'd be sub-pixel
-			if (RadiusVoxels < 0.5f) RadiusVoxels = 0.5f;
-
-			// World position to voxel-space (0 to Resolution)
 			float VoxelX = (float)((Node->Center.X + InExtent) * InvVoxelSize);
 			float VoxelY = (float)((Node->Center.Y + InExtent) * InvVoxelSize);
 			float VoxelZ = (float)((Node->Center.Z + InExtent) * InvVoxelSize);
+
+			float RX = NodeStream.FRandRange(InMinRadiusVoxels.X, InMaxRadiusVoxels.X);
+			float RY = NodeStream.FRandRange(InMinRadiusVoxels.Y, InMaxRadiusVoxels.Y);
+			float RZ = NodeStream.FRandRange(InMinRadiusVoxels.Z, InMaxRadiusVoxels.Z);
+
+			// Random rotation — uniform random Euler angles
+			FRotator RandomRot(
+				NodeStream.FRandRange(-180.0f, 180.0f),
+				NodeStream.FRandRange(-180.0f, 180.0f),
+				NodeStream.FRandRange(-180.0f, 180.0f)
+			);
+
+			// Build rotation matrix, then transpose to get the inverse rotation
+			// (rotation matrices are orthogonal, so transpose = inverse).
+			// We want: localDelta = InverseRotation * worldDelta
+			// FRotationMatrix gives us R where worldDelta = R * localDelta
+			// So InverseRotation = R^T
+			FMatrix RotMatrix = FRotationMatrix(RandomRot);
 
 			FSplatEntry Entry;
 			Entry.CenterX = VoxelX;
 			Entry.CenterY = VoxelY;
 			Entry.CenterZ = VoxelZ;
-			Entry.RadiusVoxels = RadiusVoxels;
-			Entry.InvRadius = 1.0f / RadiusVoxels;
-			Entry.Intensity = InIntensity * 255.0f;
+			Entry.RadiusX = RX;
+			Entry.RadiusY = RY;
+			Entry.RadiusZ = RZ;
+			Entry.InvRadiusX = 1.0f / RX;
+			Entry.InvRadiusY = 1.0f / RY;
+			Entry.InvRadiusZ = 1.0f / RZ;
+			Entry.FalloffK = NodeStream.FRandRange(InMinFalloff, InMaxFalloff);
+			Entry.Intensity = NodeStream.FRandRange(InMinIntensity, InMaxIntensity) * 255.0f;
+			Entry.MaxRadius = FMath::Max3(RX, RY, RZ);
+
+			// Store transposed rows (inverse rotation)
+			Entry.R00 = RotMatrix.M[0][0]; Entry.R01 = RotMatrix.M[1][0]; Entry.R02 = RotMatrix.M[2][0];
+			Entry.R10 = RotMatrix.M[0][1]; Entry.R11 = RotMatrix.M[1][1]; Entry.R12 = RotMatrix.M[2][1];
+			Entry.R20 = RotMatrix.M[0][2]; Entry.R21 = RotMatrix.M[1][2]; Entry.R22 = RotMatrix.M[2][2];
 
 			Splats.Add(Entry);
 		}
@@ -285,77 +309,71 @@ public:
 			return;
 		}
 
-		// --- Accumulation buffer (float per channel to avoid clamping during accumulation) ---
-		// Using a float buffer avoids repeated clamp-to-255 during overlapping splats,
-		// giving correct additive blending before the final quantization pass.
+		// --- Float accumulation buffer ---
 		const int64 TotalVoxels = (int64)InResolution * InResolution * InResolution;
 		TArray<float> AccumBuffer;
 		AccumBuffer.SetNumZeroed(TotalVoxels);
 
-		// --- Splat each node (parallel over nodes, atomic accumulate) ---
-		// For low node counts (<10K) this is faster than splatting per-voxel-slice
-		// because most voxels are untouched by any splat.
-		//
-		// We use a two-pass approach:
-		// Pass 1: Accumulate into float buffer (parallel per node, with simple overlap tolerance)
-		// Pass 2: Quantize and composite into the BGRA byte buffer
-
-		// Pass 1: Parallel splat into float accumulation buffer
-		// Note: overlapping splats from different nodes may race on the same voxel.
-		// For density visualization this is acceptable — the error is bounded and
-		// the result converges. For exact accumulation, switch to per-slice parallelism.
+		// --- Pass 1: Parallel splat into float accumulation buffer ---
 		ParallelFor(Splats.Num(), [&](int SplatIdx)
 			{
 				const FSplatEntry& S = Splats[SplatIdx];
 
-				// Bounding box in voxel coordinates (clamped to grid)
-				int MinX = FMath::Max(0, FMath::FloorToInt(S.CenterX - S.RadiusVoxels));
-				int MaxX = FMath::Min(InResolution - 1, FMath::CeilToInt(S.CenterX + S.RadiusVoxels));
-				int MinY = FMath::Max(0, FMath::FloorToInt(S.CenterY - S.RadiusVoxels));
-				int MaxY = FMath::Min(InResolution - 1, FMath::CeilToInt(S.CenterY + S.RadiusVoxels));
-				int MinZ = FMath::Max(0, FMath::FloorToInt(S.CenterZ - S.RadiusVoxels));
-				int MaxZ = FMath::Min(InResolution - 1, FMath::CeilToInt(S.CenterZ + S.RadiusVoxels));
-
-				const float RadSq = S.RadiusVoxels * S.RadiusVoxels;
+				// AABB uses MaxRadius — conservative bounding box for the rotated ellipsoid
+				int MinX = FMath::Max(0, FMath::FloorToInt(S.CenterX - S.MaxRadius));
+				int MaxX = FMath::Min(InResolution - 1, FMath::CeilToInt(S.CenterX + S.MaxRadius));
+				int MinY = FMath::Max(0, FMath::FloorToInt(S.CenterY - S.MaxRadius));
+				int MaxY = FMath::Min(InResolution - 1, FMath::CeilToInt(S.CenterY + S.MaxRadius));
+				int MinZ = FMath::Max(0, FMath::FloorToInt(S.CenterZ - S.MaxRadius));
+				int MaxZ = FMath::Min(InResolution - 1, FMath::CeilToInt(S.CenterZ + S.MaxRadius));
 
 				for (int z = MinZ; z <= MaxZ; ++z)
 				{
 					float dz = (z + 0.5f) - S.CenterZ;
-					float dz2 = dz * dz;
 
 					for (int y = MinY; y <= MaxY; ++y)
 					{
 						float dy = (y + 0.5f) - S.CenterY;
-						float dy2 = dy * dy;
-						float dyz2 = dy2 + dz2;
-
-						// Early row skip — if dy²+dz² already exceeds radius², whole row is outside
-						if (dyz2 > RadSq) continue;
 
 						for (int x = MinX; x <= MaxX; ++x)
 						{
 							float dx = (x + 0.5f) - S.CenterX;
-							float distSq = dx * dx + dyz2;
 
-							if (distSq > RadSq) continue;
+							// Rotate world-space delta into ellipsoid-local space
+							float lx = S.R00 * dx + S.R01 * dy + S.R02 * dz;
+							float ly = S.R10 * dx + S.R11 * dy + S.R12 * dz;
+							float lz = S.R20 * dx + S.R21 * dy + S.R22 * dz;
 
-							// Normalized distance [0, 1]
-							float t = FMath::Sqrt(distSq) * S.InvRadius;
+							// Normalized ellipsoidal distance
+							float nx = lx * S.InvRadiusX;
+							float ny = ly * S.InvRadiusY;
+							float nz = lz * S.InvRadiusZ;
+							float normDistSq = nx * nx + ny * ny + nz * nz;
 
-							// Falloff: 1 at center, 0 at edge
-							float falloff = FMath::Pow(1.0f - t, InFalloffPower);
+							if (normDistSq > 1.0f) continue;
+
+							// Lorentzian falloff: sharp spike, long tail
+							float falloff = 1.0f / (1.0f + S.FalloffK * normDistSq);
 							float contribution = S.Intensity * falloff;
 
 							int64 VoxelIdx = (int64)z * Slice + (int64)y * InResolution + x;
-
-							// Simple non-atomic add — acceptable race for density vis
 							AccumBuffer[VoxelIdx] += contribution;
 						}
 					}
 				}
 			}, Splats.Num() > 64 ? EParallelForFlags::BackgroundPriority : EParallelForFlags::ForceSingleThread);
 
-		// Pass 2: Quantize and composite into byte buffer (parallel over Z slices)
+		// --- Octree setup for depth writes ---
+		bool bWriteOctree = InOctree.IsValid() && InOctreeDepth > 0;
+		TArray<TSharedPtr<FOctreeNode>> VolumeChunks;
+
+		if (bWriteOctree)
+		{
+			TArray<TArray<FPointData>> DummyChunkData;
+			InOctree->PrePopulateVolumeLayer(VolumeChunks, DummyChunkData);
+		}
+
+		// --- Pass 2: Quantize to byte buffer + write octree (parallel over Z slices) ---
 		uint8* DataPtr = InOutVolumeData.GetData();
 
 		ParallelFor(InResolution, [&](int z)
@@ -374,7 +392,6 @@ public:
 
 						if (InChannel == -1)
 						{
-							// All channels
 							for (int c = 0; c < BytesPerVoxel; ++c)
 							{
 								DataPtr[ByteIdx + c] = (uint8)FMath::Min((int)DataPtr[ByteIdx + c] + (int)SplatByte, 255);
@@ -382,17 +399,35 @@ public:
 						}
 						else
 						{
-							// Single channel
 							int c = FMath::Clamp(InChannel, 0, 3);
 							DataPtr[ByteIdx + c] = (uint8)FMath::Min((int)DataPtr[ByteIdx + c] + (int)SplatByte, 255);
+						}
+
+						if (bWriteOctree)
+						{
+							double wx = -InExtent + (x + 0.5) * VoxelSize;
+							double wy = -InExtent + (y + 0.5) * VoxelSize;
+							double wz = -InExtent + (z + 0.5) * VoxelSize;
+
+							int ChunkIdx = InOctree->FindChunkIndexForPosition(FVector(wx, wy, wz), VolumeChunks);
+							TSharedPtr<FOctreeNode> ChunkNode = (ChunkIdx >= 0 && ChunkIdx < VolumeChunks.Num())
+								? VolumeChunks[ChunkIdx]
+								: nullptr;
+
+							if (ChunkNode.IsValid())
+							{
+								FVoxelData SplatData;
+								SplatData.Density = Accum / 255.0f;
+								InOctree->InsertPosition(FVector(wx, wy, wz), InOctreeDepth, SplatData, ChunkNode);
+							}
 						}
 					}
 				}
 			}, EParallelForFlags::BackgroundPriority);
 
 		double Duration = FPlatformTime::Seconds() - StartTime;
-		UE_LOG(LogTemp, Log, TEXT("FVolumeTextureUtils::SplatVBOsToVolume (%d nodes, radius scale %.1f, falloff %.1f, res %d) took %.3f sec"),
-			InNodes.Num(), InRadiusScale, InFalloffPower, InResolution, Duration);
+		UE_LOG(LogTemp, Log, TEXT("FVolumeTextureUtils::SplatVBOsToVolume (%d nodes, res %d, octree: %s) took %.3f sec"),
+			InNodes.Num(), InResolution, bWriteOctree ? TEXT("yes") : TEXT("no"), Duration);
 	}
 
 #pragma endregion
