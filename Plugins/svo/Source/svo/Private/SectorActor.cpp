@@ -81,12 +81,12 @@ void ASectorActor::InitializeData()
 		256,
 		Params.Extent,
 		PointNodes,
-		FVector(6, 6, 6),
-		FVector(12, 12, 12),
+		FVector(5, 5, 5),
+		FVector(10, 10, 10),
 		2.0f,
 		4.0f,
-		0.5f,
-		1.5f,
+		0.0f,
+		1.0f,
 		2,              // R channel
 		Octree,
 		8
@@ -442,9 +442,9 @@ void ASectorActor::InitializeProximitySystem()
 		});
 	CompletionFuture.Wait();
 
-	double Duration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeProximitySystem took %.3f sec (%d nodes, %d total particles)"),
-		Duration, ActiveNodeSlots.Num(), TotalParticles);
+	//double Duration = FPlatformTime::Seconds() - StartTime;
+	//UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeProximitySystem took %.3f sec (%d nodes, %d total particles)"),
+	//	Duration, ActiveNodeSlots.Num(), TotalParticles);
 }
 
 void ASectorActor::UpdateProximityNodes()
@@ -555,7 +555,7 @@ void ASectorActor::UpdateProximityNodes()
 				int32* SlotPtr = ActiveNodeSlots.Find(Coord);
 				if (SlotPtr)
 				{
-					UE_LOG(LogTemp, Log, TEXT("Clearing exiting slot %d in back buffer %d"), *SlotPtr, 1 - FrontBufferIndex.load());
+					//UE_LOG(LogTemp, Log, TEXT("Clearing exiting slot %d in back buffer %d"), *SlotPtr, 1 - FrontBufferIndex.load());
 					int32 SlotStart = *SlotPtr * MaxParticlesPerNode;
 					for (int32 i = 0; i < MaxParticlesPerNode; ++i)
 					{
@@ -574,7 +574,7 @@ void ASectorActor::UpdateProximityNodes()
 			{
 				if (FreeSlots.Num() == 0)
 				{
-					UE_LOG(LogTemp, Warning, TEXT("ASectorActor::UpdateProximityNodes - No free slots available!"));
+					//UE_LOG(LogTemp, Warning, TEXT("ASectorActor::UpdateProximityNodes - No free slots available!"));
 					break;
 				}
 
@@ -589,9 +589,9 @@ void ASectorActor::UpdateProximityNodes()
 			// Signal game thread to push the new front buffer on next Tick
 			bProximityNeedsPush.store(true);
 
-			double Duration = FPlatformTime::Seconds() - StartTime;
-			UE_LOG(LogTemp, Log, TEXT("ASectorActor::UpdateProximityNodes (%d exiting, %d entering) took %.3f sec"),
-				ExitingNodes.Num(), EnteringNodes.Num(), Duration);
+			//double Duration = FPlatformTime::Seconds() - StartTime;
+			//UE_LOG(LogTemp, Log, TEXT("ASectorActor::UpdateProximityNodes (%d exiting, %d entering) took %.3f sec"),
+			//	ExitingNodes.Num(), EnteringNodes.Num(), Duration);
 
 			bProximityUpdateInProgress.store(false);
 		});
@@ -695,8 +695,8 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InS
 	}
 
 	SlotParticleCounts[InSlotIndex] = ActualCount;
-	UE_LOG(LogTemp, Log, TEXT("GenerateNodeGalaxies wrote %d particles to slot %d, buffer extents[%d]=%.1f"),
-		ActualCount, InSlotIndex, BufferStart, InBuffer.Extents[BufferStart]);
+	//UE_LOG(LogTemp, Log, TEXT("GenerateNodeGalaxies wrote %d particles to slot %d, buffer extents[%d]=%.1f"),
+	//	ActualCount, InSlotIndex, BufferStart, InBuffer.Extents[BufferStart]);
 }
 
 void ASectorActor::PushProximityToNiagara()
@@ -706,8 +706,8 @@ void ASectorActor::PushProximityToNiagara()
 	int32 ActiveCount = 0;
 	const FProximityBuffer& Front1 = ProximityBuffers[FrontBufferIndex.load()];
 	for (int32 i = 0; i < Front1.Extents.Num(); ++i) { if (Front1.Extents[i] > 0.0f) ActiveCount++; }
-	UE_LOG(LogTemp, Log, TEXT("PushProximityToNiagara: FrontIdx=%d, bufferSize=%d, active=%d"),
-		FrontBufferIndex.load(), Front1.Positions.Num(), ActiveCount);
+	//UE_LOG(LogTemp, Log, TEXT("PushProximityToNiagara: FrontIdx=%d, bufferSize=%d, active=%d"),
+	//	FrontBufferIndex.load(), Front1.Positions.Num(), ActiveCount);
 
 	FVector PlayerPos = FVector::ZeroVector;
 	if (const auto* World = GetWorld())
