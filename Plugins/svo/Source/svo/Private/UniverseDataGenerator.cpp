@@ -39,7 +39,7 @@ void UniverseDataGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 				continue; // Reject this point
 			}
 
-			double scale = FPointData::SampleScaleFromDistribution(Params.MinGalaxyScale, Params.MaxGalaxyScale, NoiseVal, Params.ScaleDistributionCurve);
+			double scale = FPointData::SampleScaleFromDistribution(Params.MinClusterScale, Params.MaxClusterScale, NoiseVal, Params.ScaleDistributionCurve);
 			FPointData InsertData = FPointData::MakePointDataFromWorldScale(scale, Params.UnitScale, Params.Extent);
 			InsertData.Data.Density = LocalStream.FRandRange(0.5, 1.5);
 			InsertData.Data.Composition = LocalStream.GetUnitVector();

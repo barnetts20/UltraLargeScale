@@ -439,11 +439,11 @@ void ASectorActor::InitializeProximitySystem()
 	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeProximitySystem took %.3f sec (%d nodes, %d total particles)"),
 		Duration, ActiveNodeSlots.Num(), TotalParticles);
 }
-
 void ASectorActor::UpdateProximityNodes()
 {
 	if (InitializationState != ELifecycleState::Ready) return;
 	if (!ProximityNiagaraComponent) return;
+	if (bProximityUpdateInProgress.load()) return;
 
 	// --- Get player position in octree-local space ---
 	FVector PlayerPos = FVector::ZeroVector;
@@ -463,88 +463,120 @@ void ASectorActor::UpdateProximityNodes()
 
 	if (NewScanCoord == CurrentScanCoord) return;
 
-	double StartTime = FPlatformTime::Seconds();
+	// --- Boundary crossed — kick off async generation ---
+	bProximityUpdateInProgress.store(true);
+	FIntVector OldScanCoord = CurrentScanCoord;
+	CurrentScanCoord = NewScanCoord; // Update immediately so next Tick doesn't re-trigger
 
-	int32 NodesPerSide = 1 << ScanDepth;
-	TSet<FIntVector> OldSet;
-	TSet<FIntVector> NewSet;
-
-	for (int32 dz = -1; dz <= 1; ++dz)
-	{
-		for (int32 dy = -1; dy <= 1; ++dy)
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, OldScanCoord, NewScanCoord, PlayerPos]()
 		{
-			for (int32 dx = -1; dx <= 1; ++dx)
+			double StartTime = FPlatformTime::Seconds();
+
+			int32 NodesPerSide = 1 << ScanDepth;
+			TSet<FIntVector> OldSet;
+			TSet<FIntVector> NewSet;
+
+			for (int32 dz = -1; dz <= 1; ++dz)
 			{
-				FIntVector OldNeighbor = CurrentScanCoord + FIntVector(dx, dy, dz);
-				FIntVector NewNeighbor = NewScanCoord + FIntVector(dx, dy, dz);
-
-				if (OldNeighbor.X >= 0 && OldNeighbor.X < NodesPerSide &&
-					OldNeighbor.Y >= 0 && OldNeighbor.Y < NodesPerSide &&
-					OldNeighbor.Z >= 0 && OldNeighbor.Z < NodesPerSide)
+				for (int32 dy = -1; dy <= 1; ++dy)
 				{
-					OldSet.Add(OldNeighbor);
-				}
+					for (int32 dx = -1; dx <= 1; ++dx)
+					{
+						FIntVector OldNeighbor = OldScanCoord + FIntVector(dx, dy, dz);
+						FIntVector NewNeighbor = NewScanCoord + FIntVector(dx, dy, dz);
 
-				if (NewNeighbor.X >= 0 && NewNeighbor.X < NodesPerSide &&
-					NewNeighbor.Y >= 0 && NewNeighbor.Y < NodesPerSide &&
-					NewNeighbor.Z >= 0 && NewNeighbor.Z < NodesPerSide)
-				{
-					NewSet.Add(NewNeighbor);
+						if (OldNeighbor.X >= 0 && OldNeighbor.X < NodesPerSide &&
+							OldNeighbor.Y >= 0 && OldNeighbor.Y < NodesPerSide &&
+							OldNeighbor.Z >= 0 && OldNeighbor.Z < NodesPerSide)
+						{
+							OldSet.Add(OldNeighbor);
+						}
+
+						if (NewNeighbor.X >= 0 && NewNeighbor.X < NodesPerSide &&
+							NewNeighbor.Y >= 0 && NewNeighbor.Y < NodesPerSide &&
+							NewNeighbor.Z >= 0 && NewNeighbor.Z < NodesPerSide)
+						{
+							NewSet.Add(NewNeighbor);
+						}
+					}
 				}
 			}
-		}
-	}
 
-	TArray<FIntVector> ExitingNodes;
-	TArray<FIntVector> EnteringNodes;
+			TArray<FIntVector> ExitingNodes;
+			TArray<FIntVector> EnteringNodes;
 
-	for (const FIntVector& Coord : OldSet)
-	{
-		if (!NewSet.Contains(Coord))
-		{
-			ExitingNodes.Add(Coord);
-		}
-	}
+			for (const FIntVector& Coord : OldSet)
+			{
+				if (!NewSet.Contains(Coord))
+				{
+					ExitingNodes.Add(Coord);
+				}
+			}
 
-	for (const FIntVector& Coord : NewSet)
-	{
-		if (!OldSet.Contains(Coord))
-		{
-			EnteringNodes.Add(Coord);
-		}
-	}
+			for (const FIntVector& Coord : NewSet)
+			{
+				if (!OldSet.Contains(Coord))
+				{
+					EnteringNodes.Add(Coord);
+				}
+			}
 
-	for (const FIntVector& Coord : ExitingNodes)
-	{
-		int32* SlotPtr = ActiveNodeSlots.Find(Coord);
-		if (SlotPtr)
-		{
-			FreeSlots.Add(*SlotPtr);
-			ActiveNodeSlots.Remove(Coord);
-		}
-	}
+			for (const FIntVector& Coord : ExitingNodes)
+			{
+				int32* SlotPtr = ActiveNodeSlots.Find(Coord);
+				if (SlotPtr)
+				{
+					FreeSlots.Add(*SlotPtr);
+					ActiveNodeSlots.Remove(Coord);
+				}
+			}
 
-	for (const FIntVector& Coord : EnteringNodes)
-	{
-		if (FreeSlots.Num() == 0)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("ASectorActor::UpdateProximityNodes - No free slots available!"));
-			break;
-		}
+			for (const FIntVector& Coord : EnteringNodes)
+			{
+				if (FreeSlots.Num() == 0)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("ASectorActor::UpdateProximityNodes - No free slots available!"));
+					break;
+				}
 
-		int32 SlotIndex = FreeSlots.Pop();
-		ActiveNodeSlots.Add(Coord, SlotIndex);
-		GenerateNodeGalaxies(Coord, SlotIndex);
-	}
+				int32 SlotIndex = FreeSlots.Pop();
+				ActiveNodeSlots.Add(Coord, SlotIndex);
+				GenerateNodeGalaxies(Coord, SlotIndex);
+			}
 
-	CurrentScanCoord = NewScanCoord;
+			// --- Build relative positions and push to Niagara (off game thread, same as VBO init) ---
+			FVector ActorPos = GetActorLocation();
 
-	// Push on game thread (Tick is already game thread, but be explicit)
-	PushProximityToNiagara();
-	ProximityNiagaraComponent->ReinitializeSystem();
-	double Duration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("ASectorActor::UpdateProximityNodes crossing (%d exiting, %d entering) took %.3f sec"),
-		ExitingNodes.Num(), EnteringNodes.Num(), Duration);
+			TArray<FVector> RelativePositions;
+			RelativePositions.SetNumUninitialized(ProximityPositions.Num());
+
+			ParallelFor(ProximityPositions.Num(), [&](int32 i) {
+				if (ProximityExtents[i] > 0.0f)
+				{
+					RelativePositions[i] = (ProximityPositions[i] + ActorPos) - PlayerPos;
+				}
+				else
+				{
+					RelativePositions[i] = FVector::ZeroVector;
+				}
+				}, EParallelForFlags::BackgroundPriority);
+
+			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
+				ProximityNiagaraComponent, FName("User.Positions"), RelativePositions);
+			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(
+				ProximityNiagaraComponent, FName("User.Extents"), ProximityExtents);
+			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(
+				ProximityNiagaraComponent, FName("User.Colors"), ProximityColors);
+
+			double Duration = FPlatformTime::Seconds() - StartTime;
+			UE_LOG(LogTemp, Log, TEXT("ASectorActor::UpdateProximityNodes crossing (%d exiting, %d entering) took %.3f sec"),
+				ExitingNodes.Num(), EnteringNodes.Num(), Duration);
+			
+			AsyncTask(ENamedThreads::GameThread, [this, OldScanCoord, NewScanCoord, PlayerPos](){
+				ProximityNiagaraComponent->ReinitializeSystem();
+				bProximityUpdateInProgress.store(false); 
+			});
+		});
 }
 
 FIntVector ASectorActor::PositionToScanCoord(const FVector& InLocalPos) const
@@ -618,8 +650,8 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InS
 		float ScaleSample = Stream.FRand();
 		double DepthDivisor = 1000000.0; // 2^5
 		double Scale = FPointData::SampleScaleFromDistribution(
-			Params.MinGalaxyScale / DepthDivisor,  // 3e23 / 32 ≈ 9.4e21
-			Params.MaxGalaxyScale / DepthDivisor,  // 3e26 / 32 ≈ 9.4e24
+			Params.MinGalaxyScale,  // 3e23 / 32 ≈ 9.4e21
+			Params.MaxGalaxyScale,  // 3e26 / 32 ≈ 9.4e24
 			ScaleSample, Params.ScaleDistributionCurve);
 
 		// Convert to octree-local extent using same logic as VBOs

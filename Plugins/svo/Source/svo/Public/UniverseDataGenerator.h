@@ -15,21 +15,27 @@ struct SVO_API FUniverseParams : public FBaseParams {
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	int Count = 1000;
+	int Count = 500;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	double MinGalaxyScale = 3e23;
+	double MinClusterScale = 3e23;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	double MaxGalaxyScale = 3e26;
+	double MaxClusterScale = 3e25;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
+	double MinGalaxyScale = 1e16;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
+	double MaxGalaxyScale = 1e18;
+	
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
 	FRuntimeFloatCurve ScaleDistributionCurve;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
 	double Jitter = .02;
 
-	static constexpr const char* EncodedTree = "JAADAAAADQAIAAAAAAAAQAsAAQAAAAAAAAABAAAABAAAAAAAAIA/AAAAAD8AAAAAAA==";//"EwAAAEBAFwAAAAAAmpmZPgAAAAAAAIA/HwAgABAAzcyMQBcAAACAvwAAgD8AAAAAzcxMPhsAFwAAAAAAAACAPwAAgL8AAIA/JAALAAAACwABAAAAAAAAAAEAAAAEAAAAAAAAgD8AAAAAQAAK16M9AAAAAAAAAAAAPwCamZk+AAAAAD8=";
+	static constexpr const char* EncodedTree = "EADNzEw/FwAAAAAAAACAP83MzL2amRk/JAADAAAADQAIAAAAAAAAQAsAAQAAAAAAAAABAAAABAAAAAAAAIA/AAAAAD8AAAAAAAETAGZmpj8NAAsAAAAAAABABwAAAAAAPwAAAAAA";
 
 	FUniverseParams() {
 		Seed = 69;

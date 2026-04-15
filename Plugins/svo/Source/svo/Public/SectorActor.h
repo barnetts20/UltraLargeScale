@@ -70,10 +70,10 @@ protected:
 #pragma region Proximity Galaxy Streaming
 	// --- Configuration ---
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Proximity")
-	int32 ScanDepth = 10;
+	int32 ScanDepth = 6;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Proximity")
-	int32 MaxParticlesPerNode = 1000;
+	int32 MaxParticlesPerNode = 2000;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Proximity")
 	int32 RejectionOversampleFactor = 4;
@@ -88,7 +88,7 @@ protected:
 	TArray<FVector> ProximityPositions;
 	TArray<float> ProximityExtents;
 	TArray<FLinearColor> ProximityColors;
-
+	std::atomic<bool> bProximityUpdateInProgress{ false };
 	// --- Proximity Niagara ---
 	UPROPERTY()
 	UNiagaraComponent* ProximityNiagaraComponent;
