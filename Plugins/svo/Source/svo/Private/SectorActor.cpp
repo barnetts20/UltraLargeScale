@@ -210,7 +210,6 @@ void ASectorActor::InitializeNiagara()
 		});
 	CompletionFuture.Wait();
 
-	// Initialize proximity system after VBO Niagara is set up
 	InitializeProximitySystem();
 
 	double TotalDuration = FPlatformTime::Seconds() - StartTime;
@@ -254,7 +253,6 @@ void ASectorActor::ApplyParallaxOffset()
 
 	NiagaraComponent->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
 
-	// Apply parallax to proximity system too
 	if (ProximityNiagaraComponent)
 	{
 		ProximityNiagaraComponent->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
@@ -346,13 +344,14 @@ void ASectorActor::InitializeProximitySystem()
 	const int32 TotalSlots = 27;
 	const int32 TotalParticles = TotalSlots * MaxParticlesPerNode;
 
-	// --- Allocate flat buffers ---
-	ProximityPositions.SetNumZeroed(TotalParticles);
-	ProximityExtents.SetNumZeroed(TotalParticles);
-	ProximityColors.SetNumZeroed(TotalParticles);
+	// Allocate both buffers
+	ProximityBuffers[0].Allocate(TotalParticles);
+	ProximityBuffers[1].Allocate(TotalParticles);
+	FrontBufferIndex.store(0);
+
 	SlotParticleCounts.SetNumZeroed(TotalSlots);
 
-	// --- Initialize free slot pool ---
+	// Initialize free slot pool
 	FreeSlots.Empty(TotalSlots);
 	for (int32 i = TotalSlots - 1; i >= 0; --i)
 	{
@@ -361,7 +360,7 @@ void ASectorActor::InitializeProximitySystem()
 	ActiveNodeSlots.Empty();
 	CurrentScanCoord = FIntVector(INT32_MIN);
 
-	// --- Get player position ---
+	// Get player position
 	FVector PlayerPos = FVector::ZeroVector;
 	if (const auto* World = GetWorld())
 	{
@@ -374,11 +373,13 @@ void ASectorActor::InitializeProximitySystem()
 		}
 	}
 
-	// --- Determine initial scan coord and populate all 27 nodes ---
+	// Determine initial scan coord and populate all 27 nodes into front buffer
 	FVector LocalPos = PlayerPos - GetActorLocation();
 	CurrentScanCoord = PositionToScanCoord(LocalPos);
 
 	int32 NodesPerSide = 1 << ScanDepth;
+	FProximityBuffer& InitBuffer = ProximityBuffers[0];
+
 	for (int32 dz = -1; dz <= 1; ++dz)
 	{
 		for (int32 dy = -1; dy <= 1; ++dy)
@@ -396,12 +397,17 @@ void ASectorActor::InitializeProximitySystem()
 
 				int32 SlotIndex = FreeSlots.Pop();
 				ActiveNodeSlots.Add(NeighborCoord, SlotIndex);
-				GenerateNodeGalaxies(NeighborCoord, SlotIndex);
+				GenerateNodeGalaxies(NeighborCoord, SlotIndex, InitBuffer);
 			}
 		}
 	}
 
-	// --- Create proximity Niagara and push data (all on game thread) ---
+	// Copy front to back so both start identical
+	ProximityBuffers[1].Positions = ProximityBuffers[0].Positions;
+	ProximityBuffers[1].Extents = ProximityBuffers[0].Extents;
+	ProximityBuffers[1].Colors = ProximityBuffers[0].Colors;
+
+	// Create proximity Niagara and push data on game thread
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, PlayerPos, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
@@ -424,6 +430,7 @@ void ASectorActor::InitializeProximitySystem()
 				ProximityNiagaraComponent->SetWorldLocation(PlayerPos);
 
 				PushProximityToNiagara();
+				ProximityNiagaraComponent->ReinitializeSystem();
 				ProximityNiagaraComponent->Activate(true);
 			}
 			else
@@ -439,13 +446,24 @@ void ASectorActor::InitializeProximitySystem()
 	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeProximitySystem took %.3f sec (%d nodes, %d total particles)"),
 		Duration, ActiveNodeSlots.Num(), TotalParticles);
 }
+
 void ASectorActor::UpdateProximityNodes()
 {
 	if (InitializationState != ELifecycleState::Ready) return;
 	if (!ProximityNiagaraComponent) return;
+
+	// If async generation completed a swap, push the new front buffer to Niagara
+	if (bProximityNeedsPush.load())
+	{
+		PushProximityToNiagara();
+		ProximityNiagaraComponent->ReinitializeSystem();
+		bProximityNeedsPush.store(false);
+	}
+
+	// Don't start a new update if one is already in flight
 	if (bProximityUpdateInProgress.load()) return;
 
-	// --- Get player position in octree-local space ---
+	// Get player position in octree-local space
 	FVector PlayerPos = FVector::ZeroVector;
 	if (const auto* World = GetWorld())
 	{
@@ -463,15 +481,26 @@ void ASectorActor::UpdateProximityNodes()
 
 	if (NewScanCoord == CurrentScanCoord) return;
 
-	// --- Boundary crossed — kick off async generation ---
+	// Boundary crossed — kick off async generation into back buffer
 	bProximityUpdateInProgress.store(true);
 	FIntVector OldScanCoord = CurrentScanCoord;
-	CurrentScanCoord = NewScanCoord; // Update immediately so next Tick doesn't re-trigger
+	CurrentScanCoord = NewScanCoord;
 
-	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, OldScanCoord, NewScanCoord, PlayerPos]()
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, OldScanCoord, NewScanCoord]()
 		{
 			double StartTime = FPlatformTime::Seconds();
 
+			// Copy front buffer to back buffer as starting point.
+			// Unchanged slots carry over; only entering slots get regenerated.
+			int32 FrontIdx = FrontBufferIndex.load();
+			int32 BackIdx = 1 - FrontIdx;
+			FProximityBuffer& BackBuffer = ProximityBuffers[BackIdx];
+
+			BackBuffer.Positions = ProximityBuffers[FrontIdx].Positions;
+			BackBuffer.Extents = ProximityBuffers[FrontIdx].Extents;
+			BackBuffer.Colors = ProximityBuffers[FrontIdx].Colors;
+
+			// Compute entering/exiting sets
 			int32 NodesPerSide = 1 << ScanDepth;
 			TSet<FIntVector> OldSet;
 			TSet<FIntVector> NewSet;
@@ -520,17 +549,27 @@ void ASectorActor::UpdateProximityNodes()
 					EnteringNodes.Add(Coord);
 				}
 			}
-
+			// Free exiting slots and clear their data in the back buffer
 			for (const FIntVector& Coord : ExitingNodes)
 			{
 				int32* SlotPtr = ActiveNodeSlots.Find(Coord);
 				if (SlotPtr)
 				{
+					UE_LOG(LogTemp, Log, TEXT("Clearing exiting slot %d in back buffer %d"), *SlotPtr, 1 - FrontBufferIndex.load());
+					int32 SlotStart = *SlotPtr * MaxParticlesPerNode;
+					for (int32 i = 0; i < MaxParticlesPerNode; ++i)
+					{
+						BackBuffer.Positions[SlotStart + i] = FVector(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
+						BackBuffer.Extents[SlotStart + i] = 0.0f;
+						BackBuffer.Colors[SlotStart + i] = FLinearColor::Black;
+					}
+
 					FreeSlots.Add(*SlotPtr);
 					ActiveNodeSlots.Remove(Coord);
 				}
 			}
 
+			// Generate entering nodes into back buffer
 			for (const FIntVector& Coord : EnteringNodes)
 			{
 				if (FreeSlots.Num() == 0)
@@ -541,41 +580,20 @@ void ASectorActor::UpdateProximityNodes()
 
 				int32 SlotIndex = FreeSlots.Pop();
 				ActiveNodeSlots.Add(Coord, SlotIndex);
-				GenerateNodeGalaxies(Coord, SlotIndex);
+				GenerateNodeGalaxies(Coord, SlotIndex, BackBuffer);
 			}
 
-			// --- Build relative positions and push to Niagara (off game thread, same as VBO init) ---
-			FVector ActorPos = GetActorLocation();
+			// Atomic swap: back becomes front
+			FrontBufferIndex.store(BackIdx);
 
-			TArray<FVector> RelativePositions;
-			RelativePositions.SetNumUninitialized(ProximityPositions.Num());
-
-			ParallelFor(ProximityPositions.Num(), [&](int32 i) {
-				if (ProximityExtents[i] > 0.0f)
-				{
-					RelativePositions[i] = (ProximityPositions[i] + ActorPos) - PlayerPos;
-				}
-				else
-				{
-					RelativePositions[i] = FVector::ZeroVector;
-				}
-				}, EParallelForFlags::BackgroundPriority);
-
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
-				ProximityNiagaraComponent, FName("User.Positions"), RelativePositions);
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(
-				ProximityNiagaraComponent, FName("User.Extents"), ProximityExtents);
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(
-				ProximityNiagaraComponent, FName("User.Colors"), ProximityColors);
+			// Signal game thread to push the new front buffer on next Tick
+			bProximityNeedsPush.store(true);
 
 			double Duration = FPlatformTime::Seconds() - StartTime;
-			UE_LOG(LogTemp, Log, TEXT("ASectorActor::UpdateProximityNodes crossing (%d exiting, %d entering) took %.3f sec"),
+			UE_LOG(LogTemp, Log, TEXT("ASectorActor::UpdateProximityNodes (%d exiting, %d entering) took %.3f sec"),
 				ExitingNodes.Num(), EnteringNodes.Num(), Duration);
-			
-			AsyncTask(ENamedThreads::GameThread, [this, OldScanCoord, NewScanCoord, PlayerPos](){
-				ProximityNiagaraComponent->ReinitializeSystem();
-				bProximityUpdateInProgress.store(false); 
-			});
+
+			bProximityUpdateInProgress.store(false);
 		});
 }
 
@@ -608,11 +626,11 @@ double ASectorActor::GetScanNodeExtent() const
 	return Params.Extent / (double)(1 << ScanDepth);
 }
 
-void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InSlotIndex)
+void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InSlotIndex, FProximityBuffer& InBuffer)
 {
 	const int32 BufferStart = InSlotIndex * MaxParticlesPerNode;
 	const FVector NodeCenter = ScanCoordToCenter(InNodeCoord);
-	const double NodeExtent = GetScanNodeExtent();
+	const double NodeExt = GetScanNodeExtent();
 
 	int32 CoordHash = HashCombine(
 		HashCombine(GetTypeHash(InNodeCoord.X), GetTypeHash(InNodeCoord.Y)),
@@ -620,6 +638,8 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InS
 	);
 	int32 NodeSeed = HashCombine(Params.Seed, CoordHash);
 	FRandomStream Stream(NodeSeed);
+
+	const double GalaxyDepthDivisor = 1000000.0; // TODO: Resolve scale pipeline discrepancy
 
 	int32 ActualCount = 0;
 	int32 MaxAttempts = MaxParticlesPerNode * RejectionOversampleFactor;
@@ -629,9 +649,9 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InS
 		if (ActualCount >= MaxParticlesPerNode) break;
 
 		FVector Candidate(
-			Stream.FRandRange(-NodeExtent, NodeExtent),
-			Stream.FRandRange(-NodeExtent, NodeExtent),
-			Stream.FRandRange(-NodeExtent, NodeExtent)
+			Stream.FRandRange(-NodeExt, NodeExt),
+			Stream.FRandRange(-NodeExt, NodeExt),
+			Stream.FRandRange(-NodeExt, NodeExt)
 		);
 		Candidate += NodeCenter;
 
@@ -644,52 +664,50 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InS
 
 		float Density = Octree->SampleDensityAtPosition(Candidate);
 		if (Stream.FRand() > Density) continue;
+
 		FVector CompVec = Stream.GetUnitVector();
 
-		// Galaxy scale from distribution curve
 		float ScaleSample = Stream.FRand();
-		double DepthDivisor = 1000000.0; // 2^5
 		double Scale = FPointData::SampleScaleFromDistribution(
-			Params.MinGalaxyScale,  // 3e23 / 32 ≈ 9.4e21
-			Params.MaxGalaxyScale,  // 3e26 / 32 ≈ 9.4e24
+			Params.MinGalaxyScale,
+			Params.MaxGalaxyScale,
 			ScaleSample, Params.ScaleDistributionCurve);
 
-		// Convert to octree-local extent using same logic as VBOs
 		FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
-		double NodeExtentAtDepth = Params.Extent / (double)(1 << PointData.InsertDepth);
-		float FinalExtent = static_cast<float>(NodeExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
+		double ExtentAtDepth = (double)Params.Extent / (double)(1 << PointData.InsertDepth);
+		float FinalExtent = static_cast<float>(ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
 
-		// Write into slot
 		int32 Idx = BufferStart + ActualCount;
-		ProximityPositions[Idx] = Candidate;
-		ProximityExtents[Idx] = FinalExtent;
-		ProximityColors[Idx] = FLinearColor(FMath::Abs(CompVec.X), FMath::Abs(CompVec.Y), FMath::Abs(CompVec.Z));
-
-		if (ActualCount < 3)
-		{
-			UE_LOG(LogTemp, Log, TEXT("  Galaxy %d: Scale=%.2e, LocalSize=%.2e, depth=%d, SF=%.4f, extentAtDepth=%.0f, finalExtent=%.0f"),
-				ActualCount, Scale, Scale / Params.UnitScale, PointData.InsertDepth, PointData.Data.ScaleFactor, NodeExtentAtDepth, FinalExtent);
-		}
+		InBuffer.Positions[Idx] = Candidate;
+		InBuffer.Extents[Idx] = FinalExtent;
+		InBuffer.Colors[Idx] = FLinearColor(FMath::Abs(CompVec.X), FMath::Abs(CompVec.Y), FMath::Abs(CompVec.Z));
 
 		ActualCount++;
 	}
 
+	// Dead particles — offscreen
 	for (int32 i = ActualCount; i < MaxParticlesPerNode; ++i)
 	{
 		int32 Idx = BufferStart + i;
-		ProximityPositions[Idx] = FVector::ZeroVector;
-		ProximityExtents[Idx] = 0.0f;
-		ProximityColors[Idx] = FLinearColor::Black;
+		InBuffer.Positions[Idx] = FVector(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
+		InBuffer.Extents[Idx] = 0.0f;
+		InBuffer.Colors[Idx] = FLinearColor::Black;
 	}
 
 	SlotParticleCounts[InSlotIndex] = ActualCount;
-	UE_LOG(LogTemp, Log, TEXT("GenerateNodeGalaxies node (%d,%d,%d) slot %d: %d galaxies from %d attempts"),
-		InNodeCoord.X, InNodeCoord.Y, InNodeCoord.Z, InSlotIndex, ActualCount, MaxAttempts);
+	UE_LOG(LogTemp, Log, TEXT("GenerateNodeGalaxies wrote %d particles to slot %d, buffer extents[%d]=%.1f"),
+		ActualCount, InSlotIndex, BufferStart, InBuffer.Extents[BufferStart]);
 }
 
 void ASectorActor::PushProximityToNiagara()
 {
 	if (!ProximityNiagaraComponent) return;
+	
+	int32 ActiveCount = 0;
+	const FProximityBuffer& Front1 = ProximityBuffers[FrontBufferIndex.load()];
+	for (int32 i = 0; i < Front1.Extents.Num(); ++i) { if (Front1.Extents[i] > 0.0f) ActiveCount++; }
+	UE_LOG(LogTemp, Log, TEXT("PushProximityToNiagara: FrontIdx=%d, bufferSize=%d, active=%d"),
+		FrontBufferIndex.load(), Front1.Positions.Num(), ActiveCount);
 
 	FVector PlayerPos = FVector::ZeroVector;
 	if (const auto* World = GetWorld())
@@ -704,32 +722,29 @@ void ASectorActor::PushProximityToNiagara()
 	}
 
 	FVector ActorPos = GetActorLocation();
+	const FProximityBuffer& Front = ProximityBuffers[FrontBufferIndex.load()];
 
 	TArray<FVector> RelativePositions;
-	RelativePositions.SetNumUninitialized(ProximityPositions.Num());
+	RelativePositions.SetNumUninitialized(Front.Positions.Num());
 
-	ParallelFor(ProximityPositions.Num(), [&](int32 i) {
-		if (ProximityExtents[i] > 0.0f)
+	for (int32 i = 0; i < Front.Positions.Num(); ++i)
+	{
+		if (Front.Extents[i] > 0.0f)
 		{
-			RelativePositions[i] = (ProximityPositions[i] + ActorPos) - PlayerPos;
+			RelativePositions[i] = (Front.Positions[i] + ActorPos) - PlayerPos;
 		}
 		else
 		{
 			RelativePositions[i] = FVector::ZeroVector;
 		}
-		}, EParallelForFlags::BackgroundPriority);
-
-	int32 ActiveCount = 0;
-	for (float E : ProximityExtents) { if (E > 0.0f) ActiveCount++; }
-	UE_LOG(LogTemp, Log, TEXT("PushProximityToNiagara: %d active particles, NiagaraValid=%d"),
-		ActiveCount, ProximityNiagaraComponent != nullptr);
+	}
 
 	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
 		ProximityNiagaraComponent, FName("User.Positions"), RelativePositions);
 	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(
-		ProximityNiagaraComponent, FName("User.Extents"), ProximityExtents);
+		ProximityNiagaraComponent, FName("User.Extents"), Front.Extents);
 	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(
-		ProximityNiagaraComponent, FName("User.Colors"), ProximityColors);
+		ProximityNiagaraComponent, FName("User.Colors"), Front.Colors);
 
 	ProximityNiagaraComponent->SetWorldLocation(PlayerPos);
 }

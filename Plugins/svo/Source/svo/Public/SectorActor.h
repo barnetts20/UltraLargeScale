@@ -78,17 +78,32 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Proximity")
 	int32 RejectionOversampleFactor = 4;
 
-	// --- State ---
+	// --- Slot State (only touched by async task, guarded by bProximityUpdateInProgress) ---
 	FIntVector CurrentScanCoord = FIntVector(INT32_MIN);
 	TMap<FIntVector, int32> ActiveNodeSlots;
 	TArray<int32> FreeSlots;
 	TArray<int32> SlotParticleCounts;
 
-	// --- Flat particle buffers (27 * MaxParticlesPerNode) ---
-	TArray<FVector> ProximityPositions;
-	TArray<float> ProximityExtents;
-	TArray<FLinearColor> ProximityColors;
+	// --- Double-Buffered Particle Data ---
+	struct FProximityBuffer
+	{
+		TArray<FVector> Positions;
+		TArray<float> Extents;
+		TArray<FLinearColor> Colors;
+
+		void Allocate(int32 TotalParticles)
+		{
+			Positions.SetNumZeroed(TotalParticles);
+			Extents.SetNumZeroed(TotalParticles);
+			Colors.SetNumZeroed(TotalParticles);
+		}
+	};
+
+	FProximityBuffer ProximityBuffers[2];
+	std::atomic<int32> FrontBufferIndex{ 0 };
 	std::atomic<bool> bProximityUpdateInProgress{ false };
+	std::atomic<bool> bProximityNeedsPush{ false };
+
 	// --- Proximity Niagara ---
 	UPROPERTY()
 	UNiagaraComponent* ProximityNiagaraComponent;
@@ -96,10 +111,11 @@ protected:
 	// --- Methods ---
 	void InitializeProximitySystem();
 	void UpdateProximityNodes();
+	void GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InSlotIndex, FProximityBuffer& InBuffer);
+	void PushProximityToNiagara();
+
 	FIntVector PositionToScanCoord(const FVector& InLocalPos) const;
 	FVector ScanCoordToCenter(const FIntVector& InCoord) const;
 	double GetScanNodeExtent() const;
-	void GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InSlotIndex);
-	void PushProximityToNiagara();
 #pragma endregion
 };
