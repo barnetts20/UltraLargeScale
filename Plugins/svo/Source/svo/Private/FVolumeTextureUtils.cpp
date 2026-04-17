@@ -85,7 +85,7 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 	float InNoisePower,
 	int InChannel)
 {
-	FVector NoiseScale(2, 2, 2);
+	FVector NoiseScale(1, 1, 1);
 	double StartTime = FPlatformTime::Seconds();
 
 	const int BytesPerVoxel = 4;
@@ -99,19 +99,30 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 
 	// --- Octree setup ---
 	bool bWriteOctree = InOctree.IsValid() && InOctreeDepth > 0;
-	TArray<TSharedPtr<FOctreeNode>> VolumeChunks;
-	const int ChunkRes = bWriteOctree ? (1 << InOctree->VolumeDepth) : 32;
 
+	// Octree resolution: number of nodes per axis at InOctreeDepth.
+	// Independent of InResolution — we accumulate density from multiple
+	// texture voxels into each coarser octree node.
+	const int OctreeRes = bWriteOctree ? (1 << InOctreeDepth) : 0;
+	const int VoxelsPerOctreeNode = bWriteOctree ? FMath::Max(1, InResolution / OctreeRes) : 1;
+
+	// Accumulation grid at octree resolution
+	const int64 OctreeNodeCount = bWriteOctree ? (int64)OctreeRes * OctreeRes * OctreeRes : 0;
+	TArray<float> OctreeDensityAccum;
+	TArray<int32> OctreeDensityCount;
 	if (bWriteOctree)
 	{
-		TArray<TArray<FPointData>> DummyChunkData;
-		InOctree->PrePopulateVolumeLayer(VolumeChunks, DummyChunkData);
+		OctreeDensityAccum.SetNumZeroed(OctreeNodeCount);
+		OctreeDensityCount.SetNumZeroed(OctreeNodeCount);
 	}
 
+	// --- Chunking for noise sampling ---
+	const int ChunkRes = 32;
 	const int SubSamplesPerAxis = FMath::Max(1, InResolution / ChunkRes);
 	const int NumChunks = ChunkRes * ChunkRes * ChunkRes;
 	const int SamplesPerChunk = SubSamplesPerAxis * SubSamplesPerAxis * SubSamplesPerAxis;
 
+	// --- Pass 1: Noise sampling + texture write + accumulate octree density ---
 	ParallelFor(NumChunks, [&](int ChunkIdx)
 		{
 			int cx = ChunkIdx % ChunkRes;
@@ -121,10 +132,6 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 			int xStart = cx * SubSamplesPerAxis;
 			int yStart = cy * SubSamplesPerAxis;
 			int zStart = cz * SubSamplesPerAxis;
-
-			TSharedPtr<FOctreeNode> ChunkNode = (bWriteOctree && ChunkIdx < VolumeChunks.Num())
-				? VolumeChunks[ChunkIdx]
-				: nullptr;
 
 			// --- Build coordinate arrays for batch sampling ---
 			TArray<float> XCoords, YCoords, ZCoords, NoiseOut;
@@ -168,7 +175,7 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 				InSeed
 			);
 
-			// --- Write results to texture and octree ---
+			// --- Write to texture + accumulate for octree ---
 			SampleIdx = 0;
 			for (int lz = 0; lz < SubSamplesPerAxis; ++lz)
 			{
@@ -199,15 +206,15 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 							TextureData[idx + c] = densityByte;
 						}
 
-						if (bWriteOctree && ChunkNode.IsValid())
+						if (bWriteOctree)
 						{
-							double wx = -InExtent + (x + 0.5) * VoxelSize;
-							double wy = -InExtent + (y + 0.5) * VoxelSize;
-							double wz = -InExtent + (z + 0.5) * VoxelSize;
+							int ox = FMath::Min(x / VoxelsPerOctreeNode, OctreeRes - 1);
+							int oy = FMath::Min(y / VoxelsPerOctreeNode, OctreeRes - 1);
+							int oz = FMath::Min(z / VoxelsPerOctreeNode, OctreeRes - 1);
+							int64 oidx = (int64)oz * OctreeRes * OctreeRes + (int64)oy * OctreeRes + ox;
 
-							FVoxelData VoxelData;
-							VoxelData.Density = density;
-							InOctree->InsertPosition(FVector(wx, wy, wz), InOctreeDepth, VoxelData, ChunkNode);
+							OctreeDensityAccum[oidx] += density;
+							OctreeDensityCount[oidx]++;
 						}
 
 						SampleIdx++;
@@ -216,9 +223,62 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 			}
 		}, EParallelForFlags::BackgroundPriority);
 
+	double SampleDuration = FPlatformTime::Seconds() - StartTime;
+
+	// --- Pass 2: Build FPointData from accumulated grid + bulk insert ---
+	if (bWriteOctree)
+	{
+		double InsertStart = FPlatformTime::Seconds();
+
+		const double OctreeNodeSize = (2.0 * InExtent) / OctreeRes;
+
+		int32 NonEmptyCount = 0;
+		for (int64 i = 0; i < OctreeNodeCount; ++i)
+		{
+			if (OctreeDensityCount[i] > 0) NonEmptyCount++;
+		}
+
+		TArray<FPointData> AllPointData;
+		AllPointData.Reserve(NonEmptyCount);
+
+		for (int oz = 0; oz < OctreeRes; ++oz)
+		{
+			for (int oy = 0; oy < OctreeRes; ++oy)
+			{
+				for (int ox = 0; ox < OctreeRes; ++ox)
+				{
+					int64 oidx = (int64)oz * OctreeRes * OctreeRes + (int64)oy * OctreeRes + ox;
+					if (OctreeDensityCount[oidx] == 0) continue;
+
+					float avgDensity = OctreeDensityAccum[oidx] / (float)OctreeDensityCount[oidx];
+
+					double wx = -InExtent + (ox + 0.5) * OctreeNodeSize;
+					double wy = -InExtent + (oy + 0.5) * OctreeNodeSize;
+					double wz = -InExtent + (oz + 0.5) * OctreeNodeSize;
+
+					FVoxelData VoxelData;
+					VoxelData.Density = avgDensity;
+
+					AllPointData.Add(FPointData(FVector(wx, wy, wz), InOctreeDepth, VoxelData));
+				}
+			}
+		}
+
+		OctreeDensityAccum.Empty();
+		OctreeDensityCount.Empty();
+
+		TArray<TSharedPtr<FOctreeNode>> InsertedNodes;
+		TArray<TSharedPtr<FOctreeNode>> VolumeChunks;
+		InOctree->BulkInsertPositions(AllPointData, InsertedNodes, VolumeChunks);
+
+		double InsertDuration = FPlatformTime::Seconds() - InsertStart;
+		UE_LOG(LogTemp, Log, TEXT("FVolumeTextureUtils::SampleNoiseToVolume octree BulkInsert (%d nodes at depth %d) took %.3f sec"),
+			NonEmptyCount, InOctreeDepth, InsertDuration);
+	}
+
 	double Duration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("FVolumeTextureUtils::SampleNoiseToVolume @%d^3 took %.3f sec (octree write: %s, channel: %d, batch SIMD)"),
-		InResolution, Duration, bWriteOctree ? TEXT("yes") : TEXT("no"), InChannel);
+	UE_LOG(LogTemp, Log, TEXT("FVolumeTextureUtils::SampleNoiseToVolume @%d^3 took %.3f sec (sample: %.3f, octree depth: %d, channel: %d, batch SIMD)"),
+		InResolution, Duration, SampleDuration, InOctreeDepth, InChannel);
 
 	return TextureData;
 }

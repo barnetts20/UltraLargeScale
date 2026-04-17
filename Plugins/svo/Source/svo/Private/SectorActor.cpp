@@ -42,59 +42,133 @@ void ASectorActor::InitializeChildPool()
 	// TODO: Re-enable when galaxy spawning is wired up to SectorActor
 }
 
+FastNoise::SmartNode<> ASectorActor::BuildNoise(int InSeed) {
+	//Param staging
+	float masterScale = 1;
+	float clusterFalloff = 32;
+	float clusterScale = 3;
+	float clusterMulti = 50;
+	float clusterRemapMax = 1.001;
+	float clusterRemapMin = 0;
+
+	float webFalloff = 3;
+	float webRemapMin = -.005;
+	float webRemapMax = 1.005;
+
+	float warpAmp = .25;
+	float warpFreq = 1;
+	//end param
+
+	auto Voronoi = FastNoise::New<FastNoise::CellularDistance>();
+	Voronoi->SetDistanceFunction(FastNoise::DistanceFunction::EuclideanSquared);
+	Voronoi->SetReturnType(FastNoise::CellularDistance::ReturnType::Index0);
+
+	auto SeedOffset = FastNoise::New<FastNoise::SeedOffset>();
+	SeedOffset->SetSource(Voronoi);
+	SeedOffset->SetOffset(InSeed);
+
+	auto DomainScale = FastNoise::New<FastNoise::DomainScale>();
+	DomainScale->SetSource(SeedOffset);
+	DomainScale->SetScale(masterScale);
+
+	auto Fbm0 = FastNoise::New<FastNoise::FractalFBm>();
+	Fbm0->SetSource(DomainScale);
+	Fbm0->SetOctaveCount(3); //Octave count will probs stay hardcoded
+
+	auto Remap0 = FastNoise::New<FastNoise::Remap>();
+	Remap0->SetSource(Fbm0);
+	Remap0->SetRemap(0, 1, clusterRemapMax, clusterRemapMin);
+
+	auto Pow0 = FastNoise::New<FastNoise::PowInt>();
+	Pow0->SetValue(Remap0);
+	Pow0->SetPow(clusterFalloff);
+
+	auto Scale0 = FastNoise::New<FastNoise::DomainScale>();
+	Scale0->SetSource(Pow0);
+	Scale0->SetScale(clusterScale);
+
+	auto Pow1 = FastNoise::New<FastNoise::PowInt>();
+	Pow1->SetValue(Fbm0);
+	Pow1->SetPow(webFalloff);
+
+	auto Mul0 = FastNoise::New<FastNoise::Multiply>();
+	Mul0->SetLHS(Scale0);
+	Mul0->SetRHS(Pow1);
+	
+	auto Mul1 = FastNoise::New<FastNoise::Multiply>();
+	Mul1->SetLHS(Mul0);
+	Mul1->SetRHS(clusterMulti);
+
+	auto Remap1 = FastNoise::New<FastNoise::Remap>();
+	Remap1->SetSource(Pow1);
+	Remap1->SetRemap(0, 1, webRemapMin, webRemapMax);
+
+	auto Add0 = FastNoise::New<FastNoise::Add>();
+	Add0->SetLHS(Remap1);
+	Add0->SetRHS(Mul1);
+
+	auto Warp0 = FastNoise::New<FastNoise::DomainWarpGradient>();
+	Warp0->SetSource(Add0);
+	Warp0->SetWarpAmplitude(warpAmp);
+	Warp0->SetWarpFrequency(warpFreq);
+
+	return Warp0;
+}
+
 void ASectorActor::InitializeData()
 {
-	double StartTime = FPlatformTime::Seconds();
+	double TotalStart = FPlatformTime::Seconds();
+	double StepStart;
 
 	// --- Phase 1: Gas density from noise (low-res, alpha channel only) ---
-	int noiseResolution = 128;
-	auto DensityNoise = FastNoise::NewFromEncodedNodeTree(Params.EncodedTree);
+	StepStart = FPlatformTime::Seconds();
+	int noiseResolution = 256;
+	
+	auto DensityNoise = BuildNoise(69);
+
 	TArray<uint8> LowResData = FVolumeTextureUtils::SampleNoiseToVolume(
 		DensityNoise,
 		Params.Seed,
 		noiseResolution,
 		Params.Extent,
 		Octree,
-		FMath::FloorLog2(noiseResolution),
+		6,//FMath::FloorLog2(noiseResolution),
 		1.0f,
 		3      // Alpha only (gas density)
 	);
-
+	UE_LOG(LogTemp, Log, TEXT("  [InitData] Noise sampling (%d^3): %.3f sec"), noiseResolution, FPlatformTime::Seconds() - StepStart);
 	if (InitializationState == ELifecycleState::Pooling) return;
 
-	// --- Upscale noise to 256^3 ---
-	TArray<uint8> VolumeData = FVolumeTextureUtils::UpscaleVolumeData(LowResData, noiseResolution);
-	LowResData.Empty();
+	TArray<uint8> VolumeData;
+	if (noiseResolution == 256) {
+		VolumeData = LowResData;
+	}
+	else {
+		// --- Upscale noise to 256^3 ---
+		StepStart = FPlatformTime::Seconds();
+		VolumeData = FVolumeTextureUtils::UpscaleVolumeData(LowResData, noiseResolution);
+		LowResData.Empty();
+		UE_LOG(LogTemp, Log, TEXT("  [InitData] Upscale (%d^3 -> 256^3): %.3f sec"), noiseResolution, FPlatformTime::Seconds() - StepStart);
+	}
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
 	// --- Phase 2: Object generation (VBOs) ---
+	StepStart = FPlatformTime::Seconds();
 	UniverseGenerator.Params = Params;
 	UniverseGenerator.GenerateData(Octree);
+	UE_LOG(LogTemp, Log, TEXT("  [InitData] VBO generation (%d clusters): %.3f sec"), UniverseGenerator.GeneratedData.Num(), FPlatformTime::Seconds() - StepStart);
+
+	StepStart = FPlatformTime::Seconds();
 	TArray<TSharedPtr<FOctreeNode>> VolumeChunks;
 	TArray<TSharedPtr<FOctreeNode>> PointNodes;
 	Octree->BulkInsertPositions(UniverseGenerator.GeneratedData, PointNodes, VolumeChunks);
-
-	// --- Phase 2b: Splat VBO density into R channel + octree at depth 8 ---
-	FVolumeTextureUtils::SplatVBOsToVolume(
-		VolumeData,
-		256,
-		Params.Extent,
-		PointNodes,
-		FVector(5, 5, 5),
-		FVector(10, 10, 10),
-		2.0f,
-		4.0f,
-		0.0f,
-		1.0f,
-		2,              // R channel
-		Octree,
-		8
-	);
+	UE_LOG(LogTemp, Log, TEXT("  [InitData] BulkInsert (%d nodes): %.3f sec"), PointNodes.Num(), FPlatformTime::Seconds() - StepStart);
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
 	// --- Build Niagara arrays from point nodes ---
+	StepStart = FPlatformTime::Seconds();
 	Positions.SetNumUninitialized(PointNodes.Num());
 	Rotations.SetNumUninitialized(PointNodes.Num());
 	Extents.SetNumUninitialized(PointNodes.Num());
@@ -107,21 +181,15 @@ void ASectorActor::InitializeData()
 		Positions[Index] = Node->Center;
 		Extents[Index] = static_cast<float>(Node->Extent * (1 + Node->Data.ScaleFactor));
 		Colors[Index] = FLinearColor(Node->Data.Composition);
-		}, EParallelForFlags::BackgroundPriority);
-
-	double ObjectDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("ASectorActor::Object generation took: %.3f seconds"), ObjectDuration);
+	}, EParallelForFlags::BackgroundPriority);
+	UE_LOG(LogTemp, Log, TEXT("  [InitData] Niagara array build (%d particles): %.3f sec"), PointNodes.Num(), FPlatformTime::Seconds() - StepStart);
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
-	// --- Pack and create texture (already at 256^3, no second upscale) ---
-	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(
-		FVolumeTextureUtils::PackToPseudoVolumeLayout(VolumeData),
-		"/svo/Generated/BakedTest"
-	);
-
-	double GenDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeData total took: %.3f seconds"), GenDuration);
+	StepStart = FPlatformTime::Seconds();
+	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(FVolumeTextureUtils::PackToPseudoVolumeLayout(VolumeData));// , "/svo/Generated/BakedTest");
+	UE_LOG(LogTemp, Log, TEXT("  [InitData] CreatePseudoVolumeTexture: %.3f sec"), FPlatformTime::Seconds() - StepStart);
+	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeData total: %.3f sec"), FPlatformTime::Seconds() - TotalStart);
 }
 
 void ASectorActor::InitializeVolumetric()

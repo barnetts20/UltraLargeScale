@@ -14,7 +14,7 @@ UProximityTrackerComponent::UProximityTrackerComponent()
 void UProximityTrackerComponent::BeginPlay()
 {
     Super::BeginPlay();
-    UniverseActor = Cast<AUniverseActor>(UGameplayStatics::GetActorOfClass(GetWorld(), AUniverseActor::StaticClass()));
+    UniverseActor = Cast<ASectorActor>(UGameplayStatics::GetActorOfClass(GetWorld(), ASectorActor::StaticClass()));
     if (UniverseActor)
     {
         GetWorld()->GetTimerManager().SetTimer(

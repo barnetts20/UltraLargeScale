@@ -37,6 +37,7 @@ protected:
 	virtual void InitializeVolumetric() override;
 	virtual void InitializeNiagara() override;
 	virtual void InitializeChildPool() override;
+	FastNoise::SmartNode<> BuildNoise(int InSeed);
 #pragma endregion
 
 #pragma region Data Generation
