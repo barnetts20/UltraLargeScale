@@ -43,7 +43,7 @@ void ASectorActor::InitializeChildPool()
 }
 
 FastNoise::SmartNode<> ASectorActor::BuildNoise(int InSeed) {
-	//Param staging
+	//Param staging TODO: Wrap in noise param struct
 	float masterScale = 1;
 	float clusterFalloff = 32;
 	float clusterScale = 3;
@@ -51,7 +51,7 @@ FastNoise::SmartNode<> ASectorActor::BuildNoise(int InSeed) {
 	float clusterRemapMax = 1.001;
 	float clusterRemapMin = 0;
 
-	float webFalloff = 3;
+	float webFalloff = 2;
 	float webRemapMin = -.005;
 	float webRemapMax = 1.005;
 
@@ -487,8 +487,8 @@ void ASectorActor::InitializeProximitySystem()
 				FVector::ZeroVector,
 				FRotator::ZeroRotator,
 				EAttachLocation::SnapToTarget,
-				true,
-				false
+				false,
+				true
 			);
 
 			if (ProximityNiagaraComponent)
@@ -498,7 +498,7 @@ void ASectorActor::InitializeProximitySystem()
 				ProximityNiagaraComponent->SetWorldLocation(PlayerPos);
 
 				PushProximityToNiagara();
-				ProximityNiagaraComponent->ReinitializeSystem();
+				//ProximityNiagaraComponent->ReinitializeSystem(); 
 				ProximityNiagaraComponent->Activate(true);
 			}
 			else
