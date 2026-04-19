@@ -94,7 +94,7 @@ FastNoise::SmartNode<> ASectorActor::BuildNoise(int InSeed) {
 	auto Mul0 = FastNoise::New<FastNoise::Multiply>();
 	Mul0->SetLHS(Scale0);
 	Mul0->SetRHS(Pow1);
-	
+
 	auto Mul1 = FastNoise::New<FastNoise::Multiply>();
 	Mul1->SetLHS(Mul0);
 	Mul1->SetRHS(clusterMulti);
@@ -123,7 +123,7 @@ void ASectorActor::InitializeData()
 	// --- Phase 1: Gas density from noise (low-res, alpha channel only) ---
 	StepStart = FPlatformTime::Seconds();
 	int noiseResolution = 256;
-	
+
 	auto DensityNoise = BuildNoise(69);
 
 	TArray<uint8> LowResData = FVolumeTextureUtils::SampleNoiseToVolume(
@@ -131,32 +131,43 @@ void ASectorActor::InitializeData()
 		Params.Seed,
 		noiseResolution,
 		Params.Extent,
-		Octree,
-		6,//FMath::FloorLog2(noiseResolution),
+		nullptr,  // Octree density writes disabled — CPU-side DensityVolume is now authoritative
+		-1,       // OctreeDepth unused when no octree passed
 		1.0f,
 		3      // Alpha only (gas density)
 	);
 	UE_LOG(LogTemp, Log, TEXT("  [InitData] Noise sampling (%d^3): %.3f sec"), noiseResolution, FPlatformTime::Seconds() - StepStart);
 	if (InitializationState == ELifecycleState::Pooling) return;
 
-	TArray<uint8> VolumeData;
+	// Populate the persistent DensityBuffer (final 256^3 volume used both as
+	// the GPU pseudo-volume source and as the CPU-side authoritative density
+	// field for rejection sampling).
 	if (noiseResolution == 256) {
-		VolumeData = LowResData;
+		DensityBuffer = MoveTemp(LowResData);
 	}
 	else {
 		// --- Upscale noise to 256^3 ---
 		StepStart = FPlatformTime::Seconds();
-		VolumeData = FVolumeTextureUtils::UpscaleVolumeData(LowResData, noiseResolution);
+		DensityBuffer = FVolumeTextureUtils::UpscaleVolumeData(LowResData, noiseResolution);
 		LowResData.Empty();
 		UE_LOG(LogTemp, Log, TEXT("  [InitData] Upscale (%d^3 -> 256^3): %.3f sec"), noiseResolution, FPlatformTime::Seconds() - StepStart);
 	}
+
+	// Wrap DensityBuffer in the sampler view. Sector noise spans
+	// [-Params.Extent, +Params.Extent] centered at sector local origin, so the
+	// view's source-space matches sector local space directly.
+	DensityVolume = FDensityVolume(
+		DensityBuffer,
+		FVector::ZeroVector,
+		FVector(Params.Extent, Params.Extent, Params.Extent),
+		256);
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
 	// --- Phase 2: Object generation (VBOs) ---
 	StepStart = FPlatformTime::Seconds();
 	UniverseGenerator.Params = Params;
-	UniverseGenerator.GenerateData(Octree);
+	UniverseGenerator.GenerateData(DensityVolume);
 	UE_LOG(LogTemp, Log, TEXT("  [InitData] VBO generation (%d clusters): %.3f sec"), UniverseGenerator.GeneratedData.Num(), FPlatformTime::Seconds() - StepStart);
 
 	StepStart = FPlatformTime::Seconds();
@@ -181,13 +192,13 @@ void ASectorActor::InitializeData()
 		Positions[Index] = Node->Center;
 		Extents[Index] = static_cast<float>(Node->Extent * (1 + Node->Data.ScaleFactor));
 		Colors[Index] = FLinearColor(Node->Data.Composition);
-	}, EParallelForFlags::BackgroundPriority);
+		}, EParallelForFlags::BackgroundPriority);
 	UE_LOG(LogTemp, Log, TEXT("  [InitData] Niagara array build (%d particles): %.3f sec"), PointNodes.Num(), FPlatformTime::Seconds() - StepStart);
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
 	StepStart = FPlatformTime::Seconds();
-	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(FVolumeTextureUtils::PackToPseudoVolumeLayout(VolumeData));// , "/svo/Generated/BakedTest");
+	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(FVolumeTextureUtils::PackToPseudoVolumeLayout(DensityBuffer));// , "/svo/Generated/BakedTest");
 	UE_LOG(LogTemp, Log, TEXT("  [InitData] CreatePseudoVolumeTexture: %.3f sec"), FPlatformTime::Seconds() - StepStart);
 	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeData total: %.3f sec"), FPlatformTime::Seconds() - TotalStart);
 }
@@ -730,7 +741,12 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InS
 			continue;
 		}
 
-		float Density = Octree->SampleDensityAtPosition(Candidate);
+		// Density field is sampled directly from the CPU-side uint8 BGRA8
+		// volume buffer (the same bytes that back the GPU pseudo-volume).
+		// Candidate is already in sector-local space, matching DensityVolume's
+		// source frame. Alpha channel (3) holds gas density per the
+		// SampleNoiseToVolume call in InitializeData.
+		float Density = DensityVolume.SampleDensityAtLocalPos(Candidate, 3);
 		if (Stream.FRand() > Density) continue;
 
 		FVector CompVec = Stream.GetUnitVector();
@@ -770,7 +786,7 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InS
 void ASectorActor::PushProximityToNiagara()
 {
 	if (!ProximityNiagaraComponent) return;
-	
+
 	int32 ActiveCount = 0;
 	const FProximityBuffer& Front1 = ProximityBuffers[FrontBufferIndex.load()];
 	for (int32 i = 0; i < Front1.Extents.Num(); ++i) { if (Front1.Extents[i] > 0.0f) ActiveCount++; }

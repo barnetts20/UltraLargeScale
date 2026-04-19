@@ -52,6 +52,17 @@ protected:
 	FString VolumetricMaterialPath = FString("/svo/Materials/RayMarchers/MT_UniverseRaymarchPseudoVolume_Inst.MT_UniverseRaymarchPseudoVolume_Inst");
 #pragma endregion
 
+#pragma region Density Field (CPU-side authoritative copy)
+	// Persistent uint8 BGRA8 buffer from SampleNoiseToVolume. Kept alive for the
+	// lifetime of the sector so CPU systems (rejection sampling, etc.) can query
+	// density directly instead of going through the octree.
+	TArray<uint8> DensityBuffer;
+
+	// Non-owning view over DensityBuffer with source-space metadata. Rebuilt
+	// whenever DensityBuffer is (re)generated. Sample via SampleDensityAtLocalPos.
+	FDensityVolume DensityVolume;
+#pragma endregion
+
 #pragma region Galaxy Pool
 	TSubclassOf<AGalaxyActor> GalaxyActorClass;
 	int GalaxyPoolSize = 5;

@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "PointCloudGenerator.h"
 #include "ProceduralSpaceActor.h"
+#include "FVolumeTextureUtils.h"
 #include "UniverseDataGenerator.generated.h"
 
 /// <summary>
@@ -28,7 +29,7 @@ struct SVO_API FUniverseParams : public FBaseParams {
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
 	double MaxGalaxyScale = 1e18;
-	
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
 	FRuntimeFloatCurve ScaleDistributionCurve;
 
@@ -42,7 +43,7 @@ struct SVO_API FUniverseParams : public FBaseParams {
 		Extent = 2147483648;
 		UnitScale = 2e17;
 		Rotation = FRotator::ZeroRotator;
-		ParentColor = FLinearColor(1,1,1);
+		ParentColor = FLinearColor(1, 1, 1);
 
 		ScaleDistributionCurve.GetRichCurve()->AddKey(0.0f, 0.0f);
 		ScaleDistributionCurve.GetRichCurve()->AddKey(0.05f, 0.0025f);
@@ -67,7 +68,17 @@ public:
 
 	FUniverseParams Params;
 
+	// Legacy override required by PointCloudGenerator base class. This path
+	// previously sampled density from the octree; it now emits a warning and
+	// falls back to uniform-density generation. Prefer the FDensityVolume
+	// overload below for all new callers.
 	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
+
+	// Preferred entry point: uses a pre-built CPU-side density volume for
+	// rejection sampling instead of going through the octree. The octree is
+	// no longer required at generation time — point insertion into the octree
+	// (if desired) happens downstream via BulkInsertPositions.
+	void GenerateData(const FDensityVolume& InDensityVolume);
 
 	TArray<FPointData> GeneratedData;
 };

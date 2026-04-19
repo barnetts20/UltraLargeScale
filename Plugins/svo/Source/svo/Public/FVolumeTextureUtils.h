@@ -25,6 +25,146 @@ struct FVolumeVoxelEntry
 };
 
 /// <summary>
+/// CPU-side density field view — wraps the authoritative uint8 BGRA8 buffer
+/// produced by SampleNoiseToVolume along with the source-space metadata
+/// required to map world-space queries back into voxel coordinates.
+///
+/// The backing buffer is owned externally (typically by whichever actor ran
+/// the noise sampling) and MUST outlive any sampling calls. FDensityVolume
+/// only holds a pointer + metadata — no ownership, no copy.
+///
+/// Layout matches SampleNoiseToVolume output:
+///   - uint8 BGRA8, 4 bytes per voxel
+///   - Linear [z][y][x] order, X fastest, Z slowest
+///   - Voxel-center convention: voxel (i,j,k) is centered at
+///     (Min + (i+0.5)*VoxelSize, ...) in source-local space
+///
+/// Channel indexing matches the raw byte layout: channel 0 = B, 1 = G,
+/// 2 = R, 3 = A. The noise sampler defaults to channel 3 (alpha), so the
+/// default sampler channel here matches.
+/// </summary>
+struct SVO_API FDensityVolume
+{
+	const uint8* Buffer = nullptr;          // Non-owning pointer to BGRA8 buffer
+	int64        BufferSize = 0;            // Buffer size in bytes (for validation)
+	FVector      SourceCenter = FVector::ZeroVector;   // Source-space center
+	FVector      SourceHalfExtent = FVector::ZeroVector; // Source-space half-size
+	int32        Resolution = 0;            // Voxels per axis
+	int32        NumChannels = 4;           // BGRA8 = 4
+
+	FDensityVolume() = default;
+
+	FDensityVolume(
+		const TArray<uint8>& InBuffer,
+		const FVector& InSourceCenter,
+		const FVector& InSourceHalfExtent,
+		int32 InResolution)
+		: Buffer(InBuffer.GetData())
+		, BufferSize(InBuffer.Num())
+		, SourceCenter(InSourceCenter)
+		, SourceHalfExtent(InSourceHalfExtent)
+		, Resolution(InResolution)
+		, NumChannels(4)
+	{}
+
+	bool IsValid() const
+	{
+		return Buffer != nullptr
+			&& Resolution > 0
+			&& BufferSize == (int64)Resolution * Resolution * Resolution * NumChannels;
+	}
+
+	/// <summary>
+	/// Sample density in normalized [0,1] at a source-local position with trilinear
+	/// interpolation. Channel defaults to 3 (alpha) to match SampleNoiseToVolume's
+	/// default output channel.
+	///
+	/// NOTE: InLocalPos is relative to SourceCenter (i.e. already transformed into
+	/// the coordinate frame the noise was sampled in — same space as the
+	/// generator's InExtent). Out-of-bounds positions fail a check().
+	/// </summary>
+	float SampleDensityAtLocalPos(const FVector& InLocalPos, int32 Channel = 3) const
+	{
+		checkf(IsValid(), TEXT("FDensityVolume::SampleDensityAtLocalPos: buffer not valid"));
+		checkf(Channel >= 0 && Channel < NumChannels,
+			TEXT("FDensityVolume::SampleDensityAtLocalPos: channel %d out of range [0,%d)"),
+			Channel, NumChannels);
+
+		// Position relative to volume center
+		const FVector Rel = InLocalPos - SourceCenter;
+
+		checkf(
+			FMath::Abs(Rel.X) <= SourceHalfExtent.X &&
+			FMath::Abs(Rel.Y) <= SourceHalfExtent.Y &&
+			FMath::Abs(Rel.Z) <= SourceHalfExtent.Z,
+			TEXT("FDensityVolume::SampleDensityAtLocalPos: position (%f,%f,%f) outside half-extent (%f,%f,%f)"),
+			Rel.X, Rel.Y, Rel.Z, SourceHalfExtent.X, SourceHalfExtent.Y, SourceHalfExtent.Z);
+
+		// Convert to voxel-center coordinates.
+		// Source space spans [-HalfExtent, +HalfExtent]. Voxel i is centered at
+		// -HalfExtent + (i + 0.5) * VoxelSize, where VoxelSize = 2*HalfExtent / Res.
+		// Solving for voxel coordinate: vc = (Rel + HalfExtent) / VoxelSize - 0.5
+		const FVector VoxelSize(
+			2.0 * SourceHalfExtent.X / (double)Resolution,
+			2.0 * SourceHalfExtent.Y / (double)Resolution,
+			2.0 * SourceHalfExtent.Z / (double)Resolution);
+
+		const double VCx = (Rel.X + SourceHalfExtent.X) / VoxelSize.X - 0.5;
+		const double VCy = (Rel.Y + SourceHalfExtent.Y) / VoxelSize.Y - 0.5;
+		const double VCz = (Rel.Z + SourceHalfExtent.Z) / VoxelSize.Z - 0.5;
+
+		// Clamp to valid interpolation range [0, Res-1]. Positions outside the
+		// voxel-center lattice (within the half-voxel border) clamp to the edge
+		// voxel, which is the correct behavior for "just inside the boundary".
+		const double MaxIdx = (double)(Resolution - 1);
+		const double Cx = FMath::Clamp(VCx, 0.0, MaxIdx);
+		const double Cy = FMath::Clamp(VCy, 0.0, MaxIdx);
+		const double Cz = FMath::Clamp(VCz, 0.0, MaxIdx);
+
+		const int32 X0 = (int32)FMath::FloorToDouble(Cx);
+		const int32 Y0 = (int32)FMath::FloorToDouble(Cy);
+		const int32 Z0 = (int32)FMath::FloorToDouble(Cz);
+		const int32 X1 = FMath::Min(X0 + 1, Resolution - 1);
+		const int32 Y1 = FMath::Min(Y0 + 1, Resolution - 1);
+		const int32 Z1 = FMath::Min(Z0 + 1, Resolution - 1);
+
+		const float Tx = (float)(Cx - (double)X0);
+		const float Ty = (float)(Cy - (double)Y0);
+		const float Tz = (float)(Cz - (double)Z0);
+
+		// Buffer layout: idx = (z * R*R + y * R + x) * 4 + channel
+		const int64 R = (int64)Resolution;
+		const int64 Slice = R * R;
+		const int64 Stride = (int64)NumChannels;
+
+		auto FetchByte = [&](int32 X, int32 Y, int32 Z) -> float
+			{
+				const int64 ByteIdx = ((int64)Z * Slice + (int64)Y * R + (int64)X) * Stride + (int64)Channel;
+				return (float)Buffer[ByteIdx] * (1.0f / 255.0f);
+			};
+
+		const float C000 = FetchByte(X0, Y0, Z0);
+		const float C100 = FetchByte(X1, Y0, Z0);
+		const float C010 = FetchByte(X0, Y1, Z0);
+		const float C110 = FetchByte(X1, Y1, Z0);
+		const float C001 = FetchByte(X0, Y0, Z1);
+		const float C101 = FetchByte(X1, Y0, Z1);
+		const float C011 = FetchByte(X0, Y1, Z1);
+		const float C111 = FetchByte(X1, Y1, Z1);
+
+		const float C00 = FMath::Lerp(C000, C100, Tx);
+		const float C10 = FMath::Lerp(C010, C110, Tx);
+		const float C01 = FMath::Lerp(C001, C101, Tx);
+		const float C11 = FMath::Lerp(C011, C111, Tx);
+
+		const float C0 = FMath::Lerp(C00, C10, Ty);
+		const float C1 = FMath::Lerp(C01, C11, Ty);
+
+		return FMath::Lerp(C0, C1, Tz);
+	}
+};
+
+/// <summary>
 /// VOLUME TEXTURE UTILITIES
 /// Pure texture/buffer operations: upscaling, compositing, rasterization,
 /// pseudo-volume packing, async texture creation, and optional bake-to-disk.
