@@ -8,11 +8,108 @@
 #include <NiagaraFunctionLibrary.h>
 #pragma endregion
 
+#pragma region FSectorNiagaraLayerData
+void FSectorNiagaraLayerData::PopulateFromPointNodes(
+	const TArray<TSharedPtr<FOctreeNode>>& InPointNodes,
+	UNiagaraSystem* InSystemAsset,
+	FName InLayerName)
+{
+	SystemAsset = InSystemAsset;
+	LayerName = InLayerName;
+
+	const int32 Num = InPointNodes.Num();
+	Positions.SetNumUninitialized(Num);
+	Rotations.SetNumUninitialized(Num);
+	Extents.SetNumUninitialized(Num);
+	Colors.SetNumUninitialized(Num);
+
+	// Mirror of the old per-node array build that ran inline in
+	// ASectorActor::InitializeData before layer extraction. Per-point
+	// rotation is derived from a random stream seeded on ObjectId so the
+	// rotation is stable across runs of the same sector.
+	ParallelFor(Num, [&](int32 Index)
+		{
+			const TSharedPtr<FOctreeNode>& Node = InPointNodes[Index];
+			FRandomStream RandStream(Node->Data.ObjectId);
+
+			Positions[Index] = Node->Center;
+			Rotations[Index] = RandStream.GetUnitVector();
+			Extents[Index] = static_cast<float>(Node->Extent * (1.0 + Node->Data.ScaleFactor));
+			Colors[Index] = FLinearColor(Node->Data.Composition);
+		}, EParallelForFlags::BackgroundPriority);
+}
+#pragma endregion
+
+#pragma region FSectorNiagaraLayerData::PopulateFromDensityVolume
+void FSectorNiagaraLayerData::PopulateFromDensityVolume(
+	const FDensityVolume& InDensityVolume,
+	double InSectorExtent,
+	int32 InSampleCount,
+	float InMinExtent,
+	float InMaxExtent,
+	int32 InSeed,
+	UNiagaraSystem* InSystemAsset,
+	FName InLayerName)
+{
+	SystemAsset = InSystemAsset;
+	LayerName = InLayerName;
+
+	if (InSampleCount <= 0 || !InDensityVolume.IsValid())
+	{
+		Positions.Empty();
+		Rotations.Empty();
+		Extents.Empty();
+		Colors.Empty();
+		return;
+	}
+
+	// Allocate worst-case (every candidate accepted). We trim to the actual
+	// accepted count after the parallel pass via SetNum.
+	Positions.SetNumUninitialized(InSampleCount);
+	Rotations.SetNumUninitialized(InSampleCount);
+	Extents.SetNumUninitialized(InSampleCount);
+	Colors.SetNumUninitialized(InSampleCount);
+
+	std::atomic<int32> WriteIdx{ 0 };
+	const float ExtentRange = InMaxExtent - InMinExtent;
+
+	ParallelFor(InSampleCount, [&](int32 i)
+		{
+			// Per-candidate deterministic stream — same sector seed + candidate
+			// index always produces the same accept/reject + position. Lets
+			// re-init reproduce the same gas pattern.
+			FRandomStream Stream(HashCombine(InSeed, GetTypeHash(i)));
+
+			const FVector Candidate(
+				Stream.FRandRange(-InSectorExtent, InSectorExtent),
+				Stream.FRandRange(-InSectorExtent, InSectorExtent),
+				Stream.FRandRange(-InSectorExtent, InSectorExtent)
+			);
+
+			const float Density = InDensityVolume.SampleDensityAtLocalPos(Candidate, 3);
+			if (Stream.FRand() > Density) return; // rejected
+
+			const int32 Slot = WriteIdx.fetch_add(1, std::memory_order_relaxed);
+			Positions[Slot] = Candidate;
+			Rotations[Slot] = FVector::ZeroVector; // gas is billboard / radially symmetric
+			Extents[Slot] = InMinExtent + ExtentRange * Density;
+			Colors[Slot] = FLinearColor(1.0f, 1.0f, 1.0f, Density);
+		}, EParallelForFlags::BackgroundPriority);
+
+	const int32 FinalCount = WriteIdx.load(std::memory_order_relaxed);
+	Positions.SetNum(FinalCount, /*bAllowShrinking=*/ false);
+	Rotations.SetNum(FinalCount, /*bAllowShrinking=*/ false);
+	Extents.SetNum(FinalCount,   /*bAllowShrinking=*/ false);
+	Colors.SetNum(FinalCount,    /*bAllowShrinking=*/ false);
+}
+#pragma endregion
+
 #pragma region Constructor
 ASectorActor::ASectorActor()
 {
 	PointCloudNiagara = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/NG_SectorParallaxCloud.NG_SectorParallaxCloud"));
 	SectorClusterCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorClusterCloud.NG_SectorClusterCloud"));
+	SectorGasCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorGasCloud.NG_SectorGasCloud"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
 	Octree = MakeShared<FOctree>(Params.Extent);
 }
@@ -52,9 +149,9 @@ FastNoise::SmartNode<> ASectorActor::BuildNoise(int InSeed) {
 	float clusterRemapMax = 1.001;
 	float clusterRemapMin = 0;
 
-	float webFalloff = 4;
-	float webRemapMin = -.001;
-	float webRemapMax = 1.001
+	float webFalloff = 2;
+	float webRemapMin = -.005;
+	float webRemapMax = 1.005;
 
 	float warpAmp = .25;
 	float warpFreq = 1;
@@ -179,17 +276,40 @@ void ASectorActor::InitializeData()
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
-	// --- Build Niagara systems from point nodes ---
-	// Cluster visualization data is captured here while PointNodes is in
-	// scope. UClusterNiagaraSystem takes an owned copy of the data it needs;
-	// PointNodes itself can drop at end of scope.
+	// --- Build Niagara layer data from point nodes ---
+	// Cluster visualization data is captured here while PointNodes is in scope.
+	// Each layer entry holds its own copy of the arrays; PointNodes can drop
+	// at end of scope.
 	StepStart = FPlatformTime::Seconds();
 	{
-		UClusterNiagaraSystem* ClusterSystem = NewObject<UClusterNiagaraSystem>(this);
-		ClusterSystem->ConfigureFromPointNodes(PointNodes, Params.Extent);
-		NiagaraSystems.Add(ClusterSystem);
+		FSectorNiagaraLayerData& ClusterLayer = LayerData.AddDefaulted_GetRef();
+		ClusterLayer.PopulateFromPointNodes(
+			PointNodes,
+			SectorClusterCloud ? SectorClusterCloud : PointCloudNiagara,
+			FName(TEXT("ClusterCloud")));
 	}
-	UE_LOG(LogTemp, Log, TEXT("  [InitData] Niagara system config (%d particles): %.3f sec"), PointNodes.Num(), FPlatformTime::Seconds() - StepStart);
+	UE_LOG(LogTemp, Log, TEXT("  [InitData] Niagara cluster layer populate (%d particles): %.3f sec"), PointNodes.Num(), FPlatformTime::Seconds() - StepStart);
+
+	if (InitializationState == ELifecycleState::Pooling) return;
+
+	// Gas sprite layer — uniform-random rejection sampling against the
+	// CPU-side density volume. Final particle count is the accepted subset
+	// of GasParticleCount candidates; sparse sectors get fewer particles.
+	StepStart = FPlatformTime::Seconds();
+	{
+		FSectorNiagaraLayerData& GasLayer = LayerData.AddDefaulted_GetRef();
+		GasLayer.PopulateFromDensityVolume(
+			DensityVolume,
+			Params.Extent,
+			GasParticleCount,
+			GasMinExtent,
+			GasMaxExtent,
+			Params.Seed,
+			SectorGasCloud ? SectorGasCloud : PointCloudNiagara,
+			FName(TEXT("GasCloud")));
+		UE_LOG(LogTemp, Log, TEXT("  [InitData] Niagara gas layer populate (%d/%d accepted): %.3f sec"),
+			GasLayer.Positions.Num(), GasParticleCount, FPlatformTime::Seconds() - StepStart);
+	}
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
@@ -237,10 +357,9 @@ void ASectorActor::InitializeNiagara()
 	double StartTime = FPlatformTime::Seconds();
 
 	// Resolve the player's current position once — used as the initial
-	// origin for relative-space particle data across all systems. Running on
+	// origin for relative-space particle data across all layers. Running on
 	// whatever thread we're already on; GetPlayerController is thread-safe
-	// enough for this read-only usage (and systems re-sync on first frame
-	// anyway via ApplyParallax).
+	// enough for this read-only usage (layers re-sync on first tick anyway).
 	FVector PlayerPos = FVector::ZeroVector;
 	if (auto* Controller = UGameplayStatics::GetPlayerController(GetWorld(), 0))
 	{
@@ -250,34 +369,129 @@ void ASectorActor::InitializeNiagara()
 		}
 	}
 
-	// Initialize every registered system. Each one runs its own async init
-	// pipeline (spawn → push arrays → activate) and returns a future; we wait
-	// on all of them before returning.
-	//
-	// Asset selection: right now the cluster system is the only registered
-	// entry, so it gets SectorClusterCloud. When more systems are added,
-	// they'll either carry their own asset refs internally or get them from
-	// additional sector-side UPROPERTYs here.
-	UNiagaraSystem* Template = SectorClusterCloud ? SectorClusterCloud : PointCloudNiagara;
+	// LayerComponents stays index-parallel with LayerData. Reserve up front;
+	// entries get written from the game thread during the spawn phase.
+	LayerComponents.SetNum(LayerData.Num());
 
-	TArray<TFuture<void>> InitFutures;
-	InitFutures.Reserve(NiagaraSystems.Num());
-	for (const TObjectPtr<UParallaxNiagaraSystem>& System : NiagaraSystems)
-	{
-		if (!System) continue;
-		InitFutures.Add(System->Initialize(this, GetRootComponent(), Template, PlayerPos));
-	}
-	for (TFuture<void>& Fut : InitFutures)
-	{
-		Fut.Wait();
-	}
+	// ---- Phase 1 (game thread): spawn one UNiagaraComponent per layer. ----
+	// Components must be spawned on the game thread and attached to the
+	// sector root. SetSystemFixedBounds / location are set here too so the
+	// engine has a valid bounds immediately.
+	TPromise<void> SpawnPromise;
+	TFuture<void>  SpawnFuture = SpawnPromise.GetFuture();
+	TWeakObjectPtr<ASectorActor> WeakSelf(this);
+	AsyncTask(ENamedThreads::GameThread,
+		[WeakSelf, PlayerPos, SpawnPromise = MoveTemp(SpawnPromise)]() mutable
+		{
+			ASectorActor* Self = WeakSelf.Get();
+			if (!Self)
+			{
+				SpawnPromise.SetValue();
+				return;
+			}
 
-	// Proximity system is not yet migrated to UParallaxNiagaraSystem — its
-	// streaming lifecycle is more involved and will be ported in a follow-up.
+			for (int32 i = 0; i < Self->LayerData.Num(); ++i)
+			{
+				const FSectorNiagaraLayerData& Layer = Self->LayerData[i];
+				if (!Layer.SystemAsset)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("ASectorActor::InitializeNiagara: layer %d (%s) has no SystemAsset, skipping"),
+						i, *Layer.LayerName.ToString());
+					continue;
+				}
+
+				UNiagaraComponent* Comp = UNiagaraFunctionLibrary::SpawnSystemAttached(
+					Layer.SystemAsset,
+					Self->GetRootComponent(),
+					NAME_None,
+					FVector::ZeroVector,
+					FRotator::ZeroRotator,
+					EAttachLocation::SnapToTarget,
+					/*bAutoDestroy=*/ true,
+					/*bAutoActivate=*/ false);
+
+				if (!Comp) continue;
+
+				Comp->SetSystemFixedBounds(FBox(FVector(-Self->Params.Extent), FVector(Self->Params.Extent)));
+				Comp->TranslucencySortPriority = 0;
+				Comp->SetWorldLocation(PlayerPos);
+
+				Self->LayerComponents[i] = Comp;
+			}
+
+			SpawnPromise.SetValue();
+		});
+	SpawnFuture.Wait();
+
+	// ---- Phase 2 (background): build relative positions and push User.* arrays. ----
+	// Particles live in sector-relative space so positions get offset by the
+	// initial player position before being pushed to Niagara.
+	TPromise<void> PushPromise;
+	TFuture<void>  PushFuture = PushPromise.GetFuture();
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask,
+		[WeakSelf, PlayerPos, PushPromise = MoveTemp(PushPromise)]() mutable
+		{
+			ASectorActor* Self = WeakSelf.Get();
+			if (!Self)
+			{
+				PushPromise.SetValue();
+				return;
+			}
+
+			for (int32 i = 0; i < Self->LayerData.Num(); ++i)
+			{
+				UNiagaraComponent* Comp = Self->LayerComponents[i].Get();
+				if (!Comp) continue;
+
+				const FSectorNiagaraLayerData& Layer = Self->LayerData[i];
+
+				TArray<FVector> RelativePositions;
+				const int32 Num = Layer.Positions.Num();
+				RelativePositions.SetNumUninitialized(Num);
+				ParallelFor(Num, [&](int32 j)
+					{
+						RelativePositions[j] = Layer.Positions[j] - PlayerPos;
+					}, EParallelForFlags::BackgroundPriority);
+
+				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
+					Comp, FName("User.Positions"), RelativePositions);
+				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
+					Comp, FName("User.Rotations"), Layer.Rotations);
+				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(
+					Comp, FName("User.Colors"), Layer.Colors);
+				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(
+					Comp, FName("User.Extents"), Layer.Extents);
+			}
+
+			PushPromise.SetValue();
+		});
+	PushFuture.Wait();
+
+	// ---- Phase 3 (game thread): activate all components. ----
+	TPromise<void> ActivatePromise;
+	TFuture<void>  ActivateFuture = ActivatePromise.GetFuture();
+	AsyncTask(ENamedThreads::GameThread,
+		[WeakSelf, ActivatePromise = MoveTemp(ActivatePromise)]() mutable
+		{
+			ASectorActor* Self = WeakSelf.Get();
+			if (Self)
+			{
+				for (const TObjectPtr<UNiagaraComponent>& Comp : Self->LayerComponents)
+				{
+					if (Comp) Comp->Activate(true);
+				}
+			}
+			ActivatePromise.SetValue();
+		});
+	ActivateFuture.Wait();
+
+	// Proximity system is still driven inline — its streaming lifecycle is
+	// separate from the one-shot layer systems and will be migrated later.
 	InitializeProximitySystem();
 
 	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeNiagara total duration: %.3f seconds"), TotalDuration);
+	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeNiagara total duration: %.3f seconds (%d layers)"),
+		TotalDuration, LayerData.Num());
 }
 #pragma endregion
 
@@ -315,19 +529,20 @@ void ASectorActor::ApplyParallaxOffset()
 	ParallaxRatio = GetParentSpeedScale() / GetUnitScale();
 	FVector ParallaxOffset = -PlayerDelta * ParallaxRatio;
 
-	// Broadcast parallax to every managed Niagara system. Each system applies
-	// the standard User.ParallaxOffset + reseat-at-player itself; streaming
-	// systems may additionally do buffer-swap work in their override.
-	for (const TObjectPtr<UParallaxNiagaraSystem>& System : NiagaraSystems)
+	// Broadcast parallax to every managed layer component. All layers use
+	// the same User.ParallaxOffset / reseat-at-player pattern; per-layer
+	// behavior differences are expressed in the Niagara asset, not here.
+	for (const TObjectPtr<UNiagaraComponent>& Comp : LayerComponents)
 	{
-		if (System)
+		if (Comp)
 		{
-			System->ApplyParallax(ParallaxOffset, CurrentPlayerPos);
+			Comp->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
+			Comp->SetWorldLocation(CurrentPlayerPos);
 		}
 	}
 
 	// Proximity system is not yet migrated — still driven inline. Will move
-	// into the NiagaraSystems array when ported.
+	// into LayerComponents when its streaming lifecycle is unified.
 	if (ProximityNiagaraComponent)
 	{
 		ProximityNiagaraComponent->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
@@ -341,22 +556,23 @@ void ASectorActor::ApplyParallaxOffset()
 #pragma region Shutdown
 void ASectorActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	// Explicitly tear down managed Niagara systems before the engine's GC
+	// Explicitly tear down managed Niagara components before the engine's GC
 	// pass runs. Without this, the stale-reference detector at PIE end can
 	// observe partially-destroyed components still referenced through our
-	// UPROPERTY chain (sector → NiagaraSystems[i] → NiagaraComponent), and
-	// the warning printer itself can crash walking that chain.
-	for (const TObjectPtr<UParallaxNiagaraSystem>& System : NiagaraSystems)
+	// UPROPERTY chain and the printer itself can break on the walk.
+	for (const TObjectPtr<UNiagaraComponent>& Comp : LayerComponents)
 	{
-		if (System)
+		if (Comp)
 		{
-			System->Shutdown();
+			Comp->Deactivate();
+			Comp->DestroyComponent();
 		}
 	}
-	NiagaraSystems.Empty();
+	LayerComponents.Empty();
+	LayerData.Empty();
 
-	// Proximity component isn't yet part of the managed systems; tear it
-	// down the same way.
+	// Proximity component is not yet part of LayerComponents; tear it down
+	// the same way.
 	if (ProximityNiagaraComponent)
 	{
 		ProximityNiagaraComponent->Deactivate();

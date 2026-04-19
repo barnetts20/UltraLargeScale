@@ -2,10 +2,88 @@
 #include "CoreMinimal.h"
 #include "ProceduralSpaceActor.h"
 #include "UniverseDataGenerator.h"
-#include "ParallaxNiagaraSystem.h"
+#include "NiagaraSystem.h"
+#include "NiagaraComponent.h"
+#include "FOctree.h"
 #include "SectorActor.generated.h"
 
 class AGalaxyActor;
+
+/// <summary>
+/// Per-layer data bundle for one Niagara visualization system on a sector.
+/// Holds the unified set of particle arrays (Positions/Rotations/Extents/Colors)
+/// and a pointer to the Niagara system asset the sector will spawn for this
+/// layer. Behavioural differences between layers (cluster vs. gas vs. sector-
+/// wide galaxies) are expressed entirely in the Niagara asset + material —
+/// this struct is just data.
+///
+/// Population helpers like PopulateFromPointNodes fill the arrays from a
+/// specific data source. Add more helpers as new layer sources appear (e.g.
+/// PopulateFromDensityVolume for the gas system, PopulateFromLargeObjects for
+/// sector-wide galaxies).
+///
+/// Sector owns a TArray<FSectorNiagaraLayerData> built during InitializeData;
+/// InitializeNiagara then walks it, spawns a UNiagaraComponent per layer, and
+/// pushes the User.* arrays in one unified block.
+/// </summary>
+USTRUCT()
+struct SVO_API FSectorNiagaraLayerData
+{
+	GENERATED_BODY()
+
+	// Niagara system asset to spawn for this layer. Hard ref (UPROPERTY) so
+	// the cooker tracks it and GC keeps it pinned.
+	UPROPERTY()
+	TObjectPtr<UNiagaraSystem> SystemAsset = nullptr;
+
+	// Layer name for debug logging. Not shown to users.
+	FName LayerName;
+
+	// Unified particle data. All layers get the same array set; any layer
+	// whose Niagara asset doesn't read a given binding simply ignores it.
+	TArray<FVector>       Positions;
+	TArray<FVector>       Rotations;
+	TArray<float>         Extents;
+	TArray<FLinearColor>  Colors;
+
+	FSectorNiagaraLayerData() = default;
+
+	/// <summary>
+	/// Fill the arrays from a list of point nodes inserted into the octree
+	/// by UniverseDataGenerator. Builds Position/Rotation/Extent/Color per
+	/// node — rotation is derived from a stable per-ObjectId random stream.
+	/// Safe to call on any thread (ParallelFor inside).
+	/// </summary>
+	void PopulateFromPointNodes(
+		const TArray<TSharedPtr<FOctreeNode>>& InPointNodes,
+		UNiagaraSystem* InSystemAsset,
+		FName InLayerName);
+
+	/// <summary>
+	/// Fill the arrays by uniform-random rejection sampling against a
+	/// density volume — InSampleCount candidate positions are tested and the
+	/// accepted subset is written. Output array size equals the accepted
+	/// count, not InSampleCount.
+	///
+	/// Per accepted particle:
+	///  - Position: candidate world-relative position (sector-local space)
+	///  - Extent:   lerp(InMinExtent, InMaxExtent, density)
+	///  - Color:    FLinearColor(1, 1, 1, density) — RGB free for material
+	///              tinting, alpha carries the per-particle density value
+	///  - Rotation: zero (gas sprites are billboards / radially symmetric)
+	///
+	/// Threadsafe; uses ParallelFor with an atomic write index.
+	/// </summary>
+	void PopulateFromDensityVolume(
+		const FDensityVolume& InDensityVolume,
+		double InSectorExtent,
+		int32 InSampleCount,
+		float InMinExtent,
+		float InMaxExtent,
+		int32 InSeed,
+		UNiagaraSystem* InSystemAsset,
+		FName InLayerName);
+};
 
 UCLASS()
 class SVO_API ASectorActor : public AProceduralSpaceActor
@@ -45,20 +123,45 @@ protected:
 	UniverseDataGenerator UniverseGenerator;
 #pragma endregion
 
-#pragma region Niagara
+#pragma region Niagara Layers
 	// Niagara system asset for the always-loaded cluster visualization layer.
 	// Assign in the sector actor's Blueprint defaults (e.g. NG_SectorClusterCloud).
 	// Material fade range is configured directly on the material instance.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
 	UNiagaraSystem* SectorClusterCloud;
 
-	// Array of self-managing Niagara visualization systems. Each entry owns
-	// its own data, its own UNiagaraComponent, and its own lifecycle hooks.
-	// Populated during sector initialization; iterated every frame for
-	// parallax updates. UPROPERTY so the wrappers AND their Niagara
-	// components stay GC-rooted transitively.
+	// Niagara system asset for the gas sprite layer (rejection-sampled
+	// against the sector density volume). Default loaded in the constructor;
+	// override in BP defaults if needed.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
+	UNiagaraSystem* SectorGasCloud;
+
+	// Number of candidate positions to test for gas sprite placement.
+	// Final particle count is the subset that pass the density rejection
+	// gate, so denser sectors yield more particles than empty ones.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
+	int32 GasParticleCount = 15000;
+
+	// Per-particle extent at density=0 (lower bound of the density-driven
+	// extent lerp). Tune in the editor to taste.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
+	float GasMinExtent = 1e15f;
+
+	// Per-particle extent at density=1 (upper bound of the density-driven
+	// extent lerp). Tune in the editor to taste.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
+	float GasMaxExtent = 5e16f;
+
+	// CPU-side data for each layer. Populated during InitializeData,
+	// consumed during InitializeNiagara. Index-parallel with LayerComponents.
+	TArray<FSectorNiagaraLayerData> LayerData;
+
+	// Live UNiagaraComponents spawned from LayerData entries during
+	// InitializeNiagara. Index-parallel with LayerData. UPROPERTY keeps them
+	// GC-rooted; EndPlay explicitly destroys them before the engine's PIE-end
+	// stale-reference scan runs.
 	UPROPERTY()
-	TArray<TObjectPtr<UParallaxNiagaraSystem>> NiagaraSystems;
+	TArray<TObjectPtr<UNiagaraComponent>> LayerComponents;
 #pragma endregion
 
 #pragma region Volumetric
