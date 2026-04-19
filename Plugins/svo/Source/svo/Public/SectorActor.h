@@ -46,6 +46,12 @@ protected:
 #pragma endregion
 
 #pragma region Niagara
+	// Niagara system asset for the always-loaded cluster visualization layer.
+	// Assign in the sector actor's Blueprint defaults (e.g. NG_SectorClusterCloud).
+	// Material fade range is configured directly on the material instance.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
+	UNiagaraSystem* SectorClusterCloud;
+
 	// Array of self-managing Niagara visualization systems. Each entry owns
 	// its own data, its own UNiagaraComponent, and its own lifecycle hooks.
 	// Populated during sector initialization; iterated every frame for
@@ -78,6 +84,7 @@ protected:
 
 #pragma region Overrides
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void ApplyParallaxOffset() override;
 	virtual void Tick(float DeltaTime) override;
 #pragma endregion

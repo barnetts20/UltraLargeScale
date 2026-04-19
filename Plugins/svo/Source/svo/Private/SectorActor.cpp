@@ -12,6 +12,7 @@
 ASectorActor::ASectorActor()
 {
 	PointCloudNiagara = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/NG_SectorParallaxCloud.NG_SectorParallaxCloud"));
+	SectorClusterCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorClusterCloud.NG_SectorClusterCloud"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
 	Octree = MakeShared<FOctree>(Params.Extent);
 }
@@ -252,12 +253,19 @@ void ASectorActor::InitializeNiagara()
 	// Initialize every registered system. Each one runs its own async init
 	// pipeline (spawn → push arrays → activate) and returns a future; we wait
 	// on all of them before returning.
+	//
+	// Asset selection: right now the cluster system is the only registered
+	// entry, so it gets SectorClusterCloud. When more systems are added,
+	// they'll either carry their own asset refs internally or get them from
+	// additional sector-side UPROPERTYs here.
+	UNiagaraSystem* Template = SectorClusterCloud ? SectorClusterCloud : PointCloudNiagara;
+
 	TArray<TFuture<void>> InitFutures;
 	InitFutures.Reserve(NiagaraSystems.Num());
 	for (const TObjectPtr<UParallaxNiagaraSystem>& System : NiagaraSystems)
 	{
 		if (!System) continue;
-		InitFutures.Add(System->Initialize(this, GetRootComponent(), PointCloudNiagara, PlayerPos));
+		InitFutures.Add(System->Initialize(this, GetRootComponent(), Template, PlayerPos));
 	}
 	for (TFuture<void>& Fut : InitFutures)
 	{
@@ -327,6 +335,36 @@ void ASectorActor::ApplyParallaxOffset()
 	}
 
 	SetActorLocation(GetActorLocation() + ParallaxOffset);
+}
+#pragma endregion
+
+#pragma region Shutdown
+void ASectorActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	// Explicitly tear down managed Niagara systems before the engine's GC
+	// pass runs. Without this, the stale-reference detector at PIE end can
+	// observe partially-destroyed components still referenced through our
+	// UPROPERTY chain (sector → NiagaraSystems[i] → NiagaraComponent), and
+	// the warning printer itself can crash walking that chain.
+	for (const TObjectPtr<UParallaxNiagaraSystem>& System : NiagaraSystems)
+	{
+		if (System)
+		{
+			System->Shutdown();
+		}
+	}
+	NiagaraSystems.Empty();
+
+	// Proximity component isn't yet part of the managed systems; tear it
+	// down the same way.
+	if (ProximityNiagaraComponent)
+	{
+		ProximityNiagaraComponent->Deactivate();
+		ProximityNiagaraComponent->DestroyComponent();
+		ProximityNiagaraComponent = nullptr;
+	}
+
+	Super::EndPlay(EndPlayReason);
 }
 #pragma endregion
 

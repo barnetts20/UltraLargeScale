@@ -1,5 +1,5 @@
-#include "FOctree.h"
 #include "FVolumeTextureUtils.h"
+#include "FOctree.h"
 
 TArray<uint8> FVolumeTextureUtils::GenerateVolumeMipDataFromOctree(TArray<TSharedPtr<FOctreeNode>> InVolumeNodes, int InResolution, double InExtent, double InMaxDensity)
 {
