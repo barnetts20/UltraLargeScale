@@ -200,7 +200,6 @@ public:
 #pragma endregion
 
 #pragma region Upscale Volume Data
-
 	/// <summary>
 	/// Upscale a low-resolution volume grid to 256^3 via trilinear interpolation.
 	/// Returns the upscaled data as a flat 256^3 BGRA8 buffer.
@@ -290,7 +289,6 @@ public:
 
 		return OutData;
 	}
-
 #pragma endregion
 
 #pragma region Rasterize Sparse Data to Volume
@@ -337,6 +335,7 @@ public:
 	}
 
 #pragma endregion
+
 #pragma region Splat VBOs to Volume
 
 	/// <summary>
@@ -571,8 +570,8 @@ public:
 	}
 
 #pragma endregion
-#pragma region Composite Volume Layers
 
+#pragma region Composite Volume Layers
 	/// <summary>
 	/// Composite a detail layer onto a base volume buffer (both same resolution, BGRA8).
 	/// Additive per channel, clamped to 255.
@@ -611,7 +610,6 @@ public:
 #pragma endregion
 
 #pragma region Pack to Pseudo-Volume Layout
-
 	/// <summary>
 	/// Pack a 256^3 BGRA8 volume buffer into a 4096x4096 2D pseudo-volume layout.
 	/// Layout: 16x16 tiles, each tile is a 256x256 Z-slice.
@@ -663,7 +661,6 @@ public:
 #pragma endregion
 
 #pragma region Async Texture Creation
-
 	/// <summary>
 	/// Create a UTexture2D from pre-built 4096x4096 BGRA8 pseudo-volume data.
 	/// Must be called from a background thread (uses async game thread dispatch internally).
@@ -923,4 +920,5 @@ private:
 	}
 
 #pragma endregion
+
 };

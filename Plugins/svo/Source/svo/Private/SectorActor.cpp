@@ -178,22 +178,17 @@ void ASectorActor::InitializeData()
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
-	// --- Build Niagara arrays from point nodes ---
+	// --- Build Niagara systems from point nodes ---
+	// Cluster visualization data is captured here while PointNodes is in
+	// scope. UClusterNiagaraSystem takes an owned copy of the data it needs;
+	// PointNodes itself can drop at end of scope.
 	StepStart = FPlatformTime::Seconds();
-	Positions.SetNumUninitialized(PointNodes.Num());
-	Rotations.SetNumUninitialized(PointNodes.Num());
-	Extents.SetNumUninitialized(PointNodes.Num());
-	Colors.SetNumUninitialized(PointNodes.Num());
-
-	ParallelFor(PointNodes.Num(), [&](int32 Index) {
-		const TSharedPtr<FOctreeNode>& Node = PointNodes[Index];
-		FRandomStream RandStream(Node->Data.ObjectId);
-		Rotations[Index] = RandStream.GetUnitVector();
-		Positions[Index] = Node->Center;
-		Extents[Index] = static_cast<float>(Node->Extent * (1 + Node->Data.ScaleFactor));
-		Colors[Index] = FLinearColor(Node->Data.Composition);
-		}, EParallelForFlags::BackgroundPriority);
-	UE_LOG(LogTemp, Log, TEXT("  [InitData] Niagara array build (%d particles): %.3f sec"), PointNodes.Num(), FPlatformTime::Seconds() - StepStart);
+	{
+		UClusterNiagaraSystem* ClusterSystem = NewObject<UClusterNiagaraSystem>(this);
+		ClusterSystem->ConfigureFromPointNodes(PointNodes, Params.Extent);
+		NiagaraSystems.Add(ClusterSystem);
+	}
+	UE_LOG(LogTemp, Log, TEXT("  [InitData] Niagara system config (%d particles): %.3f sec"), PointNodes.Num(), FPlatformTime::Seconds() - StepStart);
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
@@ -240,55 +235,37 @@ void ASectorActor::InitializeNiagara()
 {
 	double StartTime = FPlatformTime::Seconds();
 
-	TPromise<void> CompletionPromise;
-	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
+	// Resolve the player's current position once — used as the initial
+	// origin for relative-space particle data across all systems. Running on
+	// whatever thread we're already on; GetPlayerController is thread-safe
+	// enough for this read-only usage (and systems re-sync on first frame
+	// anyway via ApplyParallax).
+	FVector PlayerPos = FVector::ZeroVector;
+	if (auto* Controller = UGameplayStatics::GetPlayerController(GetWorld(), 0))
+	{
+		if (APawn* Pawn = Controller->GetPawn())
 		{
-			FVector PlayerPos = FVector::ZeroVector;
-			if (auto* Controller = UGameplayStatics::GetPlayerController(GetWorld(), 0))
-			{
-				if (APawn* Pawn = Controller->GetPawn())
-				{
-					PlayerPos = Pawn->GetActorLocation();
-				}
-			}
+			PlayerPos = Pawn->GetActorLocation();
+		}
+	}
 
-			NiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
-				PointCloudNiagara,
-				GetRootComponent(),
-				NAME_None,
-				FVector::ZeroVector,
-				FRotator::ZeroRotator,
-				EAttachLocation::SnapToTarget,
-				true,
-				false
-			);
-			NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Params.Extent), FVector(Params.Extent)));
-			NiagaraComponent->TranslucencySortPriority = 0;
-			NiagaraComponent->SetWorldLocation(PlayerPos);
+	// Initialize every registered system. Each one runs its own async init
+	// pipeline (spawn → push arrays → activate) and returns a future; we wait
+	// on all of them before returning.
+	TArray<TFuture<void>> InitFutures;
+	InitFutures.Reserve(NiagaraSystems.Num());
+	for (const TObjectPtr<UParallaxNiagaraSystem>& System : NiagaraSystems)
+	{
+		if (!System) continue;
+		InitFutures.Add(System->Initialize(this, GetRootComponent(), PointCloudNiagara, PlayerPos));
+	}
+	for (TFuture<void>& Fut : InitFutures)
+	{
+		Fut.Wait();
+	}
 
-			AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, PlayerPos, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-				{
-					TArray<FVector> RelativePositions;
-					RelativePositions.SetNumUninitialized(Positions.Num());
-					ParallelFor(Positions.Num(), [&](int32 i) {
-						RelativePositions[i] = Positions[i] - PlayerPos;
-						}, EParallelForFlags::BackgroundPriority);
-
-					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), RelativePositions);
-					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Rotations"), Rotations);
-					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), Colors);
-					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), Extents);
-
-					AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-						{
-							NiagaraComponent->Activate(true);
-							CompletionPromise.SetValue();
-						});
-				});
-		});
-	CompletionFuture.Wait();
-
+	// Proximity system is not yet migrated to UParallaxNiagaraSystem — its
+	// streaming lifecycle is more involved and will be ported in a follow-up.
 	InitializeProximitySystem();
 
 	double TotalDuration = FPlatformTime::Seconds() - StartTime;
@@ -299,7 +276,7 @@ void ASectorActor::InitializeNiagara()
 #pragma region Player-Centered Parallax
 void ASectorActor::ApplyParallaxOffset()
 {
-	if (!NiagaraComponent || InitializationState != ELifecycleState::Ready)
+	if (InitializationState != ELifecycleState::Ready)
 	{
 		return;
 	}
@@ -330,8 +307,19 @@ void ASectorActor::ApplyParallaxOffset()
 	ParallaxRatio = GetParentSpeedScale() / GetUnitScale();
 	FVector ParallaxOffset = -PlayerDelta * ParallaxRatio;
 
-	NiagaraComponent->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
+	// Broadcast parallax to every managed Niagara system. Each system applies
+	// the standard User.ParallaxOffset + reseat-at-player itself; streaming
+	// systems may additionally do buffer-swap work in their override.
+	for (const TObjectPtr<UParallaxNiagaraSystem>& System : NiagaraSystems)
+	{
+		if (System)
+		{
+			System->ApplyParallax(ParallaxOffset, CurrentPlayerPos);
+		}
+	}
 
+	// Proximity system is not yet migrated — still driven inline. Will move
+	// into the NiagaraSystems array when ported.
 	if (ProximityNiagaraComponent)
 	{
 		ProximityNiagaraComponent->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
@@ -339,7 +327,6 @@ void ASectorActor::ApplyParallaxOffset()
 	}
 
 	SetActorLocation(GetActorLocation() + ParallaxOffset);
-	NiagaraComponent->SetWorldLocation(CurrentPlayerPos);
 }
 #pragma endregion
 

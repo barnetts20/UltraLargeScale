@@ -2,6 +2,7 @@
 #include "CoreMinimal.h"
 #include "ProceduralSpaceActor.h"
 #include "UniverseDataGenerator.h"
+#include "ParallaxNiagaraSystem.h"
 #include "SectorActor.generated.h"
 
 class AGalaxyActor;
@@ -45,7 +46,13 @@ protected:
 #pragma endregion
 
 #pragma region Niagara
-	TArray<FVector> Rotations;
+	// Array of self-managing Niagara visualization systems. Each entry owns
+	// its own data, its own UNiagaraComponent, and its own lifecycle hooks.
+	// Populated during sector initialization; iterated every frame for
+	// parallax updates. UPROPERTY so the wrappers AND their Niagara
+	// components stay GC-rooted transitively.
+	UPROPERTY()
+	TArray<TObjectPtr<UParallaxNiagaraSystem>> NiagaraSystems;
 #pragma endregion
 
 #pragma region Volumetric
