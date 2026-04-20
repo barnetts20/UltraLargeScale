@@ -166,6 +166,14 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
 	UNiagaraSystem* SectorGasCloud;
 
+	// Niagara system asset for the nearby/galaxy-scale sprite layer —
+	// populated at runtime by the proximity streaming system (see
+	// InitializeProximitySystem / UpdateProximityNodes). Distinct from the
+	// cluster layer so it can carry its own material and fade range.
+	// Assign in the sector actor's Blueprint defaults (e.g. NG_SectorGalaxyCloud).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
+	UNiagaraSystem* SectorGalaxyCloud;
+
 	// Number of candidate positions to test for gas sprite placement.
 	// Final particle count is the subset that pass the density rejection
 	// gate, so denser sectors yield more particles than empty ones.

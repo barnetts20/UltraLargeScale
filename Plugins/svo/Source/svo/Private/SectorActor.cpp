@@ -248,7 +248,7 @@ void ASectorActor::InitializeData()
 
 	// --- Phase 1: Gas density from noise (low-res, alpha channel only) ---
 	StepStart = FPlatformTime::Seconds();
-	int noiseResolution = 256;
+	int noiseResolution = 128;
 
 	auto DensityNoise = BuildNoise(69);
 
@@ -789,8 +789,14 @@ void ASectorActor::InitializeProximitySystem()
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, PlayerPos, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
+			UNiagaraSystem* GalaxyTemplate = SectorGalaxyCloud ? SectorGalaxyCloud : PointCloudNiagara;
+			if (!SectorGalaxyCloud)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("ASectorActor::InitializeProximitySystem - SectorGalaxyCloud not assigned; falling back to PointCloudNiagara. The nearby/galaxy-scale layer needs its own system asset to carry the correct material and fade range."));
+			}
+
 			ProximityNiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
-				PointCloudNiagara,
+				GalaxyTemplate,
 				GetRootComponent(),
 				NAME_None,
 				FVector::ZeroVector,
