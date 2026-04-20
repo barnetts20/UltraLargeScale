@@ -53,7 +53,7 @@ protected:
 
 #pragma region Niagara (galaxy-specific)
 	FString NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
-	// Positions, Extents, Colors, PointCloudNiagara, NiagaraComponent inherited from base
+	// Positions, Extents, Colors, SectorGalaxyCloud, NiagaraComponent inherited from base
 #pragma endregion
 
 #pragma region Volumetric (galaxy-specific)

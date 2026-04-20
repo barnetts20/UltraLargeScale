@@ -89,6 +89,34 @@ struct SVO_API FSectorNiagaraLayerData
 		UNiagaraSystem* InSystemAsset,
 		FName InLayerName,
 		FVector InWorldOffset = FVector::ZeroVector);
+
+	/// <summary>
+	/// Fill the arrays from the same cluster-scale point nodes that feed the
+	/// cluster layer, producing one gas sprite per cluster. Each sprite's
+	/// extent is lerped between InMinExtent and InMaxExtent using the
+	/// density sampled at the cluster's position. This keeps the gas cloud
+	/// perfectly co-located with the cluster distribution (same seeded
+	/// accept/reject, same jitter) instead of running a second independent
+	/// rejection pass against the density volume.
+	///
+	/// Per sprite:
+	///  - Position: Node->Center + InWorldOffset
+	///  - Extent:   lerp(InMinExtent, InMaxExtent, density-at-position)
+	///  - Color:    FLinearColor(1, 1, 1, density) — alpha carries density
+	///              for material-side tinting / fade
+	///  - Rotation: zero (billboard)
+	///
+	/// InDensityVolume is sampled in sector-local space (Node->Center before
+	/// the world-offset add). Safe to call on any thread (ParallelFor inside).
+	/// </summary>
+	void PopulateGasFromPointNodes(
+		const TArray<TSharedPtr<FOctreeNode>>& InPointNodes,
+		const FDensityVolume& InDensityVolume,
+		float InMinExtent,
+		float InMaxExtent,
+		UNiagaraSystem* InSystemAsset,
+		FName InLayerName,
+		FVector InWorldOffset = FVector::ZeroVector);
 };
 
 UCLASS()

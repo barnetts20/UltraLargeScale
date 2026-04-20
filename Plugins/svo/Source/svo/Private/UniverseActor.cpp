@@ -6,7 +6,7 @@ AUniverseActor::AUniverseActor()
 {
 	PrimaryActorTick.bCanEverTick = true;
 	SectorActorClass = ASectorActor::StaticClass();
-	// Universe is a coordinator, not a renderer. No PointCloudNiagara, no
+	// Universe is a coordinator, not a renderer. No SectorGalaxyCloud, no
 	// octree of its own — sectors own all visualization data.
 }
 

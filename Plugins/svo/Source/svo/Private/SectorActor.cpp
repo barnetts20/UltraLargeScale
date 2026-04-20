@@ -110,10 +110,55 @@ void FSectorNiagaraLayerData::PopulateFromDensityVolume(
 }
 #pragma endregion
 
+#pragma region FSectorNiagaraLayerData::PopulateGasFromPointNodes
+void FSectorNiagaraLayerData::PopulateGasFromPointNodes(
+	const TArray<TSharedPtr<FOctreeNode>>& InPointNodes,
+	const FDensityVolume& InDensityVolume,
+	float InMinExtent,
+	float InMaxExtent,
+	UNiagaraSystem* InSystemAsset,
+	FName InLayerName,
+	FVector InWorldOffset)
+{
+	SystemAsset = InSystemAsset;
+	LayerName = InLayerName;
+
+	const int32 Num = InPointNodes.Num();
+	Positions.SetNumUninitialized(Num);
+	Rotations.SetNumUninitialized(Num);
+	Extents.SetNumUninitialized(Num);
+	Colors.SetNumUninitialized(Num);
+
+	const float ExtentRange = InMaxExtent - InMinExtent;
+	const bool bHasDensity = InDensityVolume.IsValid();
+
+	// Co-locate gas sprites with the cluster-scale points. Density is
+	// resampled at each node's sector-local center so the gas sprite's extent
+	// scales with how "thick" the region it sits in is — the cluster path
+	// already gated acceptance on density, so samples here should generally
+	// be non-zero, but we still clamp to handle any edge cases at the volume
+	// boundary.
+	ParallelFor(Num, [&](int32 Index)
+		{
+			const TSharedPtr<FOctreeNode>& Node = InPointNodes[Index];
+			const FVector LocalPos = Node->Center;
+
+			const float Density = bHasDensity
+				? FMath::Clamp(InDensityVolume.SampleDensityAtLocalPos(LocalPos, 3), 0.0f, 1.0f)
+				: 1.0f;
+
+			Positions[Index] = LocalPos + InWorldOffset;
+			Rotations[Index] = FVector::ZeroVector;
+			Extents[Index] = InMinExtent + ExtentRange * Density;
+			Colors[Index] = FLinearColor(1.0f, 1.0f, 1.0f, Density);
+		}, EParallelForFlags::BackgroundPriority);
+}
+#pragma endregion
+
 #pragma region Constructor
 ASectorActor::ASectorActor()
 {
-	PointCloudNiagara = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/NG_SectorParallaxCloud.NG_SectorParallaxCloud"));
+	ProximityCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorGalaxyCloud.NG_SectorGalaxyCloud"));
 	SectorClusterCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorClusterCloud.NG_SectorClusterCloud"));
 	SectorGasCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorGasCloud.NG_SectorGasCloud"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
@@ -171,13 +216,13 @@ void ASectorActor::InitializeChildPool()
 FastNoise::SmartNode<> ASectorActor::BuildNoise(int InSeed) {
 	//Param staging TODO: Wrap in noise param struct
 	float masterScale = 1;
-	float clusterFalloff = 32;
+	int clusterFalloff = 32;
 	float clusterScale = 3;
 	float clusterMulti = 50;
 	float clusterRemapMax = 1.001;
 	float clusterRemapMin = 0;
 
-	float webFalloff = 2;
+	int webFalloff = 3;
 	float webRemapMin = -.005;
 	float webRemapMax = 1.005;
 
@@ -323,7 +368,7 @@ void ASectorActor::InitializeData()
 		FSectorNiagaraLayerData& ClusterLayer = LayerData.AddDefaulted_GetRef();
 		ClusterLayer.PopulateFromPointNodes(
 			PointNodes,
-			SectorClusterCloud ? SectorClusterCloud : PointCloudNiagara,
+			SectorClusterCloud,
 			FName(TEXT("ClusterCloud")),
 			CellOrigin);
 	}
@@ -331,24 +376,24 @@ void ASectorActor::InitializeData()
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
-	// Gas sprite layer — uniform-random rejection sampling against the
-	// CPU-side density volume. Final particle count is the accepted subset
-	// of GasParticleCount candidates; sparse sectors get fewer particles.
+	// Gas sprite layer — co-located one-to-one with the cluster points.
+	// Each cluster gets a matching gas sprite at the same position; extent
+	// is scaled by the density at that position (denser region → larger
+	// sprite). This replaces the previous independent rejection-sampling
+	// pass so the gas cloud and cluster cloud share a distribution.
 	StepStart = FPlatformTime::Seconds();
 	{
 		FSectorNiagaraLayerData& GasLayer = LayerData.AddDefaulted_GetRef();
-		GasLayer.PopulateFromDensityVolume(
+		GasLayer.PopulateGasFromPointNodes(
+			PointNodes,
 			DensityVolume,
-			Params.Extent,
-			GasParticleCount,
 			GasMinExtent,
 			GasMaxExtent,
-			Params.Seed,
-			SectorGasCloud ? SectorGasCloud : PointCloudNiagara,
+			SectorGasCloud,
 			FName(TEXT("GasCloud")),
 			CellOrigin);
-		UE_LOG(LogTemp, Log, TEXT("  [InitData] Niagara gas layer populate (%d/%d accepted): %.3f sec"),
-			GasLayer.Positions.Num(), GasParticleCount, FPlatformTime::Seconds() - StepStart);
+		UE_LOG(LogTemp, Log, TEXT("  [InitData] Niagara gas layer populate (%d particles, 1:1 with clusters): %.3f sec"),
+			GasLayer.Positions.Num(), FPlatformTime::Seconds() - StepStart);
 	}
 
 	if (InitializationState == ELifecycleState::Pooling) return;
@@ -789,10 +834,10 @@ void ASectorActor::InitializeProximitySystem()
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, PlayerPos, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
-			UNiagaraSystem* GalaxyTemplate = SectorGalaxyCloud ? SectorGalaxyCloud : PointCloudNiagara;
-			if (!SectorGalaxyCloud)
+			UNiagaraSystem* GalaxyTemplate = ProximityCloud;
+			if (!ProximityCloud)
 			{
-				UE_LOG(LogTemp, Warning, TEXT("ASectorActor::InitializeProximitySystem - SectorGalaxyCloud not assigned; falling back to PointCloudNiagara. The nearby/galaxy-scale layer needs its own system asset to carry the correct material and fade range."));
+				UE_LOG(LogTemp, Warning, TEXT("ASectorActor::InitializeProximitySystem - SectorGalaxyCloud not assigned; falling back to SectorGalaxyCloud. The nearby/galaxy-scale layer needs its own system asset to carry the correct material and fade range."));
 			}
 
 			ProximityNiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(

@@ -11,7 +11,7 @@
 #pragma region Constructor/Destructor
 AGalaxyActor::AGalaxyActor()
 {
-	PointCloudNiagara = Cast<UNiagaraSystem>(FSoftObjectPath(NiagaraPath).TryLoad());
+	ProximityCloud = Cast<UNiagaraSystem>(FSoftObjectPath(NiagaraPath).TryLoad());
 	StarSystemActorClass = AStarSystemActor::StaticClass();
 	Octree = MakeShared<FOctree>(Params.Extent);
 }
@@ -149,7 +149,7 @@ void AGalaxyActor::InitializeNiagara()
 	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
 			NiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
-				PointCloudNiagara,
+				ProximityCloud,
 				GetRootComponent(),
 				NAME_None,
 				FVector::ZeroVector,

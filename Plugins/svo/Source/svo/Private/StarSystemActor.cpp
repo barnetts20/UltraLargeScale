@@ -12,7 +12,7 @@
 #pragma region Constructor/Destructor
 AStarSystemActor::AStarSystemActor()
 {
-	PointCloudNiagara = Cast<UNiagaraSystem>(FSoftObjectPath(NiagaraPath).TryLoad());
+	ProximityCloud = Cast<UNiagaraSystem>(FSoftObjectPath(NiagaraPath).TryLoad());
 	Octree = MakeShared<FOctree>(Params.Extent);
 }
 
@@ -133,7 +133,7 @@ void AStarSystemActor::InitializeNiagara()
 	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
 			NiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
-				PointCloudNiagara,
+				ProximityCloud,
 				GetRootComponent(),
 				NAME_None,
 				FVector::ZeroVector,

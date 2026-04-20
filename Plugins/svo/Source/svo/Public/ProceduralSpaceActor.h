@@ -82,7 +82,7 @@ protected:
     TArray<FLinearColor> Colors;
 
     UPROPERTY()
-    UNiagaraSystem* PointCloudNiagara;
+    UNiagaraSystem* ProximityCloud;
 
     UPROPERTY()
     UNiagaraComponent* NiagaraComponent;
