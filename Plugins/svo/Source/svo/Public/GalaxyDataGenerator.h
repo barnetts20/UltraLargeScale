@@ -13,7 +13,7 @@ struct SVO_API FGalaxyParams {
 	GENERATED_BODY()
 	// Generation parameters (affect WHAT is generated)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	int Seed = 69;
+	int Seed = 666;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
 	double Extent = 2147483648;

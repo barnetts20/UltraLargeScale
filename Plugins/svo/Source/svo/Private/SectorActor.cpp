@@ -149,9 +149,9 @@ FastNoise::SmartNode<> ASectorActor::BuildNoise(int InSeed) {
 	float clusterRemapMax = 1.001;
 	float clusterRemapMin = 0;
 
-	float webFalloff = 2;
-	float webRemapMin = -.005;
-	float webRemapMax = 1.005;
+	float webFalloff = 3;
+	float webRemapMin = -.01;
+	float webRemapMax = 1.01;
 
 	float warpAmp = .25;
 	float warpFreq = 1;
