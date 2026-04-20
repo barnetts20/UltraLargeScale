@@ -12,7 +12,8 @@
 void FSectorNiagaraLayerData::PopulateFromPointNodes(
 	const TArray<TSharedPtr<FOctreeNode>>& InPointNodes,
 	UNiagaraSystem* InSystemAsset,
-	FName InLayerName)
+	FName InLayerName,
+	FVector InWorldOffset)
 {
 	SystemAsset = InSystemAsset;
 	LayerName = InLayerName;
@@ -26,13 +27,15 @@ void FSectorNiagaraLayerData::PopulateFromPointNodes(
 	// Mirror of the old per-node array build that ran inline in
 	// ASectorActor::InitializeData before layer extraction. Per-point
 	// rotation is derived from a random stream seeded on ObjectId so the
-	// rotation is stable across runs of the same sector.
+	// rotation is stable across runs of the same sector. WorldOffset shifts
+	// every position by the sector's cell origin so multi-sector grids
+	// render at the correct world location.
 	ParallelFor(Num, [&](int32 Index)
 		{
 			const TSharedPtr<FOctreeNode>& Node = InPointNodes[Index];
 			FRandomStream RandStream(Node->Data.ObjectId);
 
-			Positions[Index] = Node->Center;
+			Positions[Index] = Node->Center + InWorldOffset;
 			Rotations[Index] = RandStream.GetUnitVector();
 			Extents[Index] = static_cast<float>(Node->Extent * (1.0 + Node->Data.ScaleFactor));
 			Colors[Index] = FLinearColor(Node->Data.Composition);
@@ -49,7 +52,8 @@ void FSectorNiagaraLayerData::PopulateFromDensityVolume(
 	float InMaxExtent,
 	int32 InSeed,
 	UNiagaraSystem* InSystemAsset,
-	FName InLayerName)
+	FName InLayerName,
+	FVector InWorldOffset)
 {
 	SystemAsset = InSystemAsset;
 	LayerName = InLayerName;
@@ -86,11 +90,13 @@ void FSectorNiagaraLayerData::PopulateFromDensityVolume(
 				Stream.FRandRange(-InSectorExtent, InSectorExtent)
 			);
 
+			// Density is sampled in sector-local space (the candidate position
+			// pre-offset). World offset is added to the output only.
 			const float Density = InDensityVolume.SampleDensityAtLocalPos(Candidate, 3);
 			if (Stream.FRand() > Density) return; // rejected
 
 			const int32 Slot = WriteIdx.fetch_add(1, std::memory_order_relaxed);
-			Positions[Slot] = Candidate;
+			Positions[Slot] = Candidate + InWorldOffset;
 			Rotations[Slot] = FVector::ZeroVector; // gas is billboard / radially symmetric
 			Extents[Slot] = InMinExtent + ExtentRange * Density;
 			Colors[Slot] = FLinearColor(1.0f, 1.0f, 1.0f, Density);
@@ -132,7 +138,29 @@ void ASectorActor::BeginPlay()
 		}
 	}
 
-	Initialize();
+	// Skip auto-Initialize when something else (e.g. AUniverseActor) is
+	// driving the lifecycle and needs to ConfigureCell() first. Manually-
+	// placed sectors in a level still init themselves on play.
+	if (bAutoInitializeOnBeginPlay)
+	{
+		Initialize();
+	}
+}
+
+void ASectorActor::ConfigureCell(FIntVector InCellCoord)
+{
+	CellCoord = InCellCoord;
+	CellOrigin = FVector(
+		static_cast<double>(CellCoord.X) * 2.0 * Params.Extent,
+		static_cast<double>(CellCoord.Y) * 2.0 * Params.Extent,
+		static_cast<double>(CellCoord.Z) * 2.0 * Params.Extent);
+	SetActorLocation(CellOrigin);
+
+	// The sector's constructor created an Octree with default Params.Extent.
+	// If the universe has overridden Params (via SpawnSectorForCell setting
+	// Sector->Params before ConfigureCell), the octree may now be sized
+	// wrong. Rebuild against the actual extent.
+	Octree = MakeShared<FOctree>(Params.Extent);
 }
 
 void ASectorActor::InitializeChildPool()
@@ -149,9 +177,9 @@ FastNoise::SmartNode<> ASectorActor::BuildNoise(int InSeed) {
 	float clusterRemapMax = 1.001;
 	float clusterRemapMin = 0;
 
-	float webFalloff = 3;
-	float webRemapMin = -.01;
-	float webRemapMax = 1.01;
+	float webFalloff = 2;
+	float webRemapMin = -.005;
+	float webRemapMax = 1.005;
 
 	float warpAmp = .25;
 	float warpFreq = 1;
@@ -224,6 +252,15 @@ void ASectorActor::InitializeData()
 
 	auto DensityNoise = BuildNoise(69);
 
+	// Cell-coord WorldOffset for the noise sampler. Each cell extends
+	// 2 units in normalized noise-space (because a cell's local sampling
+	// covers [-1, +1] after normalization), so adjacent cells offset by
+	// (2 * CellCoord) to produce a continuous noise field.
+	const FVector NoiseOffset(
+		static_cast<double>(CellCoord.X) * 2.0,
+		static_cast<double>(CellCoord.Y) * 2.0,
+		static_cast<double>(CellCoord.Z) * 2.0);
+
 	TArray<uint8> LowResData = FVolumeTextureUtils::SampleNoiseToVolume(
 		DensityNoise,
 		Params.Seed,
@@ -232,7 +269,8 @@ void ASectorActor::InitializeData()
 		nullptr,  // Octree density writes disabled — CPU-side DensityVolume is now authoritative
 		-1,       // OctreeDepth unused when no octree passed
 		1.0f,
-		3      // Alpha only (gas density)
+		3,        // Alpha only (gas density)
+		NoiseOffset
 	);
 	UE_LOG(LogTemp, Log, TEXT("  [InitData] Noise sampling (%d^3): %.3f sec"), noiseResolution, FPlatformTime::Seconds() - StepStart);
 	if (InitializationState == ELifecycleState::Pooling) return;
@@ -286,7 +324,8 @@ void ASectorActor::InitializeData()
 		ClusterLayer.PopulateFromPointNodes(
 			PointNodes,
 			SectorClusterCloud ? SectorClusterCloud : PointCloudNiagara,
-			FName(TEXT("ClusterCloud")));
+			FName(TEXT("ClusterCloud")),
+			CellOrigin);
 	}
 	UE_LOG(LogTemp, Log, TEXT("  [InitData] Niagara cluster layer populate (%d particles): %.3f sec"), PointNodes.Num(), FPlatformTime::Seconds() - StepStart);
 
@@ -306,21 +345,39 @@ void ASectorActor::InitializeData()
 			GasMaxExtent,
 			Params.Seed,
 			SectorGasCloud ? SectorGasCloud : PointCloudNiagara,
-			FName(TEXT("GasCloud")));
+			FName(TEXT("GasCloud")),
+			CellOrigin);
 		UE_LOG(LogTemp, Log, TEXT("  [InitData] Niagara gas layer populate (%d/%d accepted): %.3f sec"),
 			GasLayer.Positions.Num(), GasParticleCount, FPlatformTime::Seconds() - StepStart);
 	}
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
-	StepStart = FPlatformTime::Seconds();
-	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(FVolumeTextureUtils::PackToPseudoVolumeLayout(DensityBuffer));// , "/svo/Generated/BakedTest");
-	UE_LOG(LogTemp, Log, TEXT("  [InitData] CreatePseudoVolumeTexture: %.3f sec"), FPlatformTime::Seconds() - StepStart);
+	// Pseudo-volume texture is the GPU-side packed copy of DensityBuffer used
+	// only by the volumetric raymarcher. Skip when volumetric is disabled —
+	// each one is ~64MB GPU; a 27-sector grid would burn ~1.7GB on textures
+	// nothing samples. CPU-side DensityBuffer / DensityVolume sampling is
+	// unaffected (those are what the gas/cluster systems use).
+	if (bEnableVolumetric)
+	{
+		StepStart = FPlatformTime::Seconds();
+		PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(FVolumeTextureUtils::PackToPseudoVolumeLayout(DensityBuffer));// , "/svo/Generated/BakedTest");
+		UE_LOG(LogTemp, Log, TEXT("  [InitData] CreatePseudoVolumeTexture: %.3f sec"), FPlatformTime::Seconds() - StepStart);
+	}
 	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeData total: %.3f sec"), FPlatformTime::Seconds() - TotalStart);
 }
 
 void ASectorActor::InitializeVolumetric()
 {
+	// Per-sector raymarched volumetric is too expensive to run on a 27-sector
+	// grid. Default disabled; only directly-placed sectors with the flag
+	// flipped on (e.g. for volumetric debugging) actually spawn the cube.
+	if (!bEnableVolumetric)
+	{
+		UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeVolumetric skipped (bEnableVolumetric=false)"));
+		return;
+	}
+
 	double StartTime = FPlatformTime::Seconds();
 
 	TPromise<void> CompletionPromise;

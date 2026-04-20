@@ -1,222 +1,215 @@
-#pragma region Includes/ForwardDec
-#include "UniverseActor.h"
-#include "NiagaraDataInterfaceArrayFunctionLibrary.h"
-#include "FVolumeTextureUtils.h"
-#include <PointCloudGenerator.h>
+﻿#include "UniverseActor.h"
+#include "SectorActor.h"
 #include <Kismet/GameplayStatics.h>
-#include <GalaxyActor.h>
-#include <NiagaraFunctionLibrary.h>
-#pragma endregion
 
-#pragma region Constructor
 AUniverseActor::AUniverseActor()
 {
-	PointCloudNiagara = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/NG_UniverseCloud.NG_UniverseCloud"));
-	GalaxyActorClass = AGalaxyActor::StaticClass();
-	Octree = MakeShared<FOctree>(Params.Extent);
+	PrimaryActorTick.bCanEverTick = true;
+	SectorActorClass = ASectorActor::StaticClass();
+	// Universe is a coordinator, not a renderer. No PointCloudNiagara, no
+	// octree of its own — sectors own all visualization data.
 }
-#pragma endregion
 
-#pragma region Initialization
 void AUniverseActor::BeginPlay()
 {
 	Super::BeginPlay();
-	Initialize();  // Calls base class Initialize()
-}
 
-void AUniverseActor::InitializeChildPool()
-{
-	TPromise<void> CompletionPromise;
-	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-		{
-			for (int i = 0; i < GalaxyPoolSize; i++) {
-				AGalaxyActor* Galaxy = GetWorld()->SpawnActor<AGalaxyActor>(GalaxyActorClass, FVector::ZeroVector, FRotator::ZeroRotator);
-				Galaxy->Universe = this;
-				GalaxyPool.Add(Galaxy);
-			}
-			CompletionPromise.SetValue();
-		});
-	CompletionFuture.Wait();
-}
-
-void AUniverseActor::InitializeData()
-{
-	double StartTime = FPlatformTime::Seconds();
-
-	UniverseGenerator.Params = Params;
-	UniverseGenerator.GenerateData(Octree);
-
-	TArray<TSharedPtr<FOctreeNode>> VolumeNodes;
-	TArray<TSharedPtr<FOctreeNode>> PointNodes;
-	Octree->BulkInsertPositions(UniverseGenerator.GeneratedData, PointNodes, VolumeNodes);
-
-	Positions.SetNumUninitialized(PointNodes.Num());
-	Rotations.SetNumUninitialized(PointNodes.Num());
-	Extents.SetNumUninitialized(PointNodes.Num());
-	Colors.SetNumUninitialized(PointNodes.Num());
-
-	ParallelFor(PointNodes.Num(), [&](int32 Index) {
-		const TSharedPtr<FOctreeNode>& Node = PointNodes[Index];
-		FRandomStream RandStream(Node->Data.ObjectId);
-		Rotations[Index] = RandStream.GetUnitVector();
-		Positions[Index] = Node->Center;
-		Extents[Index] = static_cast<float>(Node->Extent * (1 + Node->Data.ScaleFactor));
-		Colors[Index] = FLinearColor(Node->Data.Composition);
-		}, EParallelForFlags::BackgroundPriority);
-
-	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(FVolumeTextureUtils::UpscaleVolumeData(FVolumeTextureUtils::GenerateVolumeMipDataFromOctree(VolumeNodes, 32, Params.Extent, 1),32));
-
-	double GenDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Universe data generation took: %.3f seconds"), GenDuration);
-}
-
-void AUniverseActor::InitializeVolumetric()
-{
-	double StartTime = FPlatformTime::Seconds();
-
-	TPromise<void> CompletionPromise;
-	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-		{
-			VolumetricComponent = NewObject<UStaticMeshComponent>(this);
-			VolumetricComponent->SetVisibility(false);
-			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));
-			VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-			VolumetricComponent->TranslucencySortPriority = 1;
-			VolumetricComponent->RegisterComponent();
-			VolumetricComponent->SetWorldScale3D(FVector(2 * Params.Extent));
-
-			UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(
-				LoadObject<UMaterialInterface>(nullptr, *VolumetricMaterialPath),
-				this
-			);
-
-			DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), PseudoVolumeTexture);
-			VolumetricComponent->SetMaterial(0, DynamicMaterial);
-			VolumetricComponent->SetVisibility(true);
-
-			CompletionPromise.SetValue();
-		});
-	CompletionFuture.Wait();
-
-	double VolumetricDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Volumetric initialization took: %.3f seconds"), VolumetricDuration);
-}
-
-void AUniverseActor::InitializeNiagara()
-{
-	double StartTime = FPlatformTime::Seconds();
-
-	TPromise<void> CompletionPromise;
-	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-		{
-			NiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
-				PointCloudNiagara,
-				GetRootComponent(),
-				NAME_None,
-				FVector::ZeroVector,
-				FRotator::ZeroRotator,
-				EAttachLocation::SnapToTarget,
-				true,
-				false
-			);
-			NiagaraComponent->SetSystemFixedBounds(FBox(FVector(-Params.Extent), FVector(Params.Extent)));
-			NiagaraComponent->TranslucencySortPriority = 0;
-
-			AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-				{
-					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Positions"), Positions);
-					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NiagaraComponent, FName("User.Rotations"), Rotations);
-					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(NiagaraComponent, FName("User.Colors"), Colors);
-					UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(NiagaraComponent, FName("User.Extents"), Extents);
-
-					AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-						{
-							NiagaraComponent->Activate(true);
-							CompletionPromise.SetValue();
-						});
-				});
-		});
-	CompletionFuture.Wait();
-
-	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeNiagara total duration: %.3f seconds"), TotalDuration);
-}
-#pragma endregion
-
-#pragma region Galaxy Pooled Spawn Hooks
-void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
-{
-	if (!InNode.IsValid() || !GalaxyActorClass || SpawnedGalaxies.Contains(InNode) || InitializationState != ELifecycleState::Ready)
+	// Determine which cell the player starts in, and spawn the initial
+	// active grid around it.
+	FVector PlayerPos = FVector::ZeroVector;
+	if (auto* Controller = UGameplayStatics::GetPlayerController(GetWorld(), 0))
 	{
+		if (APawn* Pawn = Controller->GetPawn())
+		{
+			PlayerPos = Pawn->GetActorLocation();
+		}
+	}
+
+	const FIntVector StartCell = WorldPositionToCell(PlayerPos);
+	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::BeginPlay — initial center cell (%d,%d,%d)"),
+		StartCell.X, StartCell.Y, StartCell.Z);
+
+	// Mark CurrentCenterCell as INT32_MIN so RebuildActiveSet treats this as
+	// a fresh start (every cell counts as "entering").
+	CurrentCenterCell = FIntVector(INT32_MIN);
+	RebuildActiveSet(StartCell);
+
+	// Call base Initialize so InitializationState transitions to Ready via
+	// the async pipeline. Our InitializeData/Volumetric/Niagara/ChildPool
+	// overrides are no-ops, so this resolves quickly. Without this, Tick's
+	// state check would prevent player-crossing logic from running.
+	Initialize();
+}
+
+void AUniverseActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	// Explicitly destroy spawned sectors before the engine's stale-reference
+	// scan runs at PIE end. Same rationale as the EndPlay teardown in
+	// ASectorActor for its Niagara components.
+	for (auto& Pair : ActiveSectors)
+	{
+		if (ASectorActor* Sector = Pair.Value.Get())
+		{
+			Sector->Destroy();
+		}
+	}
+	ActiveSectors.Empty();
+
+	Super::EndPlay(EndPlayReason);
+}
+
+void AUniverseActor::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+	if (InitializationState != ELifecycleState::Ready)
+	{
+		// AProceduralSpaceActor::Initialize() flips state to Ready when its
+		// async pipeline finishes. Universe overrides all the init steps to
+		// no-ops, so this should resolve quickly.
 		return;
 	}
 
-	if (GalaxyPool.Num() == 0)
+	// Track which cell the player is in. If they cross a boundary, rebuild
+	// the active set.
+	FVector PlayerPos = FVector::ZeroVector;
+	if (auto* Controller = UGameplayStatics::GetPlayerController(GetWorld(), 0))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("Galaxy pool exhausted, consider increasing GalaxyPoolSize"));
-		return;
-	}
-
-	AGalaxyActor* Galaxy = GalaxyPool.Pop();
-	SpawnedGalaxies.Add(InNode, TWeakObjectPtr<AGalaxyActor>(Galaxy));
-	Galaxy->ResetForSpawn();
-
-	Galaxy->Params.UnitScale = (InNode->Extent * this->Params.UnitScale) / Galaxy->Params.Extent;
-	Galaxy->SpeedScale = SpeedScale;
-	Galaxy->Params.Seed = InNode->Data.ObjectId;
-	Galaxy->Params.ParentColor = FLinearColor(InNode->Data.Composition);
-	// Compute axis tilt
-	FRandomStream RandStream(InNode->Data.ObjectId);
-	Galaxy->Params.Rotation = RandStream.GetUnitVector().Rotation();
-	// Compute correct parallax ratios and spawn location
-	Galaxy->SetActorLocation(ComputeChildSpawnLocation(InNode->Center, Galaxy->Params.UnitScale));
-	Galaxy->Initialize();
-	Galaxy->SetActorHiddenInGame(false);
-}
-
-void AUniverseActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
-{
-	if (!InNode.IsValid())
-	{
-		return;
-	}
-
-	TWeakObjectPtr<AGalaxyActor> GalaxyToDestroy;
-	if (SpawnedGalaxies.RemoveAndCopyValue(InNode, GalaxyToDestroy))
-	{
-		AGalaxyActor* PoolGalaxy = GalaxyToDestroy.Get();
-		if (PoolGalaxy)
+		if (APawn* Pawn = Controller->GetPawn())
 		{
-			UE_LOG(LogTemp, Log, TEXT("Resetting galaxy for node with ObjectId: %d"), InNode->Data.ObjectId);
-			PoolGalaxy->ResetForPool();
-
-			AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, PoolGalaxy]()
-				{
-					double StartTime = FPlatformTime::Seconds();
-
-					// Flush octree
-					PoolGalaxy->Octree->bIsResetting.store(true);
-					FPlatformProcess::Sleep(0.05f);
-					PoolGalaxy->Octree = MakeShared<FOctree>(PoolGalaxy->Params.Extent);
-					PoolGalaxy->Octree->bIsResetting.store(false);
-
-					double ODuration = FPlatformTime::Seconds() - StartTime;
-					UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Flushing Octree took: %.3f seconds"), ODuration);
-
-					// Return to pool on game thread
-					AsyncTask(ENamedThreads::GameThread, [this, PoolGalaxy]()
-						{
-							GalaxyPool.Insert(PoolGalaxy, 0);
-						});
-				});
+			PlayerPos = Pawn->GetActorLocation();
 		}
 		else
 		{
-			UE_LOG(LogTemp, Warning, TEXT("Galaxy actor was already invalid for node with ObjectId: %d"), InNode->Data.ObjectId);
+			return;
 		}
 	}
+	else
+	{
+		return;
+	}
+
+	const FIntVector NewCenter = WorldPositionToCell(PlayerPos);
+	if (NewCenter != CurrentCenterCell)
+	{
+		UE_LOG(LogTemp, Log, TEXT("AUniverseActor: player crossed into cell (%d,%d,%d)"),
+			NewCenter.X, NewCenter.Y, NewCenter.Z);
+		RebuildActiveSet(NewCenter);
+	}
 }
-#pragma endregion
+
+FIntVector AUniverseActor::WorldPositionToCell(const FVector& InWorldPos) const
+{
+	// Cell origin = CellCoord * (2 * SectorExtent). Cell occupies world
+	// region [origin - Extent, origin + Extent]. So:
+	//   world ∈ [(N-0.5) * 2 * Extent, (N+0.5) * 2 * Extent]  →  cell N
+	// Equivalently: floor((world / (2*Extent)) + 0.5)
+	const double CellSize = 2.0 * Params.Extent;
+	return FIntVector(
+		FMath::FloorToInt32(InWorldPos.X / CellSize + 0.5),
+		FMath::FloorToInt32(InWorldPos.Y / CellSize + 0.5),
+		FMath::FloorToInt32(InWorldPos.Z / CellSize + 0.5));
+}
+
+void AUniverseActor::SpawnSectorForCell(const FIntVector& InCellCoord)
+{
+	if (ActiveSectors.Contains(InCellCoord))
+	{
+		return; // Already spawned
+	}
+
+	UClass* ClassToSpawn = SectorActorClass ? SectorActorClass.Get() : ASectorActor::StaticClass();
+
+	// Spawn deferred so we can configure before BeginPlay runs (which would
+	// otherwise auto-Initialize the sector before ConfigureCell sets the
+	// cell origin).
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	SpawnParams.Owner = this;
+
+	ASectorActor* Sector = GetWorld()->SpawnActorDeferred<ASectorActor>(
+		ClassToSpawn,
+		FTransform::Identity,
+		this,
+		nullptr,
+		ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+
+	if (!Sector)
+	{
+		UE_LOG(LogTemp, Error, TEXT("AUniverseActor::SpawnSectorForCell — SpawnActorDeferred failed for cell (%d,%d,%d)"),
+			InCellCoord.X, InCellCoord.Y, InCellCoord.Z);
+		return;
+	}
+
+	// Configure before finishing spawn so BeginPlay sees the correct values.
+	// bAutoInitializeOnBeginPlay stays true — the sector will start its
+	// async Initialize() automatically once FinishSpawning fires BeginPlay.
+	Sector->Params = Params;
+	Sector->ConfigureCell(InCellCoord);
+
+	UGameplayStatics::FinishSpawningActor(Sector, FTransform(Sector->CellOrigin));
+
+	ActiveSectors.Add(InCellCoord, Sector);
+
+	UE_LOG(LogTemp, Log, TEXT("AUniverseActor: spawned sector for cell (%d,%d,%d) at world %s"),
+		InCellCoord.X, InCellCoord.Y, InCellCoord.Z, *Sector->CellOrigin.ToString());
+}
+
+void AUniverseActor::DespawnSectorAtCell(const FIntVector& InCellCoord)
+{
+	TObjectPtr<ASectorActor>* Found = ActiveSectors.Find(InCellCoord);
+	if (!Found || !Found->Get())
+	{
+		return;
+	}
+
+	ASectorActor* Sector = Found->Get();
+	UE_LOG(LogTemp, Log, TEXT("AUniverseActor: despawning sector at cell (%d,%d,%d)"),
+		InCellCoord.X, InCellCoord.Y, InCellCoord.Z);
+
+	Sector->Destroy();
+	ActiveSectors.Remove(InCellCoord);
+}
+
+void AUniverseActor::RebuildActiveSet(const FIntVector& InNewCenter)
+{
+	// Collect the new desired set: all cells within NeighborhoodRadius of
+	// InNewCenter on every axis.
+	TSet<FIntVector> Desired;
+	for (int32 dx = -NeighborhoodRadius; dx <= NeighborhoodRadius; ++dx)
+	{
+		for (int32 dy = -NeighborhoodRadius; dy <= NeighborhoodRadius; ++dy)
+		{
+			for (int32 dz = -NeighborhoodRadius; dz <= NeighborhoodRadius; ++dz)
+			{
+				Desired.Add(InNewCenter + FIntVector(dx, dy, dz));
+			}
+		}
+	}
+
+	// Despawn any active cell that's no longer desired.
+	TArray<FIntVector> ToDespawn;
+	ToDespawn.Reserve(ActiveSectors.Num());
+	for (const auto& Pair : ActiveSectors)
+	{
+		if (!Desired.Contains(Pair.Key))
+		{
+			ToDespawn.Add(Pair.Key);
+		}
+	}
+	for (const FIntVector& Cell : ToDespawn)
+	{
+		DespawnSectorAtCell(Cell);
+	}
+
+	// Spawn any desired cell that isn't yet active.
+	for (const FIntVector& Cell : Desired)
+	{
+		if (!ActiveSectors.Contains(Cell))
+		{
+			SpawnSectorForCell(Cell);
+		}
+	}
+
+	CurrentCenterCell = InNewCenter;
+}

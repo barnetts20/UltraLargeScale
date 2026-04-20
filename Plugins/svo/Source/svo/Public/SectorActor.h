@@ -1,4 +1,4 @@
-#pragma once
+ï»¿#pragma once
 #include "CoreMinimal.h"
 #include "ProceduralSpaceActor.h"
 #include "UniverseDataGenerator.h"
@@ -14,7 +14,7 @@ class AGalaxyActor;
 /// Holds the unified set of particle arrays (Positions/Rotations/Extents/Colors)
 /// and a pointer to the Niagara system asset the sector will spawn for this
 /// layer. Behavioural differences between layers (cluster vs. gas vs. sector-
-/// wide galaxies) are expressed entirely in the Niagara asset + material —
+/// wide galaxies) are expressed entirely in the Niagara asset + material ï¿½
 /// this struct is just data.
 ///
 /// Population helpers like PopulateFromPointNodes fill the arrays from a
@@ -51,28 +51,33 @@ struct SVO_API FSectorNiagaraLayerData
 	/// <summary>
 	/// Fill the arrays from a list of point nodes inserted into the octree
 	/// by UniverseDataGenerator. Builds Position/Rotation/Extent/Color per
-	/// node — rotation is derived from a stable per-ObjectId random stream.
-	/// Safe to call on any thread (ParallelFor inside).
+	/// node â€” rotation is derived from a stable per-ObjectId random stream.
+	/// InWorldOffset is added to every output position; pass the sector's
+	/// CellOrigin to render at the correct world location in a multi-sector
+	/// grid. Safe to call on any thread (ParallelFor inside).
 	/// </summary>
 	void PopulateFromPointNodes(
 		const TArray<TSharedPtr<FOctreeNode>>& InPointNodes,
 		UNiagaraSystem* InSystemAsset,
-		FName InLayerName);
+		FName InLayerName,
+		FVector InWorldOffset = FVector::ZeroVector);
 
 	/// <summary>
 	/// Fill the arrays by uniform-random rejection sampling against a
-	/// density volume — InSampleCount candidate positions are tested and the
+	/// density volume â€” InSampleCount candidate positions are tested and the
 	/// accepted subset is written. Output array size equals the accepted
 	/// count, not InSampleCount.
 	///
 	/// Per accepted particle:
-	///  - Position: candidate world-relative position (sector-local space)
+	///  - Position: candidate sector-local position + InWorldOffset
 	///  - Extent:   lerp(InMinExtent, InMaxExtent, density)
-	///  - Color:    FLinearColor(1, 1, 1, density) — RGB free for material
+	///  - Color:    FLinearColor(1, 1, 1, density) â€” RGB free for material
 	///              tinting, alpha carries the per-particle density value
 	///  - Rotation: zero (gas sprites are billboards / radially symmetric)
 	///
-	/// Threadsafe; uses ParallelFor with an atomic write index.
+	/// InWorldOffset shifts every output position; density is sampled
+	/// pre-offset (in sector-local space). Threadsafe; uses ParallelFor with
+	/// an atomic write index.
 	/// </summary>
 	void PopulateFromDensityVolume(
 		const FDensityVolume& InDensityVolume,
@@ -82,7 +87,8 @@ struct SVO_API FSectorNiagaraLayerData
 		float InMaxExtent,
 		int32 InSeed,
 		UNiagaraSystem* InSystemAsset,
-		FName InLayerName);
+		FName InLayerName,
+		FVector InWorldOffset = FVector::ZeroVector);
 };
 
 UCLASS()
@@ -102,6 +108,30 @@ public:
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
 	void SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode);
 	void ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode);
+#pragma endregion
+
+#pragma region Sector Grid Identity
+	// Which cell in the universe grid this sector represents. Set by the
+	// universe before init via Configure(). All sector position/noise math
+	// is offset by CellOrigin so adjacent sectors form a continuous field.
+	UPROPERTY(VisibleAnywhere, Category = "Sector Grid")
+	FIntVector CellCoord = FIntVector::ZeroValue;
+
+	// World-space center of this sector's cell. Derived: CellCoord * (2 * Params.Extent).
+	UPROPERTY(VisibleAnywhere, Category = "Sector Grid")
+	FVector CellOrigin = FVector::ZeroVector;
+
+	// When true (default), the sector calls Initialize() automatically from
+	// BeginPlay â€” convenient for sectors dragged into the level for testing.
+	// AUniverseActor sets this to false on the sectors it spawns so it can
+	// ConfigureCell() first, then drive Initialize() itself.
+	UPROPERTY()
+	bool bAutoInitializeOnBeginPlay = true;
+
+	// Configure cell identity before Initialize(). Sets CellCoord, derives
+	// CellOrigin, places the actor at CellOrigin in world space. Must be
+	// called before Initialize() â€” does not trigger generation itself.
+	void ConfigureCell(FIntVector InCellCoord);
 #pragma endregion
 
 protected:
@@ -166,6 +196,13 @@ protected:
 
 #pragma region Volumetric
 	FString VolumetricMaterialPath = FString("/svo/Materials/RayMarchers/MT_UniverseRaymarchPseudoVolume_Inst.MT_UniverseRaymarchPseudoVolume_Inst");
+
+	// Per-sector raymarched volumetric. Default OFF â€” when running in a
+	// multi-sector grid (3x3x3 = 27 sectors), 27 raymarch volumes are
+	// unaffordable. Enable on a single directly-placed sector for
+	// volumetric debugging or single-sector dev work.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volumetric")
+	bool bEnableVolumetric = false;
 #pragma endregion
 
 #pragma region Density Field (CPU-side authoritative copy)

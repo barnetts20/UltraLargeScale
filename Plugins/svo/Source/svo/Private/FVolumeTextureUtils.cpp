@@ -1,4 +1,4 @@
-#include "FVolumeTextureUtils.h"
+ï»¿#include "FVolumeTextureUtils.h"
 #include "FOctree.h"
 
 TArray<uint8> FVolumeTextureUtils::GenerateVolumeMipDataFromOctree(TArray<TSharedPtr<FOctreeNode>> InVolumeNodes, int InResolution, double InExtent, double InMaxDensity)
@@ -83,7 +83,8 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 	TSharedPtr<FOctree> InOctree,
 	int InOctreeDepth,
 	float InNoisePower,
-	int InChannel)
+	int InChannel,
+	FVector InWorldOffset)
 {
 	FVector NoiseScale(1, 1, 1);
 	double StartTime = FPlatformTime::Seconds();
@@ -101,7 +102,7 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 	bool bWriteOctree = InOctree.IsValid() && InOctreeDepth > 0;
 
 	// Octree resolution: number of nodes per axis at InOctreeDepth.
-	// Independent of InResolution — we accumulate density from multiple
+	// Independent of InResolution ï¿½ we accumulate density from multiple
 	// texture voxels into each coarser octree node.
 	const int OctreeRes = bWriteOctree ? (1 << InOctreeDepth) : 0;
 	const int VoxelsPerOctreeNode = bWriteOctree ? FMath::Max(1, InResolution / OctreeRes) : 1;
@@ -155,9 +156,12 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 						double wy = -InExtent + (y + 0.5) * VoxelSize;
 						double wz = -InExtent + (z + 0.5) * VoxelSize;
 
-						XCoords[SampleIdx] = (float)(wx * InvExtent * (1.0 / NoiseScale.X));
-						YCoords[SampleIdx] = (float)(wy * InvExtent * (1.0 / NoiseScale.Y));
-						ZCoords[SampleIdx] = (float)(wz * InvExtent * (1.0 / NoiseScale.Z));
+						// Normalize to noise-space [-1, +1] for this volume,
+						// then add the cell's WorldOffset so adjacent cells
+						// sample contiguous regions of the same noise field.
+						XCoords[SampleIdx] = (float)(wx * InvExtent * (1.0 / NoiseScale.X) + InWorldOffset.X);
+						YCoords[SampleIdx] = (float)(wy * InvExtent * (1.0 / NoiseScale.Y) + InWorldOffset.Y);
+						ZCoords[SampleIdx] = (float)(wz * InvExtent * (1.0 / NoiseScale.Z) + InWorldOffset.Z);
 
 						SampleIdx++;
 					}

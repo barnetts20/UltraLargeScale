@@ -184,6 +184,12 @@ public:
 	/// Optionally writes results into an octree at the given depth simultaneously (single pass).
 	/// Parallel chunking at depth-5 boundaries (each depth-5 chunk processes its sub-nodes serially).
 	/// When no octree is provided, produces a standalone volume buffer from noise.
+	///
+	/// InWorldOffset is an additive offset applied to noise sample coordinates
+	/// AFTER normalization (so it's in normalized noise-space units, not world
+	/// units). For a tiled grid of volumes that want to be continuous across
+	/// boundaries, pass `(2 * CellCoord)` so adjacent cells sample contiguous
+	/// regions of the same field. Default zero matches single-volume behavior.
 	/// </summary>
 	static TArray<uint8> SampleNoiseToVolume(
 		FastNoise::SmartNode<> InNoise,
@@ -193,7 +199,8 @@ public:
 		TSharedPtr<FOctree> InOctree = nullptr,
 		int InOctreeDepth = -1,
 		float InNoisePower = 2.0f,
-		int InChannel = 3);
+		int InChannel = 3,
+		FVector InWorldOffset = FVector::ZeroVector);
 #pragma endregion
 
 #pragma region Extract Mip Data From Volume Nodes
