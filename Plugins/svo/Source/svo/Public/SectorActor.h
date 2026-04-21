@@ -269,6 +269,96 @@ protected:
 	double ParallaxRatio = 0.0;
 #pragma endregion
 
+#pragma region Coarse Cluster Streaming
+	// Streams a player-centered 3x3x3 neighborhood of coarse-scale nodes
+	// (each node == one sector's worth of extent today) and feeds their
+	// generated cluster + gas sprite data into two dedicated Niagara
+	// components. Parallel to the Proximity Galaxy Streaming region below —
+	// same pattern (slot pool, double-buffered arrays, OldSet/NewSet diff on
+	// boundary cross, async generation), one tier up.
+	//
+	// Cluster and gas share slot indexing: each coarse node owns one slot
+	// that holds both its cluster sprites and its 1:1 matched gas sprites.
+
+	// --- Configuration ---
+	// Half-width of the active coarse grid (1 = 3x3x3 = 27 nodes). Keep at 1
+	// for now; wider radii multiply streaming work and memory proportionally.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coarse")
+	int32 CoarseNeighborhoodRadius = 1;
+
+	// Slot capacity per coarse node. Each slot reserves this many contiguous
+	// particle entries in the flat packed buffer; unused entries get written
+	// as dead-particle stubs (extent=0, off-screen position). Should be >=
+	// Params.Count so every node's full candidate set fits.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coarse")
+	int32 MaxClusterPerCoarseNode = 500;
+
+	// Resolution of the transient per-node density volume built during
+	// GenerateCoarseNode. 128^3 ≈ 8MB transient, cheap to allocate/free.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coarse")
+	int32 CoarseDensityResolution = 128;
+
+	// --- Slot State (only touched by async task, guarded by bCoarseUpdateInProgress) ---
+	FIntVector CoarseCenterCell = FIntVector(INT32_MIN);
+	TMap<FIntVector, int32> ActiveCoarseNodes;
+	TArray<int32> CoarseFreeSlots;
+	TArray<int32> CoarseSlotCounts;
+
+	// --- Double-Buffered Particle Data ---
+	// Cluster and gas share slot indexing (1:1 per coarse node), so both
+	// live in the same buffer struct and get swapped together.
+	struct FCoarseBuffer
+	{
+		// Cluster arrays (one entry per cluster sprite)
+		TArray<FVector>      ClusterPositions;
+		TArray<FVector>      ClusterRotations;
+		TArray<float>        ClusterExtents;
+		TArray<FLinearColor> ClusterColors;
+
+		// Gas arrays (one entry per gas sprite, 1:1 with cluster)
+		TArray<FVector>      GasPositions;
+		TArray<float>        GasExtents;
+		TArray<FLinearColor> GasColors;
+
+		void Allocate(int32 TotalParticles)
+		{
+			ClusterPositions.SetNumZeroed(TotalParticles);
+			ClusterRotations.SetNumZeroed(TotalParticles);
+			ClusterExtents.SetNumZeroed(TotalParticles);
+			ClusterColors.SetNumZeroed(TotalParticles);
+			GasPositions.SetNumZeroed(TotalParticles);
+			GasExtents.SetNumZeroed(TotalParticles);
+			GasColors.SetNumZeroed(TotalParticles);
+		}
+	};
+
+	FCoarseBuffer CoarseBuffers[2];
+	std::atomic<int32> CoarseFrontIdx{ 0 };
+	std::atomic<bool> bCoarseUpdateInProgress{ false };
+	std::atomic<bool> bCoarseNeedsPush{ false };
+
+	// --- Niagara Components ---
+	// Two universe-level components, one for each layer. Distinct from the
+	// per-layer LayerComponents[] array (which is now vestigial for the
+	// cluster/gas layers) because they have a fundamentally different
+	// lifecycle — streamed buffers, double-buffered, slot-packed — that
+	// doesn't fit the simple init-once LayerData abstraction.
+	UPROPERTY()
+	UNiagaraComponent* CoarseClusterNiagara;
+
+	UPROPERTY()
+	UNiagaraComponent* CoarseGasNiagara;
+
+	// --- Methods ---
+	void InitializeCoarseSystem();
+	void UpdateCoarseNodes();
+	void GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InSlotIndex, FCoarseBuffer& InBuffer);
+	void PushCoarseToNiagara();
+
+	FIntVector PositionToCoarseCoord(const FVector& InWorldPos) const;
+	FVector CoarseCoordToCenter(const FIntVector& InCoord) const;
+#pragma endregion
+
 #pragma region Proximity Galaxy Streaming
 	// --- Configuration ---
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Proximity")
@@ -276,9 +366,6 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Proximity")
 	int32 MaxParticlesPerNode = 2000;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Proximity")
-	int32 RejectionOversampleFactor = 4;
 
 	// --- Slot State (only touched by async task, guarded by bProximityUpdateInProgress) ---
 	FIntVector CurrentScanCoord = FIntVector(INT32_MIN);
