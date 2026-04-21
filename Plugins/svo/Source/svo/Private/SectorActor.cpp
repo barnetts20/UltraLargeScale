@@ -223,8 +223,8 @@ FastNoise::SmartNode<> ASectorActor::BuildNoise(int InSeed) {
 	float clusterRemapMin = 0;
 
 	float webFalloff = 3;
-	float webRemapMin = -.005;
-	float webRemapMax = 1.005;
+	float webRemapMin = -.01;
+	float webRemapMax = 1.000;
 
 	float warpAmp = .25;
 	float warpFreq = 1;
@@ -291,17 +291,22 @@ void ASectorActor::InitializeData()
 	double TotalStart = FPlatformTime::Seconds();
 	double StepStart;
 
-	// Cluster + gas sprite generation has moved out of init into the coarse
-	// streaming tier (see InitializeCoarseSystem / UpdateCoarseNodes). Each
-	// active coarse node builds its own transient density volume during
-	// generation and drops it afterwards.
-	//
-	// HOWEVER: the fine-tier proximity system (GenerateNodeGalaxies) still
-	// reads the sector's member DensityVolume during its rejection sampling,
-	// and the volumetric raymarcher consumes DensityBuffer when enabled. So
-	// we still build the sector-wide density volume here — we just skip the
-	// point-generation / octree-insert / LayerData-populate steps that used
-	// to follow it.
+	// With the coarse streaming tier and fine-tier proximity system both now
+	// sampling noise directly per-candidate (GenerateCoarseNode +
+	// GenerateNodeGalaxies use GenPositionArray3D batches), nothing in the
+	// particle/data pipeline reads the sector-wide DensityVolume anymore.
+	// The only consumer is the debug volumetric raymarcher, which samples the
+	// PseudoVolumeTexture thousands of times per ray and genuinely needs the
+	// GPU-sampled volume texture form. When bEnableVolumetric is false (the
+	// default), skip the entire noise-to-volume + upscale + pseudo-volume
+	// pipeline — it was a ~120ms unconditional cost on every sector init.
+	if (!bEnableVolumetric)
+	{
+		UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeData - volumetric disabled, skipping density volume build (%.3f sec)"),
+			FPlatformTime::Seconds() - TotalStart);
+		return;
+	}
+
 	StepStart = FPlatformTime::Seconds();
 	int noiseResolution = 128;
 
@@ -351,13 +356,9 @@ void ASectorActor::InitializeData()
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
-	// Pseudo-volume texture — only needed for the debug volumetric raymarcher.
-	if (bEnableVolumetric)
-	{
-		StepStart = FPlatformTime::Seconds();
-		PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(FVolumeTextureUtils::PackToPseudoVolumeLayout(DensityBuffer));
-		UE_LOG(LogTemp, Log, TEXT("  [InitData] CreatePseudoVolumeTexture: %.3f sec"), FPlatformTime::Seconds() - StepStart);
-	}
+	StepStart = FPlatformTime::Seconds();
+	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(FVolumeTextureUtils::PackToPseudoVolumeLayout(DensityBuffer));
+	UE_LOG(LogTemp, Log, TEXT("  [InitData] CreatePseudoVolumeTexture: %.3f sec"), FPlatformTime::Seconds() - StepStart);
 
 	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeData total: %.3f sec"), FPlatformTime::Seconds() - TotalStart);
 }
@@ -810,7 +811,15 @@ void ASectorActor::InitializeCoarseSystem()
 	const FVector LocalPlayerPos = PlayerPos - GetActorLocation();
 	CoarseCenterCell = PositionToCoarseCoord(LocalPlayerPos);
 
+	// Two-phase gen matching UpdateCoarseNodes: serial slot allocation, then
+	// parallel GenerateCoarseNode over the allocated pairs. The serial step
+	// is necessary because CoarseFreeSlots / ActiveCoarseNodes aren't
+	// threadsafe; the parallel step is the expensive one (noise sampling per
+	// cell dominates) and each cell writes to a disjoint slot-indexed slice
+	// of InitBuffer, so no contention.
 	FCoarseBuffer& InitBuffer = CoarseBuffers[0];
+	TArray<TPair<FIntVector, int32>> ToGenerate;
+	ToGenerate.Reserve(Side * Side * Side);
 	for (int32 dz = -CoarseNeighborhoodRadius; dz <= CoarseNeighborhoodRadius; ++dz)
 	{
 		for (int32 dy = -CoarseNeighborhoodRadius; dy <= CoarseNeighborhoodRadius; ++dy)
@@ -820,10 +829,16 @@ void ASectorActor::InitializeCoarseSystem()
 				const FIntVector NeighborCoord = CoarseCenterCell + FIntVector(dx, dy, dz);
 				const int32 SlotIndex = CoarseFreeSlots.Pop();
 				ActiveCoarseNodes.Add(NeighborCoord, SlotIndex);
-				GenerateCoarseNode(NeighborCoord, SlotIndex, InitBuffer);
+				ToGenerate.Emplace(NeighborCoord, SlotIndex);
 			}
 		}
 	}
+
+	ParallelFor(ToGenerate.Num(), [this, &ToGenerate, &InitBuffer](int32 i)
+		{
+			const TPair<FIntVector, int32>& Pair = ToGenerate[i];
+			GenerateCoarseNode(Pair.Key, Pair.Value, InitBuffer);
+		}, EParallelForFlags::BackgroundPriority);
 
 	// Mirror front → back so either buffer is a valid starting state for
 	// the first boundary-cross update.
@@ -1048,7 +1063,21 @@ void ASectorActor::UpdateCoarseNodes()
 				}
 			}
 
-			// Generate entering nodes into the back buffer.
+			// Generate entering nodes into the back buffer. Two-phase:
+			//
+			//   (1) Serial pass: pop slots and record (Coord, SlotIndex) pairs.
+			//       CoarseFreeSlots and ActiveCoarseNodes are shared state and
+			//       neither is threadsafe, so slot allocation cannot race.
+			//
+			//   (2) Parallel pass: run GenerateCoarseNode on the pairs. Each
+			//       call writes to a disjoint slice of BackBuffer (slot-
+			//       indexed, non-overlapping) and independently builds its own
+			//       FastNoise graph via BuildNoise, so no shared state needs
+			//       guarding. SampleNoiseToVolume has its own inner ParallelFor
+			//       — nested parallelism is fine here, the outer loop just
+			//       dominates available cores.
+			TArray<TPair<FIntVector, int32>> ToGenerate;
+			ToGenerate.Reserve(EnteringNodes.Num());
 			for (const FIntVector& Coord : EnteringNodes)
 			{
 				if (CoarseFreeSlots.Num() == 0)
@@ -1059,8 +1088,14 @@ void ASectorActor::UpdateCoarseNodes()
 				}
 				const int32 SlotIndex = CoarseFreeSlots.Pop();
 				ActiveCoarseNodes.Add(Coord, SlotIndex);
-				GenerateCoarseNode(Coord, SlotIndex, BackBuffer);
+				ToGenerate.Emplace(Coord, SlotIndex);
 			}
+
+			ParallelFor(ToGenerate.Num(), [this, &ToGenerate, &BackBuffer](int32 i)
+				{
+					const TPair<FIntVector, int32>& Pair = ToGenerate[i];
+					GenerateCoarseNode(Pair.Key, Pair.Value, BackBuffer);
+				}, EParallelForFlags::BackgroundPriority);
 
 			// Atomic buffer swap.
 			CoarseFrontIdx.store(BackIdx);
@@ -1074,101 +1109,117 @@ void ASectorActor::UpdateCoarseNodes()
 
 void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InSlotIndex, FCoarseBuffer& InBuffer)
 {
-	// Mirrors GenerateNodeGalaxies exactly — same inline accept/reject loop,
-	// same slot layout, same dead-stub tail. The only differences:
-	//   - Operates on a fresh density volume scoped to this coarse cell,
-	//     built with a coord-derived noise offset so adjacent cells produce
-	//     a continuous field.
-	//   - Writes both cluster and gas entries per accepted point (1:1).
-	//   - Uses cluster scale range (MinClusterScale/MaxClusterScale) instead
-	//     of galaxy scale range.
+	// Direct batched noise sampling — no transient density volume. Same
+	// pattern as GenerateNodeGalaxies:
+	//   Phase 1: generate all candidate positions + their normalized noise
+	//            coords (with coord-derived offset baked in).
+	//   Phase 2: one GenPositionArray3D call covering all candidates.
+	//   Phase 3: walk results, rejection-gate, write accepted to slot buffer.
+	//
+	// Why no volume: rejection sampling reads density exactly MaxClusterPer-
+	// CoarseNode times (500 currently). Building a 128³ = 2M voxel volume as
+	// a lookup structure to serve 500 reads was pure waste — ~8MB alloc per
+	// cell, serialized into the stream, and most voxels never sampled. The
+	// FastNoise batch path evaluates noise at exactly the points we actually
+	// care about. Volume textures stay relevant only for raymarching consumers
+	// (see InitializeData + bEnableVolumetric), which sample the same field
+	// thousands of times per frame at arbitrary positions.
+	//
+	// Differences from GenerateNodeGalaxies:
+	//   - Candidates are cell-local [-Extent, +Extent] instead of scan-node-
+	//     local — coarse cells are the outer unit here, not a child of one.
+	//   - Noise offset is InCoarseCoord * 2.0 directly; no per-candidate
+	//     coarse-cell lookup since every candidate shares this node's coord.
+	//   - Per accepted point: writes both a cluster and a gas entry (1:1
+	//     matched), gas extent lerped by the same density value we rejection-
+	//     gated against.
 
 	const int32 BufferStart = InSlotIndex * MaxClusterPerCoarseNode;
 	const FVector NodeCenter = CoarseCoordToCenter(InCoarseCoord);
 
-	// --- Build transient density volume for this coarse cell ---
-	// NoiseOffset shifts the sampling so cell N aligns with cell N+1 in
-	// continuous noise space (each cell covers [-1,+1] normalized → offset
-	// by 2*Coord). Same pattern InitializeData uses for a single sector.
-	auto DensityNoise = BuildNoise(69);
-	const FVector NoiseOffset(
-		static_cast<double>(InCoarseCoord.X) * 2.0,
-		static_cast<double>(InCoarseCoord.Y) * 2.0,
-		static_cast<double>(InCoarseCoord.Z) * 2.0);
-
-	TArray<uint8> NodeDensityBuffer = FVolumeTextureUtils::SampleNoiseToVolume(
-		DensityNoise,
-		Params.Seed,
-		CoarseDensityResolution,
-		Params.Extent,
-		nullptr,
-		-1,
-		1.0f,
-		3,
-		NoiseOffset);
-
-	FDensityVolume NodeDensityVolume(
-		NodeDensityBuffer,
-		FVector::ZeroVector,
-		FVector(Params.Extent, Params.Extent, Params.Extent),
-		CoarseDensityResolution);
-
-	// --- Seeded stream for this cell ---
-	// Coord-hashed so the same coord always produces the same points even
-	// across re-entries; pattern matches GenerateNodeGalaxies.
-	int32 CoordHash = HashCombine(
+	const int32 CoordHash = HashCombine(
 		HashCombine(GetTypeHash(InCoarseCoord.X), GetTypeHash(InCoarseCoord.Y)),
 		GetTypeHash(InCoarseCoord.Z));
-	int32 NodeSeed = HashCombine(Params.Seed, CoordHash);
+	const int32 NodeSeed = HashCombine(Params.Seed, CoordHash);
 	FRandomStream Stream(NodeSeed);
 
 	const float ExtentRange = GasMaxExtent - GasMinExtent;
-
-	// Candidate count equals slot capacity. The actual accepted count is
-	// whatever density lets through — that's the point: particle count
-	// directly reflects the density field. If a cell wants more particles,
-	// increase MaxClusterPerCoarseNode, not an oversample factor.
-	int32 ActualCount = 0;
 	const int32 NumCandidates = MaxClusterPerCoarseNode;
+	const double InvExtent = 1.0 / (double)Params.Extent;
+
+	// Coord-derived noise offset — every candidate in this cell gets the same
+	// offset applied, unlike GenerateNodeGalaxies where a scan node can
+	// straddle coarse cell boundaries.
+	const double NoiseOffsetX = (double)InCoarseCoord.X * 2.0;
+	const double NoiseOffsetY = (double)InCoarseCoord.Y * 2.0;
+	const double NoiseOffsetZ = (double)InCoarseCoord.Z * 2.0;
+
+	// --- Phase 1: generate candidates + normalized noise coords ---
+	TArray<FVector> CandidatePositions;
+	TArray<float> NoiseX, NoiseY, NoiseZ;
+	CandidatePositions.SetNumUninitialized(NumCandidates);
+	NoiseX.SetNumUninitialized(NumCandidates);
+	NoiseY.SetNumUninitialized(NumCandidates);
+	NoiseZ.SetNumUninitialized(NumCandidates);
 
 	for (int32 i = 0; i < NumCandidates; ++i)
 	{
-		// Candidate in cell-local space [-Extent, +Extent].
-		FVector Candidate(
+		// Cell-local candidate in [-Extent, +Extent].
+		const FVector Candidate(
 			Stream.FRandRange(-(double)Params.Extent, (double)Params.Extent),
 			Stream.FRandRange(-(double)Params.Extent, (double)Params.Extent),
 			Stream.FRandRange(-(double)Params.Extent, (double)Params.Extent));
+		CandidatePositions[i] = Candidate;
 
-		// Density rejection, same pattern as GenerateNodeGalaxies. Candidate
-		// is cell-local; density volume is also cell-local (noise offset was
-		// applied at sample time, not at query time).
-		float Density = NodeDensityVolume.SampleDensityAtLocalPos(Candidate, 3);
+		NoiseX[i] = (float)(Candidate.X * InvExtent + NoiseOffsetX);
+		NoiseY[i] = (float)(Candidate.Y * InvExtent + NoiseOffsetY);
+		NoiseZ[i] = (float)(Candidate.Z * InvExtent + NoiseOffsetZ);
+	}
+
+	// --- Phase 2: batch noise evaluation ---
+	auto DensityNoise = BuildNoise(69);
+	TArray<float> NoiseOut;
+	NoiseOut.SetNumUninitialized(NumCandidates);
+	DensityNoise->GenPositionArray3D(
+		NoiseOut.GetData(),
+		NumCandidates,
+		NoiseX.GetData(),
+		NoiseY.GetData(),
+		NoiseZ.GetData(),
+		0.0f, 0.0f, 0.0f,
+		Params.Seed);
+
+	NoiseX.Empty();
+	NoiseY.Empty();
+	NoiseZ.Empty();
+
+	// --- Phase 3: accept/reject + write to slot ---
+	int32 ActualCount = 0;
+	for (int32 i = 0; i < NumCandidates; ++i)
+	{
+		const float Density = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
 		if (Stream.FRand() > Density) continue;
 
-		// Cluster scale pick, same curve-driven sample as
-		// UniverseDataGenerator::GenerateDataInternal used.
-		float ScaleSample = Stream.FRand();
-		double Scale = FPointData::SampleScaleFromDistribution(
+		// Cluster scale pick — stable curve-driven sample per-object.
+		const float ScaleSample = Stream.FRand();
+		const double Scale = FPointData::SampleScaleFromDistribution(
 			Params.MinClusterScale,
 			Params.MaxClusterScale,
 			ScaleSample, Params.ScaleDistributionCurve);
 
 		FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
-		double ExtentAtDepth = (double)Params.Extent / (double)(1 << PointData.InsertDepth);
-		float ClusterExtent = static_cast<float>(ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
+		const double ExtentAtDepth = (double)Params.Extent / (double)(1 << PointData.InsertDepth);
+		const float ClusterExtent = static_cast<float>(ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
 
-		// Composition / rotation — stable random per-object for rotation so
-		// cluster sprites don't flicker on re-entry.
-		FVector CompVec = Stream.GetUnitVector();
-		FVector Rotation = Stream.GetUnitVector();
+		const FVector CompVec = Stream.GetUnitVector();
+		const FVector Rotation = Stream.GetUnitVector();
 
-		// Gas extent lerped by density at the accepted position.
-		float GasExtent = GasMinExtent + ExtentRange * Density;
+		// Gas extent lerped by the same density we gated against.
+		const float GasExtent = GasMinExtent + ExtentRange * Density;
 
-		// Sector-actor-local position for the sprite (cell-local candidate
-		// offset + cell center, both in sector-local space). The push pass
-		// converts to player-relative: Local + ActorPos - PlayerPos.
-		const FVector LocalPos = Candidate + NodeCenter;
+		// Sector-actor-local position. The push pass converts to player-
+		// relative: Local + ActorPos - PlayerPos.
+		const FVector LocalPos = CandidatePositions[i] + NodeCenter;
 
 		const int32 Idx = BufferStart + ActualCount;
 		InBuffer.ClusterPositions[Idx] = LocalPos;
@@ -1183,7 +1234,7 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InS
 		ActualCount++;
 	}
 
-	// Dead particles — offscreen — same pattern as GenerateNodeGalaxies.
+	// Dead particles — offscreen.
 	const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
 	for (int32 i = ActualCount; i < MaxClusterPerCoarseNode; ++i)
 	{
@@ -1324,6 +1375,9 @@ void ASectorActor::InitializeProximitySystem()
 
 	FProximityBuffer& InitBuffer = ProximityBuffers[0];
 
+	// Two-phase gen, same pattern as the coarse tier and UpdateProximityNodes.
+	TArray<TPair<FIntVector, int32>> ToGenerate;
+	ToGenerate.Reserve(27);
 	for (int32 dz = -1; dz <= 1; ++dz)
 	{
 		for (int32 dy = -1; dy <= 1; ++dy)
@@ -1336,10 +1390,16 @@ void ASectorActor::InitializeProximitySystem()
 
 				int32 SlotIndex = FreeSlots.Pop();
 				ActiveNodeSlots.Add(NeighborCoord, SlotIndex);
-				GenerateNodeGalaxies(NeighborCoord, SlotIndex, InitBuffer);
+				ToGenerate.Emplace(NeighborCoord, SlotIndex);
 			}
 		}
 	}
+
+	ParallelFor(ToGenerate.Num(), [this, &ToGenerate, &InitBuffer](int32 i)
+		{
+			const TPair<FIntVector, int32>& Pair = ToGenerate[i];
+			GenerateNodeGalaxies(Pair.Key, Pair.Value, InitBuffer);
+		}, EParallelForFlags::BackgroundPriority);
 
 	// Copy front to back so both start identical
 	ProximityBuffers[1].Positions = ProximityBuffers[0].Positions;
@@ -1507,7 +1567,14 @@ void ASectorActor::UpdateProximityNodes()
 				}
 			}
 
-			// Generate entering nodes into back buffer
+			// Generate entering nodes into back buffer. Two-phase, same
+			// pattern as UpdateCoarseNodes: serial slot allocation first
+			// (FreeSlots / ActiveNodeSlots aren't threadsafe), then parallel
+			// GenerateNodeGalaxies. Per-cell GenerateNodeGalaxies writes to a
+			// disjoint slot-indexed slice of BackBuffer and allocates its own
+			// transient noise + candidate arrays, so no shared state.
+			TArray<TPair<FIntVector, int32>> ToGenerate;
+			ToGenerate.Reserve(EnteringNodes.Num());
 			for (const FIntVector& Coord : EnteringNodes)
 			{
 				if (FreeSlots.Num() == 0)
@@ -1518,8 +1585,14 @@ void ASectorActor::UpdateProximityNodes()
 
 				int32 SlotIndex = FreeSlots.Pop();
 				ActiveNodeSlots.Add(Coord, SlotIndex);
-				GenerateNodeGalaxies(Coord, SlotIndex, BackBuffer);
+				ToGenerate.Emplace(Coord, SlotIndex);
 			}
+
+			ParallelFor(ToGenerate.Num(), [this, &ToGenerate, &BackBuffer](int32 i)
+				{
+					const TPair<FIntVector, int32>& Pair = ToGenerate[i];
+					GenerateNodeGalaxies(Pair.Key, Pair.Value, BackBuffer);
+				}, EParallelForFlags::BackgroundPriority);
 
 			// Atomic swap: back becomes front
 			FrontBufferIndex.store(BackIdx);

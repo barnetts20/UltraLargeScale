@@ -293,11 +293,6 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coarse")
 	int32 MaxClusterPerCoarseNode = 500;
 
-	// Resolution of the transient per-node density volume built during
-	// GenerateCoarseNode. 128^3 ≈ 8MB transient, cheap to allocate/free.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coarse")
-	int32 CoarseDensityResolution = 128;
-
 	// --- Slot State (only touched by async task, guarded by bCoarseUpdateInProgress) ---
 	FIntVector CoarseCenterCell = FIntVector(INT32_MIN);
 	TMap<FIntVector, int32> ActiveCoarseNodes;
