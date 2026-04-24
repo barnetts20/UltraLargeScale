@@ -1,4 +1,4 @@
-// Fill out your copyright notice in the Description page of Project Settings.
+﻿// Fill out your copyright notice in the Description page of Project Settings.
 
 #pragma once
 
@@ -7,6 +7,58 @@
 #include "ProceduralSpaceActor.h"
 #include "FVolumeTextureUtils.h"
 #include "UniverseDataGenerator.generated.h"
+
+/// Noise‑graph tuning knobs consumed by ASectorActor::BuildNoise().
+/// Defaults reproduce the original hardcoded values.
+USTRUCT(BlueprintType)
+struct SVO_API FNoiseParams
+{
+	GENERATED_BODY()
+
+	// Overall domain scale applied to the Voronoi source.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float MasterScale = 1.0f;
+
+	// Cluster falloff exponent (PowInt value on the remapped Voronoi FBM).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float ClusterFalloff = 32.0f;
+
+	// Domain scale applied after the cluster power curve.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float ClusterScale = 3.0f;
+
+	// Multiplier on the cluster × web product.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float ClusterMulti = 50.0f;
+
+	// Remap output max for the cluster branch (min→max swap in FastNoise Remap).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float ClusterRemapMax = 1.001f;
+
+	// Remap output min for the cluster branch.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float ClusterRemapMin = 0.0f;
+
+	// Web (filament) falloff exponent.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float WebFalloff = 3.0f;
+
+	// Web remap output min.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float WebRemapMin = -0.1f;
+
+	// Web remap output max.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float WebRemapMax = 1.0f;
+
+	// Domain warp amplitude.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float WarpAmp = 0.25f;
+
+	// Domain warp frequency.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float WarpFreq = 1.0f;
+};
 
 /// <summary>
 /// UNIVERSE GENERATION PARAM STRUCT
@@ -35,6 +87,9 @@ struct SVO_API FUniverseParams : public FBaseParams {
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
 	double Jitter = .02;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	FNoiseParams NoiseParams;
 
 	static constexpr const char* EncodedTree = "EAAAAIA/GQAbABsAEwAAAEBAJAAgAAAAFwAAAAAAAACAP8UggD8AAAAADQADAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAAEXAAAAAAAAAIA/zcxMvQAAgD8kAAIAAAD//wEAAAAASEIB//8GAAAAAIA+";
 
@@ -76,7 +131,7 @@ public:
 
 	// Preferred entry point: uses a pre-built CPU-side density volume for
 	// rejection sampling instead of going through the octree. The octree is
-	// no longer required at generation time � point insertion into the octree
+	// no longer required at generation time — point insertion into the octree
 	// (if desired) happens downstream via BulkInsertPositions.
 	void GenerateData(const FDensityVolume& InDensityVolume);
 

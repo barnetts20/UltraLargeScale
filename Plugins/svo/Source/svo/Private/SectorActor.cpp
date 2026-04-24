@@ -125,75 +125,46 @@ void ASectorActor::InitializeChildPool()
 }
 
 FastNoise::SmartNode<> ASectorActor::BuildNoise(int InSeed) {
-	//Param staging TODO: Wrap in noise param struct
-	float masterScale = 1;
-	float clusterFalloff = 32;
-	float clusterScale = 3;
-	float clusterMulti = 50;
-	float clusterRemapMax = 1.001;
-	float clusterRemapMin = 0;
-
-	float webFalloff = 3;
-	float webRemapMin = -.1;
-	float webRemapMax = 1.000;
-
-	float warpAmp = .25;
-	float warpFreq = 1;
-	//end param
-
 	auto Voronoi = FastNoise::New<FastNoise::CellularDistance>();
 	Voronoi->SetDistanceFunction(FastNoise::DistanceFunction::EuclideanSquared);
 	Voronoi->SetReturnType(FastNoise::CellularDistance::ReturnType::Index0);
-
 	auto SeedOffset = FastNoise::New<FastNoise::SeedOffset>();
 	SeedOffset->SetSource(Voronoi);
 	SeedOffset->SetOffset(InSeed);
-
 	auto DomainScale = FastNoise::New<FastNoise::DomainScale>();
 	DomainScale->SetSource(SeedOffset);
-	DomainScale->SetScale(masterScale);
-
+	DomainScale->SetScale(Params.NoiseParams.MasterScale);
 	auto Fbm0 = FastNoise::New<FastNoise::FractalFBm>();
 	Fbm0->SetSource(DomainScale);
 	Fbm0->SetOctaveCount(3);
-
 	auto Remap0 = FastNoise::New<FastNoise::Remap>();
 	Remap0->SetSource(Fbm0);
-	Remap0->SetRemap(0, 1, clusterRemapMax, clusterRemapMin);
-
+	Remap0->SetRemap(0, 1, Params.NoiseParams.ClusterRemapMax, Params.NoiseParams.ClusterRemapMin);
 	auto Pow0 = FastNoise::New<FastNoise::PowInt>();
 	Pow0->SetValue(Remap0);
-	Pow0->SetPow(clusterFalloff);
-
+	Pow0->SetPow(Params.NoiseParams.ClusterFalloff);
 	auto Scale0 = FastNoise::New<FastNoise::DomainScale>();
 	Scale0->SetSource(Pow0);
-	Scale0->SetScale(clusterScale);
-
+	Scale0->SetScale(Params.NoiseParams.ClusterScale);
 	auto Pow1 = FastNoise::New<FastNoise::PowInt>();
 	Pow1->SetValue(Fbm0);
-	Pow1->SetPow(webFalloff);
-
+	Pow1->SetPow(Params.NoiseParams.WebFalloff);
 	auto Mul0 = FastNoise::New<FastNoise::Multiply>();
 	Mul0->SetLHS(Scale0);
 	Mul0->SetRHS(Pow1);
-
 	auto Mul1 = FastNoise::New<FastNoise::Multiply>();
 	Mul1->SetLHS(Mul0);
-	Mul1->SetRHS(clusterMulti);
-
+	Mul1->SetRHS(Params.NoiseParams.ClusterMulti);
 	auto Remap1 = FastNoise::New<FastNoise::Remap>();
 	Remap1->SetSource(Pow1);
-	Remap1->SetRemap(0, 1, webRemapMin, webRemapMax);
-
+	Remap1->SetRemap(0, 1, Params.NoiseParams.WebRemapMin, Params.NoiseParams.WebRemapMax);
 	auto Add0 = FastNoise::New<FastNoise::Add>();
 	Add0->SetLHS(Remap1);
 	Add0->SetRHS(Mul1);
-
 	auto Warp0 = FastNoise::New<FastNoise::DomainWarpGradient>();
 	Warp0->SetSource(Add0);
-	Warp0->SetWarpAmplitude(warpAmp);
-	Warp0->SetWarpFrequency(warpFreq);
-
+	Warp0->SetWarpAmplitude(Params.NoiseParams.WarpAmp);
+	Warp0->SetWarpFrequency(Params.NoiseParams.WarpFreq);
 	return Warp0;
 }
 
