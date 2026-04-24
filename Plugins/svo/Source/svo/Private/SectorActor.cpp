@@ -8,161 +8,63 @@
 #include <NiagaraFunctionLibrary.h>
 #pragma endregion
 
-#pragma region FSectorNiagaraLayerData
-void FSectorNiagaraLayerData::PopulateFromPointNodes(
-	const TArray<TSharedPtr<FOctreeNode>>& InPointNodes,
-	UNiagaraSystem* InSystemAsset,
-	FName InLayerName,
-	FVector InWorldOffset)
-{
-	SystemAsset = InSystemAsset;
-	LayerName = InLayerName;
-
-	const int32 Num = InPointNodes.Num();
-	Positions.SetNumUninitialized(Num);
-	Rotations.SetNumUninitialized(Num);
-	Extents.SetNumUninitialized(Num);
-	Colors.SetNumUninitialized(Num);
-
-	// Mirror of the old per-node array build that ran inline in
-	// ASectorActor::InitializeData before layer extraction. Per-point
-	// rotation is derived from a random stream seeded on ObjectId so the
-	// rotation is stable across runs of the same sector. WorldOffset shifts
-	// every position by the sector's cell origin so multi-sector grids
-	// render at the correct world location.
-	ParallelFor(Num, [&](int32 Index)
-		{
-			const TSharedPtr<FOctreeNode>& Node = InPointNodes[Index];
-			FRandomStream RandStream(Node->Data.ObjectId);
-
-			Positions[Index] = Node->Center + InWorldOffset;
-			Rotations[Index] = RandStream.GetUnitVector();
-			Extents[Index] = static_cast<float>(Node->Extent * (1.0 + Node->Data.ScaleFactor));
-			Colors[Index] = FLinearColor(Node->Data.Composition);
-		}, EParallelForFlags::BackgroundPriority);
-}
-#pragma endregion
-
-#pragma region FSectorNiagaraLayerData::PopulateFromDensityVolume
-void FSectorNiagaraLayerData::PopulateFromDensityVolume(
-	const FDensityVolume& InDensityVolume,
-	double InSectorExtent,
-	int32 InSampleCount,
-	float InMinExtent,
-	float InMaxExtent,
-	int32 InSeed,
-	UNiagaraSystem* InSystemAsset,
-	FName InLayerName,
-	FVector InWorldOffset)
-{
-	SystemAsset = InSystemAsset;
-	LayerName = InLayerName;
-
-	if (InSampleCount <= 0 || !InDensityVolume.IsValid())
-	{
-		Positions.Empty();
-		Rotations.Empty();
-		Extents.Empty();
-		Colors.Empty();
-		return;
-	}
-
-	// Allocate worst-case (every candidate accepted). We trim to the actual
-	// accepted count after the parallel pass via SetNum.
-	Positions.SetNumUninitialized(InSampleCount);
-	Rotations.SetNumUninitialized(InSampleCount);
-	Extents.SetNumUninitialized(InSampleCount);
-	Colors.SetNumUninitialized(InSampleCount);
-
-	std::atomic<int32> WriteIdx{ 0 };
-	const float ExtentRange = InMaxExtent - InMinExtent;
-
-	ParallelFor(InSampleCount, [&](int32 i)
-		{
-			// Per-candidate deterministic stream — same sector seed + candidate
-			// index always produces the same accept/reject + position. Lets
-			// re-init reproduce the same gas pattern.
-			FRandomStream Stream(HashCombine(InSeed, GetTypeHash(i)));
-
-			const FVector Candidate(
-				Stream.FRandRange(-InSectorExtent, InSectorExtent),
-				Stream.FRandRange(-InSectorExtent, InSectorExtent),
-				Stream.FRandRange(-InSectorExtent, InSectorExtent)
-			);
-
-			// Density is sampled in sector-local space (the candidate position
-			// pre-offset). World offset is added to the output only.
-			const float Density = InDensityVolume.SampleDensityAtLocalPos(Candidate, 3);
-			if (Stream.FRand() > Density) return; // rejected
-
-			const int32 Slot = WriteIdx.fetch_add(1, std::memory_order_relaxed);
-			Positions[Slot] = Candidate + InWorldOffset;
-			Rotations[Slot] = FVector::ZeroVector; // gas is billboard / radially symmetric
-			Extents[Slot] = InMinExtent + ExtentRange * Density;
-			Colors[Slot] = FLinearColor(1.0f, 1.0f, 1.0f, Density);
-		}, EParallelForFlags::BackgroundPriority);
-
-	const int32 FinalCount = WriteIdx.load(std::memory_order_relaxed);
-	Positions.SetNum(FinalCount, /*bAllowShrinking=*/ false);
-	Rotations.SetNum(FinalCount, /*bAllowShrinking=*/ false);
-	Extents.SetNum(FinalCount,   /*bAllowShrinking=*/ false);
-	Colors.SetNum(FinalCount,    /*bAllowShrinking=*/ false);
-}
-#pragma endregion
-
-#pragma region FSectorNiagaraLayerData::PopulateGasFromPointNodes
-void FSectorNiagaraLayerData::PopulateGasFromPointNodes(
-	const TArray<TSharedPtr<FOctreeNode>>& InPointNodes,
-	const FDensityVolume& InDensityVolume,
-	float InMinExtent,
-	float InMaxExtent,
-	UNiagaraSystem* InSystemAsset,
-	FName InLayerName,
-	FVector InWorldOffset)
-{
-	SystemAsset = InSystemAsset;
-	LayerName = InLayerName;
-
-	const int32 Num = InPointNodes.Num();
-	Positions.SetNumUninitialized(Num);
-	Rotations.SetNumUninitialized(Num);
-	Extents.SetNumUninitialized(Num);
-	Colors.SetNumUninitialized(Num);
-
-	const float ExtentRange = InMaxExtent - InMinExtent;
-	const bool bHasDensity = InDensityVolume.IsValid();
-
-	// Co-locate gas sprites with the cluster-scale points. Density is
-	// resampled at each node's sector-local center so the gas sprite's extent
-	// scales with how "thick" the region it sits in is — the cluster path
-	// already gated acceptance on density, so samples here should generally
-	// be non-zero, but we still clamp to handle any edge cases at the volume
-	// boundary.
-	ParallelFor(Num, [&](int32 Index)
-		{
-			const TSharedPtr<FOctreeNode>& Node = InPointNodes[Index];
-			const FVector LocalPos = Node->Center;
-
-			const float Density = bHasDensity
-				? FMath::Clamp(InDensityVolume.SampleDensityAtLocalPos(LocalPos, 3), 0.0f, 1.0f)
-				: 1.0f;
-
-			Positions[Index] = LocalPos + InWorldOffset;
-			Rotations[Index] = FVector::ZeroVector;
-			Extents[Index] = InMinExtent + ExtentRange * Density;
-			Colors[Index] = FLinearColor(1.0f, 1.0f, 1.0f, Density);
-		}, EParallelForFlags::BackgroundPriority);
-}
-#pragma endregion
-
 #pragma region Constructor
 ASectorActor::ASectorActor()
 {
+	PrimaryActorTick.bCanEverTick = true;
+	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent")));
+
 	SectorGalaxyCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/NG_SectorParallaxCloud.NG_SectorParallaxCloud"));
 	SectorClusterCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorClusterCloud.NG_SectorClusterCloud"));
 	SectorGasCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorGasCloud.NG_SectorGasCloud"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
 	Octree = MakeShared<FOctree>(Params.Extent);
+}
+#pragma endregion
+
+#pragma region Lifecycle
+// Copied locally from the former AProceduralSpaceActor base. Same async-init
+// pattern: InitializeChildPool → InitializeData → InitializeVolumetric →
+// InitializeNiagara, checking InitializationState == Pooling between each step
+// so a ResetForPool mid-init short-circuits cleanly.
+void ASectorActor::Initialize()
+{
+	InitializationState = ELifecycleState::Initializing;
+
+	if (const auto* World = GetWorld())
+	{
+		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
+		{
+			if (APawn* Pawn = Controller->GetPawn())
+			{
+				LastFrameOfReferenceLocation = Pawn->GetActorLocation();
+				CurrentFrameOfReferenceLocation = LastFrameOfReferenceLocation;
+			}
+		}
+	}
+
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this]()
+		{
+			double StartTime = FPlatformTime::Seconds();
+
+			InitializeChildPool();
+			if (InitializationState == ELifecycleState::Pooling) return;
+
+			InitializeData();
+			if (InitializationState == ELifecycleState::Pooling) return;
+
+			InitializeVolumetric();
+			if (InitializationState == ELifecycleState::Pooling) return;
+
+			InitializeNiagara();
+			if (InitializationState == ELifecycleState::Pooling) return;
+
+			InitializationState = ELifecycleState::Ready;
+
+			double TotalDuration = FPlatformTime::Seconds() - StartTime;
+			UE_LOG(LogTemp, Log, TEXT("%s::Initialize total duration: %.3f seconds"),
+				*GetClass()->GetName(), TotalDuration);
+		});
 }
 #pragma endregion
 
@@ -407,164 +309,58 @@ void ASectorActor::InitializeVolumetric()
 
 void ASectorActor::InitializeNiagara()
 {
+	// With FSectorNiagaraLayerData / LayerComponents gone, InitializeNiagara
+	// is now just a dispatcher for the two streaming subsystems. Both own
+	// their own Niagara components, their own double-buffered particle state,
+	// and their own initial-population + spawn-component + push + activate
+	// sequence. Ordering between them is not significant — neither reads the
+	// other's state.
 	double StartTime = FPlatformTime::Seconds();
 
-	// Resolve the player's current position once — used as the initial
-	// origin for relative-space particle data across all layers. Running on
-	// whatever thread we're already on; GetPlayerController is thread-safe
-	// enough for this read-only usage (layers re-sync on first tick anyway).
-	FVector PlayerPos = FVector::ZeroVector;
-	if (auto* Controller = UGameplayStatics::GetPlayerController(GetWorld(), 0))
-	{
-		if (APawn* Pawn = Controller->GetPawn())
-		{
-			PlayerPos = Pawn->GetActorLocation();
-		}
-	}
-
-	// LayerComponents stays index-parallel with LayerData. Reserve up front;
-	// entries get written from the game thread during the spawn phase.
-	LayerComponents.SetNum(LayerData.Num());
-
-	// ---- Phase 1 (game thread): spawn one UNiagaraComponent per layer. ----
-	// Components must be spawned on the game thread and attached to the
-	// sector root. SetSystemFixedBounds / location are set here too so the
-	// engine has a valid bounds immediately.
-	TPromise<void> SpawnPromise;
-	TFuture<void>  SpawnFuture = SpawnPromise.GetFuture();
-	TWeakObjectPtr<ASectorActor> WeakSelf(this);
-	AsyncTask(ENamedThreads::GameThread,
-		[WeakSelf, PlayerPos, SpawnPromise = MoveTemp(SpawnPromise)]() mutable
-		{
-			ASectorActor* Self = WeakSelf.Get();
-			if (!Self)
-			{
-				SpawnPromise.SetValue();
-				return;
-			}
-
-			for (int32 i = 0; i < Self->LayerData.Num(); ++i)
-			{
-				const FSectorNiagaraLayerData& Layer = Self->LayerData[i];
-				if (!Layer.SystemAsset)
-				{
-					UE_LOG(LogTemp, Warning, TEXT("ASectorActor::InitializeNiagara: layer %d (%s) has no SystemAsset, skipping"),
-						i, *Layer.LayerName.ToString());
-					continue;
-				}
-
-				UNiagaraComponent* Comp = UNiagaraFunctionLibrary::SpawnSystemAttached(
-					Layer.SystemAsset,
-					Self->GetRootComponent(),
-					NAME_None,
-					FVector::ZeroVector,
-					FRotator::ZeroRotator,
-					EAttachLocation::SnapToTarget,
-					/*bAutoDestroy=*/ true,
-					/*bAutoActivate=*/ false);
-
-				if (!Comp) continue;
-
-				Comp->SetSystemFixedBounds(FBox(FVector(-Self->Params.Extent), FVector(Self->Params.Extent)));
-				Comp->TranslucencySortPriority = 0;
-				Comp->SetWorldLocation(PlayerPos);
-
-				Self->LayerComponents[i] = Comp;
-			}
-
-			SpawnPromise.SetValue();
-		});
-	SpawnFuture.Wait();
-
-	// ---- Phase 2 (background): build relative positions and push User.* arrays. ----
-	// Particles live in sector-relative space so positions get offset by the
-	// initial player position before being pushed to Niagara.
-	TPromise<void> PushPromise;
-	TFuture<void>  PushFuture = PushPromise.GetFuture();
-	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask,
-		[WeakSelf, PlayerPos, PushPromise = MoveTemp(PushPromise)]() mutable
-		{
-			ASectorActor* Self = WeakSelf.Get();
-			if (!Self)
-			{
-				PushPromise.SetValue();
-				return;
-			}
-
-			for (int32 i = 0; i < Self->LayerData.Num(); ++i)
-			{
-				UNiagaraComponent* Comp = Self->LayerComponents[i].Get();
-				if (!Comp) continue;
-
-				const FSectorNiagaraLayerData& Layer = Self->LayerData[i];
-
-				TArray<FVector> RelativePositions;
-				const int32 Num = Layer.Positions.Num();
-				RelativePositions.SetNumUninitialized(Num);
-				ParallelFor(Num, [&](int32 j)
-					{
-						RelativePositions[j] = Layer.Positions[j] - PlayerPos;
-					}, EParallelForFlags::BackgroundPriority);
-
-				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
-					Comp, FName("User.Positions"), RelativePositions);
-				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
-					Comp, FName("User.Rotations"), Layer.Rotations);
-				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(
-					Comp, FName("User.Colors"), Layer.Colors);
-				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(
-					Comp, FName("User.Extents"), Layer.Extents);
-			}
-
-			PushPromise.SetValue();
-		});
-	PushFuture.Wait();
-
-	// ---- Phase 3 (game thread): activate all components. ----
-	TPromise<void> ActivatePromise;
-	TFuture<void>  ActivateFuture = ActivatePromise.GetFuture();
-	AsyncTask(ENamedThreads::GameThread,
-		[WeakSelf, ActivatePromise = MoveTemp(ActivatePromise)]() mutable
-		{
-			ASectorActor* Self = WeakSelf.Get();
-			if (Self)
-			{
-				for (const TObjectPtr<UNiagaraComponent>& Comp : Self->LayerComponents)
-				{
-					if (Comp) Comp->Activate(true);
-				}
-			}
-			ActivatePromise.SetValue();
-		});
-	ActivateFuture.Wait();
-
-	// Proximity system is still driven inline — its streaming lifecycle is
-	// separate from the one-shot layer systems and will be migrated later.
 	InitializeProximitySystem();
-
-	// Coarse cluster/gas streaming system. LayerData/LayerComponents above
-	// is now vestigial for these two layers — the coarse tier owns its own
-	// Niagara components (CoarseClusterNiagara / CoarseGasNiagara) because
-	// its data is streamed per-node and double-buffered, not captured once
-	// at init time.
 	InitializeCoarseSystem();
 
 	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeNiagara total duration: %.3f seconds (%d layers)"),
-		TotalDuration, LayerData.Num());
+	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeNiagara total duration: %.3f seconds"), TotalDuration);
 }
 #pragma endregion
 
 #pragma region Player-Centered Parallax
+// Parallax model (restored from pre-refactor working build):
+//   1. Single ratio per actor: Ratio = SpeedScale / Params.UnitScale.
+//   2. Per-frame ParallaxOffset = -PlayerDelta * Ratio.
+//   3. Actor drifts by ParallaxOffset, so GetActorLocation() is a stable
+//      slow-drifting reference frame the streaming pipeline can query
+//      for coord-space boundary crossings.
+//   4. Niagara components SetWorldLocation(PlayerPos) each tick so they
+//      sit at the camera; User.ParallaxOffset is broadcast to their
+//      scratch pad as the per-frame delta.
+//   5. Push math: Relative = (Local + ActorPos) - PlayerPos. Component
+//      at PlayerPos renders this as (Local + ActorPos) in world space —
+//      a world-pinned slow-drifting position.
+//
+// Task 1's per-tier ratio model (CoarseUnitScale / FineUnitScale with
+// scratch-pad-only parallax + actor pegged to player) broke streaming
+// because non-center cells rendered at player-relative positions that
+// drifted off-screen instead of staying world-pinned. Multi-tier
+// differentiation is deferred — see design doc.
 void ASectorActor::ApplyParallaxOffset()
 {
+	// Mirrors the original AProceduralSpaceActor::ApplyParallaxOffset /
+	// ASectorActor::ApplyParallaxOffset pattern: single parallax ratio,
+	// actor drifts by -PlayerDelta*Ratio, Niagara components pinned to
+	// player via SetWorldLocation, scratch pad also broadcast the same
+	// ParallaxOffset. This restores the exact rendering semantics of the
+	// working pre-refactor build. Per-tier ratio differentiation is out
+	// of scope for Task 1 — see design doc for the deferred multi-ratio
+	// plan.
 	if (InitializationState != ELifecycleState::Ready)
 	{
 		return;
 	}
 
-	bool bHasReference = false;
 	FVector CurrentPlayerPos = FVector::ZeroVector;
+	bool bHasReference = false;
 	if (const auto* World = GetWorld())
 	{
 		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
@@ -582,28 +378,17 @@ void ASectorActor::ApplyParallaxOffset()
 		return;
 	}
 
-	FVector PlayerDelta = CurrentPlayerPos - LastFrameOfReferenceLocation;
+	const FVector PlayerDelta = CurrentPlayerPos - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = CurrentPlayerPos;
 	CurrentFrameOfReferenceLocation = CurrentPlayerPos;
 
-	ParallaxRatio = GetParentSpeedScale() / GetUnitScale();
-	FVector ParallaxOffset = -PlayerDelta * ParallaxRatio;
+	// Single-ratio parallax (same as pre-refactor). Ratio = SpeedScale /
+	// Params.UnitScale; ParallaxOffset is per-frame delta applied to both
+	// the actor (as slow-drift) and every Niagara component's scratch
+	// pad (as per-particle delta).
+	const double Ratio = (Params.UnitScale > 0.0) ? (SpeedScale / Params.UnitScale) : 0.0;
+	const FVector ParallaxOffset = -PlayerDelta * Ratio;
 
-	// Broadcast parallax to every managed layer component. All layers use
-	// the same User.ParallaxOffset / reseat-at-player pattern; per-layer
-	// behavior differences are expressed in the Niagara asset, not here.
-	for (const TObjectPtr<UNiagaraComponent>& Comp : LayerComponents)
-	{
-		if (Comp)
-		{
-			Comp->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
-			Comp->SetWorldLocation(CurrentPlayerPos);
-		}
-	}
-
-	// Coarse cluster + gas components get the same parallax broadcast. They
-	// live outside LayerComponents because their data is streamed per-node
-	// and double-buffered rather than captured at init.
 	if (CoarseClusterNiagara)
 	{
 		CoarseClusterNiagara->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
@@ -614,15 +399,17 @@ void ASectorActor::ApplyParallaxOffset()
 		CoarseGasNiagara->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
 		CoarseGasNiagara->SetWorldLocation(CurrentPlayerPos);
 	}
-
-	// Proximity system is not yet migrated — still driven inline. Will move
-	// into LayerComponents when its streaming lifecycle is unified.
 	if (ProximityNiagaraComponent)
 	{
 		ProximityNiagaraComponent->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
 		ProximityNiagaraComponent->SetWorldLocation(CurrentPlayerPos);
 	}
 
+	// Actor drifts by the same per-frame offset. This is the mechanism
+	// that makes (PlayerPos - GetActorLocation()) a stable slow-drift
+	// reference for coord-space tracking in UpdateCoarseNodes /
+	// UpdateProximityNodes, and makes (LocalPos + ActorPos - PlayerPos)
+	// produce correct world-pinned render positions in the Push* calls.
 	SetActorLocation(GetActorLocation() + ParallaxOffset);
 }
 #pragma endregion
@@ -634,19 +421,6 @@ void ASectorActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	// pass runs. Without this, the stale-reference detector at PIE end can
 	// observe partially-destroyed components still referenced through our
 	// UPROPERTY chain and the printer itself can break on the walk.
-	for (const TObjectPtr<UNiagaraComponent>& Comp : LayerComponents)
-	{
-		if (Comp)
-		{
-			Comp->Deactivate();
-			Comp->DestroyComponent();
-		}
-	}
-	LayerComponents.Empty();
-	LayerData.Empty();
-
-	// Proximity component is not yet part of LayerComponents; tear it down
-	// the same way.
 	if (ProximityNiagaraComponent)
 	{
 		ProximityNiagaraComponent->Deactivate();
@@ -654,13 +428,13 @@ void ASectorActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		ProximityNiagaraComponent = nullptr;
 	}
 
-	// Coarse streaming components — same pattern as proximity.
 	if (CoarseClusterNiagara)
 	{
 		CoarseClusterNiagara->Deactivate();
 		CoarseClusterNiagara->DestroyComponent();
 		CoarseClusterNiagara = nullptr;
 	}
+
 	if (CoarseGasNiagara)
 	{
 		CoarseGasNiagara->Deactivate();
@@ -669,6 +443,25 @@ void ASectorActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 
 	Super::EndPlay(EndPlayReason);
+}
+#pragma endregion
+
+#pragma region Child Spawn Location
+FVector ASectorActor::ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const
+{
+	// In the player-pegged frame, NodeCenter is in sector-local coords (offset
+	// from CellOrigin), not world-space. Recover the cell-local offset and
+	// scale by the tier unit-scale ratio so nearer-tier children (smaller
+	// ChildUnitScale) sit proportionally closer to the player.
+	//
+	// With ThisUnitScale == ChildUnitScale this collapses to
+	// CurrentFrameOfReferenceLocation + (NodeCenter - CellOrigin), which
+	// matches the "treat sector-local as player-relative" convention used by
+	// the Niagara push path.
+	const double ThisUnitScale = Params.UnitScale;
+	const double Ratio = (ChildUnitScale > 0.0) ? (ThisUnitScale / ChildUnitScale) : 1.0;
+	const FVector CellLocalOffset = NodeCenter - CellOrigin;
+	return CurrentFrameOfReferenceLocation + CellLocalOffset * Ratio;
 }
 #pragma endregion
 
@@ -748,8 +541,9 @@ void ASectorActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 // Coordinate helpers. Coarse cells are 2*Params.Extent on a side, centered at
 // integer-coord multiples — i.e. cell (N, M, K) occupies world space
 // [(N-0.5) * 2*Extent .. (N+0.5) * 2*Extent]. Coord (0,0,0) is centered at
-// world origin. Same convention the old AUniverseActor used for its sector
-// grid, just now the grid lives inside a single sector actor.
+// the sector's CellOrigin in the sector-local frame. Same convention the old
+// AUniverseActor used for its sector grid, just now the grid lives inside a
+// single sector actor.
 FIntVector ASectorActor::PositionToCoarseCoord(const FVector& InWorldPos) const
 {
 	const double CellSize = 2.0 * Params.Extent;
@@ -806,8 +600,11 @@ void ASectorActor::InitializeCoarseSystem()
 		}
 	}
 
-	// Coarse coords are sector-actor-local. Subtract ActorLocation so a
-	// player placed at the same spot as the sector starts in cell (0,0,0).
+	// Coarse coords are sector-actor-local. With ApplyParallaxOffset
+	// restored to drift the actor by -PlayerDelta*Ratio each tick,
+	// GetActorLocation() is again the slow-drifting reference frame the
+	// streaming pipeline was built around. PlayerPos - GetActorLocation()
+	// is the player's position in that frame.
 	const FVector LocalPlayerPos = PlayerPos - GetActorLocation();
 	CoarseCenterCell = PositionToCoarseCoord(LocalPlayerPos);
 
@@ -889,8 +686,8 @@ void ASectorActor::InitializeCoarseSystem()
 				/*bAutoActivate=*/ true);
 
 			// Fixed bounds cover the full active neighborhood, not just one
-			// cell. Component sits at the player; particles reach
-			// CoarseNeighborhoodRadius cells away in every direction.
+			// cell. Component sits at the actor (pegged to player); particles
+			// reach CoarseNeighborhoodRadius cells away in every direction.
 			const double BoundsExtent = (2 * CoarseNeighborhoodRadius + 1) * Params.Extent;
 			const FBox CoarseBounds(FVector(-BoundsExtent), FVector(BoundsExtent));
 
@@ -898,7 +695,6 @@ void ASectorActor::InitializeCoarseSystem()
 			{
 				CoarseClusterNiagara->SetSystemFixedBounds(CoarseBounds);
 				CoarseClusterNiagara->TranslucencySortPriority = 0;
-				CoarseClusterNiagara->SetWorldLocation(PlayerPos);
 			}
 			else
 			{
@@ -909,7 +705,6 @@ void ASectorActor::InitializeCoarseSystem()
 			{
 				CoarseGasNiagara->SetSystemFixedBounds(CoarseBounds);
 				CoarseGasNiagara->TranslucencySortPriority = 0;
-				CoarseGasNiagara->SetWorldLocation(PlayerPos);
 			}
 			else
 			{
@@ -917,6 +712,8 @@ void ASectorActor::InitializeCoarseSystem()
 			}
 
 			// Push the initial (real) data into both components, then activate.
+			// No SetWorldLocation here — the components are attached to the
+			// actor which ApplyParallaxOffset will peg to the player.
 			PushCoarseToNiagara();
 
 			if (CoarseClusterNiagara) CoarseClusterNiagara->Activate(true);
@@ -941,7 +738,7 @@ void ASectorActor::UpdateCoarseNodes()
 	// arrays — without it, already-live particles hold onto whatever
 	// positions/extents they were spawned with, so the buffer swap updates
 	// the component's user parameters but no visible change occurs. Same
-	// pattern as UpdateProximityNodes (line just below).
+	// pattern as UpdateProximityNodes.
 	if (bCoarseNeedsPush.load())
 	{
 		PushCoarseToNiagara();
@@ -953,13 +750,10 @@ void ASectorActor::UpdateCoarseNodes()
 	// Don't start a new update if one is in flight.
 	if (bCoarseUpdateInProgress.load()) return;
 
-	// Player pos → coarse coord. Coarse coords live in sector-actor-local space
-	// (same convention as InitializeCoarseSystem and UpdateProximityNodes), so
-	// subtract ActorLocation before binning. Critical because ApplyParallaxOffset
-	// drifts the actor's world position every tick — using raw PlayerPos here
-	// would compare against a CoarseCenterCell that was computed in a different
-	// (and constantly receding) coordinate frame at init time, and the
-	// boundary-cross branch would either fire wrongly on frame 1 or never fire.
+	// Player pos → coarse coord, in sector-actor-local space. With
+	// ApplyParallaxOffset restored to drift the actor by -PlayerDelta*Ratio,
+	// GetActorLocation() is the slow-drifting reference the streaming
+	// pipeline was built around.
 	FVector PlayerPos = FVector::ZeroVector;
 	if (const auto* World = GetWorld())
 	{
@@ -1218,7 +1012,8 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InS
 		const float GasExtent = GasMinExtent + ExtentRange * Density;
 
 		// Sector-actor-local position. The push pass converts to player-
-		// relative: Local + ActorPos - PlayerPos.
+		// relative via (Local + ActorPos) - PlayerPos; world render lands
+		// at (Local + ActorPos), which tracks the actor's slow drift.
 		const FVector LocalPos = CandidatePositions[i] + NodeCenter;
 
 		const int32 Idx = BufferStart + ActualCount;
@@ -1253,10 +1048,12 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InS
 
 void ASectorActor::PushCoarseToNiagara()
 {
-	// Positions in CoarseBuffers are stored in sector-actor-local space (same
-	// convention as ProximityBuffers). Convert to player-relative at push
-	// time: Local + ActorPos = World, then World - PlayerPos = Relative to
-	// Niagara component (which sits at the player).
+	// Positions in CoarseBuffers are stored in sector-actor-local space
+	// (offset from actor's stable-drift position). Convert to player-
+	// relative at push time: Local + ActorPos - PlayerPos. Component sits
+	// at the player via SetWorldLocation below, so that relative offset
+	// renders at (PlayerPos + Local + ActorPos - PlayerPos) = Local +
+	// ActorPos in world space — a slow-drifting world-pinned position.
 	const int32 FrontIdx = CoarseFrontIdx.load();
 	const FCoarseBuffer& Front = CoarseBuffers[FrontIdx];
 
@@ -1280,28 +1077,17 @@ void ASectorActor::PushCoarseToNiagara()
 	RelativeClusterPositions.SetNumUninitialized(Num);
 	RelativeGasPositions.SetNumUninitialized(Num);
 
-	// Keep dead particles at their parked offscreen pos so Niagara culls
-	// them; for live particles, convert local → world → player-relative.
-	// Extent == 0 is the dead-particle signal in both subsystems.
+	// Keep dead particles at ZeroVector so the extent==0 gate culls them;
+	// for live particles, convert local → world → player-relative.
 	for (int32 i = 0; i < Num; ++i)
 	{
-		if (Front.ClusterExtents[i] > 0.0f)
-		{
-			RelativeClusterPositions[i] = (Front.ClusterPositions[i] + ActorPos) - PlayerPos;
-		}
-		else
-		{
-			RelativeClusterPositions[i] = FVector::ZeroVector;
-		}
+		RelativeClusterPositions[i] = (Front.ClusterExtents[i] > 0.0f)
+			? (Front.ClusterPositions[i] + ActorPos) - PlayerPos
+			: FVector::ZeroVector;
 
-		if (Front.GasExtents[i] > 0.0f)
-		{
-			RelativeGasPositions[i] = (Front.GasPositions[i] + ActorPos) - PlayerPos;
-		}
-		else
-		{
-			RelativeGasPositions[i] = FVector::ZeroVector;
-		}
+		RelativeGasPositions[i] = (Front.GasExtents[i] > 0.0f)
+			? (Front.GasPositions[i] + ActorPos) - PlayerPos
+			: FVector::ZeroVector;
 	}
 
 	if (CoarseClusterNiagara)
@@ -1369,8 +1155,10 @@ void ASectorActor::InitializeProximitySystem()
 		}
 	}
 
-	// Determine initial scan coord and populate all 27 nodes into front buffer
-	FVector LocalPos = PlayerPos - GetActorLocation();
+	// Determine initial scan coord. PlayerPos - GetActorLocation() uses the
+	// slow-drifting actor frame (ApplyParallaxOffset drifts the actor by
+	// -PlayerDelta*Ratio each tick).
+	const FVector LocalPos = PlayerPos - GetActorLocation();
 	CurrentScanCoord = PositionToScanCoord(LocalPos);
 
 	FProximityBuffer& InitBuffer = ProximityBuffers[0];
@@ -1432,10 +1220,10 @@ void ASectorActor::InitializeProximitySystem()
 			{
 				ProximityNiagaraComponent->SetSystemFixedBounds(
 					FBox(FVector(-Params.Extent), FVector(Params.Extent)));
-				ProximityNiagaraComponent->SetWorldLocation(PlayerPos);
 
+				// No SetWorldLocation — component is attached to the actor
+				// which ApplyParallaxOffset pegs to the player every tick.
 				PushProximityToNiagara();
-				//ProximityNiagaraComponent->ReinitializeSystem(); 
 				ProximityNiagaraComponent->Activate(true);
 			}
 			else
@@ -1446,10 +1234,6 @@ void ASectorActor::InitializeProximitySystem()
 			CompletionPromise.SetValue();
 		});
 	CompletionFuture.Wait();
-
-	//double Duration = FPlatformTime::Seconds() - StartTime;
-	//UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeProximitySystem took %.3f sec (%d nodes, %d total particles)"),
-	//	Duration, ActiveNodeSlots.Num(), TotalParticles);
 }
 
 void ASectorActor::UpdateProximityNodes()
@@ -1468,7 +1252,8 @@ void ASectorActor::UpdateProximityNodes()
 	// Don't start a new update if one is already in flight
 	if (bProximityUpdateInProgress.load()) return;
 
-	// Get player position in octree-local space
+	// Get player position in sector-actor-local space. PlayerPos -
+	// GetActorLocation() uses the slow-drifting actor frame.
 	FVector PlayerPos = FVector::ZeroVector;
 	if (const auto* World = GetWorld())
 	{
@@ -1481,7 +1266,7 @@ void ASectorActor::UpdateProximityNodes()
 		}
 	}
 
-	FVector LocalPos = PlayerPos - GetActorLocation();
+	const FVector LocalPos = PlayerPos - GetActorLocation();
 	FIntVector NewScanCoord = PositionToScanCoord(LocalPos);
 
 	if (NewScanCoord == CurrentScanCoord) return;
@@ -1553,7 +1338,6 @@ void ASectorActor::UpdateProximityNodes()
 				int32* SlotPtr = ActiveNodeSlots.Find(Coord);
 				if (SlotPtr)
 				{
-					//UE_LOG(LogTemp, Log, TEXT("Clearing exiting slot %d in back buffer %d"), *SlotPtr, 1 - FrontBufferIndex.load());
 					int32 SlotStart = *SlotPtr * MaxParticlesPerNode;
 					for (int32 i = 0; i < MaxParticlesPerNode; ++i)
 					{
@@ -1579,7 +1363,6 @@ void ASectorActor::UpdateProximityNodes()
 			{
 				if (FreeSlots.Num() == 0)
 				{
-					//UE_LOG(LogTemp, Warning, TEXT("ASectorActor::UpdateProximityNodes - No free slots available!"));
 					break;
 				}
 
@@ -1599,10 +1382,6 @@ void ASectorActor::UpdateProximityNodes()
 
 			// Signal game thread to push the new front buffer on next Tick
 			bProximityNeedsPush.store(true);
-
-			//double Duration = FPlatformTime::Seconds() - StartTime;
-			//UE_LOG(LogTemp, Log, TEXT("ASectorActor::UpdateProximityNodes (%d exiting, %d entering) took %.3f sec"),
-			//	ExitingNodes.Num(), EnteringNodes.Num(), Duration);
 
 			bProximityUpdateInProgress.store(false);
 		});
@@ -1794,12 +1573,11 @@ void ASectorActor::PushProximityToNiagara()
 {
 	if (!ProximityNiagaraComponent) return;
 
-	int32 ActiveCount = 0;
-	const FProximityBuffer& Front1 = ProximityBuffers[FrontBufferIndex.load()];
-	for (int32 i = 0; i < Front1.Extents.Num(); ++i) { if (Front1.Extents[i] > 0.0f) ActiveCount++; }
-	//UE_LOG(LogTemp, Log, TEXT("PushProximityToNiagara: FrontIdx=%d, bufferSize=%d, active=%d"),
-	//	FrontBufferIndex.load(), Front1.Positions.Num(), ActiveCount);
-
+	// Positions in ProximityBuffers are stored in sector-actor-local space.
+	// Same push semantics as PushCoarseToNiagara: convert Local →
+	// player-relative so that (component-at-player + relative) renders as
+	// (Local + ActorPos) in world space — a slow-drifting world-pinned
+	// position that tracks the actor drift applied by ApplyParallaxOffset.
 	FVector PlayerPos = FVector::ZeroVector;
 	if (const auto* World = GetWorld())
 	{
@@ -1812,22 +1590,18 @@ void ASectorActor::PushProximityToNiagara()
 		}
 	}
 
-	FVector ActorPos = GetActorLocation();
+	const FVector ActorPos = GetActorLocation();
 	const FProximityBuffer& Front = ProximityBuffers[FrontBufferIndex.load()];
+	const int32 Num = Front.Positions.Num();
 
 	TArray<FVector> RelativePositions;
-	RelativePositions.SetNumUninitialized(Front.Positions.Num());
+	RelativePositions.SetNumUninitialized(Num);
 
-	for (int32 i = 0; i < Front.Positions.Num(); ++i)
+	for (int32 i = 0; i < Num; ++i)
 	{
-		if (Front.Extents[i] > 0.0f)
-		{
-			RelativePositions[i] = (Front.Positions[i] + ActorPos) - PlayerPos;
-		}
-		else
-		{
-			RelativePositions[i] = FVector::ZeroVector;
-		}
+		RelativePositions[i] = (Front.Extents[i] > 0.0f)
+			? (Front.Positions[i] + ActorPos) - PlayerPos
+			: FVector::ZeroVector;
 	}
 
 	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
@@ -1843,6 +1617,12 @@ void ASectorActor::PushProximityToNiagara()
 void ASectorActor::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// With the inheritance break, Super::Tick is AActor::Tick (which does
+	// nothing for our purposes). ApplyParallaxOffset used to be driven from
+	// AProceduralSpaceActor::Tick; now we call it directly here.
+	ApplyParallaxOffset();
+
 	UpdateCoarseNodes();
 	UpdateProximityNodes();
 }

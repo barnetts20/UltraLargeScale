@@ -1,126 +1,17 @@
 ﻿#pragma once
 #include "CoreMinimal.h"
-#include "ProceduralSpaceActor.h"
+#include "GameFramework/Actor.h"
 #include "UniverseDataGenerator.h"
 #include "NiagaraSystem.h"
 #include "NiagaraComponent.h"
 #include "FOctree.h"
+#include "DataTypes.h"
 #include "SectorActor.generated.h"
 
 class AGalaxyActor;
 
-/// <summary>
-/// Per-layer data bundle for one Niagara visualization system on a sector.
-/// Holds the unified set of particle arrays (Positions/Rotations/Extents/Colors)
-/// and a pointer to the Niagara system asset the sector will spawn for this
-/// layer. Behavioural differences between layers (cluster vs. gas vs. sector-
-/// wide galaxies) are expressed entirely in the Niagara asset + material �
-/// this struct is just data.
-///
-/// Population helpers like PopulateFromPointNodes fill the arrays from a
-/// specific data source. Add more helpers as new layer sources appear (e.g.
-/// PopulateFromDensityVolume for the gas system, PopulateFromLargeObjects for
-/// sector-wide galaxies).
-///
-/// Sector owns a TArray<FSectorNiagaraLayerData> built during InitializeData;
-/// InitializeNiagara then walks it, spawns a UNiagaraComponent per layer, and
-/// pushes the User.* arrays in one unified block.
-/// </summary>
-USTRUCT()
-struct SVO_API FSectorNiagaraLayerData
-{
-	GENERATED_BODY()
-
-	// Niagara system asset to spawn for this layer. Hard ref (UPROPERTY) so
-	// the cooker tracks it and GC keeps it pinned.
-	UPROPERTY()
-	TObjectPtr<UNiagaraSystem> SystemAsset = nullptr;
-
-	// Layer name for debug logging. Not shown to users.
-	FName LayerName;
-
-	// Unified particle data. All layers get the same array set; any layer
-	// whose Niagara asset doesn't read a given binding simply ignores it.
-	TArray<FVector>       Positions;
-	TArray<FVector>       Rotations;
-	TArray<float>         Extents;
-	TArray<FLinearColor>  Colors;
-
-	FSectorNiagaraLayerData() = default;
-
-	/// <summary>
-	/// Fill the arrays from a list of point nodes inserted into the octree
-	/// by UniverseDataGenerator. Builds Position/Rotation/Extent/Color per
-	/// node — rotation is derived from a stable per-ObjectId random stream.
-	/// InWorldOffset is added to every output position; pass the sector's
-	/// CellOrigin to render at the correct world location in a multi-sector
-	/// grid. Safe to call on any thread (ParallelFor inside).
-	/// </summary>
-	void PopulateFromPointNodes(
-		const TArray<TSharedPtr<FOctreeNode>>& InPointNodes,
-		UNiagaraSystem* InSystemAsset,
-		FName InLayerName,
-		FVector InWorldOffset = FVector::ZeroVector);
-
-	/// <summary>
-	/// Fill the arrays by uniform-random rejection sampling against a
-	/// density volume — InSampleCount candidate positions are tested and the
-	/// accepted subset is written. Output array size equals the accepted
-	/// count, not InSampleCount.
-	///
-	/// Per accepted particle:
-	///  - Position: candidate sector-local position + InWorldOffset
-	///  - Extent:   lerp(InMinExtent, InMaxExtent, density)
-	///  - Color:    FLinearColor(1, 1, 1, density) — RGB free for material
-	///              tinting, alpha carries the per-particle density value
-	///  - Rotation: zero (gas sprites are billboards / radially symmetric)
-	///
-	/// InWorldOffset shifts every output position; density is sampled
-	/// pre-offset (in sector-local space). Threadsafe; uses ParallelFor with
-	/// an atomic write index.
-	/// </summary>
-	void PopulateFromDensityVolume(
-		const FDensityVolume& InDensityVolume,
-		double InSectorExtent,
-		int32 InSampleCount,
-		float InMinExtent,
-		float InMaxExtent,
-		int32 InSeed,
-		UNiagaraSystem* InSystemAsset,
-		FName InLayerName,
-		FVector InWorldOffset = FVector::ZeroVector);
-
-	/// <summary>
-	/// Fill the arrays from the same cluster-scale point nodes that feed the
-	/// cluster layer, producing one gas sprite per cluster. Each sprite's
-	/// extent is lerped between InMinExtent and InMaxExtent using the
-	/// density sampled at the cluster's position. This keeps the gas cloud
-	/// perfectly co-located with the cluster distribution (same seeded
-	/// accept/reject, same jitter) instead of running a second independent
-	/// rejection pass against the density volume.
-	///
-	/// Per sprite:
-	///  - Position: Node->Center + InWorldOffset
-	///  - Extent:   lerp(InMinExtent, InMaxExtent, density-at-position)
-	///  - Color:    FLinearColor(1, 1, 1, density) — alpha carries density
-	///              for material-side tinting / fade
-	///  - Rotation: zero (billboard)
-	///
-	/// InDensityVolume is sampled in sector-local space (Node->Center before
-	/// the world-offset add). Safe to call on any thread (ParallelFor inside).
-	/// </summary>
-	void PopulateGasFromPointNodes(
-		const TArray<TSharedPtr<FOctreeNode>>& InPointNodes,
-		const FDensityVolume& InDensityVolume,
-		float InMinExtent,
-		float InMaxExtent,
-		UNiagaraSystem* InSystemAsset,
-		FName InLayerName,
-		FVector InWorldOffset = FVector::ZeroVector);
-};
-
 UCLASS()
-class SVO_API ASectorActor : public AProceduralSpaceActor
+class SVO_API ASectorActor : public AActor
 {
 	GENERATED_BODY()
 
@@ -130,6 +21,29 @@ public:
 #pragma region Editor Exposed Parameters
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
 	FUniverseParams Params;
+
+	// Parallax strength knob — analogous to the base-class SpeedScale that
+	// lived on AProceduralSpaceActor. Per-tier parallax ratios are derived as
+	// SpeedScale / TierUnitScale, so this is the numerator shared across tiers.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parallax Properties")
+	double SpeedScale = 1.0;
+#pragma endregion
+
+#pragma region Lifecycle State
+	// Copied down from the former AProceduralSpaceActor base so external
+	// callers (UniverseActor pooling, etc.) and internal async init guards
+	// keep working without a base class.
+	ELifecycleState InitializationState = ELifecycleState::Uninitialized;
+
+	// Octree still lives on the sector — retained for the Task 2 proximity
+	// data structure work. Not driven by any data pipeline currently; the
+	// coarse/fine streaming both sample noise directly.
+	TSharedPtr<FOctree> Octree;
+
+	// Kicks off async init — InitializeChildPool → InitializeData →
+	// InitializeVolumetric → InitializeNiagara, with Pooling-state guards
+	// between each step. Copied from the former base.
+	void Initialize();
 #pragma endregion
 
 #pragma region Pooled Spawn/Despawn Hooks
@@ -146,6 +60,11 @@ public:
 	FIntVector CellCoord = FIntVector::ZeroValue;
 
 	// World-space center of this sector's cell. Derived: CellCoord * (2 * Params.Extent).
+	// Set once in ConfigureCell and used as the initial actor placement
+	// location, plus as the authoritative sector-grid origin for cross-
+	// sector child-spawn math in ComputeChildSpawnLocation. Note the
+	// actor itself drifts away from CellOrigin during play due to the
+	// parallax offset applied in ApplyParallaxOffset.
 	UPROPERTY(VisibleAnywhere, Category = "Sector Grid")
 	FVector CellOrigin = FVector::ZeroVector;
 
@@ -157,23 +76,18 @@ public:
 	bool bAutoInitializeOnBeginPlay = true;
 
 	// Configure cell identity before Initialize(). Sets CellCoord, derives
-	// CellOrigin, places the actor at CellOrigin in world space. Must be
-	// called before Initialize() — does not trigger generation itself.
+	// CellOrigin, places the actor at CellOrigin in world space (initial
+	// position — ApplyParallaxOffset will peg the actor to the player once
+	// init completes). Must be called before Initialize().
 	void ConfigureCell(FIntVector InCellCoord);
 #pragma endregion
 
 protected:
-#pragma region Params Accessors
-	virtual double GetUnitScale() const override { return Params.UnitScale; }
-	virtual double GetExtent() const override { return Params.Extent; }
-	virtual double GetParentSpeedScale() const override { return SpeedScale; }
-#pragma endregion
-
 #pragma region Initialization
-	virtual void InitializeData() override;
-	virtual void InitializeVolumetric() override;
-	virtual void InitializeNiagara() override;
-	virtual void InitializeChildPool() override;
+	void InitializeData();
+	void InitializeVolumetric();
+	void InitializeNiagara();
+	void InitializeChildPool();
 	FastNoise::SmartNode<> BuildNoise(int InSeed);
 #pragma endregion
 
@@ -181,7 +95,7 @@ protected:
 	UniverseDataGenerator UniverseGenerator;
 #pragma endregion
 
-#pragma region Niagara Layers
+#pragma region Niagara Assets
 	// Niagara system asset for the always-loaded cluster visualization layer.
 	// Assign in the sector actor's Blueprint defaults (e.g. NG_SectorClusterCloud).
 	// Material fade range is configured directly on the material instance.
@@ -217,17 +131,6 @@ protected:
 	// extent lerp). Tune in the editor to taste.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
 	float GasMaxExtent = 5e16f;
-
-	// CPU-side data for each layer. Populated during InitializeData,
-	// consumed during InitializeNiagara. Index-parallel with LayerComponents.
-	TArray<FSectorNiagaraLayerData> LayerData;
-
-	// Live UNiagaraComponents spawned from LayerData entries during
-	// InitializeNiagara. Index-parallel with LayerData. UPROPERTY keeps them
-	// GC-rooted; EndPlay explicitly destroys them before the engine's PIE-end
-	// stale-reference scan runs.
-	UPROPERTY()
-	TArray<TObjectPtr<UNiagaraComponent>> LayerComponents;
 #pragma endregion
 
 #pragma region Volumetric
@@ -239,6 +142,20 @@ protected:
 	// volumetric debugging or single-sector dev work.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volumetric")
 	bool bEnableVolumetric = false;
+
+	// Volumetric component resources. Previously inherited from the base;
+	// now local since the sector is a bare AActor. Only populated when
+	// bEnableVolumetric is true. VolumeMaterial is kept as a member for
+	// symmetry with the former shared layout; it is unused today but keeps
+	// the cookbook intact for future material updates.
+	UPROPERTY()
+	UTexture2D* PseudoVolumeTexture;
+
+	UPROPERTY()
+	UStaticMeshComponent* VolumetricComponent;
+
+	UPROPERTY()
+	UMaterialInstanceDynamic* VolumeMaterial;
 #pragma endregion
 
 #pragma region Density Field (CPU-side authoritative copy)
@@ -256,17 +173,37 @@ protected:
 	TSubclassOf<AGalaxyActor> GalaxyActorClass;
 	int GalaxyPoolSize = 5;
 	TArray<AGalaxyActor*> GalaxyPool;
+
+	// Reimplemented locally now that there's no AProceduralSpaceActor to
+	// inherit from. In the new player-pegged frame, a child actor placed to
+	// "look right" given the parallax depth story sits at:
+	//   CurrentPlayerPos + (NodeCenter - CellOrigin) * (ThisUnitScale / ChildUnitScale)
+	// i.e. scale the cell-local offset by the unit-scale ratio so nearer-tier
+	// spawns appear closer to the player. Preserved for the SpawnGalaxyFromPool
+	// surface; not wired into any streaming path yet (see Task 3).
+	FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const;
 #pragma endregion
 
-#pragma region Overrides
+#pragma region AActor Overrides
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
-	virtual void ApplyParallaxOffset() override;
 	virtual void Tick(float DeltaTime) override;
 #pragma endregion
 
 #pragma region Player-Centered Parallax
-	double ParallaxRatio = 0.0;
+	// Reference positions tracked frame-to-frame for parallax math. Copied
+	// down from the former base class; LastFrameOfReferenceLocation is used
+	// to compute PlayerDelta, CurrentFrameOfReferenceLocation is the most
+	// recent sampled player pos (useful for child spawn calls).
+	FVector LastFrameOfReferenceLocation = FVector::ZeroVector;
+	FVector CurrentFrameOfReferenceLocation = FVector::ZeroVector;
+
+	// Per-frame update: compute player delta, drift actor by
+	// -PlayerDelta*Ratio, broadcast ParallaxOffset to each Niagara
+	// component (they also SetWorldLocation(PlayerPos)). Single-ratio
+	// model — Ratio = SpeedScale / Params.UnitScale, same as the
+	// pre-refactor AProceduralSpaceActor::ApplyParallaxOffset.
+	void ApplyParallaxOffset();
 #pragma endregion
 
 #pragma region Coarse Cluster Streaming
@@ -333,11 +270,9 @@ protected:
 	std::atomic<bool> bCoarseNeedsPush{ false };
 
 	// --- Niagara Components ---
-	// Two universe-level components, one for each layer. Distinct from the
-	// per-layer LayerComponents[] array (which is now vestigial for the
-	// cluster/gas layers) because they have a fundamentally different
-	// lifecycle — streamed buffers, double-buffered, slot-packed — that
-	// doesn't fit the simple init-once LayerData abstraction.
+	// Two sector-level components, one per visual layer. Streamed buffers,
+	// double-buffered, slot-packed — so they have their own lifecycle rather
+	// than fitting into any one-shot init pattern.
 	UPROPERTY()
 	UNiagaraComponent* CoarseClusterNiagara;
 
