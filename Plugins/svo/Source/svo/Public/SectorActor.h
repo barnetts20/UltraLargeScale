@@ -219,11 +219,32 @@ protected:
 	FVector LastFrameOfReferenceLocation = FVector::ZeroVector;
 	FVector CurrentFrameOfReferenceLocation = FVector::ZeroVector;
 
-	// Per-frame update: compute player delta, drift actor by
-	// -PlayerDelta*Ratio, broadcast ParallaxOffset to each Niagara
-	// component (they also SetWorldLocation(PlayerPos)). Single-ratio
-	// model — Ratio = SpeedScale / Params.UnitScale, same as the
-	// pre-refactor AProceduralSpaceActor::ApplyParallaxOffset.
+	// Accumulated virtual-space traversal. Advances by Ratio * PlayerDelta
+	// each tick inside ApplyParallaxOffset. Functionally equivalent to the
+	// old (GetActorLocation() - CellOrigin) delta from the actor-drift
+	// parallax model, but stored separately so the actor transform can stay
+	// pegged to the player — which keeps UE's rendering/physics/audio
+	// systems in a clean numerical range near the camera, even after long
+	// play sessions where the old model would drift the actor to billions-
+	// of-units magnitudes and start hitting float precision artifacts in
+	// systems that still downcast internally.
+	//
+	// Used by:
+	//   - Push* to compute camera-relative particle positions
+	//     (Relative = LocalPos - VirtualTraversal).
+	//   - Streaming coord tracking (PositionToCoarseCoord / PositionToScanCoord
+	//     consume VirtualTraversal directly — that's the player's position in
+	//     the sector's virtual frame).
+	//   - DebugDrawSpawnNode and UpdateSpawnRangeNodes to place world boxes
+	//     and query the octree in the right frame.
+	//   - Scratch pad broadcast: User.ParallaxOffset = -Ratio * PlayerDelta
+	//     per tick, drifts stored particle positions to match the new
+	//     VirtualTraversal state without re-pushing every frame.
+	FVector VirtualTraversal = FVector::ZeroVector;
+
+	// Per-frame update: peg actor to player, advance VirtualTraversal, and
+	// broadcast User.ParallaxOffset to Niagara scratch pads. Single-ratio
+	// (SpeedScale / Params.UnitScale); per-tier differentiation is deferred.
 	void ApplyParallaxOffset();
 #pragma endregion
 
@@ -405,5 +426,62 @@ public:
 	// proximity slots: 0..NumProximitySlots, but they index into different
 	// buffer arrays so the caller needs to know which tier it asked about).
 	TArray<TSharedPtr<FOctreeNode>> GetNearbyGalaxyNodes(const FVector& InCenter, double InRadius) const;
+
+	// Screen-space variant — includes the threshold cull the original
+	// ProximityTrackerComponent used. Traverses the tree top-down and
+	// prunes nodes whose (Extent * (1 + ScaleFactor)) / Distance falls
+	// below the threshold, so large-but-distant galaxies drop out
+	// automatically. Sector-actor-local space.
+	TArray<TSharedPtr<FOctreeNode>> GetNearbyGalaxyNodesByScreenSpace(const FVector& InCenter, double InExtent, double InScreenSpaceThreshold) const;
+#pragma endregion
+
+#pragma region Spawn Range Scanning
+	// Fires UpdateSpawnRangeNodes every SpawnScanInterval seconds when the
+	// sector is Ready. Tracks which octree nodes currently fall within
+	// spawn range + pass the screen-space threshold, and logs + debug-
+	// draws as nodes cross in and out of that set. No actor spawn/pool
+	// hooks yet — this pass is pure observation so we can tune range and
+	// threshold values before wiring spawn behavior.
+public:
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
+	float SpawnScanInterval = 0.1f;
+
+	// Extent of the spatial query box around the player (sector-actor-local
+	// space). Tune with logs enabled to find a comfortable on-screen-at-
+	// once galaxy count.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
+	double SpawnScanExtent = 200000.0;
+
+	// Screen-space size threshold, angular-size proxy (Extent / Distance).
+	// Lower ⇒ smaller things pass ⇒ more results.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
+	double SpawnScreenSpaceThreshold = 0.0001;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
+	bool bDebugDrawSpawnNodes = true;
+
+	// When true, on enter/exit we log the full cell buffer slice
+	// (positions + extents per particle in that cell's slot). Useful
+	// while tuning but noisy — off by default.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
+	bool bLogSpawnEnterExitBuffers = false;
+
+private:
+	FTimerHandle SpawnScanTimerHandle;
+	TSet<TSharedPtr<FOctreeNode>> TrackedSpawnNodes;
+
+	void StartSpawnScanTimer();
+	void StopSpawnScanTimer();
+	void UpdateSpawnRangeNodes();
+
+	// Logging helpers. Called from UpdateSpawnRangeNodes as nodes enter
+	// or exit the tracked set.
+	void LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) const;
+	void LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const;
+
+	// Debug-draw a box around the node in world space. Uses
+	// GetActorLocation() as the sector-local → world offset, matching the
+	// convention used by the push pipeline.
+	void DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) const;
 #pragma endregion
 };

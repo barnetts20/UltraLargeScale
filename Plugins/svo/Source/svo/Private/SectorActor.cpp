@@ -6,6 +6,8 @@
 #include <Kismet/GameplayStatics.h>
 #include <GalaxyActor.h>
 #include <NiagaraFunctionLibrary.h>
+#include <DrawDebugHelpers.h>
+#include <TimerManager.h>
 #pragma endregion
 
 #pragma region Constructor
@@ -69,6 +71,17 @@ void ASectorActor::Initialize()
 			double TotalDuration = FPlatformTime::Seconds() - StartTime;
 			UE_LOG(LogTemp, Log, TEXT("%s::Initialize total duration: %.3f seconds"),
 				*GetClass()->GetName(), TotalDuration);
+
+			// Kick off the spawn-range scan. TimerManager touches FTimerHandle
+			// state and must run on the game thread; this async completion
+			// handler is on a background thread, so hop over.
+			AsyncTask(ENamedThreads::GameThread, [this]()
+				{
+					if (IsValid(this))
+					{
+						StartSpawnScanTimer();
+					}
+				});
 		});
 }
 #pragma endregion
@@ -333,34 +346,29 @@ void ASectorActor::InitializeNiagara()
 #pragma endregion
 
 #pragma region Player-Centered Parallax
-// Parallax model (restored from pre-refactor working build):
-//   1. Single ratio per actor: Ratio = SpeedScale / Params.UnitScale.
-//   2. Per-frame ParallaxOffset = -PlayerDelta * Ratio.
-//   3. Actor drifts by ParallaxOffset, so GetActorLocation() is a stable
-//      slow-drifting reference frame the streaming pipeline can query
-//      for coord-space boundary crossings.
-//   4. Niagara components SetWorldLocation(PlayerPos) each tick so they
-//      sit at the camera; User.ParallaxOffset is broadcast to their
-//      scratch pad as the per-frame delta.
-//   5. Push math: Relative = (Local + ActorPos) - PlayerPos. Component
-//      at PlayerPos renders this as (Local + ActorPos) in world space —
-//      a world-pinned slow-drifting position.
-//
-// Task 1's per-tier ratio model (CoarseUnitScale / FineUnitScale with
-// scratch-pad-only parallax + actor pegged to player) broke streaming
-// because non-center cells rendered at player-relative positions that
-// drifted off-screen instead of staying world-pinned. Multi-tier
-// differentiation is deferred — see design doc.
+// VirtualTraversal-based pegged-actor parallax model:
+//   1. Actor is pegged to the player every tick (SetActorLocation). Niagara
+//      components are attached and follow automatically. Keeps the actor's
+//      transform in UE's clean "near the camera" numerical range.
+//   2. VirtualTraversal accumulates Ratio * PlayerDelta each tick, encoding
+//      how far the player has "virtually" moved through sector-grid space.
+//      Replaces the old model's (GetActorLocation() - CellOrigin) delta
+//      without forcing the actor itself to drift.
+//   3. Per-frame scratch pad broadcast User.ParallaxOffset = -Ratio *
+//      PlayerDelta drifts stored particle positions so they stay aligned
+//      with VirtualTraversal between pushes: stored = LocalPos -
+//      VirtualTraversal at all times (push establishes the identity;
+//      scratch pad maintains it incrementally).
+//   4. Push math: Relative = LocalPos - VirtualTraversal (component at
+//      player renders this as PlayerPos + LocalPos - VirtualTraversal,
+//      which is the particle's current world position under the parallax
+//      compression).
+//   5. Streaming: boundary-cross checks use PositionToCoarseCoord and
+//      PositionToScanCoord applied to VirtualTraversal directly — that IS
+//      the player's sector-grid position.
+//   6. Single ratio (SpeedScale / Params.UnitScale); per-tier deferred.
 void ASectorActor::ApplyParallaxOffset()
 {
-	// Mirrors the original AProceduralSpaceActor::ApplyParallaxOffset /
-	// ASectorActor::ApplyParallaxOffset pattern: single parallax ratio,
-	// actor drifts by -PlayerDelta*Ratio, Niagara components pinned to
-	// player via SetWorldLocation, scratch pad also broadcast the same
-	// ParallaxOffset. This restores the exact rendering semantics of the
-	// working pre-refactor build. Per-tier ratio differentiation is out
-	// of scope for Task 1 — see design doc for the deferred multi-ratio
-	// plan.
 	if (InitializationState != ELifecycleState::Ready)
 	{
 		return;
@@ -389,41 +397,45 @@ void ASectorActor::ApplyParallaxOffset()
 	LastFrameOfReferenceLocation = CurrentPlayerPos;
 	CurrentFrameOfReferenceLocation = CurrentPlayerPos;
 
-	// Single-ratio parallax (same as pre-refactor). Ratio = SpeedScale /
-	// Params.UnitScale; ParallaxOffset is per-frame delta applied to both
-	// the actor (as slow-drift) and every Niagara component's scratch
-	// pad (as per-particle delta).
 	const double Ratio = (Params.UnitScale > 0.0) ? (SpeedScale / Params.UnitScale) : 0.0;
-	const FVector ParallaxOffset = -PlayerDelta * Ratio;
 
+	// Accumulate virtual traversal. This is the numerical replacement for
+	// the old actor-drift; same rate (Ratio * PlayerDelta) but doesn't
+	// feed into the actor's rendering transform.
+	VirtualTraversal += PlayerDelta * Ratio;
+
+	// Scratch-pad broadcast. Stored particle positions satisfy
+	// stored = LocalPos - VirtualTraversal at every tick. Each frame
+	// VirtualTraversal grows by Ratio * PlayerDelta, so stored needs to
+	// shrink by the same amount — the scratch pad adds User.ParallaxOffset
+	// destructively, so we pass the negation.
+	const FVector ParallaxOffset = -PlayerDelta * Ratio;
 	if (CoarseClusterNiagara)
 	{
 		CoarseClusterNiagara->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
-		CoarseClusterNiagara->SetWorldLocation(CurrentPlayerPos);
 	}
 	if (CoarseGasNiagara)
 	{
 		CoarseGasNiagara->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
-		CoarseGasNiagara->SetWorldLocation(CurrentPlayerPos);
 	}
 	if (ProximityNiagaraComponent)
 	{
 		ProximityNiagaraComponent->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
-		ProximityNiagaraComponent->SetWorldLocation(CurrentPlayerPos);
 	}
 
-	// Actor drifts by the same per-frame offset. This is the mechanism
-	// that makes (PlayerPos - GetActorLocation()) a stable slow-drift
-	// reference for coord-space tracking in UpdateCoarseNodes /
-	// UpdateProximityNodes, and makes (LocalPos + ActorPos - PlayerPos)
-	// produce correct world-pinned render positions in the Push* calls.
-	SetActorLocation(GetActorLocation() + ParallaxOffset);
+	// Peg the actor. Components follow via attachment.
+	SetActorLocation(CurrentPlayerPos);
 }
 #pragma endregion
 
 #pragma region Shutdown
 void ASectorActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	// Stop the spawn-range scan before component teardown so any in-flight
+	// debug draws / logs don't race the GC pass on components they might
+	// reference.
+	StopSpawnScanTimer();
+
 	// Explicitly tear down managed Niagara components before the engine's GC
 	// pass runs. Without this, the stale-reference detector at PIE end can
 	// observe partially-destroyed components still referenced through our
@@ -607,12 +619,13 @@ void ASectorActor::InitializeCoarseSystem()
 		}
 	}
 
-	// Coarse coords are sector-actor-local. With ApplyParallaxOffset
-	// restored to drift the actor by -PlayerDelta*Ratio each tick,
-	// GetActorLocation() is again the slow-drifting reference frame the
-	// streaming pipeline was built around. PlayerPos - GetActorLocation()
-	// is the player's position in that frame.
-	const FVector LocalPlayerPos = PlayerPos - GetActorLocation();
+	// Coarse coords live in the sector's virtual grid frame. The player's
+	// position in that frame is tracked by VirtualTraversal, which advances
+	// by Ratio * PlayerDelta in ApplyParallaxOffset. At init it's zero —
+	// meaning the player starts at virtual coord (0,0,0) regardless of where
+	// they physically are in world space. Subsequent motion accumulates into
+	// VirtualTraversal and boundary-cross checks use it directly.
+	const FVector LocalPlayerPos = VirtualTraversal;
 	CoarseCenterCell = PositionToCoarseCoord(LocalPlayerPos);
 
 	// Two-phase pipeline (Task 2 — registry model):
@@ -774,22 +787,9 @@ void ASectorActor::UpdateCoarseNodes()
 	// Don't start a new update if one is in flight.
 	if (bCoarseUpdateInProgress.load()) return;
 
-	// Player pos → coarse coord, in sector-actor-local space. With
-	// ApplyParallaxOffset restored to drift the actor by -PlayerDelta*Ratio,
-	// GetActorLocation() is the slow-drifting reference the streaming
-	// pipeline was built around.
-	FVector PlayerPos = FVector::ZeroVector;
-	if (const auto* World = GetWorld())
-	{
-		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-		{
-			if (APawn* Pawn = Controller->GetPawn())
-			{
-				PlayerPos = Pawn->GetActorLocation();
-			}
-		}
-	}
-	const FVector LocalPlayerPos = PlayerPos - GetActorLocation();
+	// Player's position in the sector's virtual grid frame, tracked by
+	// VirtualTraversal. See InitializeCoarseSystem for the rationale.
+	const FVector LocalPlayerPos = VirtualTraversal;
 	const FIntVector NewCoarseCoord = PositionToCoarseCoord(LocalPlayerPos);
 
 	if (NewCoarseCoord == CoarseCenterCell) return;
@@ -1156,45 +1156,39 @@ void ASectorActor::InsertCoarseCellIntoOctree(const FIntVector& InCoarseCoord, i
 
 void ASectorActor::PushCoarseToNiagara()
 {
-	// Positions in CoarseBuffers are stored in sector-actor-local space
-	// (offset from actor's stable-drift position). Convert to player-
-	// relative at push time: Local + ActorPos - PlayerPos. Component sits
-	// at the player via SetWorldLocation below, so that relative offset
-	// renders at (PlayerPos + Local + ActorPos - PlayerPos) = Local +
-	// ActorPos in world space — a slow-drifting world-pinned position.
+	// VirtualTraversal push math: buffer holds sector-grid positions
+	// (LocalPos, in virtual units). Push converts to camera-relative:
+	// Relative = LocalPos - VirtualTraversal. Component is attached to
+	// the actor (= player), so Niagara renders at
+	//   PlayerPos + Relative = PlayerPos + LocalPos - VirtualTraversal
+	// which is the particle's current world position under the parallax
+	// compression (see Player-Centered Parallax region for derivation).
+	//
+	// Between pushes the scratch pad maintains stored = LocalPos -
+	// VirtualTraversal via the per-tick User.ParallaxOffset broadcast, so
+	// this math stays valid continuously — no re-push required each frame.
+	//
+	// Dead particles (Extent == 0) get a ZeroVector anchor rather than the
+	// parked DeadPos — on ReinitializeSystem they'd otherwise drift in from
+	// the off-screen parked position. With Extent == 0 the Niagara pipeline
+	// culls them regardless; the zero is defensive.
 	const int32 FrontIdx = CoarseFrontIdx.load();
 	const FCoarseBuffer& Front = CoarseBuffers[FrontIdx];
 
-	FVector PlayerPos = FVector::ZeroVector;
-	if (const auto* World = GetWorld())
-	{
-		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-		{
-			if (APawn* Pawn = Controller->GetPawn())
-			{
-				PlayerPos = Pawn->GetActorLocation();
-			}
-		}
-	}
-
-	const FVector ActorPos = GetActorLocation();
 	const int32 Num = Front.ClusterPositions.Num();
-
 	TArray<FVector> RelativeClusterPositions;
 	TArray<FVector> RelativeGasPositions;
 	RelativeClusterPositions.SetNumUninitialized(Num);
 	RelativeGasPositions.SetNumUninitialized(Num);
 
-	// Keep dead particles at ZeroVector so the extent==0 gate culls them;
-	// for live particles, convert local → world → player-relative.
 	for (int32 i = 0; i < Num; ++i)
 	{
 		RelativeClusterPositions[i] = (Front.ClusterExtents[i] > 0.0f)
-			? (Front.ClusterPositions[i] + ActorPos) - PlayerPos
+			? (Front.ClusterPositions[i] - VirtualTraversal)
 			: FVector::ZeroVector;
 
 		RelativeGasPositions[i] = (Front.GasExtents[i] > 0.0f)
-			? (Front.GasPositions[i] + ActorPos) - PlayerPos
+			? (Front.GasPositions[i] - VirtualTraversal)
 			: FVector::ZeroVector;
 	}
 
@@ -1208,7 +1202,6 @@ void ASectorActor::PushCoarseToNiagara()
 			CoarseClusterNiagara, FName("User.Extents"), Front.ClusterExtents);
 		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(
 			CoarseClusterNiagara, FName("User.Colors"), Front.ClusterColors);
-		CoarseClusterNiagara->SetWorldLocation(PlayerPos);
 	}
 
 	if (CoarseGasNiagara)
@@ -1219,7 +1212,6 @@ void ASectorActor::PushCoarseToNiagara()
 			CoarseGasNiagara, FName("User.Extents"), Front.GasExtents);
 		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(
 			CoarseGasNiagara, FName("User.Colors"), Front.GasColors);
-		CoarseGasNiagara->SetWorldLocation(PlayerPos);
 	}
 }
 
@@ -1263,10 +1255,9 @@ void ASectorActor::InitializeProximitySystem()
 		}
 	}
 
-	// Determine initial scan coord. PlayerPos - GetActorLocation() uses the
-	// slow-drifting actor frame (ApplyParallaxOffset drifts the actor by
-	// -PlayerDelta*Ratio each tick).
-	const FVector LocalPos = PlayerPos - GetActorLocation();
+	// Initial scan coord — same virtual grid convention as InitializeCoarseSystem.
+	// VirtualTraversal = 0 at init means the player starts at scan coord 0.
+	const FVector LocalPos = VirtualTraversal;
 	CurrentScanCoord = PositionToScanCoord(LocalPos);
 
 	FProximityBuffer& InitBuffer = ProximityBuffers[0];
@@ -1368,21 +1359,8 @@ void ASectorActor::UpdateProximityNodes()
 	// Don't start a new update if one is already in flight
 	if (bProximityUpdateInProgress.load()) return;
 
-	// Get player position in sector-actor-local space. PlayerPos -
-	// GetActorLocation() uses the slow-drifting actor frame.
-	FVector PlayerPos = FVector::ZeroVector;
-	if (const auto* World = GetWorld())
-	{
-		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-		{
-			if (APawn* Pawn = Controller->GetPawn())
-			{
-				PlayerPos = Pawn->GetActorLocation();
-			}
-		}
-	}
-
-	const FVector LocalPos = PlayerPos - GetActorLocation();
+	// Player's position in the virtual grid frame.
+	const FVector LocalPos = VirtualTraversal;
 	FIntVector NewScanCoord = PositionToScanCoord(LocalPos);
 
 	if (NewScanCoord == CurrentScanCoord) return;
@@ -1746,24 +1724,10 @@ void ASectorActor::PushProximityToNiagara()
 {
 	if (!ProximityNiagaraComponent) return;
 
-	// Positions in ProximityBuffers are stored in sector-actor-local space.
-	// Same push semantics as PushCoarseToNiagara: convert Local →
-	// player-relative so that (component-at-player + relative) renders as
-	// (Local + ActorPos) in world space — a slow-drifting world-pinned
-	// position that tracks the actor drift applied by ApplyParallaxOffset.
-	FVector PlayerPos = FVector::ZeroVector;
-	if (const auto* World = GetWorld())
-	{
-		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-		{
-			if (APawn* Pawn = Controller->GetPawn())
-			{
-				PlayerPos = Pawn->GetActorLocation();
-			}
-		}
-	}
-
-	const FVector ActorPos = GetActorLocation();
+	// Same math as PushCoarseToNiagara: Relative = LocalPos - VirtualTraversal.
+	// Particle's rendered world position = PlayerPos + Relative. The scratch
+	// pad maintains the identity between pushes via per-tick ParallaxOffset
+	// broadcasts from ApplyParallaxOffset.
 	const FProximityBuffer& Front = ProximityBuffers[FrontBufferIndex.load()];
 	const int32 Num = Front.Positions.Num();
 
@@ -1773,7 +1737,7 @@ void ASectorActor::PushProximityToNiagara()
 	for (int32 i = 0; i < Num; ++i)
 	{
 		RelativePositions[i] = (Front.Extents[i] > 0.0f)
-			? (Front.Positions[i] + ActorPos) - PlayerPos
+			? (Front.Positions[i] - VirtualTraversal)
 			: FVector::ZeroVector;
 	}
 
@@ -1783,8 +1747,6 @@ void ASectorActor::PushProximityToNiagara()
 		ProximityNiagaraComponent, FName("User.Extents"), Front.Extents);
 	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(
 		ProximityNiagaraComponent, FName("User.Colors"), Front.Colors);
-
-	ProximityNiagaraComponent->SetWorldLocation(PlayerPos);
 }
 
 void ASectorActor::Tick(float DeltaTime)
@@ -1816,5 +1778,200 @@ TArray<TSharedPtr<FOctreeNode>> ASectorActor::GetNearbyGalaxyNodes(const FVector
 		return {};
 	}
 	return Octree->GetNodesInRange(InCenter, InRadius, /*MinDepth=*/ -1, /*MaxDepth=*/ -1, GalaxyTypeId);
+}
+
+TArray<TSharedPtr<FOctreeNode>> ASectorActor::GetNearbyGalaxyNodesByScreenSpace(const FVector& InCenter, double InExtent, double InScreenSpaceThreshold) const
+{
+	// Screen-space-culled variant of GetNearbyGalaxyNodes. The tree walks
+	// itself top-down and prunes nodes whose angular-size proxy
+	// (Extent * (1 + ScaleFactor)) / Distance falls below
+	// InScreenSpaceThreshold — so very distant or very small galaxies drop
+	// out of the result automatically. Same TypeId filter as the plain
+	// range query.
+	if (!Octree.IsValid())
+	{
+		return {};
+	}
+	return Octree->GetNodesByScreenSpace(InCenter, InExtent, InScreenSpaceThreshold,
+		/*MinDepth=*/ -1, /*MaxDepth=*/ -1, GalaxyTypeId);
+}
+#pragma endregion
+
+#pragma region Spawn Range Scanning
+void ASectorActor::StartSpawnScanTimer()
+{
+	// Re-entrant-safe: clear any existing timer first so repeated
+	// Initialize/Reset cycles don't stack handlers. Interval-driven at
+	// SpawnScanInterval to decouple scan cadence from render tick.
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(SpawnScanTimerHandle);
+		World->GetTimerManager().SetTimer(
+			SpawnScanTimerHandle,
+			this,
+			&ASectorActor::UpdateSpawnRangeNodes,
+			SpawnScanInterval,
+			/*bLoop=*/ true);
+	}
+}
+
+void ASectorActor::StopSpawnScanTimer()
+{
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(SpawnScanTimerHandle);
+	}
+	// Drop tracked state so a fresh Initialize starts clean — callers
+	// checking TrackedSpawnNodes.Num() won't see ghosts.
+	TrackedSpawnNodes.Empty();
+}
+
+void ASectorActor::UpdateSpawnRangeNodes()
+{
+	// Guard against running before streaming is ready (no octree content
+	// yet) or during shutdown.
+	if (InitializationState != ELifecycleState::Ready) return;
+	if (!Octree.IsValid()) return;
+
+	// Query the octree in the virtual grid frame. Octree nodes were
+	// inserted at buffer LocalPos values (generated as CoarseCoordToCenter
+	// + candidate — absolute virtual-grid positions). The player's
+	// position in that frame is VirtualTraversal. DebugDrawSpawnNode
+	// mirrors this: world box anchor = PlayerPos + Node->Center -
+	// VirtualTraversal, matching the particle's current camera-relative
+	// render position.
+	const FVector LocalPlayerPos = VirtualTraversal;
+
+	const TArray<TSharedPtr<FOctreeNode>> NearbyArray =
+		GetNearbyGalaxyNodesByScreenSpace(LocalPlayerPos, SpawnScanExtent, SpawnScreenSpaceThreshold);
+
+	TSet<TSharedPtr<FOctreeNode>> NearbySet(NearbyArray);
+
+	// Enter = in Nearby but not yet tracked. Log + debug-draw.
+	for (const TSharedPtr<FOctreeNode>& Node : NearbySet)
+	{
+		if (!TrackedSpawnNodes.Contains(Node))
+		{
+			LogSpawnNodeEnter(Node);
+		}
+		// Debug-draw every tick for nodes currently in range — not just on
+		// enter — so the boxes persist visibly during the scan window.
+		// (DrawDebugBox with Lifetime == SpawnScanInterval fades naturally.)
+		if (bDebugDrawSpawnNodes)
+		{
+			DebugDrawSpawnNode(Node);
+		}
+	}
+
+	// Exit = tracked but no longer in Nearby.
+	TSet<TSharedPtr<FOctreeNode>> Exited = TrackedSpawnNodes.Difference(NearbySet);
+	for (const TSharedPtr<FOctreeNode>& Node : Exited)
+	{
+		LogSpawnNodeExit(Node);
+	}
+
+	// Commit the new tracked set. Using assignment rather than Remove/Add
+	// loops — one pass is cheaper than two and we've already emitted the
+	// enter/exit side-effects.
+	TrackedSpawnNodes = MoveTemp(NearbySet);
+}
+
+void ASectorActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) const
+{
+	if (!InNode.IsValid()) return;
+
+	const int32 SlotId = InNode->Data.ObjectId;
+	const int32 ExtraCount = InNode->Data.AdditionalObjectIds.Num();
+
+	UE_LOG(LogTemp, Log,
+		TEXT("ASectorActor::SpawnScan ENTER — node center=(%.1f, %.1f, %.1f) extent=%.2f depth=%d slot=%d extras=%d scale=%.3f"),
+		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
+		InNode->Extent, InNode->Depth, SlotId, ExtraCount, InNode->Data.ScaleFactor);
+
+	if (bLogSpawnEnterExitBuffers)
+	{
+		// The slot index could point into either CoarseBuffers or
+		// ProximityBuffers. We don't carry a tier tag on the node, so pick
+		// by slot-extent magnitude: coarse slot extents live in the
+		// MaxClusterPerCoarseNode range, proximity in MaxParticlesPerNode.
+		// Since both tiers share GalaxyTypeId and the slot indices can
+		// overlap numerically, the cleanest heuristic is to check whether
+		// the slot index is a registered coarse-entry value.
+		bool bIsCoarse = false;
+		for (const auto& Pair : ActiveCoarseNodes)
+		{
+			if (Pair.Value.SlotIndex == SlotId)
+			{
+				bIsCoarse = true;
+				break;
+			}
+		}
+
+		if (bIsCoarse)
+		{
+			const int32 FrontIdx = CoarseFrontIdx.load();
+			const FCoarseBuffer& Front = CoarseBuffers[FrontIdx];
+			const int32 Start = SlotId * MaxClusterPerCoarseNode;
+			int32 LiveCount = 0;
+			for (int32 i = 0; i < MaxClusterPerCoarseNode; ++i)
+			{
+				if (Front.ClusterExtents[Start + i] > 0.0f) ++LiveCount;
+			}
+			UE_LOG(LogTemp, Log,
+				TEXT("  coarse slot %d: %d live cluster particles of %d capacity"),
+				SlotId, LiveCount, MaxClusterPerCoarseNode);
+		}
+		else
+		{
+			const int32 FrontIdx = FrontBufferIndex.load();
+			const FProximityBuffer& Front = ProximityBuffers[FrontIdx];
+			const int32 Start = SlotId * MaxParticlesPerNode;
+			int32 LiveCount = 0;
+			for (int32 i = 0; i < MaxParticlesPerNode; ++i)
+			{
+				if (Front.Extents[Start + i] > 0.0f) ++LiveCount;
+			}
+			UE_LOG(LogTemp, Log,
+				TEXT("  proximity slot %d: %d live particles of %d capacity"),
+				SlotId, LiveCount, MaxParticlesPerNode);
+		}
+	}
+}
+
+void ASectorActor::LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const
+{
+	if (!InNode.IsValid()) return;
+
+	UE_LOG(LogTemp, Log,
+		TEXT("ASectorActor::SpawnScan EXIT  — node center=(%.1f, %.1f, %.1f) extent=%.2f depth=%d slot=%d"),
+		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
+		InNode->Extent, InNode->Depth, InNode->Data.ObjectId);
+}
+
+void ASectorActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) const
+{
+	if (!InNode.IsValid()) return;
+	const UWorld* World = GetWorld();
+	if (!World) return;
+
+	// Particle rendered world position = PlayerPos + LocalPos - VirtualTraversal
+	// (see Push* functions and scratch-pad drift in ApplyParallaxOffset).
+	// Node->Center is the octree's quantization of LocalPos, so the
+	// matching world-space box anchor is:
+	//   PlayerPos + Node->Center - VirtualTraversal
+	// GetActorLocation() == PlayerPos here (actor is pegged), so this is
+	// equivalent to GetActorLocation() + Node->Center - VirtualTraversal.
+	const FVector NodeCenterWorld = GetActorLocation() + InNode->Center - VirtualTraversal;
+	const FVector BoxExtent(InNode->Extent);
+
+	DrawDebugBox(
+		World,
+		NodeCenterWorld,
+		BoxExtent,
+		FColor::Green,
+		/*bPersistent=*/ false,
+		/*Lifetime=*/ SpawnScanInterval,
+		/*DepthPriority=*/ 0,
+		/*Thickness=*/ 10.0f);
 }
 #pragma endregion
