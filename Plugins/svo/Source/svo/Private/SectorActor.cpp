@@ -20,9 +20,10 @@ ASectorActor::ASectorActor()
 	SectorClusterCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorClusterCloud.NG_SectorClusterCloud"));
 	SectorGasCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorGasCloud.NG_SectorGasCloud"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
-	// Corner-align the tree so depth-2 cells line up with sector coarse
-	// cells. Center = (SE, SE, SE), extent = 4*SE → depth-2 grid centers
-	// at {-2*SE, 0, +2*SE, +4*SE} along each axis. The first three match
+
+	// Corner-align the tree so depth-2 cells line up with sector coarse cells.
+	// Center = (SE, SE, SE), extent = 4*SE → depth-2 grid centers at
+	// {-2*SE, 0, +2*SE, +4*SE} along each axis. The first three match
 	// coarse cell coords {-1, 0, +1}; the fourth is unused buffer.
 	const FVector TreeCenter(Params.Extent, Params.Extent, Params.Extent);
 	Octree = MakeShared<FOctree>(Params.Extent * TreeExtentMultiplier, TreeCenter);
@@ -30,10 +31,6 @@ ASectorActor::ASectorActor()
 #pragma endregion
 
 #pragma region Lifecycle
-// Copied locally from the former AProceduralSpaceActor base. Same async-init
-// pattern: InitializeChildPool → InitializeData → InitializeVolumetric →
-// InitializeNiagara, checking InitializationState == Pooling between each step
-// so a ResetForPool mid-init short-circuits cleanly.
 void ASectorActor::Initialize()
 {
 	InitializationState = ELifecycleState::Initializing;
@@ -72,9 +69,7 @@ void ASectorActor::Initialize()
 			UE_LOG(LogTemp, Log, TEXT("%s::Initialize total duration: %.3f seconds"),
 				*GetClass()->GetName(), TotalDuration);
 
-			// Kick off the spawn-range scan. TimerManager touches FTimerHandle
-			// state and must run on the game thread; this async completion
-			// handler is on a background thread, so hop over.
+			// TimerManager must be touched on the game thread.
 			AsyncTask(ENamedThreads::GameThread, [this]()
 				{
 					if (IsValid(this))
@@ -103,9 +98,6 @@ void ASectorActor::BeginPlay()
 		}
 	}
 
-	// Skip auto-Initialize when something else (e.g. AUniverseActor) is
-	// driving the lifecycle and needs to ConfigureCell() first. Manually-
-	// placed sectors in a level still init themselves on play.
 	if (bAutoInitializeOnBeginPlay)
 	{
 		Initialize();
@@ -121,11 +113,8 @@ void ASectorActor::ConfigureCell(FIntVector InCellCoord)
 		static_cast<double>(CellCoord.Z) * 2.0 * Params.Extent);
 	SetActorLocation(CellOrigin);
 
-	// The sector's constructor created an Octree with default Params.Extent.
-	// If the universe has overridden Params (via SpawnSectorForCell setting
-	// Sector->Params before ConfigureCell), the octree may now be sized
-	// wrong. Rebuild against the actual extent (sized 4× and corner-aligned
-	// — see constructor comment).
+	// Rebuild the octree against the actual extent in case Params were
+	// overridden after construction (see constructor comment for sizing).
 	const FVector TreeCenter(Params.Extent, Params.Extent, Params.Extent);
 	Octree = MakeShared<FOctree>(Params.Extent * TreeExtentMultiplier, TreeCenter);
 }
@@ -166,7 +155,7 @@ FastNoise::SmartNode<> ASectorActor::BuildNoise(int InSeed) {
 
 	auto Fbm0 = FastNoise::New<FastNoise::FractalFBm>();
 	Fbm0->SetSource(DomainScale);
-	Fbm0->SetOctaveCount(3); //Octave count will probs stay hardcoded
+	Fbm0->SetOctaveCount(3);
 
 	auto Remap0 = FastNoise::New<FastNoise::Remap>();
 	Remap0->SetSource(Fbm0);
@@ -213,15 +202,12 @@ void ASectorActor::InitializeData()
 	double TotalStart = FPlatformTime::Seconds();
 	double StepStart;
 
-	// With the coarse streaming tier and fine-tier proximity system both now
-	// sampling noise directly per-candidate (GenerateCoarseNode +
-	// GenerateNodeGalaxies use GenPositionArray3D batches), nothing in the
-	// particle/data pipeline reads the sector-wide DensityVolume anymore.
-	// The only consumer is the debug volumetric raymarcher, which samples the
-	// PseudoVolumeTexture thousands of times per ray and genuinely needs the
-	// GPU-sampled volume texture form. When bEnableVolumetric is false (the
-	// default), skip the entire noise-to-volume + upscale + pseudo-volume
-	// pipeline — it was a ~120ms unconditional cost on every sector init.
+	// With the coarse and proximity streaming tiers both sampling noise
+	// directly per-candidate, nothing in the particle pipeline reads the
+	// sector-wide DensityVolume. The only consumer is the debug volumetric
+	// raymarcher, which samples the PseudoVolumeTexture thousands of times
+	// per ray. When bEnableVolumetric is false (the default), skip the entire
+	// noise-to-volume pipeline — it was a ~120ms unconditional cost per init.
 	if (!bEnableVolumetric)
 	{
 		UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeData - volumetric disabled, skipping density volume build (%.3f sec)"),
@@ -235,8 +221,7 @@ void ASectorActor::InitializeData()
 	auto DensityNoise = BuildNoise(69);
 
 	// Cell-coord WorldOffset for the noise sampler. Each cell extends
-	// 2 units in normalized noise-space (because a cell's local sampling
-	// covers [-1, +1] after normalization), so adjacent cells offset by
+	// 2 units in normalized noise-space, so adjacent cells offset by
 	// (2 * CellCoord) to produce a continuous noise field.
 	const FVector NoiseOffset(
 		static_cast<double>(CellCoord.X) * 2.0,
@@ -267,9 +252,6 @@ void ASectorActor::InitializeData()
 		UE_LOG(LogTemp, Log, TEXT("  [InitData] Upscale (%d^3 -> 256^3): %.3f sec"), noiseResolution, FPlatformTime::Seconds() - StepStart);
 	}
 
-	// Wrap DensityBuffer in the sampler view. Sector noise spans
-	// [-Params.Extent, +Params.Extent] centered at sector local origin, so the
-	// view's source-space matches sector local space directly.
 	DensityVolume = FDensityVolume(
 		DensityBuffer,
 		FVector::ZeroVector,
@@ -287,9 +269,6 @@ void ASectorActor::InitializeData()
 
 void ASectorActor::InitializeVolumetric()
 {
-	// Per-sector raymarched volumetric is too expensive to run on a 27-sector
-	// grid. Default disabled; only directly-placed sectors with the flag
-	// flipped on (e.g. for volumetric debugging) actually spawn the cube.
 	if (!bEnableVolumetric)
 	{
 		UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeVolumetric skipped (bEnableVolumetric=false)"));
@@ -323,50 +302,32 @@ void ASectorActor::InitializeVolumetric()
 		});
 	CompletionFuture.Wait();
 
-	double VolumetricDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("ASectorActor::Volumetric initialization took: %.3f seconds"), VolumetricDuration);
+	UE_LOG(LogTemp, Log, TEXT("ASectorActor::Volumetric initialization took: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
 }
 
 void ASectorActor::InitializeNiagara()
 {
-	// With FSectorNiagaraLayerData / LayerComponents gone, InitializeNiagara
-	// is now just a dispatcher for the two streaming subsystems. Both own
-	// their own Niagara components, their own double-buffered particle state,
-	// and their own initial-population + spawn-component + push + activate
-	// sequence. Ordering between them is not significant — neither reads the
-	// other's state.
+	// Dispatches to the two streaming subsystem initializers. Both own their
+	// own Niagara components, double-buffered particle state, and push/activate
+	// sequence. Ordering between them is not significant.
 	double StartTime = FPlatformTime::Seconds();
 
 	InitializeProximitySystem();
 	InitializeCoarseSystem();
 
-	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeNiagara total duration: %.3f seconds"), TotalDuration);
+	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeNiagara total duration: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
 }
 #pragma endregion
 
 #pragma region Player-Centered Parallax
 // VirtualTraversal-based pegged-actor parallax model:
-//   1. Actor is pegged to the player every tick (SetActorLocation). Niagara
-//      components are attached and follow automatically. Keeps the actor's
-//      transform in UE's clean "near the camera" numerical range.
+//   1. Actor is pegged to the player every tick (SetActorLocation).
 //   2. VirtualTraversal accumulates Ratio * PlayerDelta each tick, encoding
 //      how far the player has "virtually" moved through sector-grid space.
-//      Replaces the old model's (GetActorLocation() - CellOrigin) delta
-//      without forcing the actor itself to drift.
 //   3. Per-frame scratch pad broadcast User.ParallaxOffset = -Ratio *
-//      PlayerDelta drifts stored particle positions so they stay aligned
-//      with VirtualTraversal between pushes: stored = LocalPos -
-//      VirtualTraversal at all times (push establishes the identity;
-//      scratch pad maintains it incrementally).
-//   4. Push math: Relative = LocalPos - VirtualTraversal (component at
-//      player renders this as PlayerPos + LocalPos - VirtualTraversal,
-//      which is the particle's current world position under the parallax
-//      compression).
-//   5. Streaming: boundary-cross checks use PositionToCoarseCoord and
-//      PositionToScanCoord applied to VirtualTraversal directly — that IS
-//      the player's sector-grid position.
-//   6. Single ratio (SpeedScale / Params.UnitScale); per-tier deferred.
+//      PlayerDelta drifts stored particle positions to stay aligned.
+//   4. Push math: Relative = LocalPos - VirtualTraversal.
+//   5. Streaming: boundary-cross checks use VirtualTraversal directly.
 void ASectorActor::ApplyParallaxOffset()
 {
 	if (InitializationState != ELifecycleState::Ready)
@@ -399,16 +360,12 @@ void ASectorActor::ApplyParallaxOffset()
 
 	const double Ratio = (Params.UnitScale > 0.0) ? (SpeedScale / Params.UnitScale) : 0.0;
 
-	// Accumulate virtual traversal. This is the numerical replacement for
-	// the old actor-drift; same rate (Ratio * PlayerDelta) but doesn't
-	// feed into the actor's rendering transform.
 	VirtualTraversal += PlayerDelta * Ratio;
 
 	// Scratch-pad broadcast. Stored particle positions satisfy
 	// stored = LocalPos - VirtualTraversal at every tick. Each frame
 	// VirtualTraversal grows by Ratio * PlayerDelta, so stored needs to
-	// shrink by the same amount — the scratch pad adds User.ParallaxOffset
-	// destructively, so we pass the negation.
+	// shrink by the same amount.
 	const FVector ParallaxOffset = -PlayerDelta * Ratio;
 	if (CoarseClusterNiagara)
 	{
@@ -431,15 +388,8 @@ void ASectorActor::ApplyParallaxOffset()
 #pragma region Shutdown
 void ASectorActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	// Stop the spawn-range scan before component teardown so any in-flight
-	// debug draws / logs don't race the GC pass on components they might
-	// reference.
 	StopSpawnScanTimer();
 
-	// Explicitly tear down managed Niagara components before the engine's GC
-	// pass runs. Without this, the stale-reference detector at PIE end can
-	// observe partially-destroyed components still referenced through our
-	// UPROPERTY chain and the printer itself can break on the walk.
 	if (ProximityNiagaraComponent)
 	{
 		ProximityNiagaraComponent->Deactivate();
@@ -468,15 +418,6 @@ void ASectorActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 #pragma region Child Spawn Location
 FVector ASectorActor::ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const
 {
-	// In the player-pegged frame, NodeCenter is in sector-local coords (offset
-	// from CellOrigin), not world-space. Recover the cell-local offset and
-	// scale by the tier unit-scale ratio so nearer-tier children (smaller
-	// ChildUnitScale) sit proportionally closer to the player.
-	//
-	// With ThisUnitScale == ChildUnitScale this collapses to
-	// CurrentFrameOfReferenceLocation + (NodeCenter - CellOrigin), which
-	// matches the "treat sector-local as player-relative" convention used by
-	// the Niagara push path.
 	const double ThisUnitScale = Params.UnitScale;
 	const double Ratio = (ChildUnitScale > 0.0) ? (ThisUnitScale / ChildUnitScale) : 1.0;
 	const FVector CellLocalOffset = NodeCenter - CellOrigin;
@@ -538,8 +479,7 @@ void ASectorActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 					PoolGalaxy->Octree = MakeShared<FOctree>(PoolGalaxy->Params.Extent);
 					PoolGalaxy->Octree->bIsResetting.store(false);
 
-					double ODuration = FPlatformTime::Seconds() - StartTime;
-					UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Flushing Octree took: %.3f seconds"), ODuration);
+					UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Flushing Octree took: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
 
 					AsyncTask(ENamedThreads::GameThread, [this, PoolGalaxy]()
 						{
@@ -557,12 +497,9 @@ void ASectorActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 
 #pragma region Coarse Cluster Streaming
 
-// Coordinate helpers. Coarse cells are 2*Params.Extent on a side, centered at
-// integer-coord multiples — i.e. cell (N, M, K) occupies world space
-// [(N-0.5) * 2*Extent .. (N+0.5) * 2*Extent]. Coord (0,0,0) is centered at
-// the sector's CellOrigin in the sector-local frame. Same convention the old
-// AUniverseActor used for its sector grid, just now the grid lives inside a
-// single sector actor.
+// Coarse cells are 2*Params.Extent on a side, centered at integer-coord multiples.
+// Cell (N, M, K) occupies [(N-0.5)*2*Extent .. (N+0.5)*2*Extent]. Coord (0,0,0)
+// is centered at the sector's CellOrigin.
 FIntVector ASectorActor::PositionToCoarseCoord(const FVector& InWorldPos) const
 {
 	const double CellSize = 2.0 * Params.Extent;
@@ -588,10 +525,11 @@ void ASectorActor::InitializeCoarseSystem()
 	// Slot pool sized to 3x3x3 = 27 at radius 1. Wider radii multiply.
 	const int32 Side = 2 * CoarseNeighborhoodRadius + 1;
 	const int32 TotalSlots = Side * Side * Side;
-	const int32 TotalParticles = TotalSlots * MaxClusterPerCoarseNode;
 
-	CoarseBuffers[0].Allocate(TotalParticles);
-	CoarseBuffers[1].Allocate(TotalParticles);
+	CoarseClusterBuffers[0].Allocate(TotalSlots, MaxClusterPerCoarseNode, /*bWantRotations=*/true);
+	CoarseClusterBuffers[1].Allocate(TotalSlots, MaxClusterPerCoarseNode, /*bWantRotations=*/true);
+	CoarseGasBuffers[0].Allocate(TotalSlots, MaxClusterPerCoarseNode);
+	CoarseGasBuffers[1].Allocate(TotalSlots, MaxClusterPerCoarseNode);
 	CoarseFrontIdx.store(0);
 
 	CoarseSlotCounts.SetNumZeroed(TotalSlots);
@@ -602,45 +540,16 @@ void ASectorActor::InitializeCoarseSystem()
 	}
 	ActiveCoarseNodes.Empty();
 
-	// --- Determine initial coarse coord from player position and populate
-	// all neighborhood cells into the front buffer synchronously. Matches
-	// the pattern in InitializeProximitySystem — having real data in the
-	// buffer before the component spawns means the first push has something
-	// to draw, rather than dead particles until the first async regen lands.
-	FVector PlayerPos = FVector::ZeroVector;
-	if (const auto* World = GetWorld())
-	{
-		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-		{
-			if (APawn* Pawn = Controller->GetPawn())
-			{
-				PlayerPos = Pawn->GetActorLocation();
-			}
-		}
-	}
-
-	// Coarse coords live in the sector's virtual grid frame. The player's
-	// position in that frame is tracked by VirtualTraversal, which advances
-	// by Ratio * PlayerDelta in ApplyParallaxOffset. At init it's zero —
-	// meaning the player starts at virtual coord (0,0,0) regardless of where
-	// they physically are in world space. Subsequent motion accumulates into
-	// VirtualTraversal and boundary-cross checks use it directly.
+	// VirtualTraversal is 0 at init — player starts at virtual coord (0,0,0).
 	const FVector LocalPlayerPos = VirtualTraversal;
 	CoarseCenterCell = PositionToCoarseCoord(LocalPlayerPos);
 
-	// Two-phase pipeline (Task 2 — registry model):
-	//   (1) Serial slot allocation. CoarseFreeSlots / ActiveCoarseNodes
-	//       aren't threadsafe; pop slots and build the (Coord, Slot) work
-	//       list under single-threaded control.
-	//   (2) Parallel generation. Each worker writes to a disjoint slot-
-	//       indexed slice of InitBuffer — no contention.
-	//   (3) Per-cell octree insert. After generation completes, walk each
-	//       cell's particle slice and bulk-insert each non-dead particle
-	//       at a depth derived from its extent. Record touched nodes per
-	//       cell entry for cell-exit cleanup.
-	FCoarseBuffer& InitBuffer = CoarseBuffers[0];
+	// Two-phase pipeline:
+	//   (1) Serial slot allocation — CoarseFreeSlots / ActiveCoarseNodes aren't threadsafe.
+	//   (2) Parallel generation — each worker writes to a disjoint slot-indexed slice.
+	//   (3) Serial octree insert — InsertPosition mutex-guards internally.
 	TArray<TPair<FIntVector, int32>> ToGenerate;
-	ToGenerate.Reserve(Side * Side * Side);
+	ToGenerate.Reserve(TotalSlots);
 	for (int32 dz = -CoarseNeighborhoodRadius; dz <= CoarseNeighborhoodRadius; ++dz)
 	{
 		for (int32 dy = -CoarseNeighborhoodRadius; dy <= CoarseNeighborhoodRadius; ++dy)
@@ -655,37 +564,38 @@ void ASectorActor::InitializeCoarseSystem()
 		}
 	}
 
-	ParallelFor(ToGenerate.Num(), [this, &ToGenerate, &InitBuffer](int32 i)
+	ParallelFor(ToGenerate.Num(), [this, &ToGenerate](int32 i)
 		{
 			const TPair<FIntVector, int32>& Pair = ToGenerate[i];
-			GenerateCoarseNode(Pair.Key, Pair.Value, InitBuffer);
+			GenerateCoarseNode(Pair.Key, Pair.Value, CoarseClusterBuffers[0], CoarseGasBuffers[0]);
 		}, EParallelForFlags::BackgroundPriority);
 
-	// Octree registry pass. InsertCoarseCellIntoOctree calls FOctree::
-	// InsertPosition per particle, which mutex-guards. Running the inserts
-	// in parallel would serialize on that mutex anyway and add scheduler
-	// overhead, so do them serially in slot-iteration order.
 	for (const TPair<FIntVector, int32>& Pair : ToGenerate)
 	{
 		FCoarseSlotEntry* Entry = ActiveCoarseNodes.Find(Pair.Key);
 		if (Entry)
 		{
-			InsertCoarseCellIntoOctree(Pair.Key, Pair.Value, InitBuffer, Entry->InsertedNodes);
+			InsertCoarseCellIntoOctree(Pair.Key, Pair.Value, CoarseClusterBuffers[0], Entry->InsertedNodes);
 		}
 	}
 
-	// Mirror front → back so either buffer is a valid starting state for
-	// the first boundary-cross update.
-	CoarseBuffers[1].ClusterPositions = CoarseBuffers[0].ClusterPositions;
-	CoarseBuffers[1].ClusterRotations = CoarseBuffers[0].ClusterRotations;
-	CoarseBuffers[1].ClusterExtents = CoarseBuffers[0].ClusterExtents;
-	CoarseBuffers[1].ClusterColors = CoarseBuffers[0].ClusterColors;
-	CoarseBuffers[1].GasPositions = CoarseBuffers[0].GasPositions;
-	CoarseBuffers[1].GasExtents = CoarseBuffers[0].GasExtents;
-	CoarseBuffers[1].GasColors = CoarseBuffers[0].GasColors;
+	// Mirror front → back so either buffer is a valid starting state.
+	CoarseClusterBuffers[1].CopyFrom(CoarseClusterBuffers[0]);
+	CoarseGasBuffers[1].CopyFrom(CoarseGasBuffers[0]);
 
-	// --- Spawn Niagara components on game thread, push real data, activate.
-	// Same pattern as InitializeProximitySystem.
+	// Spawn Niagara components on game thread, push real data, activate.
+	FVector PlayerPos = FVector::ZeroVector;
+	if (const auto* World = GetWorld())
+	{
+		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
+		{
+			if (APawn* Pawn = Controller->GetPawn())
+			{
+				PlayerPos = Pawn->GetActorLocation();
+			}
+		}
+	}
+
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, PlayerPos, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
@@ -722,9 +632,7 @@ void ASectorActor::InitializeCoarseSystem()
 				/*bAutoDestroy=*/ false,
 				/*bAutoActivate=*/ true);
 
-			// Fixed bounds cover the full active neighborhood, not just one
-			// cell. Component sits at the actor (pegged to player); particles
-			// reach CoarseNeighborhoodRadius cells away in every direction.
+			// Fixed bounds cover the full active neighborhood.
 			const double BoundsExtent = (2 * CoarseNeighborhoodRadius + 1) * Params.Extent;
 			const FBox CoarseBounds(FVector(-BoundsExtent), FVector(BoundsExtent));
 
@@ -748,14 +656,7 @@ void ASectorActor::InitializeCoarseSystem()
 				UE_LOG(LogTemp, Error, TEXT("ASectorActor::InitializeCoarseSystem - Failed to create CoarseGasNiagara"));
 			}
 
-			// Push the initial (real) data into both components, then activate.
-			// No SetWorldLocation here — the components are attached to the
-			// actor which ApplyParallaxOffset will peg to the player.
 			PushCoarseToNiagara();
-
-			if (CoarseClusterNiagara) CoarseClusterNiagara->Activate(true);
-			if (CoarseGasNiagara) CoarseGasNiagara->Activate(true);
-
 			CompletionPromise.SetValue();
 		});
 	CompletionFuture.Wait();
@@ -771,11 +672,7 @@ void ASectorActor::UpdateCoarseNodes()
 	if (!CoarseClusterNiagara && !CoarseGasNiagara) return;
 
 	// If async generation completed a swap, push the new front buffer.
-	// ReinitializeSystem() forces Niagara to re-spawn with the new user
-	// arrays — without it, already-live particles hold onto whatever
-	// positions/extents they were spawned with, so the buffer swap updates
-	// the component's user parameters but no visible change occurs. Same
-	// pattern as UpdateProximityNodes.
+	// ReinitializeSystem() forces Niagara to re-spawn with the new user arrays.
 	if (bCoarseNeedsPush.load())
 	{
 		PushCoarseToNiagara();
@@ -784,11 +681,8 @@ void ASectorActor::UpdateCoarseNodes()
 		bCoarseNeedsPush.store(false);
 	}
 
-	// Don't start a new update if one is in flight.
 	if (bCoarseUpdateInProgress.load()) return;
 
-	// Player's position in the sector's virtual grid frame, tracked by
-	// VirtualTraversal. See InitializeCoarseSystem for the rationale.
 	const FVector LocalPlayerPos = VirtualTraversal;
 	const FIntVector NewCoarseCoord = PositionToCoarseCoord(LocalPlayerPos);
 
@@ -798,7 +692,6 @@ void ASectorActor::UpdateCoarseNodes()
 		CoarseCenterCell.X, CoarseCenterCell.Y, CoarseCenterCell.Z,
 		NewCoarseCoord.X, NewCoarseCoord.Y, NewCoarseCoord.Z);
 
-	// Boundary crossed — async regen of entering slots into back buffer.
 	bCoarseUpdateInProgress.store(true);
 	const FIntVector OldCenter = CoarseCenterCell;
 	CoarseCenterCell = NewCoarseCoord;
@@ -807,25 +700,13 @@ void ASectorActor::UpdateCoarseNodes()
 		{
 			double StartTime = FPlatformTime::Seconds();
 
-			// Copy front → back as the starting state; unchanged slots carry
-			// over untouched, only entering/exiting slots get modified.
+			// Copy front → back; unchanged slots carry over untouched.
 			const int32 FrontIdx = CoarseFrontIdx.load();
 			const int32 BackIdx = 1 - FrontIdx;
-			FCoarseBuffer& BackBuffer = CoarseBuffers[BackIdx];
-			const FCoarseBuffer& FrontBuffer = CoarseBuffers[FrontIdx];
+			CoarseClusterBuffers[BackIdx].CopyFrom(CoarseClusterBuffers[FrontIdx]);
+			CoarseGasBuffers[BackIdx].CopyFrom(CoarseGasBuffers[FrontIdx]);
 
-			BackBuffer.ClusterPositions = FrontBuffer.ClusterPositions;
-			BackBuffer.ClusterRotations = FrontBuffer.ClusterRotations;
-			BackBuffer.ClusterExtents = FrontBuffer.ClusterExtents;
-			BackBuffer.ClusterColors = FrontBuffer.ClusterColors;
-			BackBuffer.GasPositions = FrontBuffer.GasPositions;
-			BackBuffer.GasExtents = FrontBuffer.GasExtents;
-			BackBuffer.GasColors = FrontBuffer.GasColors;
-
-			// Entering / exiting coord sets. Unlike the proximity system
-			// (which clamps to [0, NodesPerSide) inside the sector), coarse
-			// coords are universe-wide integer space with no bounds — the
-			// sliding window can be anywhere.
+			// Coarse coords are universe-wide integer space with no bounds.
 			TSet<FIntVector> OldSet;
 			TSet<FIntVector> NewSet;
 			for (int32 dz = -CoarseNeighborhoodRadius; dz <= CoarseNeighborhoodRadius; ++dz)
@@ -835,8 +716,6 @@ void ASectorActor::UpdateCoarseNodes()
 					for (int32 dx = -CoarseNeighborhoodRadius; dx <= CoarseNeighborhoodRadius; ++dx)
 					{
 						const FIntVector Offset(dx, dy, dz);
-						// Only register OldSet cells if the OldCenter was a
-						// real center (not the INT32_MIN cold-start sentinel).
 						if (OldCenter.X != INT32_MIN)
 						{
 							OldSet.Add(OldCenter + Offset);
@@ -857,29 +736,15 @@ void ASectorActor::UpdateCoarseNodes()
 				if (!OldSet.Contains(Coord)) EnteringNodes.Add(Coord);
 			}
 
-			// Free exiting slots: dead-stub the cell's particles in the back
-			// buffer, return the slot to the free pool, and walk every octree
-			// node this cell touched to retire its slot index. Other cells
-			// may have inserted into the same node (collision overflow), so
-			// we use RemoveObjectIdFromNode rather than blanket-clearing.
+			// Free exiting slots: dead-stub their data, retire from octree, return slot.
 			const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
 			for (const FIntVector& Coord : ExitingNodes)
 			{
 				FCoarseSlotEntry* Entry = ActiveCoarseNodes.Find(Coord);
 				if (Entry)
 				{
-					const int32 SlotStart = Entry->SlotIndex * MaxClusterPerCoarseNode;
-					for (int32 i = 0; i < MaxClusterPerCoarseNode; ++i)
-					{
-						const int32 Idx = SlotStart + i;
-						BackBuffer.ClusterPositions[Idx] = DeadPos;
-						BackBuffer.ClusterRotations[Idx] = FVector::ZeroVector;
-						BackBuffer.ClusterExtents[Idx] = 0.0f;
-						BackBuffer.ClusterColors[Idx] = FLinearColor::Black;
-						BackBuffer.GasPositions[Idx] = DeadPos;
-						BackBuffer.GasExtents[Idx] = 0.0f;
-						BackBuffer.GasColors[Idx] = FLinearColor::Black;
-					}
+					CoarseClusterBuffers[BackIdx].ClearSlot(Entry->SlotIndex, DeadPos);
+					CoarseGasBuffers[BackIdx].ClearSlot(Entry->SlotIndex, DeadPos);
 					CoarseFreeSlots.Add(Entry->SlotIndex);
 
 					for (const TSharedPtr<FOctreeNode>& Node : Entry->InsertedNodes)
@@ -893,16 +758,10 @@ void ASectorActor::UpdateCoarseNodes()
 				}
 			}
 
-			// Generate entering nodes into the back buffer (registry model):
-			//   (1) Serial: pop slots, build (Coord, Slot) work list,
-			//       register placeholder ActiveCoarseNodes entries with
-			//       empty InsertedNodes lists.
-			//   (2) Parallel: GenerateCoarseNode writes to disjoint slot
-			//       slices of BackBuffer. Same as pre-Task 2.
-			//   (3) Serial: per cell, walk the slot's particles and
-			//       register each into the octree (per-particle insert at
-			//       MakePointDataFromWorldScale-derived depth). Records
-			//       touched nodes back into the cell entry.
+			// Generate entering nodes:
+			//   (1) Serial slot allocation.
+			//   (2) Parallel generation into back buffer slices.
+			//   (3) Serial octree insert.
 			TArray<TPair<FIntVector, int32>> ToGenerate;
 			ToGenerate.Reserve(EnteringNodes.Num());
 			for (const FIntVector& Coord : EnteringNodes)
@@ -918,24 +777,21 @@ void ASectorActor::UpdateCoarseNodes()
 				ToGenerate.Emplace(Coord, SlotIndex);
 			}
 
-			ParallelFor(ToGenerate.Num(), [this, &ToGenerate, &BackBuffer](int32 i)
+			ParallelFor(ToGenerate.Num(), [this, &ToGenerate, BackIdx](int32 i)
 				{
 					const TPair<FIntVector, int32>& Pair = ToGenerate[i];
-					GenerateCoarseNode(Pair.Key, Pair.Value, BackBuffer);
+					GenerateCoarseNode(Pair.Key, Pair.Value, CoarseClusterBuffers[BackIdx], CoarseGasBuffers[BackIdx]);
 				}, EParallelForFlags::BackgroundPriority);
 
-			// Octree registry pass. Serial — InsertPosition mutex-guards
-			// internally so parallel calls would just contend on that lock.
 			for (const TPair<FIntVector, int32>& Pair : ToGenerate)
 			{
 				FCoarseSlotEntry* Entry = ActiveCoarseNodes.Find(Pair.Key);
 				if (Entry)
 				{
-					InsertCoarseCellIntoOctree(Pair.Key, Pair.Value, BackBuffer, Entry->InsertedNodes);
+					InsertCoarseCellIntoOctree(Pair.Key, Pair.Value, CoarseClusterBuffers[BackIdx], Entry->InsertedNodes);
 				}
 			}
 
-			// Atomic buffer swap.
 			CoarseFrontIdx.store(BackIdx);
 			bCoarseNeedsPush.store(true);
 			bCoarseUpdateInProgress.store(false);
@@ -945,39 +801,18 @@ void ASectorActor::UpdateCoarseNodes()
 		});
 }
 
-void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InSlotIndex, FCoarseBuffer& InBuffer)
+void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InSlotIndex, FNiagaraParticleBuffer& InClusterBuffer, FNiagaraParticleBuffer& InGasBuffer)
 {
-	// Direct batched noise sampling — no transient density volume. Same
-	// pattern as GenerateNodeGalaxies:
-	//   Phase 1: generate all candidate positions + their normalized noise
-	//            coords (with coord-derived offset baked in).
-	//   Phase 2: one GenPositionArray3D call covering all candidates.
-	//   Phase 3: walk results, rejection-gate, write accepted to slot buffer.
+	// Batched noise sampling — three phases:
+	//   1. Generate candidate positions + normalized noise coords.
+	//   2. One GenPositionArray3D call covering all candidates.
+	//   3. Walk results, rejection-gate, write accepted to slot buffers.
 	//
-	// Why no volume: rejection sampling reads density exactly MaxClusterPer-
-	// CoarseNode times (500 currently). Building a 128³ = 2M voxel volume as
-	// a lookup structure to serve 500 reads was pure waste — ~8MB alloc per
-	// cell, serialized into the stream, and most voxels never sampled. The
-	// FastNoise batch path evaluates noise at exactly the points we actually
-	// care about. Volume textures stay relevant only for raymarching consumers
-	// (see InitializeData + bEnableVolumetric), which sample the same field
-	// thousands of times per frame at arbitrary positions.
-	//
-	// Differences from GenerateNodeGalaxies:
-	//   - Candidates are cell-local [-Extent, +Extent] instead of scan-node-
-	//     local — coarse cells are the outer unit here, not a child of one.
-	//   - Noise offset is InCoarseCoord * 2.0 directly; no per-candidate
-	//     coarse-cell lookup since every candidate shares this node's coord.
-	//   - Per accepted point: writes both a cluster and a gas entry (1:1
-	//     matched), gas extent lerped by the same density value we rejection-
-	//     gated against.
-	//
-	// Position uses CoarseCoordToCenter directly (the cell's logical center).
-	// The octree's quantization doesn't influence rendering — the spatial
-	// index is populated as a separate post-generation pass and only stores
-	// slot indices, not authoritative positions.
+	// Cluster and gas share 1:1 positions and slot indexing; accepted points
+	// write a cluster entry and a gas entry at the same slot index.
+	// Gas extent is lerped by the same density value used for rejection.
 
-	const int32 BufferStart = InSlotIndex * MaxClusterPerCoarseNode;
+	const int32 BufferStart = InSlotIndex * InClusterBuffer.SlotCapacity;
 	const FVector NodeCenter = CoarseCoordToCenter(InCoarseCoord);
 
 	const int32 CoordHash = HashCombine(
@@ -990,9 +825,7 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InS
 	const int32 NumCandidates = MaxClusterPerCoarseNode;
 	const double InvExtent = 1.0 / (double)Params.Extent;
 
-	// Coord-derived noise offset — every candidate in this cell gets the same
-	// offset applied, unlike GenerateNodeGalaxies where a scan node can
-	// straddle coarse cell boundaries.
+	// Every candidate in this cell shares the same coord-derived noise offset.
 	const double NoiseOffsetX = (double)InCoarseCoord.X * 2.0;
 	const double NoiseOffsetY = (double)InCoarseCoord.Y * 2.0;
 	const double NoiseOffsetZ = (double)InCoarseCoord.Z * 2.0;
@@ -1007,7 +840,6 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InS
 
 	for (int32 i = 0; i < NumCandidates; ++i)
 	{
-		// Cell-local candidate in [-Extent, +Extent].
 		const FVector Candidate(
 			Stream.FRandRange(-(double)Params.Extent, (double)Params.Extent),
 			Stream.FRandRange(-(double)Params.Extent, (double)Params.Extent),
@@ -1043,7 +875,6 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InS
 		const float Density = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
 		if (Stream.FRand() > Density) continue;
 
-		// Cluster scale pick — stable curve-driven sample per-object.
 		const float ScaleSample = Stream.FRand();
 		const double Scale = FPointData::SampleScaleFromDistribution(
 			Params.MinClusterScale,
@@ -1056,92 +887,58 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InS
 
 		const FVector CompVec = Stream.GetUnitVector();
 		const FVector Rotation = Stream.GetUnitVector();
-
-		// Gas extent lerped by the same density we gated against.
 		const float GasExtent = GasMinExtent + ExtentRange * Density;
-
-		// Sector-actor-local position. The push pass converts to player-
-		// relative via (Local + ActorPos) - PlayerPos; world render lands
-		// at (Local + ActorPos), which tracks the actor's slow drift.
 		const FVector LocalPos = CandidatePositions[i] + NodeCenter;
 
 		const int32 Idx = BufferStart + ActualCount;
-		InBuffer.ClusterPositions[Idx] = LocalPos;
-		InBuffer.ClusterRotations[Idx] = Rotation;
-		InBuffer.ClusterExtents[Idx] = ClusterExtent;
-		InBuffer.ClusterColors[Idx] = FLinearColor(FMath::Abs(CompVec.X), FMath::Abs(CompVec.Y), FMath::Abs(CompVec.Z));
+		InClusterBuffer.Positions[Idx] = LocalPos;
+		InClusterBuffer.Rotations[Idx] = Rotation;
+		InClusterBuffer.Extents[Idx] = ClusterExtent;
+		InClusterBuffer.Colors[Idx] = FLinearColor(FMath::Abs(CompVec.X), FMath::Abs(CompVec.Y), FMath::Abs(CompVec.Z));
 
-		InBuffer.GasPositions[Idx] = LocalPos;
-		InBuffer.GasExtents[Idx] = GasExtent;
-		InBuffer.GasColors[Idx] = FLinearColor(1.0f, 1.0f, 1.0f, Density);
+		InGasBuffer.Positions[Idx] = LocalPos;
+		InGasBuffer.Extents[Idx] = GasExtent;
+		InGasBuffer.Colors[Idx] = FLinearColor(1.0f, 1.0f, 1.0f, Density);
 
 		ActualCount++;
 	}
 
-	// Dead particles — offscreen.
 	const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
-	for (int32 i = ActualCount; i < MaxClusterPerCoarseNode; ++i)
-	{
-		const int32 Idx = BufferStart + i;
-		InBuffer.ClusterPositions[Idx] = DeadPos;
-		InBuffer.ClusterRotations[Idx] = FVector::ZeroVector;
-		InBuffer.ClusterExtents[Idx] = 0.0f;
-		InBuffer.ClusterColors[Idx] = FLinearColor::Black;
-		InBuffer.GasPositions[Idx] = DeadPos;
-		InBuffer.GasExtents[Idx] = 0.0f;
-		InBuffer.GasColors[Idx] = FLinearColor::Black;
-	}
+	InClusterBuffer.PadSlotDead(InSlotIndex, ActualCount, DeadPos);
+	InGasBuffer.PadSlotDead(InSlotIndex, ActualCount, DeadPos);
 
 	CoarseSlotCounts[InSlotIndex] = ActualCount;
 }
 
-void ASectorActor::InsertCoarseCellIntoOctree(const FIntVector& InCoarseCoord, int32 InSlotIndex, const FCoarseBuffer& InBuffer, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes) const
+void ASectorActor::InsertCoarseCellIntoOctree(const FIntVector& InCoarseCoord, int32 InSlotIndex, const FNiagaraParticleBuffer& InClusterBuffer, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes) const
 {
-	// Walk this cell's slot in the buffer; insert each non-dead cluster
-	// particle into the octree. Per-particle depth comes from
-	// MakePointDataFromWorldScale, which picks the deepest depth at which
-	// the node is still big enough to contain the particle's extent.
-	// ObjectId carries the slot index so queries can dereference into the
-	// buffer; TypeId tags the node as galaxy content so non-galaxy queries
-	// can filter it out.
-	//
-	// We only insert cluster particles, not gas — cluster and gas share
-	// 1:1 positions and slot indexing, so a cluster insert spatially
-	// represents both. Gas-only queries (if ever needed) can use the same
-	// slot index to look up the gas data.
+	// Walk this cell's cluster slot; insert each live particle into the octree.
+	// Only cluster particles are inserted — gas shares 1:1 positions and slot
+	// indexing, so a cluster insert spatially represents both.
+	// ObjectId carries the slot index; TypeId tags nodes as galaxy content.
 	if (!Octree.IsValid())
 	{
 		return;
 	}
 
 	const double TreeExtent = Octree->Extent;
-	const int32 BufferStart = InSlotIndex * MaxClusterPerCoarseNode;
-	OutInsertedNodes.Reserve(MaxClusterPerCoarseNode);
+	const int32 BufferStart = InSlotIndex * InClusterBuffer.SlotCapacity;
+	OutInsertedNodes.Reserve(InClusterBuffer.SlotCapacity);
 
-	// Apply the actor's slow-drift offset so the octree position matches
-	// the cell's stable world frame at insert time. (The tree is in
-	// sector-local space; ApplyParallaxOffset shifts the actor by
-	// -PlayerDelta*Ratio per tick, so GetActorLocation() represents the
-	// drift origin. NOT applied to particle positions in InBuffer — those
-	// stay in pristine sector-local space; this offset is only for
-	// deciding which octree node to bucket into.)
-	for (int32 i = 0; i < MaxClusterPerCoarseNode; ++i)
+	for (int32 i = 0; i < InClusterBuffer.SlotCapacity; ++i)
 	{
 		const int32 Idx = BufferStart + i;
-		const float Extent = InBuffer.ClusterExtents[Idx];
+		const float Extent = InClusterBuffer.Extents[Idx];
 		if (Extent <= 0.0f)
 		{
 			continue;
 		}
 
-		// MakePointDataFromWorldScale returns an FPointData with InsertDepth
-		// + a Data with ScaleFactor encoding sub-node precision. We override
-		// position/ObjectId/TypeId on the result to carry our slot tag.
 		FPointData PointData = FPointData::MakePointDataFromWorldScale(
 			static_cast<double>(Extent),
 			/*InUnitScale=*/ 1.0,
 			static_cast<int64>(TreeExtent));
-		PointData.SetPosition(InBuffer.ClusterPositions[Idx]);
+		PointData.SetPosition(InClusterBuffer.Positions[Idx]);
 		PointData.Data.ObjectId = InSlotIndex;
 		PointData.Data.TypeId = GalaxyTypeId;
 
@@ -1156,63 +953,9 @@ void ASectorActor::InsertCoarseCellIntoOctree(const FIntVector& InCoarseCoord, i
 
 void ASectorActor::PushCoarseToNiagara()
 {
-	// VirtualTraversal push math: buffer holds sector-grid positions
-	// (LocalPos, in virtual units). Push converts to camera-relative:
-	// Relative = LocalPos - VirtualTraversal. Component is attached to
-	// the actor (= player), so Niagara renders at
-	//   PlayerPos + Relative = PlayerPos + LocalPos - VirtualTraversal
-	// which is the particle's current world position under the parallax
-	// compression (see Player-Centered Parallax region for derivation).
-	//
-	// Between pushes the scratch pad maintains stored = LocalPos -
-	// VirtualTraversal via the per-tick User.ParallaxOffset broadcast, so
-	// this math stays valid continuously — no re-push required each frame.
-	//
-	// Dead particles (Extent == 0) get a ZeroVector anchor rather than the
-	// parked DeadPos — on ReinitializeSystem they'd otherwise drift in from
-	// the off-screen parked position. With Extent == 0 the Niagara pipeline
-	// culls them regardless; the zero is defensive.
 	const int32 FrontIdx = CoarseFrontIdx.load();
-	const FCoarseBuffer& Front = CoarseBuffers[FrontIdx];
-
-	const int32 Num = Front.ClusterPositions.Num();
-	TArray<FVector> RelativeClusterPositions;
-	TArray<FVector> RelativeGasPositions;
-	RelativeClusterPositions.SetNumUninitialized(Num);
-	RelativeGasPositions.SetNumUninitialized(Num);
-
-	for (int32 i = 0; i < Num; ++i)
-	{
-		RelativeClusterPositions[i] = (Front.ClusterExtents[i] > 0.0f)
-			? (Front.ClusterPositions[i] - VirtualTraversal)
-			: FVector::ZeroVector;
-
-		RelativeGasPositions[i] = (Front.GasExtents[i] > 0.0f)
-			? (Front.GasPositions[i] - VirtualTraversal)
-			: FVector::ZeroVector;
-	}
-
-	if (CoarseClusterNiagara)
-	{
-		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
-			CoarseClusterNiagara, FName("User.Positions"), RelativeClusterPositions);
-		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
-			CoarseClusterNiagara, FName("User.Rotations"), Front.ClusterRotations);
-		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(
-			CoarseClusterNiagara, FName("User.Extents"), Front.ClusterExtents);
-		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(
-			CoarseClusterNiagara, FName("User.Colors"), Front.ClusterColors);
-	}
-
-	if (CoarseGasNiagara)
-	{
-		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
-			CoarseGasNiagara, FName("User.Positions"), RelativeGasPositions);
-		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(
-			CoarseGasNiagara, FName("User.Extents"), Front.GasExtents);
-		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(
-			CoarseGasNiagara, FName("User.Colors"), Front.GasColors);
-	}
+	CoarseClusterBuffers[FrontIdx].PushToNiagara(CoarseClusterNiagara, VirtualTraversal);
+	CoarseGasBuffers[FrontIdx].PushToNiagara(CoarseGasNiagara, VirtualTraversal);
 }
 
 #pragma endregion
@@ -1224,16 +967,12 @@ void ASectorActor::InitializeProximitySystem()
 	double StartTime = FPlatformTime::Seconds();
 
 	const int32 TotalSlots = 27;
-	const int32 TotalParticles = TotalSlots * MaxParticlesPerNode;
 
-	// Allocate both buffers
-	ProximityBuffers[0].Allocate(TotalParticles);
-	ProximityBuffers[1].Allocate(TotalParticles);
+	ProximityBuffers[0].Allocate(TotalSlots, MaxParticlesPerNode);
+	ProximityBuffers[1].Allocate(TotalSlots, MaxParticlesPerNode);
 	FrontBufferIndex.store(0);
 
 	SlotParticleCounts.SetNumZeroed(TotalSlots);
-
-	// Initialize free slot pool
 	FreeSlots.Empty(TotalSlots);
 	for (int32 i = TotalSlots - 1; i >= 0; --i)
 	{
@@ -1242,29 +981,11 @@ void ASectorActor::InitializeProximitySystem()
 	ActiveNodeSlots.Empty();
 	CurrentScanCoord = FIntVector(INT32_MIN);
 
-	// Get player position
-	FVector PlayerPos = FVector::ZeroVector;
-	if (const auto* World = GetWorld())
-	{
-		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-		{
-			if (APawn* Pawn = Controller->GetPawn())
-			{
-				PlayerPos = Pawn->GetActorLocation();
-			}
-		}
-	}
-
-	// Initial scan coord — same virtual grid convention as InitializeCoarseSystem.
-	// VirtualTraversal = 0 at init means the player starts at scan coord 0.
+	// VirtualTraversal is 0 at init — player starts at virtual coord (0,0,0).
 	const FVector LocalPos = VirtualTraversal;
 	CurrentScanCoord = PositionToScanCoord(LocalPos);
 
-	FProximityBuffer& InitBuffer = ProximityBuffers[0];
-
-	// Two-phase pipeline (registry model — same as InitializeCoarseSystem):
-	// serial slot allocation → parallel generate → serial per-cell octree
-	// insert pass.
+	// Two-phase pipeline: serial slot allocation → parallel generate → serial octree insert.
 	TArray<TPair<FIntVector, int32>> ToGenerate;
 	ToGenerate.Reserve(27);
 	for (int32 dz = -1; dz <= 1; ++dz)
@@ -1281,10 +1002,10 @@ void ASectorActor::InitializeProximitySystem()
 		}
 	}
 
-	ParallelFor(ToGenerate.Num(), [this, &ToGenerate, &InitBuffer](int32 i)
+	ParallelFor(ToGenerate.Num(), [this, &ToGenerate](int32 i)
 		{
 			const TPair<FIntVector, int32>& Pair = ToGenerate[i];
-			GenerateNodeGalaxies(Pair.Key, Pair.Value, InitBuffer);
+			GenerateNodeGalaxies(Pair.Key, Pair.Value, ProximityBuffers[0]);
 		}, EParallelForFlags::BackgroundPriority);
 
 	for (const TPair<FIntVector, int32>& Pair : ToGenerate)
@@ -1292,28 +1013,25 @@ void ASectorActor::InitializeProximitySystem()
 		FProximitySlotEntry* Entry = ActiveNodeSlots.Find(Pair.Key);
 		if (Entry)
 		{
-			InsertProximityCellIntoOctree(Pair.Key, Pair.Value, InitBuffer, Entry->InsertedNodes);
+			InsertProximityCellIntoOctree(Pair.Key, Pair.Value, ProximityBuffers[0], Entry->InsertedNodes);
 		}
 	}
 
-	// Copy front to back so both start identical
-	ProximityBuffers[1].Positions = ProximityBuffers[0].Positions;
-	ProximityBuffers[1].Extents = ProximityBuffers[0].Extents;
-	ProximityBuffers[1].Colors = ProximityBuffers[0].Colors;
+	// Mirror front → back so either buffer is a valid starting state.
+	ProximityBuffers[1].CopyFrom(ProximityBuffers[0]);
 
-	// Create proximity Niagara and push data on game thread
+	// Create proximity Niagara component and push data on game thread.
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	AsyncTask(ENamedThreads::GameThread, [this, PlayerPos, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
+	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
-			UNiagaraSystem* GalaxyTemplate = SectorGalaxyCloud ? SectorGalaxyCloud : SectorGalaxyCloud;
 			if (!SectorGalaxyCloud)
 			{
-				UE_LOG(LogTemp, Warning, TEXT("ASectorActor::InitializeProximitySystem - SectorGalaxyCloud not assigned; falling back to SectorGalaxyCloud. The nearby/galaxy-scale layer needs its own system asset to carry the correct material and fade range."));
+				UE_LOG(LogTemp, Warning, TEXT("ASectorActor::InitializeProximitySystem - SectorGalaxyCloud not assigned."));
 			}
 
 			ProximityNiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
-				GalaxyTemplate,
+				SectorGalaxyCloud,
 				GetRootComponent(),
 				NAME_None,
 				FVector::ZeroVector,
@@ -1328,10 +1046,7 @@ void ASectorActor::InitializeProximitySystem()
 				ProximityNiagaraComponent->SetSystemFixedBounds(
 					FBox(FVector(-Params.Extent), FVector(Params.Extent)));
 
-				// No SetWorldLocation — component is attached to the actor
-				// which ApplyParallaxOffset pegs to the player every tick.
 				PushProximityToNiagara();
-				ProximityNiagaraComponent->Activate(true);
 			}
 			else
 			{
@@ -1341,6 +1056,9 @@ void ASectorActor::InitializeProximitySystem()
 			CompletionPromise.SetValue();
 		});
 	CompletionFuture.Wait();
+
+	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeProximitySystem took %.3f sec (%d slots, %d max particles/slot)"),
+		FPlatformTime::Seconds() - StartTime, TotalSlots, MaxParticlesPerNode);
 }
 
 void ASectorActor::UpdateProximityNodes()
@@ -1348,7 +1066,6 @@ void ASectorActor::UpdateProximityNodes()
 	if (InitializationState != ELifecycleState::Ready) return;
 	if (!ProximityNiagaraComponent) return;
 
-	// If async generation completed a swap, push the new front buffer to Niagara
 	if (bProximityNeedsPush.load())
 	{
 		PushProximityToNiagara();
@@ -1356,16 +1073,13 @@ void ASectorActor::UpdateProximityNodes()
 		bProximityNeedsPush.store(false);
 	}
 
-	// Don't start a new update if one is already in flight
 	if (bProximityUpdateInProgress.load()) return;
 
-	// Player's position in the virtual grid frame.
 	const FVector LocalPos = VirtualTraversal;
 	FIntVector NewScanCoord = PositionToScanCoord(LocalPos);
 
 	if (NewScanCoord == CurrentScanCoord) return;
 
-	// Boundary crossed — kick off async generation into back buffer
 	bProximityUpdateInProgress.store(true);
 	FIntVector OldScanCoord = CurrentScanCoord;
 	CurrentScanCoord = NewScanCoord;
@@ -1374,22 +1088,14 @@ void ASectorActor::UpdateProximityNodes()
 		{
 			double StartTime = FPlatformTime::Seconds();
 
-			// Copy front buffer to back buffer as starting point.
-			// Unchanged slots carry over; only entering slots get regenerated.
-			int32 FrontIdx = FrontBufferIndex.load();
-			int32 BackIdx = 1 - FrontIdx;
-			FProximityBuffer& BackBuffer = ProximityBuffers[BackIdx];
+			// Copy front → back; unchanged slots carry over.
+			const int32 FrontIdx = FrontBufferIndex.load();
+			const int32 BackIdx = 1 - FrontIdx;
+			ProximityBuffers[BackIdx].CopyFrom(ProximityBuffers[FrontIdx]);
 
-			BackBuffer.Positions = ProximityBuffers[FrontIdx].Positions;
-			BackBuffer.Extents = ProximityBuffers[FrontIdx].Extents;
-			BackBuffer.Colors = ProximityBuffers[FrontIdx].Colors;
-
-			// Compute entering/exiting sets. Scan coords are now universe-wide
-			// (see PositionToScanCoord), so no NodesPerSide bounds culling —
-			// the 3x3x3 neighborhood around the player is always 27 cells.
+			// Scan coords are universe-wide — no NodesPerSide bounds culling.
 			TSet<FIntVector> OldSet;
 			TSet<FIntVector> NewSet;
-
 			for (int32 dz = -1; dz <= 1; ++dz)
 			{
 				for (int32 dy = -1; dy <= 1; ++dy)
@@ -1397,8 +1103,6 @@ void ASectorActor::UpdateProximityNodes()
 					for (int32 dx = -1; dx <= 1; ++dx)
 					{
 						const FIntVector Offset(dx, dy, dz);
-						// OldSet only meaningful if OldScanCoord was a real center,
-						// not the INT32_MIN cold-start sentinel.
 						if (OldScanCoord.X != INT32_MIN)
 						{
 							OldSet.Add(OldScanCoord + Offset);
@@ -1410,38 +1114,25 @@ void ASectorActor::UpdateProximityNodes()
 
 			TArray<FIntVector> ExitingNodes;
 			TArray<FIntVector> EnteringNodes;
-
 			for (const FIntVector& Coord : OldSet)
 			{
-				if (!NewSet.Contains(Coord))
-				{
-					ExitingNodes.Add(Coord);
-				}
+				if (!NewSet.Contains(Coord)) ExitingNodes.Add(Coord);
 			}
-
 			for (const FIntVector& Coord : NewSet)
 			{
-				if (!OldSet.Contains(Coord))
-				{
-					EnteringNodes.Add(Coord);
-				}
+				if (!OldSet.Contains(Coord)) EnteringNodes.Add(Coord);
 			}
-			// Free exiting slots, dead-stub their data, retire each cell's
-			// slot from every octree node it touched.
+
+			// Free exiting slots: dead-stub their data, retire from octree, return slot.
+			const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
 			for (const FIntVector& Coord : ExitingNodes)
 			{
 				FProximitySlotEntry* Entry = ActiveNodeSlots.Find(Coord);
 				if (Entry)
 				{
-					int32 SlotStart = Entry->SlotIndex * MaxParticlesPerNode;
-					for (int32 i = 0; i < MaxParticlesPerNode; ++i)
-					{
-						BackBuffer.Positions[SlotStart + i] = FVector(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
-						BackBuffer.Extents[SlotStart + i] = 0.0f;
-						BackBuffer.Colors[SlotStart + i] = FLinearColor::Black;
-					}
-
+					ProximityBuffers[BackIdx].ClearSlot(Entry->SlotIndex, DeadPos);
 					FreeSlots.Add(Entry->SlotIndex);
+
 					for (const TSharedPtr<FOctreeNode>& Node : Entry->InsertedNodes)
 					{
 						if (Octree.IsValid())
@@ -1453,9 +1144,10 @@ void ASectorActor::UpdateProximityNodes()
 				}
 			}
 
-			// Generate entering nodes into back buffer (registry model):
-			// serial slot allocation → parallel generate → serial per-cell
-			// octree insert. Same shape as UpdateCoarseNodes.
+			// Generate entering nodes:
+			//   (1) Serial slot allocation.
+			//   (2) Parallel generation into back buffer slices.
+			//   (3) Serial octree insert.
 			TArray<TPair<FIntVector, int32>> ToGenerate;
 			ToGenerate.Reserve(EnteringNodes.Num());
 			for (const FIntVector& Coord : EnteringNodes)
@@ -1464,16 +1156,15 @@ void ASectorActor::UpdateProximityNodes()
 				{
 					break;
 				}
-
 				int32 SlotIndex = FreeSlots.Pop();
 				ActiveNodeSlots.Add(Coord, FProximitySlotEntry{ SlotIndex, {} });
 				ToGenerate.Emplace(Coord, SlotIndex);
 			}
 
-			ParallelFor(ToGenerate.Num(), [this, &ToGenerate, &BackBuffer](int32 i)
+			ParallelFor(ToGenerate.Num(), [this, &ToGenerate, BackIdx](int32 i)
 				{
 					const TPair<FIntVector, int32>& Pair = ToGenerate[i];
-					GenerateNodeGalaxies(Pair.Key, Pair.Value, BackBuffer);
+					GenerateNodeGalaxies(Pair.Key, Pair.Value, ProximityBuffers[BackIdx]);
 				}, EParallelForFlags::BackgroundPriority);
 
 			for (const TPair<FIntVector, int32>& Pair : ToGenerate)
@@ -1481,17 +1172,16 @@ void ASectorActor::UpdateProximityNodes()
 				FProximitySlotEntry* Entry = ActiveNodeSlots.Find(Pair.Key);
 				if (Entry)
 				{
-					InsertProximityCellIntoOctree(Pair.Key, Pair.Value, BackBuffer, Entry->InsertedNodes);
+					InsertProximityCellIntoOctree(Pair.Key, Pair.Value, ProximityBuffers[BackIdx], Entry->InsertedNodes);
 				}
 			}
 
-			// Atomic swap: back becomes front
 			FrontBufferIndex.store(BackIdx);
-
-			// Signal game thread to push the new front buffer on next Tick
 			bProximityNeedsPush.store(true);
-
 			bProximityUpdateInProgress.store(false);
+
+			UE_LOG(LogTemp, Log, TEXT("ASectorActor::UpdateProximityNodes - %d entering, %d exiting in %.3f sec"),
+				EnteringNodes.Num(), ExitingNodes.Num(), FPlatformTime::Seconds() - StartTime);
 		});
 }
 
@@ -1500,16 +1190,9 @@ FIntVector ASectorActor::PositionToScanCoord(const FVector& InLocalPos) const
 	int32 NodesPerSide = 1 << ScanDepth;
 	double NodeSize = (2.0 * Params.Extent) / NodesPerSide;
 
-	// Scan coords are a universe-wide integer lattice with step size NodeSize,
-	// NOT clamped to [0, NodesPerSide). The old clamp pinned the scan window
-	// to the sector's own extent and prevented the boundary-cross branch from
-	// firing when the player walked into a neighbor coarse cell. Coords outside
-	// [0, NodesPerSide) are fully legal now — GenerateNodeGalaxies builds a
-	// coord-derived transient density field, so there's no sector-wide volume
-	// to fall off the edge of.
-	//
-	// Uses FloorToInt (signed-safe) so negative positions map to negative
-	// coords symmetrically — coord 0 covers [-Params.Extent, -Params.Extent + NodeSize].
+	// Scan coords are a universe-wide integer lattice — NOT clamped to [0, NodesPerSide).
+	// GenerateNodeGalaxies builds a coord-derived transient density field so there
+	// is no sector-wide volume to fall off the edge of.
 	const int32 X = FMath::FloorToInt((InLocalPos.X + Params.Extent) / NodeSize);
 	const int32 Y = FMath::FloorToInt((InLocalPos.Y + Params.Extent) / NodeSize);
 	const int32 Z = FMath::FloorToInt((InLocalPos.Z + Params.Extent) / NodeSize);
@@ -1534,12 +1217,14 @@ double ASectorActor::GetScanNodeExtent() const
 	return Params.Extent / (double)(1 << ScanDepth);
 }
 
-void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InSlotIndex, FProximityBuffer& InBuffer)
+void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InSlotIndex, FNiagaraParticleBuffer& InBuffer)
 {
-	const int32 BufferStart = InSlotIndex * MaxParticlesPerNode;
-	// Position/extent use the cell's logical center — the octree's
-	// quantization doesn't influence rendering. Octree insert is a separate
-	// post-generation pass.
+	// Batched noise sampling — three phases matching GenerateCoarseNode.
+	// Candidates are scan-node-local rather than cell-local; each candidate
+	// may straddle coarse cell boundaries so noise offset is computed
+	// per-candidate rather than shared across the node.
+
+	const int32 BufferStart = InSlotIndex * InBuffer.SlotCapacity;
 	const FVector NodeCenter = ScanCoordToCenter(InNodeCoord);
 	const double NodeExt = GetScanNodeExtent();
 
@@ -1550,41 +1235,11 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InS
 	int32 NodeSeed = HashCombine(Params.Seed, CoordHash);
 	FRandomStream Stream(NodeSeed);
 
-	// --- Batched direct noise sampling ---
-	// Generate the full candidate set up front, batch-evaluate the noise
-	// function via GenPositionArray3D (SIMD path, same API SampleNoiseToVolume
-	// uses internally), then walk the results to do rejection + acceptance
-	// into the output slot. Replaces the old per-candidate GenSingle3D loop;
-	// same math, same noise, ~8× SIMD-width speedup on the noise evaluation.
-	//
-	// Candidate count equals slot capacity — no rejection oversampling. The
-	// actual accepted count is whatever density lets through, which is the
-	// point: particle count directly reflects the density field instead of
-	// being flattened to the slot cap in dense cells. If you want more
-	// particles, raise MaxParticlesPerNode.
-	//
-	// Coord-derived noise offset: each candidate falls into one coarse cell,
-	// and the noise field is offset by CoarseCoord * 2.0 for that cell so
-	// adjacent cells produce a continuous field (same convention as
-	// InitializeData and GenerateCoarseNode). The offset is baked into the
-	// per-candidate normalized coord before the batch call — FastNoise has no
-	// per-call setup to reconfigure, so mixing offsets within one batch is
-	// fine: the math just evaluates noise at whatever coord you pass.
-	//
-	// Power semantics: GenPositionArray3D returns the raw noise output; the
-	// coarse-tier pre-bake applies pow(clamp(raw, 0, 1), InNoisePower) with
-	// power=1.0 in InitializeData. With power=1 that's equivalent to a bare
-	// clamp, which is what we do below.
-
 	const int32 NumCandidates = MaxParticlesPerNode;
 	const double InvExtent = 1.0 / (double)Params.Extent;
 	const double TwoExtent = 2.0 * (double)Params.Extent;
 
 	// --- Phase 1: generate candidates + normalized noise coords ---
-	// Positions are stored as doubles (needed for the output buffer), noise
-	// coords are floats (GenPositionArray3D takes float arrays). Keep a
-	// parallel copy of the double position to avoid a float→double round-trip
-	// at accept time.
 	TArray<FVector> CandidatePositions;
 	TArray<float> NoiseX, NoiseY, NoiseZ;
 	CandidatePositions.SetNumUninitialized(NumCandidates);
@@ -1602,16 +1257,12 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InS
 		Candidate += NodeCenter;
 		CandidatePositions[i] = Candidate;
 
-		// Which coarse cell this candidate falls into, and its position within
-		// that cell's local frame. Inlined rather than calling
-		// PositionToCoarseCoord + CoarseCoordToCenter to avoid the double
-		// division — we already have TwoExtent and InvExtent handy.
+		// Determine which coarse cell this candidate falls into and compute
+		// its cell-local normalized coord + coord-derived offset.
 		const int32 CX = FMath::FloorToInt32(Candidate.X / TwoExtent + 0.5);
 		const int32 CY = FMath::FloorToInt32(Candidate.Y / TwoExtent + 0.5);
 		const int32 CZ = FMath::FloorToInt32(Candidate.Z / TwoExtent + 0.5);
 
-		// coarse-local = sector-local - coarse-center, normalized by Extent,
-		// then add the coord-derived offset.
 		const double CenterX = (double)CX * TwoExtent;
 		const double CenterY = (double)CY * TwoExtent;
 		const double CenterZ = (double)CZ * TwoExtent;
@@ -1635,8 +1286,6 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InS
 		Params.Seed
 	);
 
-	// Noise coord arrays no longer needed — free now rather than holding
-	// through the accept loop.
 	NoiseX.Empty();
 	NoiseY.Empty();
 	NoiseZ.Empty();
@@ -1668,33 +1317,24 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InS
 		ActualCount++;
 	}
 
-	// Dead particles — offscreen
-	for (int32 i = ActualCount; i < MaxParticlesPerNode; ++i)
-	{
-		const int32 Idx = BufferStart + i;
-		InBuffer.Positions[Idx] = FVector(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
-		InBuffer.Extents[Idx] = 0.0f;
-		InBuffer.Colors[Idx] = FLinearColor::Black;
-	}
+	const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
+	InBuffer.PadSlotDead(InSlotIndex, ActualCount, DeadPos);
 
 	SlotParticleCounts[InSlotIndex] = ActualCount;
 }
 
-void ASectorActor::InsertProximityCellIntoOctree(const FIntVector& InNodeCoord, int32 InSlotIndex, const FProximityBuffer& InBuffer, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes) const
+void ASectorActor::InsertProximityCellIntoOctree(const FIntVector& InNodeCoord, int32 InSlotIndex, const FNiagaraParticleBuffer& InBuffer, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes) const
 {
-	// Same shape as InsertCoarseCellIntoOctree. Walks this cell's slot in
-	// the proximity buffer; per non-dead galaxy point, inserts at the
-	// depth picked by MakePointDataFromWorldScale based on point extent.
 	if (!Octree.IsValid())
 	{
 		return;
 	}
 
 	const double TreeExtent = Octree->Extent;
-	const int32 BufferStart = InSlotIndex * MaxParticlesPerNode;
-	OutInsertedNodes.Reserve(MaxParticlesPerNode);
+	const int32 BufferStart = InSlotIndex * InBuffer.SlotCapacity;
+	OutInsertedNodes.Reserve(InBuffer.SlotCapacity);
 
-	for (int32 i = 0; i < MaxParticlesPerNode; ++i)
+	for (int32 i = 0; i < InBuffer.SlotCapacity; ++i)
 	{
 		const int32 Idx = BufferStart + i;
 		const float Extent = InBuffer.Extents[Idx];
@@ -1722,87 +1362,46 @@ void ASectorActor::InsertProximityCellIntoOctree(const FIntVector& InNodeCoord, 
 
 void ASectorActor::PushProximityToNiagara()
 {
-	if (!ProximityNiagaraComponent) return;
-
-	// Same math as PushCoarseToNiagara: Relative = LocalPos - VirtualTraversal.
-	// Particle's rendered world position = PlayerPos + Relative. The scratch
-	// pad maintains the identity between pushes via per-tick ParallaxOffset
-	// broadcasts from ApplyParallaxOffset.
-	const FProximityBuffer& Front = ProximityBuffers[FrontBufferIndex.load()];
-	const int32 Num = Front.Positions.Num();
-
-	TArray<FVector> RelativePositions;
-	RelativePositions.SetNumUninitialized(Num);
-
-	for (int32 i = 0; i < Num; ++i)
-	{
-		RelativePositions[i] = (Front.Extents[i] > 0.0f)
-			? (Front.Positions[i] - VirtualTraversal)
-			: FVector::ZeroVector;
-	}
-
-	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
-		ProximityNiagaraComponent, FName("User.Positions"), RelativePositions);
-	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(
-		ProximityNiagaraComponent, FName("User.Extents"), Front.Extents);
-	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(
-		ProximityNiagaraComponent, FName("User.Colors"), Front.Colors);
-}
-
-void ASectorActor::Tick(float DeltaTime)
-{
-	Super::Tick(DeltaTime);
-
-	// With the inheritance break, Super::Tick is AActor::Tick (which does
-	// nothing for our purposes). ApplyParallaxOffset used to be driven from
-	// AProceduralSpaceActor::Tick; now we call it directly here.
-	ApplyParallaxOffset();
-
-	UpdateCoarseNodes();
-	UpdateProximityNodes();
+	ProximityBuffers[FrontBufferIndex.load()].PushToNiagara(ProximityNiagaraComponent, VirtualTraversal);
 }
 
 #pragma endregion
 
-#pragma region Public Octree Queries
-TArray<TSharedPtr<FOctreeNode>> ASectorActor::GetNearbyGalaxyNodes(const FVector& InCenter, double InRadius) const
+#pragma region Tick
+void ASectorActor::Tick(float DeltaTime)
 {
-	// Spatial range query into the unified per-sector octree. Depths are
-	// per-particle (set by MakePointDataFromWorldScale based on extent), so
-	// we don't depth-restrict the query — only TypeId-filter for galaxy
-	// content. Caller dereferences each node's ObjectId (and
-	// AdditionalObjectIds for collision-bucket nodes) into the appropriate
-	// flat buffer.
+	Super::Tick(DeltaTime);
+
+	ApplyParallaxOffset();
+	UpdateCoarseNodes();
+	UpdateProximityNodes();
+}
+#pragma endregion
+
+#pragma region Public Octree Queries
+TArray<TSharedPtr<FOctreeNode>> ASectorActor::GetNodesInRange(const FVector& InCenter, double InRadius, int32 InTypeId) const
+{
 	if (!Octree.IsValid())
 	{
 		return {};
 	}
-	return Octree->GetNodesInRange(InCenter, InRadius, /*MinDepth=*/ -1, /*MaxDepth=*/ -1, GalaxyTypeId);
+	return Octree->GetNodesInRange(InCenter, InRadius, /*MinDepth=*/ -1, /*MaxDepth=*/ -1, InTypeId);
 }
 
-TArray<TSharedPtr<FOctreeNode>> ASectorActor::GetNearbyGalaxyNodesByScreenSpace(const FVector& InCenter, double InExtent, double InScreenSpaceThreshold) const
+TArray<TSharedPtr<FOctreeNode>> ASectorActor::GetNodesByScreenSpace(const FVector& InCenter, double InExtent, double InScreenSpaceThreshold, int32 InTypeId) const
 {
-	// Screen-space-culled variant of GetNearbyGalaxyNodes. The tree walks
-	// itself top-down and prunes nodes whose angular-size proxy
-	// (Extent * (1 + ScaleFactor)) / Distance falls below
-	// InScreenSpaceThreshold — so very distant or very small galaxies drop
-	// out of the result automatically. Same TypeId filter as the plain
-	// range query.
 	if (!Octree.IsValid())
 	{
 		return {};
 	}
 	return Octree->GetNodesByScreenSpace(InCenter, InExtent, InScreenSpaceThreshold,
-		/*MinDepth=*/ -1, /*MaxDepth=*/ -1, GalaxyTypeId);
+		/*MinDepth=*/ -1, /*MaxDepth=*/ -1, InTypeId);
 }
 #pragma endregion
 
 #pragma region Spawn Range Scanning
 void ASectorActor::StartSpawnScanTimer()
 {
-	// Re-entrant-safe: clear any existing timer first so repeated
-	// Initialize/Reset cycles don't stack handlers. Interval-driven at
-	// SpawnScanInterval to decouple scan cadence from render tick.
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(SpawnScanTimerHandle);
@@ -1821,58 +1420,39 @@ void ASectorActor::StopSpawnScanTimer()
 	{
 		World->GetTimerManager().ClearTimer(SpawnScanTimerHandle);
 	}
-	// Drop tracked state so a fresh Initialize starts clean — callers
-	// checking TrackedSpawnNodes.Num() won't see ghosts.
 	TrackedSpawnNodes.Empty();
 }
 
 void ASectorActor::UpdateSpawnRangeNodes()
 {
-	// Guard against running before streaming is ready (no octree content
-	// yet) or during shutdown.
 	if (InitializationState != ELifecycleState::Ready) return;
 	if (!Octree.IsValid()) return;
 
-	// Query the octree in the virtual grid frame. Octree nodes were
-	// inserted at buffer LocalPos values (generated as CoarseCoordToCenter
-	// + candidate — absolute virtual-grid positions). The player's
-	// position in that frame is VirtualTraversal. DebugDrawSpawnNode
-	// mirrors this: world box anchor = PlayerPos + Node->Center -
-	// VirtualTraversal, matching the particle's current camera-relative
-	// render position.
 	const FVector LocalPlayerPos = VirtualTraversal;
 
 	const TArray<TSharedPtr<FOctreeNode>> NearbyArray =
-		GetNearbyGalaxyNodesByScreenSpace(LocalPlayerPos, SpawnScanExtent, SpawnScreenSpaceThreshold);
+		GetNodesByScreenSpace(LocalPlayerPos, SpawnScanExtent, SpawnScreenSpaceThreshold, GalaxyTypeId);
 
 	TSet<TSharedPtr<FOctreeNode>> NearbySet(NearbyArray);
 
-	// Enter = in Nearby but not yet tracked. Log + debug-draw.
 	for (const TSharedPtr<FOctreeNode>& Node : NearbySet)
 	{
 		if (!TrackedSpawnNodes.Contains(Node))
 		{
 			LogSpawnNodeEnter(Node);
 		}
-		// Debug-draw every tick for nodes currently in range — not just on
-		// enter — so the boxes persist visibly during the scan window.
-		// (DrawDebugBox with Lifetime == SpawnScanInterval fades naturally.)
 		if (bDebugDrawSpawnNodes)
 		{
 			DebugDrawSpawnNode(Node);
 		}
 	}
 
-	// Exit = tracked but no longer in Nearby.
 	TSet<TSharedPtr<FOctreeNode>> Exited = TrackedSpawnNodes.Difference(NearbySet);
 	for (const TSharedPtr<FOctreeNode>& Node : Exited)
 	{
 		LogSpawnNodeExit(Node);
 	}
 
-	// Commit the new tracked set. Using assignment rather than Remove/Add
-	// loops — one pass is cheaper than two and we've already emitted the
-	// enter/exit side-effects.
 	TrackedSpawnNodes = MoveTemp(NearbySet);
 }
 
@@ -1890,13 +1470,7 @@ void ASectorActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) cons
 
 	if (bLogSpawnEnterExitBuffers)
 	{
-		// The slot index could point into either CoarseBuffers or
-		// ProximityBuffers. We don't carry a tier tag on the node, so pick
-		// by slot-extent magnitude: coarse slot extents live in the
-		// MaxClusterPerCoarseNode range, proximity in MaxParticlesPerNode.
-		// Since both tiers share GalaxyTypeId and the slot indices can
-		// overlap numerically, the cleanest heuristic is to check whether
-		// the slot index is a registered coarse-entry value.
+		// Identify tier by checking whether the slot index appears in ActiveCoarseNodes.
 		bool bIsCoarse = false;
 		for (const auto& Pair : ActiveCoarseNodes)
 		{
@@ -1909,13 +1483,12 @@ void ASectorActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) cons
 
 		if (bIsCoarse)
 		{
-			const int32 FrontIdx = CoarseFrontIdx.load();
-			const FCoarseBuffer& Front = CoarseBuffers[FrontIdx];
+			const FNiagaraParticleBuffer& Front = CoarseClusterBuffers[CoarseFrontIdx.load()];
 			const int32 Start = SlotId * MaxClusterPerCoarseNode;
 			int32 LiveCount = 0;
 			for (int32 i = 0; i < MaxClusterPerCoarseNode; ++i)
 			{
-				if (Front.ClusterExtents[Start + i] > 0.0f) ++LiveCount;
+				if (Front.Extents[Start + i] > 0.0f) ++LiveCount;
 			}
 			UE_LOG(LogTemp, Log,
 				TEXT("  coarse slot %d: %d live cluster particles of %d capacity"),
@@ -1923,8 +1496,7 @@ void ASectorActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) cons
 		}
 		else
 		{
-			const int32 FrontIdx = FrontBufferIndex.load();
-			const FProximityBuffer& Front = ProximityBuffers[FrontIdx];
+			const FNiagaraParticleBuffer& Front = ProximityBuffers[FrontBufferIndex.load()];
 			const int32 Start = SlotId * MaxParticlesPerNode;
 			int32 LiveCount = 0;
 			for (int32 i = 0; i < MaxParticlesPerNode; ++i)
@@ -1954,13 +1526,9 @@ void ASectorActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) con
 	const UWorld* World = GetWorld();
 	if (!World) return;
 
-	// Particle rendered world position = PlayerPos + LocalPos - VirtualTraversal
-	// (see Push* functions and scratch-pad drift in ApplyParallaxOffset).
-	// Node->Center is the octree's quantization of LocalPos, so the
-	// matching world-space box anchor is:
-	//   PlayerPos + Node->Center - VirtualTraversal
-	// GetActorLocation() == PlayerPos here (actor is pegged), so this is
-	// equivalent to GetActorLocation() + Node->Center - VirtualTraversal.
+	// Particle rendered world position = PlayerPos + LocalPos - VirtualTraversal.
+	// Node->Center is the octree's quantization of LocalPos, so:
+	//   NodeCenterWorld = GetActorLocation() + Node->Center - VirtualTraversal
 	const FVector NodeCenterWorld = GetActorLocation() + InNode->Center - VirtualTraversal;
 	const FVector BoxExtent(InNode->Extent);
 

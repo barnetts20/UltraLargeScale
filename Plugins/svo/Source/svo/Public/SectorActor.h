@@ -6,6 +6,7 @@
 #include "NiagaraComponent.h"
 #include "FOctree.h"
 #include "DataTypes.h"
+#include "FNiagaraParticleBuffer.h"
 #include "SectorActor.generated.h"
 
 class AGalaxyActor;
@@ -22,17 +23,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
 	FUniverseParams Params;
 
-	// Parallax strength knob — analogous to the base-class SpeedScale that
-	// lived on AProceduralSpaceActor. Per-tier parallax ratios are derived as
+	// Parallax strength knob — per-tier parallax ratios are derived as
 	// SpeedScale / TierUnitScale, so this is the numerator shared across tiers.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parallax Properties")
 	double SpeedScale = 1.0;
 #pragma endregion
 
 #pragma region Lifecycle State
-	// Copied down from the former AProceduralSpaceActor base so external
-	// callers (UniverseActor pooling, etc.) and internal async init guards
-	// keep working without a base class.
 	ELifecycleState InitializationState = ELifecycleState::Uninitialized;
 
 	// Sector-scope spatial index. Sized to 4 * Params.Extent and corner-
@@ -46,9 +43,7 @@ public:
 	// FPointData::MakePointDataFromWorldScale. The tree is a registry, not
 	// authoritative storage — Data.ObjectId carries the slot index into the
 	// flat particle buffers, and queries dereference back through that
-	// index to read pre-quantized positions/extents. This means the
-	// tree's internal quantization can't degrade render or proximity-query
-	// precision; the tree is only used for spatial culling.
+	// index to read pre-quantized positions/extents.
 	TSharedPtr<FOctree> Octree;
 
 	// Tree sizing convention. Multiplier is fixed by the 3x3 coarse
@@ -63,19 +58,20 @@ public:
 
 	// Kicks off async init — InitializeChildPool → InitializeData →
 	// InitializeVolumetric → InitializeNiagara, with Pooling-state guards
-	// between each step. Copied from the former base.
+	// between each step.
 	void Initialize();
 #pragma endregion
 
 #pragma region Pooled Spawn/Despawn Hooks
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
+	// TODO: Wire these into the spawn scanning system once the clean-up pass is complete.
 	void SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode);
 	void ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode);
 #pragma endregion
 
 #pragma region Sector Grid Identity
 	// Which cell in the universe grid this sector represents. Set by the
-	// universe before init via Configure(). All sector position/noise math
+	// universe before init via ConfigureCell(). All sector position/noise math
 	// is offset by CellOrigin so adjacent sectors form a continuous field.
 	UPROPERTY(VisibleAnywhere, Category = "Sector Grid")
 	FIntVector CellCoord = FIntVector::ZeroValue;
@@ -83,9 +79,7 @@ public:
 	// World-space center of this sector's cell. Derived: CellCoord * (2 * Params.Extent).
 	// Set once in ConfigureCell and used as the initial actor placement
 	// location, plus as the authoritative sector-grid origin for cross-
-	// sector child-spawn math in ComputeChildSpawnLocation. Note the
-	// actor itself drifts away from CellOrigin during play due to the
-	// parallax offset applied in ApplyParallaxOffset.
+	// sector child-spawn math.
 	UPROPERTY(VisibleAnywhere, Category = "Sector Grid")
 	FVector CellOrigin = FVector::ZeroVector;
 
@@ -97,9 +91,8 @@ public:
 	bool bAutoInitializeOnBeginPlay = true;
 
 	// Configure cell identity before Initialize(). Sets CellCoord, derives
-	// CellOrigin, places the actor at CellOrigin in world space (initial
-	// position — ApplyParallaxOffset will peg the actor to the player once
-	// init completes). Must be called before Initialize().
+	// CellOrigin, places the actor at CellOrigin in world space. Must be
+	// called before Initialize().
 	void ConfigureCell(FIntVector InCellCoord);
 #pragma endregion
 
@@ -117,39 +110,30 @@ protected:
 #pragma endregion
 
 #pragma region Niagara Assets
-	// Niagara system asset for the always-loaded cluster visualization layer.
+	// Niagara system asset for the cluster visualization layer.
 	// Assign in the sector actor's Blueprint defaults (e.g. NG_SectorClusterCloud).
-	// Material fade range is configured directly on the material instance.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
 	UNiagaraSystem* SectorClusterCloud;
 
-	// Niagara system asset for the gas sprite layer (rejection-sampled
-	// against the sector density volume). Default loaded in the constructor;
-	// override in BP defaults if needed.
+	// Niagara system asset for the gas sprite layer.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
 	UNiagaraSystem* SectorGasCloud;
 
-	// Niagara system asset for the nearby/galaxy-scale sprite layer —
-	// populated at runtime by the proximity streaming system (see
-	// InitializeProximitySystem / UpdateProximityNodes). Distinct from the
-	// cluster layer so it can carry its own material and fade range.
-	// Assign in the sector actor's Blueprint defaults (e.g. NG_SectorGalaxyCloud).
+	// Niagara system asset for the proximity/galaxy-scale sprite layer.
+	// Distinct from the cluster layer so it can carry its own material and fade range.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
 	UNiagaraSystem* SectorGalaxyCloud;
 
 	// Number of candidate positions to test for gas sprite placement.
-	// Final particle count is the subset that pass the density rejection
-	// gate, so denser sectors yield more particles than empty ones.
+	// Final particle count is the subset that pass the density rejection gate.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
 	int32 GasParticleCount = 15000;
 
-	// Per-particle extent at density=0 (lower bound of the density-driven
-	// extent lerp). Tune in the editor to taste.
+	// Per-particle extent at density=0 (lower bound of the density-driven extent lerp).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
 	float GasMinExtent = 1e15f;
 
-	// Per-particle extent at density=1 (upper bound of the density-driven
-	// extent lerp). Tune in the editor to taste.
+	// Per-particle extent at density=1 (upper bound of the density-driven extent lerp).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
 	float GasMaxExtent = 5e16f;
 #pragma endregion
@@ -157,18 +141,15 @@ protected:
 #pragma region Volumetric
 	FString VolumetricMaterialPath = FString("/svo/Materials/RayMarchers/MT_UniverseRaymarchPseudoVolume_Inst.MT_UniverseRaymarchPseudoVolume_Inst");
 
-	// Per-sector raymarched volumetric. Default OFF — when running in a
-	// multi-sector grid (3x3x3 = 27 sectors), 27 raymarch volumes are
-	// unaffordable. Enable on a single directly-placed sector for
-	// volumetric debugging or single-sector dev work.
+	// Per-sector raymarched volumetric. Default OFF — 27 simultaneous raymarch
+	// volumes in a full grid are unaffordable. Enable on a single directly-placed
+	// sector for volumetric debugging or single-sector dev work.
+	// Retained as a debug/reference path; the grid-aligned octree may eventually
+	// allow a lower-resolution per-cell volumetric to be revisited.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volumetric")
 	bool bEnableVolumetric = false;
 
-	// Volumetric component resources. Previously inherited from the base;
-	// now local since the sector is a bare AActor. Only populated when
-	// bEnableVolumetric is true. VolumeMaterial is kept as a member for
-	// symmetry with the former shared layout; it is unused today but keeps
-	// the cookbook intact for future material updates.
+	// Only populated when bEnableVolumetric is true.
 	UPROPERTY()
 	UTexture2D* PseudoVolumeTexture;
 
@@ -180,13 +161,12 @@ protected:
 #pragma endregion
 
 #pragma region Density Field (CPU-side authoritative copy)
-	// Persistent uint8 BGRA8 buffer from SampleNoiseToVolume. Kept alive for the
-	// lifetime of the sector so CPU systems (rejection sampling, etc.) can query
-	// density directly instead of going through the octree.
+	// Persistent uint8 BGRA8 buffer from SampleNoiseToVolume.
+	// Only populated when bEnableVolumetric is true.
 	TArray<uint8> DensityBuffer;
 
-	// Non-owning view over DensityBuffer with source-space metadata. Rebuilt
-	// whenever DensityBuffer is (re)generated. Sample via SampleDensityAtLocalPos.
+	// Non-owning view over DensityBuffer with source-space metadata.
+	// Rebuilt whenever DensityBuffer is (re)generated.
 	FDensityVolume DensityVolume;
 #pragma endregion
 
@@ -195,13 +175,8 @@ protected:
 	int GalaxyPoolSize = 5;
 	TArray<AGalaxyActor*> GalaxyPool;
 
-	// Reimplemented locally now that there's no AProceduralSpaceActor to
-	// inherit from. In the new player-pegged frame, a child actor placed to
-	// "look right" given the parallax depth story sits at:
+	// In the player-pegged frame, a child actor placed to match parallax depth sits at:
 	//   CurrentPlayerPos + (NodeCenter - CellOrigin) * (ThisUnitScale / ChildUnitScale)
-	// i.e. scale the cell-local offset by the unit-scale ratio so nearer-tier
-	// spawns appear closer to the player. Preserved for the SpawnGalaxyFromPool
-	// surface; not wired into any streaming path yet (see Task 3).
 	FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const;
 #pragma endregion
 
@@ -212,73 +187,48 @@ protected:
 #pragma endregion
 
 #pragma region Player-Centered Parallax
-	// Reference positions tracked frame-to-frame for parallax math. Copied
-	// down from the former base class; LastFrameOfReferenceLocation is used
-	// to compute PlayerDelta, CurrentFrameOfReferenceLocation is the most
-	// recent sampled player pos (useful for child spawn calls).
+	// Reference positions tracked frame-to-frame for parallax math.
+	// LastFrameOfReferenceLocation is used to compute PlayerDelta;
+	// CurrentFrameOfReferenceLocation is the most recent sampled player pos.
 	FVector LastFrameOfReferenceLocation = FVector::ZeroVector;
 	FVector CurrentFrameOfReferenceLocation = FVector::ZeroVector;
 
 	// Accumulated virtual-space traversal. Advances by Ratio * PlayerDelta
-	// each tick inside ApplyParallaxOffset. Functionally equivalent to the
-	// old (GetActorLocation() - CellOrigin) delta from the actor-drift
-	// parallax model, but stored separately so the actor transform can stay
-	// pegged to the player — which keeps UE's rendering/physics/audio
-	// systems in a clean numerical range near the camera, even after long
-	// play sessions where the old model would drift the actor to billions-
-	// of-units magnitudes and start hitting float precision artifacts in
-	// systems that still downcast internally.
+	// each tick inside ApplyParallaxOffset. The actor itself stays pegged to
+	// the player so UE's rendering systems remain in a clean numerical range;
+	// VirtualTraversal is the player's position in the sector's virtual frame.
 	//
 	// Used by:
 	//   - Push* to compute camera-relative particle positions
 	//     (Relative = LocalPos - VirtualTraversal).
 	//   - Streaming coord tracking (PositionToCoarseCoord / PositionToScanCoord
-	//     consume VirtualTraversal directly — that's the player's position in
-	//     the sector's virtual frame).
-	//   - DebugDrawSpawnNode and UpdateSpawnRangeNodes to place world boxes
-	//     and query the octree in the right frame.
+	//     consume VirtualTraversal directly).
+	//   - DebugDrawSpawnNode and UpdateSpawnRangeNodes.
 	//   - Scratch pad broadcast: User.ParallaxOffset = -Ratio * PlayerDelta
-	//     per tick, drifts stored particle positions to match the new
-	//     VirtualTraversal state without re-pushing every frame.
+	//     per tick, drifts stored particle positions to stay aligned with
+	//     VirtualTraversal between pushes.
 	FVector VirtualTraversal = FVector::ZeroVector;
 
 	// Per-frame update: peg actor to player, advance VirtualTraversal, and
-	// broadcast User.ParallaxOffset to Niagara scratch pads. Single-ratio
-	// (SpeedScale / Params.UnitScale); per-tier differentiation is deferred.
+	// broadcast User.ParallaxOffset to all Niagara scratch pads.
 	void ApplyParallaxOffset();
 #pragma endregion
 
 #pragma region Coarse Cluster Streaming
-	// Streams a player-centered 3x3x3 neighborhood of coarse-scale nodes
-	// (each node == one sector's worth of extent today) and feeds their
-	// generated cluster + gas sprite data into two dedicated Niagara
-	// components. Parallel to the Proximity Galaxy Streaming region below —
-	// same pattern (slot pool, double-buffered arrays, OldSet/NewSet diff on
-	// boundary cross, async generation), one tier up.
-	//
-	// Cluster and gas share slot indexing: each coarse node owns one slot
-	// that holds both its cluster sprites and its 1:1 matched gas sprites.
+	// Streams a player-centered 3x3x3 neighborhood of coarse-scale nodes and
+	// feeds generated cluster + gas sprite data into two dedicated Niagara
+	// components. Cluster and gas share slot indexing (1:1 per coarse node).
 
 	// --- Configuration ---
-	// Half-width of the active coarse grid (1 = 3x3x3 = 27 nodes). Keep at 1
-	// for now; wider radii multiply streaming work and memory proportionally.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coarse")
 	int32 CoarseNeighborhoodRadius = 1;
 
-	// Slot capacity per coarse node. Each slot reserves this many contiguous
-	// particle entries in the flat packed buffer; unused entries get written
-	// as dead-particle stubs (extent=0, off-screen position). Should be >=
-	// Params.Count so every node's full candidate set fits.
+	// Slot capacity per coarse node. Should be >= Params.Count so every node's
+	// full candidate set fits; unused entries are written as dead-particle stubs.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coarse")
 	int32 MaxClusterPerCoarseNode = 500;
 
 	// --- Slot State (only touched by async task, guarded by bCoarseUpdateInProgress) ---
-	// ActiveCoarseNodes: coord → (slot index, list of octree nodes this
-	// cell's particles touched). The slot index is the stable handle into
-	// the flat double-buffered particle arrays. InsertedNodes is the set of
-	// octree nodes that received this cell's slot index in their ObjectId
-	// (or AdditionalObjectIds, on collision); on cell exit we walk this
-	// list to retire the slot from each.
 	struct FCoarseSlotEntry
 	{
 		int32 SlotIndex = -1;
@@ -291,42 +241,15 @@ protected:
 	TArray<int32> CoarseSlotCounts;
 
 	// --- Double-Buffered Particle Data ---
-	// Cluster and gas share slot indexing (1:1 per coarse node), so both
-	// live in the same buffer struct and get swapped together.
-	struct FCoarseBuffer
-	{
-		// Cluster arrays (one entry per cluster sprite)
-		TArray<FVector>      ClusterPositions;
-		TArray<FVector>      ClusterRotations;
-		TArray<float>        ClusterExtents;
-		TArray<FLinearColor> ClusterColors;
-
-		// Gas arrays (one entry per gas sprite, 1:1 with cluster)
-		TArray<FVector>      GasPositions;
-		TArray<float>        GasExtents;
-		TArray<FLinearColor> GasColors;
-
-		void Allocate(int32 TotalParticles)
-		{
-			ClusterPositions.SetNumZeroed(TotalParticles);
-			ClusterRotations.SetNumZeroed(TotalParticles);
-			ClusterExtents.SetNumZeroed(TotalParticles);
-			ClusterColors.SetNumZeroed(TotalParticles);
-			GasPositions.SetNumZeroed(TotalParticles);
-			GasExtents.SetNumZeroed(TotalParticles);
-			GasColors.SetNumZeroed(TotalParticles);
-		}
-	};
-
-	FCoarseBuffer CoarseBuffers[2];
+	// Cluster and gas share slot indices but are separate buffers so each can
+	// be pushed to its own Niagara component independently.
+	FNiagaraParticleBuffer CoarseClusterBuffers[2];
+	FNiagaraParticleBuffer CoarseGasBuffers[2];
 	std::atomic<int32> CoarseFrontIdx{ 0 };
 	std::atomic<bool> bCoarseUpdateInProgress{ false };
 	std::atomic<bool> bCoarseNeedsPush{ false };
 
 	// --- Niagara Components ---
-	// Two sector-level components, one per visual layer. Streamed buffers,
-	// double-buffered, slot-packed — so they have their own lifecycle rather
-	// than fitting into any one-shot init pattern.
 	UPROPERTY()
 	UNiagaraComponent* CoarseClusterNiagara;
 
@@ -337,17 +260,11 @@ protected:
 	void InitializeCoarseSystem();
 	void UpdateCoarseNodes();
 	// Generation produces particle data using the cell's logical center
-	// (CoarseCoordToCenter) — the octree's quantization is irrelevant to
-	// rendering. After generation completes for all cells in a streaming
-	// pass, InsertCellParticlesIntoOctree walks each cell's buffer slice
-	// and registers the particles in the spatial index.
-	void GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InSlotIndex, FCoarseBuffer& InBuffer);
-	// Per-particle insert: walks the cell's slot in InBuffer and inserts
-	// each non-dead particle (Extent > 0) into the octree at a depth
-	// derived from its extent. Each touched node is appended to
-	// OutInsertedNodes for cell-exit cleanup. Safe to call on a worker
-	// thread — InsertPosition is mutex-guarded internally.
-	void InsertCoarseCellIntoOctree(const FIntVector& InCoarseCoord, int32 InSlotIndex, const FCoarseBuffer& InBuffer, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes) const;
+	// (CoarseCoordToCenter). Octree insert is a separate post-generation pass.
+	void GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InSlotIndex, FNiagaraParticleBuffer& InClusterBuffer, FNiagaraParticleBuffer& InGasBuffer);
+	// Walks the cluster buffer slot and inserts each live particle into the
+	// octree. Gas shares 1:1 positions with cluster so only cluster is inserted.
+	void InsertCoarseCellIntoOctree(const FIntVector& InCoarseCoord, int32 InSlotIndex, const FNiagaraParticleBuffer& InClusterBuffer, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes) const;
 	void PushCoarseToNiagara();
 
 	FIntVector PositionToCoarseCoord(const FVector& InWorldPos) const;
@@ -375,21 +292,7 @@ protected:
 	TArray<int32> SlotParticleCounts;
 
 	// --- Double-Buffered Particle Data ---
-	struct FProximityBuffer
-	{
-		TArray<FVector> Positions;
-		TArray<float> Extents;
-		TArray<FLinearColor> Colors;
-
-		void Allocate(int32 TotalParticles)
-		{
-			Positions.SetNumZeroed(TotalParticles);
-			Extents.SetNumZeroed(TotalParticles);
-			Colors.SetNumZeroed(TotalParticles);
-		}
-	};
-
-	FProximityBuffer ProximityBuffers[2];
+	FNiagaraParticleBuffer ProximityBuffers[2];
 	std::atomic<int32> FrontBufferIndex{ 0 };
 	std::atomic<bool> bProximityUpdateInProgress{ false };
 	std::atomic<bool> bProximityNeedsPush{ false };
@@ -401,11 +304,10 @@ protected:
 	// --- Methods ---
 	void InitializeProximitySystem();
 	void UpdateProximityNodes();
-	// Same convention as the coarse tier — generation produces particles
-	// using the cell's logical center; the octree insert is a separate
-	// pass that walks the slot's particles after generation.
-	void GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InSlotIndex, FProximityBuffer& InBuffer);
-	void InsertProximityCellIntoOctree(const FIntVector& InNodeCoord, int32 InSlotIndex, const FProximityBuffer& InBuffer, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes) const;
+	// Generation produces particles using the cell's logical center (ScanCoordToCenter).
+	// Octree insert is a separate post-generation pass.
+	void GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InSlotIndex, FNiagaraParticleBuffer& InBuffer);
+	void InsertProximityCellIntoOctree(const FIntVector& InNodeCoord, int32 InSlotIndex, const FNiagaraParticleBuffer& InBuffer, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes) const;
 	void PushProximityToNiagara();
 
 	FIntVector PositionToScanCoord(const FVector& InLocalPos) const;
@@ -415,54 +317,36 @@ protected:
 
 #pragma region Public Octree Queries
 public:
-	// Spatial range query into the unified per-sector octree. Returns every
-	// node within InRadius of the query center (sector-actor-local space)
-	// that carries at least one galaxy slot tag (TypeId == GalaxyTypeId).
-	// The caller dereferences each node's ObjectId (and AdditionalObjectIds
-	// for collision-bucket nodes) into the cell's slot in the flat
-	// CoarseBuffers/ProximityBuffers to get the actual particle data.
-	// Both tiers' particles are interleaved in the result — distinguish by
-	// looking up the slot index range (coarse slots: 0..NumCoarseSlots,
-	// proximity slots: 0..NumProximitySlots, but they index into different
-	// buffer arrays so the caller needs to know which tier it asked about).
-	TArray<TSharedPtr<FOctreeNode>> GetNearbyGalaxyNodes(const FVector& InCenter, double InRadius) const;
+	// Spatial range query — returns every node within InRadius of InCenter
+	// (sector-actor-local space) matching the given TypeId. Pass -1 for no
+	// type filter. Both tiers' particles are interleaved in the result.
+	TArray<TSharedPtr<FOctreeNode>> GetNodesInRange(const FVector& InCenter, double InRadius, int32 InTypeId = -1) const;
 
-	// Screen-space variant — includes the threshold cull the original
-	// ProximityTrackerComponent used. Traverses the tree top-down and
-	// prunes nodes whose (Extent * (1 + ScaleFactor)) / Distance falls
-	// below the threshold, so large-but-distant galaxies drop out
-	// automatically. Sector-actor-local space.
-	TArray<TSharedPtr<FOctreeNode>> GetNearbyGalaxyNodesByScreenSpace(const FVector& InCenter, double InExtent, double InScreenSpaceThreshold) const;
+	// Screen-space-culled variant. Traverses the tree top-down and prunes nodes
+	// whose (Extent * (1 + ScaleFactor)) / Distance falls below InScreenSpaceThreshold.
+	// Pass -1 for InTypeId for no type filter.
+	TArray<TSharedPtr<FOctreeNode>> GetNodesByScreenSpace(const FVector& InCenter, double InExtent, double InScreenSpaceThreshold, int32 InTypeId = -1) const;
 #pragma endregion
 
 #pragma region Spawn Range Scanning
-	// Fires UpdateSpawnRangeNodes every SpawnScanInterval seconds when the
-	// sector is Ready. Tracks which octree nodes currently fall within
-	// spawn range + pass the screen-space threshold, and logs + debug-
-	// draws as nodes cross in and out of that set. No actor spawn/pool
-	// hooks yet — this pass is pure observation so we can tune range and
-	// threshold values before wiring spawn behavior.
 public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
 	float SpawnScanInterval = 0.1f;
 
-	// Extent of the spatial query box around the player (sector-actor-local
-	// space). Tune with logs enabled to find a comfortable on-screen-at-
-	// once galaxy count.
+	// Extent of the spatial query box around the player (sector-actor-local space).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
 	double SpawnScanExtent = 200000.0;
 
 	// Screen-space size threshold, angular-size proxy (Extent / Distance).
-	// Lower ⇒ smaller things pass ⇒ more results.
+	// Lower => smaller things pass => more results.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
 	double SpawnScreenSpaceThreshold = 0.0001;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
 	bool bDebugDrawSpawnNodes = true;
 
-	// When true, on enter/exit we log the full cell buffer slice
-	// (positions + extents per particle in that cell's slot). Useful
-	// while tuning but noisy — off by default.
+	// When true, on enter/exit we log the full cell buffer slice.
+	// Useful while tuning but noisy — off by default.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
 	bool bLogSpawnEnterExitBuffers = false;
 
@@ -474,14 +358,8 @@ private:
 	void StopSpawnScanTimer();
 	void UpdateSpawnRangeNodes();
 
-	// Logging helpers. Called from UpdateSpawnRangeNodes as nodes enter
-	// or exit the tracked set.
 	void LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) const;
 	void LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const;
-
-	// Debug-draw a box around the node in world space. Uses
-	// GetActorLocation() as the sector-local → world offset, matching the
-	// convention used by the push pipeline.
 	void DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) const;
 #pragma endregion
 };
