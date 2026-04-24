@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #pragma region Includes/ForwardDec
 #include <DataTypes.h>
@@ -16,7 +16,7 @@
 class SVO_API FOctreeNode : public TSharedFromThis<FOctreeNode>
 {
 public:
-	#pragma region Public Parameters
+#pragma region Public Parameters
 	TArray<uint8> Index;
 	int Depth;
 	TWeakPtr<FOctreeNode> Parent;
@@ -24,9 +24,9 @@ public:
 	FVector Center;
 	double Extent;
 	FVoxelData Data = FVoxelData(); //Default constructor with 0 ScaleFactor -1 ObectId
-	#pragma endregion
+#pragma endregion
 
-	#pragma region Constructor/Destructor
+#pragma region Constructor/Destructor
 	FOctreeNode() {
 		Index = TArray<uint8>();
 		Center = FVector::ZeroVector;
@@ -41,26 +41,32 @@ public:
 		Parent = InParent;
 		Depth = Index.Num();
 	};
-	#pragma endregion
+#pragma endregion
 };
 
 class SVO_API FOctree : public TSharedFromThis<FOctree>
 {
 public:
-	#pragma region Public Parameters
+#pragma region Public Parameters
 	double Extent; //Must be power of 2, eg 1024 2048 etc
 	TSharedPtr<FOctreeNode> Root;
 
 	int MaxDepth;
-	int VolumeDepth = 5;
-	#pragma endregion
+	// Default depth at which BulkInsertPositions pre-populates the chunk grid
+	// for parallel insert distribution. 2 ⇒ 8^2 = 64 chunks, which balances
+	// parallel granularity against per-cross prepopulate cost. The previous
+	// default (5 ⇒ 32,768 chunks) was tuned for one-shot full-volume bulk
+	// loads and is far too heavy for streaming-style boundary-cross updates
+	// where only a handful of cells enter per cross.
+	int VolumeDepth = 2;
+#pragma endregion
 
-	#pragma region Locks
+#pragma region Locks
 	mutable FCriticalSection OctreeMutex;
 	std::atomic<bool> bIsResetting{ false };
-	#pragma endregion
+#pragma endregion
 
-	#pragma region BulkInsert
+#pragma region BulkInsert
 	void BulkInsertPositions(TArray<FPointData> InPointData, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes, TArray<TSharedPtr<FOctreeNode>>& OutVolumeChunks) {
 		if (bIsResetting.load()) {
 			return; // Early exit if shutting down
@@ -171,7 +177,7 @@ public:
 			}
 		}
 	}
-	
+
 	TSharedPtr<FOctreeNode> InsertPosition(FVector InPosition, int InDepth, FVoxelData InData, TSharedPtr<FOctreeNode> InCurrent = nullptr) {
 		if (bIsResetting.load()) {
 			return nullptr; // Early exit if shutting down
@@ -220,12 +226,67 @@ public:
 			Current = Current->Children[ChildIndex];
 		}
 
-		Current->Data = InData;
+		// Collision-aware write. Existing convention: ObjectId == -1 means
+		// "node has no payload yet". First insert lands in ObjectId; later
+		// inserts at the same node append to AdditionalObjectIds. Other
+		// fields (ScaleFactor, Density, Composition, TypeId) take the first
+		// inserter's values — this matches the legacy single-ObjectId
+		// readers' expectations and avoids a meaningless "merge" of
+		// per-particle aux data. If you need full provenance for collision
+		// cases, walk the indices and look the data up in your own buffers.
+		if (Current->Data.ObjectId == -1)
+		{
+			Current->Data = InData;
+		}
+		else if (InData.ObjectId != -1 && InData.ObjectId != Current->Data.ObjectId)
+		{
+			Current->Data.AdditionalObjectIds.Add(InData.ObjectId);
+		}
+		// Carry over any AdditionalObjectIds the incoming InData itself was
+		// already aggregating (re-inserts of merged data, etc.).
+		for (int32 ExtraId : InData.AdditionalObjectIds)
+		{
+			if (ExtraId != Current->Data.ObjectId
+				&& !Current->Data.AdditionalObjectIds.Contains(ExtraId))
+			{
+				Current->Data.AdditionalObjectIds.Add(ExtraId);
+			}
+		}
 		return Current;
 	}
-	#pragma endregion
 
-	#pragma region Fetch Operations
+	// Remove a specific ObjectId from a node. If it was the primary
+	// ObjectId, promote the next AdditionalObjectIds entry into the slot.
+	// Used by streaming code on cell-exit to retire one cell's slot from
+	// nodes that may still hold other cells' slots after collisions.
+	// Returns true if the node has no remaining ObjectIds (caller may want
+	// to also clear TypeId / mark the node empty).
+	bool RemoveObjectIdFromNode(const TSharedPtr<FOctreeNode>& InNode, int32 InObjectId) {
+		if (!InNode.IsValid()) return false;
+
+		if (InNode->Data.ObjectId == InObjectId)
+		{
+			if (InNode->Data.AdditionalObjectIds.Num() > 0)
+			{
+				InNode->Data.ObjectId = InNode->Data.AdditionalObjectIds[0];
+				InNode->Data.AdditionalObjectIds.RemoveAt(0);
+			}
+			else
+			{
+				InNode->Data.ObjectId = -1;
+				InNode->Data.TypeId = -1;
+				return true;
+			}
+		}
+		else
+		{
+			InNode->Data.AdditionalObjectIds.RemoveSingle(InObjectId);
+		}
+		return false;
+	}
+#pragma endregion
+
+#pragma region Fetch Operations
 	void CollectLeafNodes(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
 		if (!InNode.IsValid()) return;
 
@@ -246,7 +307,7 @@ public:
 			OutNodes.Add(InNode);
 		}
 	}
-	
+
 	void CollectNodesAtDepth(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, int InTargetDepth) const {
 		if (!InNode.IsValid()) return;
 		if (InNode->Depth == InTargetDepth) {
@@ -324,7 +385,7 @@ public:
 		if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
 		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) bPassesFilter = false;
 		if (InTypeIdFilter != -1 && InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false;
-		
+
 		if (bPassesFilter) {
 			OutNodes.Add(InNode);
 		}
@@ -337,7 +398,7 @@ public:
 		}
 		return Leaves;
 	}
-	
+
 	TArray<TSharedPtr<FOctreeNode>> GetPopulatedNodes(int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
 		TArray<TSharedPtr<FOctreeNode>> Nodes;
 		if (Root.IsValid()) {
@@ -430,15 +491,44 @@ public:
 		}
 		return Nodes;
 	}
-	#pragma endregion
+#pragma endregion
 
-	#pragma region Constructor/Destructor 
+#pragma region Constructor/Destructor 
 	FOctree(double InExtent) {
 		Extent = InExtent;
 		MaxDepth = static_cast<int>(FMath::Log2(Extent));
 		Root = MakeShared<FOctreeNode>(FVector::ZeroVector, Extent, TArray<uint8>(), nullptr);
 	}
-	#pragma endregion
+
+	// Center-aware overload. Used by ASectorActor to corner-align the tree
+	// so the sector's 3x3x3 coarse-cell neighborhood occupies a 3-of-4
+	// segment of the tree's depth-2 grid (the 4th cell being the buffer
+	// ring on each axis). With InCenter = (Sector::Extent, Sector::Extent,
+	// Sector::Extent) and InExtent = 4 * Sector::Extent the tree spans
+	// [-3*SE, +5*SE] and depth-2 node centers fall on coarse cell centers.
+	// InCenter defaults to ZeroVector for legacy callers.
+	FOctree(double InExtent, FVector InCenter) {
+		Extent = InExtent;
+		MaxDepth = static_cast<int>(FMath::Log2(Extent));
+		Root = MakeShared<FOctreeNode>(InCenter, Extent, TArray<uint8>(), nullptr);
+	}
+
+	// Drop all nodes and rebuild an empty root. Used by streaming code that
+	// rebuilds the spatial index every boundary cross via BulkInsertPositions
+	// (insert-first pipeline). bIsResetting is flipped briefly so any in-
+	// flight BulkInsert / GetNodesInRange calls early-out instead of touching
+	// half-detached nodes. Preserves the existing root center.
+	void Reset() {
+		bIsResetting.store(true);
+		{
+			FScopeLock Lock(&OctreeMutex);
+			const FVector CenterToKeep = Root.IsValid() ? Root->Center : FVector::ZeroVector;
+			Root.Reset();
+			Root = MakeShared<FOctreeNode>(CenterToKeep, Extent, TArray<uint8>(), nullptr);
+		}
+		bIsResetting.store(false);
+	}
+#pragma endregion
 };
 
 //class SVO_API FOctreeTextureProcessor {

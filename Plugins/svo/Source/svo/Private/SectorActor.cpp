@@ -18,7 +18,12 @@ ASectorActor::ASectorActor()
 	SectorClusterCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorClusterCloud.NG_SectorClusterCloud"));
 	SectorGasCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorGasCloud.NG_SectorGasCloud"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
-	Octree = MakeShared<FOctree>(Params.Extent);
+	// Corner-align the tree so depth-2 cells line up with sector coarse
+	// cells. Center = (SE, SE, SE), extent = 4*SE → depth-2 grid centers
+	// at {-2*SE, 0, +2*SE, +4*SE} along each axis. The first three match
+	// coarse cell coords {-1, 0, +1}; the fourth is unused buffer.
+	const FVector TreeCenter(Params.Extent, Params.Extent, Params.Extent);
+	Octree = MakeShared<FOctree>(Params.Extent * TreeExtentMultiplier, TreeCenter);
 }
 #pragma endregion
 
@@ -106,8 +111,10 @@ void ASectorActor::ConfigureCell(FIntVector InCellCoord)
 	// The sector's constructor created an Octree with default Params.Extent.
 	// If the universe has overridden Params (via SpawnSectorForCell setting
 	// Sector->Params before ConfigureCell), the octree may now be sized
-	// wrong. Rebuild against the actual extent.
-	Octree = MakeShared<FOctree>(Params.Extent);
+	// wrong. Rebuild against the actual extent (sized 4× and corner-aligned
+	// — see constructor comment).
+	const FVector TreeCenter(Params.Extent, Params.Extent, Params.Extent);
+	Octree = MakeShared<FOctree>(Params.Extent * TreeExtentMultiplier, TreeCenter);
 }
 
 void ASectorActor::InitializeChildPool()
@@ -608,12 +615,16 @@ void ASectorActor::InitializeCoarseSystem()
 	const FVector LocalPlayerPos = PlayerPos - GetActorLocation();
 	CoarseCenterCell = PositionToCoarseCoord(LocalPlayerPos);
 
-	// Two-phase gen matching UpdateCoarseNodes: serial slot allocation, then
-	// parallel GenerateCoarseNode over the allocated pairs. The serial step
-	// is necessary because CoarseFreeSlots / ActiveCoarseNodes aren't
-	// threadsafe; the parallel step is the expensive one (noise sampling per
-	// cell dominates) and each cell writes to a disjoint slot-indexed slice
-	// of InitBuffer, so no contention.
+	// Two-phase pipeline (Task 2 — registry model):
+	//   (1) Serial slot allocation. CoarseFreeSlots / ActiveCoarseNodes
+	//       aren't threadsafe; pop slots and build the (Coord, Slot) work
+	//       list under single-threaded control.
+	//   (2) Parallel generation. Each worker writes to a disjoint slot-
+	//       indexed slice of InitBuffer — no contention.
+	//   (3) Per-cell octree insert. After generation completes, walk each
+	//       cell's particle slice and bulk-insert each non-dead particle
+	//       at a depth derived from its extent. Record touched nodes per
+	//       cell entry for cell-exit cleanup.
 	FCoarseBuffer& InitBuffer = CoarseBuffers[0];
 	TArray<TPair<FIntVector, int32>> ToGenerate;
 	ToGenerate.Reserve(Side * Side * Side);
@@ -625,7 +636,7 @@ void ASectorActor::InitializeCoarseSystem()
 			{
 				const FIntVector NeighborCoord = CoarseCenterCell + FIntVector(dx, dy, dz);
 				const int32 SlotIndex = CoarseFreeSlots.Pop();
-				ActiveCoarseNodes.Add(NeighborCoord, SlotIndex);
+				ActiveCoarseNodes.Add(NeighborCoord, FCoarseSlotEntry{ SlotIndex, {} });
 				ToGenerate.Emplace(NeighborCoord, SlotIndex);
 			}
 		}
@@ -636,6 +647,19 @@ void ASectorActor::InitializeCoarseSystem()
 			const TPair<FIntVector, int32>& Pair = ToGenerate[i];
 			GenerateCoarseNode(Pair.Key, Pair.Value, InitBuffer);
 		}, EParallelForFlags::BackgroundPriority);
+
+	// Octree registry pass. InsertCoarseCellIntoOctree calls FOctree::
+	// InsertPosition per particle, which mutex-guards. Running the inserts
+	// in parallel would serialize on that mutex anyway and add scheduler
+	// overhead, so do them serially in slot-iteration order.
+	for (const TPair<FIntVector, int32>& Pair : ToGenerate)
+	{
+		FCoarseSlotEntry* Entry = ActiveCoarseNodes.Find(Pair.Key);
+		if (Entry)
+		{
+			InsertCoarseCellIntoOctree(Pair.Key, Pair.Value, InitBuffer, Entry->InsertedNodes);
+		}
+	}
 
 	// Mirror front → back so either buffer is a valid starting state for
 	// the first boundary-cross update.
@@ -833,14 +857,18 @@ void ASectorActor::UpdateCoarseNodes()
 				if (!OldSet.Contains(Coord)) EnteringNodes.Add(Coord);
 			}
 
-			// Free exiting slots; dead-stub their data in the back buffer.
+			// Free exiting slots: dead-stub the cell's particles in the back
+			// buffer, return the slot to the free pool, and walk every octree
+			// node this cell touched to retire its slot index. Other cells
+			// may have inserted into the same node (collision overflow), so
+			// we use RemoveObjectIdFromNode rather than blanket-clearing.
 			const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
 			for (const FIntVector& Coord : ExitingNodes)
 			{
-				int32* SlotPtr = ActiveCoarseNodes.Find(Coord);
-				if (SlotPtr)
+				FCoarseSlotEntry* Entry = ActiveCoarseNodes.Find(Coord);
+				if (Entry)
 				{
-					const int32 SlotStart = *SlotPtr * MaxClusterPerCoarseNode;
+					const int32 SlotStart = Entry->SlotIndex * MaxClusterPerCoarseNode;
 					for (int32 i = 0; i < MaxClusterPerCoarseNode; ++i)
 					{
 						const int32 Idx = SlotStart + i;
@@ -852,24 +880,29 @@ void ASectorActor::UpdateCoarseNodes()
 						BackBuffer.GasExtents[Idx] = 0.0f;
 						BackBuffer.GasColors[Idx] = FLinearColor::Black;
 					}
-					CoarseFreeSlots.Add(*SlotPtr);
+					CoarseFreeSlots.Add(Entry->SlotIndex);
+
+					for (const TSharedPtr<FOctreeNode>& Node : Entry->InsertedNodes)
+					{
+						if (Octree.IsValid())
+						{
+							Octree->RemoveObjectIdFromNode(Node, Entry->SlotIndex);
+						}
+					}
 					ActiveCoarseNodes.Remove(Coord);
 				}
 			}
 
-			// Generate entering nodes into the back buffer. Two-phase:
-			//
-			//   (1) Serial pass: pop slots and record (Coord, SlotIndex) pairs.
-			//       CoarseFreeSlots and ActiveCoarseNodes are shared state and
-			//       neither is threadsafe, so slot allocation cannot race.
-			//
-			//   (2) Parallel pass: run GenerateCoarseNode on the pairs. Each
-			//       call writes to a disjoint slice of BackBuffer (slot-
-			//       indexed, non-overlapping) and independently builds its own
-			//       FastNoise graph via BuildNoise, so no shared state needs
-			//       guarding. SampleNoiseToVolume has its own inner ParallelFor
-			//       — nested parallelism is fine here, the outer loop just
-			//       dominates available cores.
+			// Generate entering nodes into the back buffer (registry model):
+			//   (1) Serial: pop slots, build (Coord, Slot) work list,
+			//       register placeholder ActiveCoarseNodes entries with
+			//       empty InsertedNodes lists.
+			//   (2) Parallel: GenerateCoarseNode writes to disjoint slot
+			//       slices of BackBuffer. Same as pre-Task 2.
+			//   (3) Serial: per cell, walk the slot's particles and
+			//       register each into the octree (per-particle insert at
+			//       MakePointDataFromWorldScale-derived depth). Records
+			//       touched nodes back into the cell entry.
 			TArray<TPair<FIntVector, int32>> ToGenerate;
 			ToGenerate.Reserve(EnteringNodes.Num());
 			for (const FIntVector& Coord : EnteringNodes)
@@ -881,7 +914,7 @@ void ASectorActor::UpdateCoarseNodes()
 					continue;
 				}
 				const int32 SlotIndex = CoarseFreeSlots.Pop();
-				ActiveCoarseNodes.Add(Coord, SlotIndex);
+				ActiveCoarseNodes.Add(Coord, FCoarseSlotEntry{ SlotIndex, {} });
 				ToGenerate.Emplace(Coord, SlotIndex);
 			}
 
@@ -890,6 +923,17 @@ void ASectorActor::UpdateCoarseNodes()
 					const TPair<FIntVector, int32>& Pair = ToGenerate[i];
 					GenerateCoarseNode(Pair.Key, Pair.Value, BackBuffer);
 				}, EParallelForFlags::BackgroundPriority);
+
+			// Octree registry pass. Serial — InsertPosition mutex-guards
+			// internally so parallel calls would just contend on that lock.
+			for (const TPair<FIntVector, int32>& Pair : ToGenerate)
+			{
+				FCoarseSlotEntry* Entry = ActiveCoarseNodes.Find(Pair.Key);
+				if (Entry)
+				{
+					InsertCoarseCellIntoOctree(Pair.Key, Pair.Value, BackBuffer, Entry->InsertedNodes);
+				}
+			}
 
 			// Atomic buffer swap.
 			CoarseFrontIdx.store(BackIdx);
@@ -927,6 +971,11 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InS
 	//   - Per accepted point: writes both a cluster and a gas entry (1:1
 	//     matched), gas extent lerped by the same density value we rejection-
 	//     gated against.
+	//
+	// Position uses CoarseCoordToCenter directly (the cell's logical center).
+	// The octree's quantization doesn't influence rendering — the spatial
+	// index is populated as a separate post-generation pass and only stores
+	// slot indices, not authoritative positions.
 
 	const int32 BufferStart = InSlotIndex * MaxClusterPerCoarseNode;
 	const FVector NodeCenter = CoarseCoordToCenter(InCoarseCoord);
@@ -1046,6 +1095,65 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InS
 	CoarseSlotCounts[InSlotIndex] = ActualCount;
 }
 
+void ASectorActor::InsertCoarseCellIntoOctree(const FIntVector& InCoarseCoord, int32 InSlotIndex, const FCoarseBuffer& InBuffer, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes) const
+{
+	// Walk this cell's slot in the buffer; insert each non-dead cluster
+	// particle into the octree. Per-particle depth comes from
+	// MakePointDataFromWorldScale, which picks the deepest depth at which
+	// the node is still big enough to contain the particle's extent.
+	// ObjectId carries the slot index so queries can dereference into the
+	// buffer; TypeId tags the node as galaxy content so non-galaxy queries
+	// can filter it out.
+	//
+	// We only insert cluster particles, not gas — cluster and gas share
+	// 1:1 positions and slot indexing, so a cluster insert spatially
+	// represents both. Gas-only queries (if ever needed) can use the same
+	// slot index to look up the gas data.
+	if (!Octree.IsValid())
+	{
+		return;
+	}
+
+	const double TreeExtent = Octree->Extent;
+	const int32 BufferStart = InSlotIndex * MaxClusterPerCoarseNode;
+	OutInsertedNodes.Reserve(MaxClusterPerCoarseNode);
+
+	// Apply the actor's slow-drift offset so the octree position matches
+	// the cell's stable world frame at insert time. (The tree is in
+	// sector-local space; ApplyParallaxOffset shifts the actor by
+	// -PlayerDelta*Ratio per tick, so GetActorLocation() represents the
+	// drift origin. NOT applied to particle positions in InBuffer — those
+	// stay in pristine sector-local space; this offset is only for
+	// deciding which octree node to bucket into.)
+	for (int32 i = 0; i < MaxClusterPerCoarseNode; ++i)
+	{
+		const int32 Idx = BufferStart + i;
+		const float Extent = InBuffer.ClusterExtents[Idx];
+		if (Extent <= 0.0f)
+		{
+			continue;
+		}
+
+		// MakePointDataFromWorldScale returns an FPointData with InsertDepth
+		// + a Data with ScaleFactor encoding sub-node precision. We override
+		// position/ObjectId/TypeId on the result to carry our slot tag.
+		FPointData PointData = FPointData::MakePointDataFromWorldScale(
+			static_cast<double>(Extent),
+			/*InUnitScale=*/ 1.0,
+			static_cast<int64>(TreeExtent));
+		PointData.SetPosition(InBuffer.ClusterPositions[Idx]);
+		PointData.Data.ObjectId = InSlotIndex;
+		PointData.Data.TypeId = GalaxyTypeId;
+
+		TSharedPtr<FOctreeNode> Node = Octree->InsertPosition(
+			PointData.GetPosition(), PointData.InsertDepth, PointData.Data);
+		if (Node.IsValid())
+		{
+			OutInsertedNodes.Add(Node);
+		}
+	}
+}
+
 void ASectorActor::PushCoarseToNiagara()
 {
 	// Positions in CoarseBuffers are stored in sector-actor-local space
@@ -1163,7 +1271,9 @@ void ASectorActor::InitializeProximitySystem()
 
 	FProximityBuffer& InitBuffer = ProximityBuffers[0];
 
-	// Two-phase gen, same pattern as the coarse tier and UpdateProximityNodes.
+	// Two-phase pipeline (registry model — same as InitializeCoarseSystem):
+	// serial slot allocation → parallel generate → serial per-cell octree
+	// insert pass.
 	TArray<TPair<FIntVector, int32>> ToGenerate;
 	ToGenerate.Reserve(27);
 	for (int32 dz = -1; dz <= 1; ++dz)
@@ -1172,12 +1282,9 @@ void ASectorActor::InitializeProximitySystem()
 		{
 			for (int32 dx = -1; dx <= 1; ++dx)
 			{
-				// Scan coords are universe-wide now — no NodesPerSide clamp.
-				// Every neighbor in the 3x3x3 window gets a slot.
 				FIntVector NeighborCoord = CurrentScanCoord + FIntVector(dx, dy, dz);
-
 				int32 SlotIndex = FreeSlots.Pop();
-				ActiveNodeSlots.Add(NeighborCoord, SlotIndex);
+				ActiveNodeSlots.Add(NeighborCoord, FProximitySlotEntry{ SlotIndex, {} });
 				ToGenerate.Emplace(NeighborCoord, SlotIndex);
 			}
 		}
@@ -1188,6 +1295,15 @@ void ASectorActor::InitializeProximitySystem()
 			const TPair<FIntVector, int32>& Pair = ToGenerate[i];
 			GenerateNodeGalaxies(Pair.Key, Pair.Value, InitBuffer);
 		}, EParallelForFlags::BackgroundPriority);
+
+	for (const TPair<FIntVector, int32>& Pair : ToGenerate)
+	{
+		FProximitySlotEntry* Entry = ActiveNodeSlots.Find(Pair.Key);
+		if (Entry)
+		{
+			InsertProximityCellIntoOctree(Pair.Key, Pair.Value, InitBuffer, Entry->InsertedNodes);
+		}
+	}
 
 	// Copy front to back so both start identical
 	ProximityBuffers[1].Positions = ProximityBuffers[0].Positions;
@@ -1332,13 +1448,14 @@ void ASectorActor::UpdateProximityNodes()
 					EnteringNodes.Add(Coord);
 				}
 			}
-			// Free exiting slots and clear their data in the back buffer
+			// Free exiting slots, dead-stub their data, retire each cell's
+			// slot from every octree node it touched.
 			for (const FIntVector& Coord : ExitingNodes)
 			{
-				int32* SlotPtr = ActiveNodeSlots.Find(Coord);
-				if (SlotPtr)
+				FProximitySlotEntry* Entry = ActiveNodeSlots.Find(Coord);
+				if (Entry)
 				{
-					int32 SlotStart = *SlotPtr * MaxParticlesPerNode;
+					int32 SlotStart = Entry->SlotIndex * MaxParticlesPerNode;
 					for (int32 i = 0; i < MaxParticlesPerNode; ++i)
 					{
 						BackBuffer.Positions[SlotStart + i] = FVector(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
@@ -1346,17 +1463,21 @@ void ASectorActor::UpdateProximityNodes()
 						BackBuffer.Colors[SlotStart + i] = FLinearColor::Black;
 					}
 
-					FreeSlots.Add(*SlotPtr);
+					FreeSlots.Add(Entry->SlotIndex);
+					for (const TSharedPtr<FOctreeNode>& Node : Entry->InsertedNodes)
+					{
+						if (Octree.IsValid())
+						{
+							Octree->RemoveObjectIdFromNode(Node, Entry->SlotIndex);
+						}
+					}
 					ActiveNodeSlots.Remove(Coord);
 				}
 			}
 
-			// Generate entering nodes into back buffer. Two-phase, same
-			// pattern as UpdateCoarseNodes: serial slot allocation first
-			// (FreeSlots / ActiveNodeSlots aren't threadsafe), then parallel
-			// GenerateNodeGalaxies. Per-cell GenerateNodeGalaxies writes to a
-			// disjoint slot-indexed slice of BackBuffer and allocates its own
-			// transient noise + candidate arrays, so no shared state.
+			// Generate entering nodes into back buffer (registry model):
+			// serial slot allocation → parallel generate → serial per-cell
+			// octree insert. Same shape as UpdateCoarseNodes.
 			TArray<TPair<FIntVector, int32>> ToGenerate;
 			ToGenerate.Reserve(EnteringNodes.Num());
 			for (const FIntVector& Coord : EnteringNodes)
@@ -1367,7 +1488,7 @@ void ASectorActor::UpdateProximityNodes()
 				}
 
 				int32 SlotIndex = FreeSlots.Pop();
-				ActiveNodeSlots.Add(Coord, SlotIndex);
+				ActiveNodeSlots.Add(Coord, FProximitySlotEntry{ SlotIndex, {} });
 				ToGenerate.Emplace(Coord, SlotIndex);
 			}
 
@@ -1376,6 +1497,15 @@ void ASectorActor::UpdateProximityNodes()
 					const TPair<FIntVector, int32>& Pair = ToGenerate[i];
 					GenerateNodeGalaxies(Pair.Key, Pair.Value, BackBuffer);
 				}, EParallelForFlags::BackgroundPriority);
+
+			for (const TPair<FIntVector, int32>& Pair : ToGenerate)
+			{
+				FProximitySlotEntry* Entry = ActiveNodeSlots.Find(Pair.Key);
+				if (Entry)
+				{
+					InsertProximityCellIntoOctree(Pair.Key, Pair.Value, BackBuffer, Entry->InsertedNodes);
+				}
+			}
 
 			// Atomic swap: back becomes front
 			FrontBufferIndex.store(BackIdx);
@@ -1429,6 +1559,9 @@ double ASectorActor::GetScanNodeExtent() const
 void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InSlotIndex, FProximityBuffer& InBuffer)
 {
 	const int32 BufferStart = InSlotIndex * MaxParticlesPerNode;
+	// Position/extent use the cell's logical center — the octree's
+	// quantization doesn't influence rendering. Octree insert is a separate
+	// post-generation pass.
 	const FVector NodeCenter = ScanCoordToCenter(InNodeCoord);
 	const double NodeExt = GetScanNodeExtent();
 
@@ -1569,6 +1702,46 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InS
 	SlotParticleCounts[InSlotIndex] = ActualCount;
 }
 
+void ASectorActor::InsertProximityCellIntoOctree(const FIntVector& InNodeCoord, int32 InSlotIndex, const FProximityBuffer& InBuffer, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes) const
+{
+	// Same shape as InsertCoarseCellIntoOctree. Walks this cell's slot in
+	// the proximity buffer; per non-dead galaxy point, inserts at the
+	// depth picked by MakePointDataFromWorldScale based on point extent.
+	if (!Octree.IsValid())
+	{
+		return;
+	}
+
+	const double TreeExtent = Octree->Extent;
+	const int32 BufferStart = InSlotIndex * MaxParticlesPerNode;
+	OutInsertedNodes.Reserve(MaxParticlesPerNode);
+
+	for (int32 i = 0; i < MaxParticlesPerNode; ++i)
+	{
+		const int32 Idx = BufferStart + i;
+		const float Extent = InBuffer.Extents[Idx];
+		if (Extent <= 0.0f)
+		{
+			continue;
+		}
+
+		FPointData PointData = FPointData::MakePointDataFromWorldScale(
+			static_cast<double>(Extent),
+			/*InUnitScale=*/ 1.0,
+			static_cast<int64>(TreeExtent));
+		PointData.SetPosition(InBuffer.Positions[Idx]);
+		PointData.Data.ObjectId = InSlotIndex;
+		PointData.Data.TypeId = GalaxyTypeId;
+
+		TSharedPtr<FOctreeNode> Node = Octree->InsertPosition(
+			PointData.GetPosition(), PointData.InsertDepth, PointData.Data);
+		if (Node.IsValid())
+		{
+			OutInsertedNodes.Add(Node);
+		}
+	}
+}
+
 void ASectorActor::PushProximityToNiagara()
 {
 	if (!ProximityNiagaraComponent) return;
@@ -1627,4 +1800,21 @@ void ASectorActor::Tick(float DeltaTime)
 	UpdateProximityNodes();
 }
 
+#pragma endregion
+
+#pragma region Public Octree Queries
+TArray<TSharedPtr<FOctreeNode>> ASectorActor::GetNearbyGalaxyNodes(const FVector& InCenter, double InRadius) const
+{
+	// Spatial range query into the unified per-sector octree. Depths are
+	// per-particle (set by MakePointDataFromWorldScale based on extent), so
+	// we don't depth-restrict the query — only TypeId-filter for galaxy
+	// content. Caller dereferences each node's ObjectId (and
+	// AdditionalObjectIds for collision-bucket nodes) into the appropriate
+	// flat buffer.
+	if (!Octree.IsValid())
+	{
+		return {};
+	}
+	return Octree->GetNodesInRange(InCenter, InRadius, /*MinDepth=*/ -1, /*MaxDepth=*/ -1, GalaxyTypeId);
+}
 #pragma endregion

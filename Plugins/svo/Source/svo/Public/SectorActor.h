@@ -35,10 +35,31 @@ public:
 	// keep working without a base class.
 	ELifecycleState InitializationState = ELifecycleState::Uninitialized;
 
-	// Octree still lives on the sector — retained for the Task 2 proximity
-	// data structure work. Not driven by any data pipeline currently; the
-	// coarse/fine streaming both sample noise directly.
+	// Sector-scope spatial index. Sized to 4 * Params.Extent and corner-
+	// aligned with center = (Params.Extent, Params.Extent, Params.Extent)
+	// so that the tree's depth-2 grid lines up with the sector's coarse
+	// cell grid: 3 of the 4 depth-2 cells along each axis correspond to
+	// real sector cells (-1, 0, +1 coords); the 4th is unused buffer.
+	//
+	// Particles (cluster sprites + galaxy points) are inserted individually
+	// at depths derived from each particle's extent via
+	// FPointData::MakePointDataFromWorldScale. The tree is a registry, not
+	// authoritative storage — Data.ObjectId carries the slot index into the
+	// flat particle buffers, and queries dereference back through that
+	// index to read pre-quantized positions/extents. This means the
+	// tree's internal quantization can't degrade render or proximity-query
+	// precision; the tree is only used for spatial culling.
 	TSharedPtr<FOctree> Octree;
+
+	// Tree sizing convention. Multiplier is fixed by the 3x3 coarse
+	// neighborhood requirement; if CoarseNeighborhoodRadius ever exceeds 1
+	// this needs to scale.
+	static constexpr double TreeExtentMultiplier = 4.0;
+
+	// Both tiers' particles tag their octree nodes with this TypeId so
+	// proximity queries can filter for galaxy content vs. anything else
+	// that may live in the tree later.
+	static constexpr int32 GalaxyTypeId = 0;
 
 	// Kicks off async init — InitializeChildPool → InitializeData →
 	// InitializeVolumetric → InitializeNiagara, with Pooling-state guards
@@ -231,8 +252,20 @@ protected:
 	int32 MaxClusterPerCoarseNode = 500;
 
 	// --- Slot State (only touched by async task, guarded by bCoarseUpdateInProgress) ---
+	// ActiveCoarseNodes: coord → (slot index, list of octree nodes this
+	// cell's particles touched). The slot index is the stable handle into
+	// the flat double-buffered particle arrays. InsertedNodes is the set of
+	// octree nodes that received this cell's slot index in their ObjectId
+	// (or AdditionalObjectIds, on collision); on cell exit we walk this
+	// list to retire the slot from each.
+	struct FCoarseSlotEntry
+	{
+		int32 SlotIndex = -1;
+		TArray<TSharedPtr<FOctreeNode>> InsertedNodes;
+	};
+
 	FIntVector CoarseCenterCell = FIntVector(INT32_MIN);
-	TMap<FIntVector, int32> ActiveCoarseNodes;
+	TMap<FIntVector, FCoarseSlotEntry> ActiveCoarseNodes;
 	TArray<int32> CoarseFreeSlots;
 	TArray<int32> CoarseSlotCounts;
 
@@ -282,7 +315,18 @@ protected:
 	// --- Methods ---
 	void InitializeCoarseSystem();
 	void UpdateCoarseNodes();
+	// Generation produces particle data using the cell's logical center
+	// (CoarseCoordToCenter) — the octree's quantization is irrelevant to
+	// rendering. After generation completes for all cells in a streaming
+	// pass, InsertCellParticlesIntoOctree walks each cell's buffer slice
+	// and registers the particles in the spatial index.
 	void GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InSlotIndex, FCoarseBuffer& InBuffer);
+	// Per-particle insert: walks the cell's slot in InBuffer and inserts
+	// each non-dead particle (Extent > 0) into the octree at a depth
+	// derived from its extent. Each touched node is appended to
+	// OutInsertedNodes for cell-exit cleanup. Safe to call on a worker
+	// thread — InsertPosition is mutex-guarded internally.
+	void InsertCoarseCellIntoOctree(const FIntVector& InCoarseCoord, int32 InSlotIndex, const FCoarseBuffer& InBuffer, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes) const;
 	void PushCoarseToNiagara();
 
 	FIntVector PositionToCoarseCoord(const FVector& InWorldPos) const;
@@ -298,8 +342,14 @@ protected:
 	int32 MaxParticlesPerNode = 2000;
 
 	// --- Slot State (only touched by async task, guarded by bProximityUpdateInProgress) ---
+	struct FProximitySlotEntry
+	{
+		int32 SlotIndex = -1;
+		TArray<TSharedPtr<FOctreeNode>> InsertedNodes;
+	};
+
 	FIntVector CurrentScanCoord = FIntVector(INT32_MIN);
-	TMap<FIntVector, int32> ActiveNodeSlots;
+	TMap<FIntVector, FProximitySlotEntry> ActiveNodeSlots;
 	TArray<int32> FreeSlots;
 	TArray<int32> SlotParticleCounts;
 
@@ -330,11 +380,30 @@ protected:
 	// --- Methods ---
 	void InitializeProximitySystem();
 	void UpdateProximityNodes();
+	// Same convention as the coarse tier — generation produces particles
+	// using the cell's logical center; the octree insert is a separate
+	// pass that walks the slot's particles after generation.
 	void GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InSlotIndex, FProximityBuffer& InBuffer);
+	void InsertProximityCellIntoOctree(const FIntVector& InNodeCoord, int32 InSlotIndex, const FProximityBuffer& InBuffer, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes) const;
 	void PushProximityToNiagara();
 
 	FIntVector PositionToScanCoord(const FVector& InLocalPos) const;
 	FVector ScanCoordToCenter(const FIntVector& InCoord) const;
 	double GetScanNodeExtent() const;
+#pragma endregion
+
+#pragma region Public Octree Queries
+public:
+	// Spatial range query into the unified per-sector octree. Returns every
+	// node within InRadius of the query center (sector-actor-local space)
+	// that carries at least one galaxy slot tag (TypeId == GalaxyTypeId).
+	// The caller dereferences each node's ObjectId (and AdditionalObjectIds
+	// for collision-bucket nodes) into the cell's slot in the flat
+	// CoarseBuffers/ProximityBuffers to get the actual particle data.
+	// Both tiers' particles are interleaved in the result — distinguish by
+	// looking up the slot index range (coarse slots: 0..NumCoarseSlots,
+	// proximity slots: 0..NumProximitySlots, but they index into different
+	// buffer arrays so the caller needs to know which tier it asked about).
+	TArray<TSharedPtr<FOctreeNode>> GetNearbyGalaxyNodes(const FVector& InCenter, double InRadius) const;
 #pragma endregion
 };

@@ -16,6 +16,19 @@ public:
 	FVector Composition;
 	int ObjectId;
 	int TypeId;
+
+	// Collision overflow for nodes that receive multiple inserts at the same
+	// quantized depth/position. ObjectId carries the first inserter's id;
+	// any subsequent inserts append to AdditionalObjectIds. Empty for the
+	// non-collision case (vast majority of nodes), so the per-node memory
+	// cost is just the empty TArray header.
+	//
+	// Callers that only consume "the" ObjectId (the existing convention
+	// across PointCloudGenerator, GalaxyDataGenerator, ParallaxNiagaraSystem,
+	// GalaxyActor, etc.) continue to work unchanged. Callers that want full
+	// collision-aware enumeration walk both ObjectId (if != -1) and
+	// AdditionalObjectIds.
+	TArray<int32> AdditionalObjectIds;
 };
 
 struct SVO_API FPointData
@@ -51,71 +64,71 @@ public:
 			static_cast<double>(InInt64.Z));
 	}
 
-    // Unified depth calculation from real-world scale
-    // InScaleWorldUnits: Size in centimeters (real world)
-    // InUnitScale: The octree's unit scale (cm per octree unit)
-    // InExtent: The octree's extent (must be power of 2)
-    static FPointData MakePointDataFromWorldScale(
-        const double InScaleWorldUnits,
-        const double InUnitScale,
-        const int64 InExtent)
-    {
-        // Convert world scale to octree local units
-        double LocalSize = InScaleWorldUnits / InUnitScale;
+	// Unified depth calculation from real-world scale
+	// InScaleWorldUnits: Size in centimeters (real world)
+	// InUnitScale: The octree's unit scale (cm per octree unit)
+	// InExtent: The octree's extent (must be power of 2)
+	static FPointData MakePointDataFromWorldScale(
+		const double InScaleWorldUnits,
+		const double InUnitScale,
+		const int64 InExtent)
+	{
+		// Convert world scale to octree local units
+		double LocalSize = InScaleWorldUnits / InUnitScale;
 
-        // Calculate max depth based on extent
-        // Extent is power of 2, minimum node size is 2 units
-        // At depth d: NodeExtent = InExtent >> d
-        // We want: InExtent >> MaxDepth = 2
-        // So: MaxDepth = log2(InExtent) - 1
-        int MinDepth = 1;
-        int MaxDepth = static_cast<int>(FMath::Log2(static_cast<double>(InExtent)));
+		// Calculate max depth based on extent
+		// Extent is power of 2, minimum node size is 2 units
+		// At depth d: NodeExtent = InExtent >> d
+		// We want: InExtent >> MaxDepth = 2
+		// So: MaxDepth = log2(InExtent) - 1
+		int MinDepth = 1;
+		int MaxDepth = static_cast<int>(FMath::Log2(static_cast<double>(InExtent)));
 
-        // Find the deepest depth where this object still fits
-        int BestDepth = MinDepth;
-        int64 BestNodeExtent = InExtent >> MinDepth;
-        double BestRatio = FMath::Abs(1.0 - LocalSize / static_cast<double>(BestNodeExtent));
+		// Find the deepest depth where this object still fits
+		int BestDepth = MinDepth;
+		int64 BestNodeExtent = InExtent >> MinDepth;
+		double BestRatio = FMath::Abs(1.0 - LocalSize / static_cast<double>(BestNodeExtent));
 
-        for (int d = MinDepth; d <= MaxDepth; d++)
-        {
-            int64 ExtentAtDepth = InExtent >> d;
+		for (int d = MinDepth; d <= MaxDepth; d++)
+		{
+			int64 ExtentAtDepth = InExtent >> d;
 
-            // Object must fit within node (LocalSize <= ExtentAtDepth)
-            if (LocalSize > ExtentAtDepth)
-            {
-                // Too deep, object doesn't fit anymore
-                break;
-            }
+			// Object must fit within node (LocalSize <= ExtentAtDepth)
+			if (LocalSize > ExtentAtDepth)
+			{
+				// Too deep, object doesn't fit anymore
+				break;
+			}
 
-            double Ratio = FMath::Abs(1.0 - LocalSize / static_cast<double>(ExtentAtDepth));
+			double Ratio = FMath::Abs(1.0 - LocalSize / static_cast<double>(ExtentAtDepth));
 
-            if (Ratio < BestRatio)
-            {
-                BestRatio = Ratio;
-                BestDepth = d;
-                BestNodeExtent = ExtentAtDepth;
-            }
-        }
+			if (Ratio < BestRatio)
+			{
+				BestRatio = Ratio;
+				BestDepth = d;
+				BestNodeExtent = ExtentAtDepth;
+			}
+		}
 
-        // Calculate density to encode sub-node precision
-        // Actual object size = NodeExtent * (1 + ScaleFactor)
-        // ScaleFactor = (LocalSize / BestNodeExtent) - 1
-        float ScaleFactor = FMath::Clamp(
-            static_cast<float>((LocalSize / static_cast<double>(BestNodeExtent)) - 1.0),
-            0.0001f,
-            1.0f
-        );
+		// Calculate density to encode sub-node precision
+		// Actual object size = NodeExtent * (1 + ScaleFactor)
+		// ScaleFactor = (LocalSize / BestNodeExtent) - 1
+		float ScaleFactor = FMath::Clamp(
+			static_cast<float>((LocalSize / static_cast<double>(BestNodeExtent)) - 1.0),
+			0.0001f,
+			1.0f
+		);
 
-        FVoxelData Data;
-        Data.ScaleFactor = ScaleFactor;
+		FVoxelData Data;
+		Data.ScaleFactor = ScaleFactor;
 
-        return FPointData(FInt64Vector::ZeroValue, BestDepth, Data);
-    }
+		return FPointData(FInt64Vector::ZeroValue, BestDepth, Data);
+	}
 
-    static double SampleScaleFromDistribution(double InMinScale, double InMaxScale, double InSample, const FRuntimeFloatCurve& InDistributionCurve) {
-        // Lerp between min and max using the distribution value
-        return FMath::Lerp(InMinScale, InMaxScale, static_cast<double>(FMath::Clamp(InDistributionCurve.GetRichCurveConst()->Eval(FMath::Clamp(InSample, 0.0f, 1.0f)), 0.0f, 1.0f)));
-    }
+	static double SampleScaleFromDistribution(double InMinScale, double InMaxScale, double InSample, const FRuntimeFloatCurve& InDistributionCurve) {
+		// Lerp between min and max using the distribution value
+		return FMath::Lerp(InMinScale, InMaxScale, static_cast<double>(FMath::Clamp(InDistributionCurve.GetRichCurveConst()->Eval(FMath::Clamp(InSample, 0.0f, 1.0f)), 0.0f, 1.0f)));
+	}
 
 	// Constructors
 	FPointData() : InsertDepth(0), Data() {}
