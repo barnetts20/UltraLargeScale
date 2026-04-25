@@ -51,7 +51,7 @@ namespace
 					continue; // Reject this point
 				}
 
-				double scale = FPointData::SampleScaleFromDistribution(LocalParams.MinClusterScale, LocalParams.MaxClusterScale, NoiseVal, LocalParams.ScaleDistributionCurve);
+				double scale = FPointData::SampleScaleFromDistribution(LocalParams.LargeTier.MinScale, LocalParams.LargeTier.MaxScale, NoiseVal, LocalParams.ScaleDistributionCurve);
 				FPointData InsertData = FPointData::MakePointDataFromWorldScale(scale, LocalParams.UnitScale, LocalParams.Extent);
 				InsertData.Data.Density = LocalStream.FRandRange(0.5, 1.5);
 				InsertData.Data.Composition = LocalStream.GetUnitVector();

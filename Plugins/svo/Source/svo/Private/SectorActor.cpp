@@ -325,11 +325,11 @@ double ASectorActor::GetGridCellExtent(int32 InGridDepth) const
 
 void ASectorActor::BuildTierConfigs()
 {
-	// --- Coarse tier ---
-	CoarseTierConfig.TierName = TEXT("Coarse");
-	CoarseTierConfig.GridDepth = 1;
-	CoarseTierConfig.NeighborhoodRadius = Params.CoarseNeighborhoodRadius;
-	CoarseTierConfig.SlotCapacity = Params.MaxClusterPerCoarseNode;
+	// --- Large tier (was "Coarse") ---
+	CoarseTierConfig.TierName = TEXT("Large");
+	CoarseTierConfig.GridDepth = Params.LargeTier.GridDepth;
+	CoarseTierConfig.NeighborhoodRadius = Params.LargeTier.NeighborhoodRadius;
+	CoarseTierConfig.SlotCapacity = Params.LargeTier.MaxParticlesPerSlot;
 	CoarseTierConfig.NiagaraAssets = { SectorLargeCloud, SectorGasCloud };
 	CoarseTierConfig.bWantRotations = { true, false };
 	CoarseTierConfig.OctreeInsertBufferIndex = 0;
@@ -341,26 +341,23 @@ void ASectorActor::BuildTierConfigs()
 
 	CoarseTierConfig.ComputeBounds = [this]() -> FBox
 		{
-			const double BoundsExtent = (2 * Params.CoarseNeighborhoodRadius + 1) * Params.Extent;
+			const double BoundsExtent = (2 * Params.LargeTier.NeighborhoodRadius + 1) * Params.Extent;
 			return FBox(FVector(-BoundsExtent), FVector(BoundsExtent));
 		};
 
-	// --- Mid tier (POC) ---
-	// GridDepth 2 → cell extent = Extent (halfway between coarse 2E and proximity E/32).
-	// Reuses coarse cluster generation with a single buffer (no gas layer).
-	// Neighborhood radius 1 → 27 slots, same particle budget as coarse.
+	// --- Mid tier ---
 	MidTierConfig.TierName = TEXT("Mid");
-	MidTierConfig.GridDepth = 4;
-	MidTierConfig.NeighborhoodRadius = 1;
-	MidTierConfig.SlotCapacity = Params.MaxClusterPerCoarseNode;
+	MidTierConfig.GridDepth = Params.MidTier.GridDepth;
+	MidTierConfig.NeighborhoodRadius = Params.MidTier.NeighborhoodRadius;
+	MidTierConfig.SlotCapacity = Params.MidTier.MaxParticlesPerSlot;
 	MidTierConfig.NiagaraAssets = { SectorMidCloud };
 	MidTierConfig.bWantRotations = { true };
 	MidTierConfig.OctreeInsertBufferIndex = 0;
 
 	MidTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers)
 		{
-			// Simplified cluster-only generation at mid-tier grid scale.
-			// Same noise-driven rejection as coarse but writes a single buffer.
+			// Cluster-only generation at mid-tier grid scale.
+			// Same noise-driven rejection as the large tier but writes a single buffer.
 			FNiagaraParticleBuffer& Buf = *Buffers[0];
 			const int32 BufferStart = SlotIndex * Buf.SlotCapacity;
 			const FVector NodeCenter = GridCoordToCenter(Coord, MidTierConfig.GridDepth);
@@ -369,13 +366,12 @@ void ASectorActor::BuildTierConfigs()
 			const int32 CoordHash = HashCombine(
 				HashCombine(GetTypeHash(Coord.X), GetTypeHash(Coord.Y)),
 				GetTypeHash(Coord.Z));
-			const int32 NodeSeed = HashCombine(Params.Seed + 1, CoordHash); // +1 offset to differentiate from coarse
+			const int32 NodeSeed = HashCombine(Params.Seed + 1, CoordHash);
 			FRandomStream Stream(NodeSeed);
 
 			const int32 NumCandidates = Buf.SlotCapacity;
 			const double InvExtent = 1.0 / (double)Params.Extent;
 
-			// Noise offset derived from which coarse cell this mid-cell falls in.
 			const double TwoExtent = 2.0 * (double)Params.Extent;
 			TArray<FVector> CandidatePositions;
 			TArray<float> NoiseX, NoiseY, NoiseZ;
@@ -393,7 +389,6 @@ void ASectorActor::BuildTierConfigs()
 				Candidate += NodeCenter;
 				CandidatePositions[i] = Candidate;
 
-				// Per-candidate coarse cell lookup for noise continuity.
 				const int32 CX = FMath::FloorToInt32(Candidate.X / TwoExtent + 0.5);
 				const int32 CY = FMath::FloorToInt32(Candidate.Y / TwoExtent + 0.5);
 				const int32 CZ = FMath::FloorToInt32(Candidate.Z / TwoExtent + 0.5);
@@ -421,7 +416,7 @@ void ASectorActor::BuildTierConfigs()
 
 				const float ScaleSample = Stream.FRand();
 				const double Scale = FPointData::SampleScaleFromDistribution(
-					Params.MinClusterScale, Params.MaxClusterScale,
+					Params.MidTier.MinScale, Params.MidTier.MaxScale,
 					ScaleSample, Params.ScaleDistributionCurve);
 				FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
 				const double ExtentAtDepth = (double)Params.Extent / (double)(1 << PointData.InsertDepth);
@@ -445,16 +440,15 @@ void ASectorActor::BuildTierConfigs()
 
 	MidTierConfig.ComputeBounds = [this]() -> FBox
 		{
-			// 3×3×3 neighborhood of Extent-sized cells → 3*Extent bounds.
-			const double BoundsExtent = 3.0 * Params.Extent;
+			const double BoundsExtent = (2 * Params.MidTier.NeighborhoodRadius + 1) * GetGridCellExtent(Params.MidTier.GridDepth) * 2.0;
 			return FBox(FVector(-BoundsExtent), FVector(BoundsExtent));
 		};
 
-	// --- Proximity tier ---
-	ProximityTierConfig.TierName = TEXT("Proximity");
-	ProximityTierConfig.GridDepth = Params.ScanDepth + 1;
-	ProximityTierConfig.NeighborhoodRadius = 1;
-	ProximityTierConfig.SlotCapacity = Params.MaxParticlesPerNode;
+	// --- Small tier (was "Proximity") ---
+	ProximityTierConfig.TierName = TEXT("Small");
+	ProximityTierConfig.GridDepth = Params.SmallTier.GridDepth;
+	ProximityTierConfig.NeighborhoodRadius = Params.SmallTier.NeighborhoodRadius;
+	ProximityTierConfig.SlotCapacity = Params.SmallTier.MaxParticlesPerSlot;
 	ProximityTierConfig.NiagaraAssets = { SectorSmallCloud };
 	ProximityTierConfig.bWantRotations = { false };
 	ProximityTierConfig.OctreeInsertBufferIndex = 0;
@@ -466,7 +460,8 @@ void ASectorActor::BuildTierConfigs()
 
 	ProximityTierConfig.ComputeBounds = [this]() -> FBox
 		{
-			return FBox(FVector(-Params.Extent), FVector(Params.Extent));
+			const double BoundsExtent = (2 * Params.SmallTier.NeighborhoodRadius + 1) * GetGridCellExtent(Params.SmallTier.GridDepth) * 2.0;
+			return FBox(FVector(-BoundsExtent), FVector(BoundsExtent));
 		};
 }
 
@@ -1032,7 +1027,7 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoord, int32 InSlotInd
 	FRandomStream Stream(NodeSeed);
 
 	const float ExtentRange = Params.GasMaxExtent - Params.GasMinExtent;
-	const int32 NumCandidates = Params.MaxClusterPerCoarseNode;
+	const int32 NumCandidates = InClusterBuffer.SlotCapacity;
 	const double InvExtent = 1.0 / (double)Params.Extent;
 
 	// Every candidate in this cell shares the same coord-derived noise offset.
@@ -1087,8 +1082,8 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoord, int32 InSlotInd
 
 		const float ScaleSample = Stream.FRand();
 		const double Scale = FPointData::SampleScaleFromDistribution(
-			Params.MinClusterScale,
-			Params.MaxClusterScale,
+			Params.LargeTier.MinScale,
+			Params.LargeTier.MaxScale,
 			ScaleSample, Params.ScaleDistributionCurve);
 
 		FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
@@ -1138,7 +1133,7 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InCoord, int32 InSlotI
 	int32 NodeSeed = HashCombine(Params.Seed, CoordHash);
 	FRandomStream Stream(NodeSeed);
 
-	const int32 NumCandidates = Params.MaxParticlesPerNode;
+	const int32 NumCandidates = InBuffer.SlotCapacity;
 	const double InvExtent = 1.0 / (double)Params.Extent;
 	const double TwoExtent = 2.0 * (double)Params.Extent;
 
@@ -1204,8 +1199,8 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InCoord, int32 InSlotI
 
 		const float ScaleSample = Stream.FRand();
 		const double Scale = FPointData::SampleScaleFromDistribution(
-			Params.MinGalaxyScale,
-			Params.MaxGalaxyScale,
+			Params.SmallTier.MinScale,
+			Params.SmallTier.MaxScale,
 			ScaleSample, Params.ScaleDistributionCurve);
 
 		FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
