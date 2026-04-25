@@ -224,6 +224,8 @@ protected:
 	// --- Tier Config/State Pairs ---
 	FParticleTierConfig CoarseTierConfig;
 	FParticleTierState  CoarseTierState;
+	FParticleTierConfig MidTierConfig;
+	FParticleTierState  MidTierState;
 	FParticleTierConfig ProximityTierConfig;
 	FParticleTierState  ProximityTierState;
 

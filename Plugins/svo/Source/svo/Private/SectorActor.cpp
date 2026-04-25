@@ -282,6 +282,7 @@ void ASectorActor::InitializeNiagara()
 
 	BuildTierConfigs();
 	InitializeTier(CoarseTierConfig, CoarseTierState);
+	InitializeTier(MidTierConfig, MidTierState);
 	InitializeTier(ProximityTierConfig, ProximityTierState);
 
 	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeNiagara total duration: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
@@ -340,6 +341,111 @@ void ASectorActor::BuildTierConfigs()
 	CoarseTierConfig.ComputeBounds = [this]() -> FBox
 		{
 			const double BoundsExtent = (2 * Params.CoarseNeighborhoodRadius + 1) * Params.Extent;
+			return FBox(FVector(-BoundsExtent), FVector(BoundsExtent));
+		};
+
+	// --- Mid tier (POC) ---
+	// GridDepth 2 → cell extent = Extent (halfway between coarse 2E and proximity E/32).
+	// Reuses coarse cluster generation with a single buffer (no gas layer).
+	// Neighborhood radius 1 → 27 slots, same particle budget as coarse.
+	MidTierConfig.TierName = TEXT("Mid");
+	MidTierConfig.GridDepth = 3;
+	MidTierConfig.NeighborhoodRadius = 1;
+	MidTierConfig.SlotCapacity = Params.MaxClusterPerCoarseNode;
+	MidTierConfig.NiagaraAssets = { SectorClusterCloud };
+	MidTierConfig.bWantRotations = { true };
+	MidTierConfig.OctreeInsertBufferIndex = 0;
+
+	MidTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers)
+		{
+			// Simplified cluster-only generation at mid-tier grid scale.
+			// Same noise-driven rejection as coarse but writes a single buffer.
+			FNiagaraParticleBuffer& Buf = *Buffers[0];
+			const int32 BufferStart = SlotIndex * Buf.SlotCapacity;
+			const FVector NodeCenter = GridCoordToCenter(Coord, MidTierConfig.GridDepth);
+			const double CellExt = GetGridCellExtent(MidTierConfig.GridDepth);
+
+			const int32 CoordHash = HashCombine(
+				HashCombine(GetTypeHash(Coord.X), GetTypeHash(Coord.Y)),
+				GetTypeHash(Coord.Z));
+			const int32 NodeSeed = HashCombine(Params.Seed + 1, CoordHash); // +1 offset to differentiate from coarse
+			FRandomStream Stream(NodeSeed);
+
+			const int32 NumCandidates = Buf.SlotCapacity;
+			const double InvExtent = 1.0 / (double)Params.Extent;
+
+			// Noise offset derived from which coarse cell this mid-cell falls in.
+			const double TwoExtent = 2.0 * (double)Params.Extent;
+			TArray<FVector> CandidatePositions;
+			TArray<float> NoiseX, NoiseY, NoiseZ;
+			CandidatePositions.SetNumUninitialized(NumCandidates);
+			NoiseX.SetNumUninitialized(NumCandidates);
+			NoiseY.SetNumUninitialized(NumCandidates);
+			NoiseZ.SetNumUninitialized(NumCandidates);
+
+			for (int32 i = 0; i < NumCandidates; ++i)
+			{
+				FVector Candidate(
+					Stream.FRandRange(-CellExt, CellExt),
+					Stream.FRandRange(-CellExt, CellExt),
+					Stream.FRandRange(-CellExt, CellExt));
+				Candidate += NodeCenter;
+				CandidatePositions[i] = Candidate;
+
+				// Per-candidate coarse cell lookup for noise continuity.
+				const int32 CX = FMath::FloorToInt32(Candidate.X / TwoExtent + 0.5);
+				const int32 CY = FMath::FloorToInt32(Candidate.Y / TwoExtent + 0.5);
+				const int32 CZ = FMath::FloorToInt32(Candidate.Z / TwoExtent + 0.5);
+				const double CenterX = (double)CX * TwoExtent;
+				const double CenterY = (double)CY * TwoExtent;
+				const double CenterZ = (double)CZ * TwoExtent;
+				NoiseX[i] = (float)((Candidate.X - CenterX) * InvExtent + (double)CX * 2.0);
+				NoiseY[i] = (float)((Candidate.Y - CenterY) * InvExtent + (double)CY * 2.0);
+				NoiseZ[i] = (float)((Candidate.Z - CenterZ) * InvExtent + (double)CZ * 2.0);
+			}
+
+			auto DensityNoise = BuildNoise(69);
+			TArray<float> NoiseOut;
+			NoiseOut.SetNumUninitialized(NumCandidates);
+			DensityNoise->GenPositionArray3D(
+				NoiseOut.GetData(), NumCandidates,
+				NoiseX.GetData(), NoiseY.GetData(), NoiseZ.GetData(),
+				0.0f, 0.0f, 0.0f, Params.Seed);
+
+			int32 ActualCount = 0;
+			for (int32 i = 0; i < NumCandidates; ++i)
+			{
+				const float Density = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
+				if (Stream.FRand() > Density) continue;
+
+				const float ScaleSample = Stream.FRand();
+				const double Scale = FPointData::SampleScaleFromDistribution(
+					Params.MinClusterScale, Params.MaxClusterScale,
+					ScaleSample, Params.ScaleDistributionCurve);
+				FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
+				const double ExtentAtDepth = (double)Params.Extent / (double)(1 << PointData.InsertDepth);
+				const float ClusterExtent = static_cast<float>(ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
+
+				const FVector CompVec = Stream.GetUnitVector();
+				const FVector Rotation = Stream.GetUnitVector();
+
+				const int32 Idx = BufferStart + ActualCount;
+				Buf.Positions[Idx] = CandidatePositions[i];
+				Buf.Rotations[Idx] = Rotation;
+				Buf.Extents[Idx] = ClusterExtent;
+				Buf.Colors[Idx] = FLinearColor(FMath::Abs(CompVec.X), FMath::Abs(CompVec.Y), FMath::Abs(CompVec.Z));
+				ActualCount++;
+			}
+
+			const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
+			Buf.PadSlotDead(SlotIndex, ActualCount, DeadPos);
+			MidTierState.SlotCounts[SlotIndex] = ActualCount;
+		};
+
+	MidTierConfig.ComputeBounds = [this]() -> FBox
+		{
+			// 3×3×3 neighborhood of Extent-sized cells → 3*Extent bounds.
+			const double BoundsExtent = 3.0 * Params.Extent;
 			return FBox(FVector(-BoundsExtent), FVector(BoundsExtent));
 		};
 
@@ -786,7 +892,7 @@ void ASectorActor::ApplyParallaxOffset()
 	// VirtualTraversal grows by Ratio * PlayerDelta, so stored needs to
 	// shrink by the same amount.
 	const FVector ParallaxOffset = -PlayerDelta * Ratio;
-	for (FParticleTierState* Tier : { &CoarseTierState, &ProximityTierState })
+	for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &ProximityTierState })
 	{
 		for (UNiagaraComponent* NC : Tier->NiagaraComponents)
 		{
@@ -804,7 +910,7 @@ void ASectorActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	StopSpawnScanTimer();
 
-	for (FParticleTierState* Tier : { &CoarseTierState, &ProximityTierState })
+	for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &ProximityTierState })
 	{
 		for (UNiagaraComponent*& NC : Tier->NiagaraComponents)
 		{
@@ -1128,6 +1234,7 @@ void ASectorActor::Tick(float DeltaTime)
 
 	ApplyParallaxOffset();
 	UpdateTier(CoarseTierConfig, CoarseTierState);
+	UpdateTier(MidTierConfig, MidTierState);
 	UpdateTier(ProximityTierConfig, ProximityTierState);
 }
 #pragma endregion
