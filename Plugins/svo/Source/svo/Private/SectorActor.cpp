@@ -16,9 +16,10 @@ ASectorActor::ASectorActor()
 	PrimaryActorTick.bCanEverTick = true;
 	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent")));
 
-	SectorGalaxyCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorGalaxyCloud.NG_SectorGalaxyCloud"));
-	SectorClusterCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorClusterCloud.NG_SectorClusterCloud"));
-	SectorGasCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorGasCloud.NG_SectorGasCloud"));
+	SectorLargeCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorLarge.NG_SectorLarge"));
+	SectorMidCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorMid.NG_SectorMid"));
+	SectorSmallCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorSmall.NG_SectorSmall"));
+	SectorGasCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorGas.NG_SectorGas"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
 
 	// Corner-align the tree so depth-2 cells line up with sector coarse cells.
@@ -329,7 +330,7 @@ void ASectorActor::BuildTierConfigs()
 	CoarseTierConfig.GridDepth = 1;
 	CoarseTierConfig.NeighborhoodRadius = Params.CoarseNeighborhoodRadius;
 	CoarseTierConfig.SlotCapacity = Params.MaxClusterPerCoarseNode;
-	CoarseTierConfig.NiagaraAssets = { SectorClusterCloud, SectorGasCloud };
+	CoarseTierConfig.NiagaraAssets = { SectorLargeCloud, SectorGasCloud };
 	CoarseTierConfig.bWantRotations = { true, false };
 	CoarseTierConfig.OctreeInsertBufferIndex = 0;
 
@@ -349,10 +350,10 @@ void ASectorActor::BuildTierConfigs()
 	// Reuses coarse cluster generation with a single buffer (no gas layer).
 	// Neighborhood radius 1 → 27 slots, same particle budget as coarse.
 	MidTierConfig.TierName = TEXT("Mid");
-	MidTierConfig.GridDepth = 3;
+	MidTierConfig.GridDepth = 4;
 	MidTierConfig.NeighborhoodRadius = 1;
 	MidTierConfig.SlotCapacity = Params.MaxClusterPerCoarseNode;
-	MidTierConfig.NiagaraAssets = { SectorClusterCloud };
+	MidTierConfig.NiagaraAssets = { SectorMidCloud };
 	MidTierConfig.bWantRotations = { true };
 	MidTierConfig.OctreeInsertBufferIndex = 0;
 
@@ -454,7 +455,7 @@ void ASectorActor::BuildTierConfigs()
 	ProximityTierConfig.GridDepth = Params.ScanDepth + 1;
 	ProximityTierConfig.NeighborhoodRadius = 1;
 	ProximityTierConfig.SlotCapacity = Params.MaxParticlesPerNode;
-	ProximityTierConfig.NiagaraAssets = { SectorGalaxyCloud };
+	ProximityTierConfig.NiagaraAssets = { SectorSmallCloud };
 	ProximityTierConfig.bWantRotations = { false };
 	ProximityTierConfig.OctreeInsertBufferIndex = 0;
 

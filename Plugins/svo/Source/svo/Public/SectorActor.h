@@ -205,19 +205,20 @@ protected:
 #pragma endregion
 
 #pragma region Niagara Assets
-	// Niagara system asset for the cluster visualization layer.
-	// Assign in the sector actor's Blueprint defaults (e.g. NG_SectorClusterCloud).
+	// Galaxy sprite systems — one per scale band, each using a material instance
+	// of the shared MT_GalaxySprite base with its own fade-out range.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
-	UNiagaraSystem* SectorClusterCloud;
+	UNiagaraSystem* SectorLargeCloud;
 
-	// Niagara system asset for the gas sprite layer.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
+	UNiagaraSystem* SectorMidCloud;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
+	UNiagaraSystem* SectorSmallCloud;
+
+	// Gas sprite layer — separate material, paired with the large tier.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
 	UNiagaraSystem* SectorGasCloud;
-
-	// Niagara system asset for the proximity/galaxy-scale sprite layer.
-	// Distinct from the cluster layer so it can carry its own material and fade range.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
-	UNiagaraSystem* SectorGalaxyCloud;
 #pragma endregion
 
 #pragma region Unified Particle Tier System
