@@ -328,10 +328,10 @@ protected:
 	// VirtualTraversal is the player's position in the sector's virtual frame.
 	//
 	// Used by:
-	//   - Push* to compute camera-relative particle positions
+	//   - PushTierToNiagara to compute camera-relative particle positions
 	//     (Relative = LocalPos - VirtualTraversal).
-	//   - Streaming coord tracking (PositionToCoarseCoord / PositionToScanCoord
-	//     consume VirtualTraversal directly).
+	//   - Streaming coord tracking (PositionToGridCoord consumes
+	//     VirtualTraversal directly via UpdateTier).
 	//   - DebugDrawSpawnNode and UpdateSpawnRangeNodes.
 	//   - Scratch pad broadcast: User.ParallaxOffset = -Ratio * PlayerDelta
 	//     per tick, drifts stored particle positions to stay aligned with
@@ -343,89 +343,21 @@ protected:
 	void ApplyParallaxOffset();
 #pragma endregion
 
-#pragma region Coarse Cluster Streaming
-	// Streams a player-centered 3x3x3 neighborhood of coarse-scale nodes and
-	// feeds generated cluster + gas sprite data into two dedicated Niagara
-	// components. Cluster and gas share slot indexing (1:1 per coarse node).
+#pragma region Tier-Specific Generation Callbacks
+	// These remain as named methods wired into FParticleTierConfig.GenerateCallback.
+	// Each receives raw buffer pointers and writes directly into the slot.
 
-	// --- Slot State (only touched by async task, guarded by bCoarseUpdateInProgress) ---
-	struct FCoarseSlotEntry
-	{
-		int32 SlotIndex = -1;
-		TArray<TSharedPtr<FOctreeNode>> InsertedNodes;
-	};
+	// Coarse tier: generates cluster + gas particles using batched noise.
+	// Candidates scatter within ±Extent of the cell center; noise offset is
+	// shared across all candidates in a cell (coord-derived).
+	void GenerateCoarseNode(const FIntVector& InCoord, int32 InSlotIndex,
+		FNiagaraParticleBuffer& InClusterBuffer, FNiagaraParticleBuffer& InGasBuffer);
 
-	FIntVector CoarseCenterCell = FIntVector(INT32_MIN);
-	TMap<FIntVector, FCoarseSlotEntry> ActiveCoarseNodes;
-	TArray<int32> CoarseFreeSlots;
-	TArray<int32> CoarseSlotCounts;
-
-	// --- Double-Buffered Particle Data ---
-	// Cluster and gas share slot indices but are separate buffers so each can
-	// be pushed to its own Niagara component independently.
-	FNiagaraParticleBuffer CoarseClusterBuffers[2];
-	FNiagaraParticleBuffer CoarseGasBuffers[2];
-	std::atomic<int32> CoarseFrontIdx{ 0 };
-	std::atomic<bool> bCoarseUpdateInProgress{ false };
-	std::atomic<bool> bCoarseNeedsPush{ false };
-
-	// --- Niagara Components ---
-	UPROPERTY()
-	UNiagaraComponent* CoarseClusterNiagara;
-
-	UPROPERTY()
-	UNiagaraComponent* CoarseGasNiagara;
-
-	// --- Methods ---
-	void InitializeCoarseSystem();
-	void UpdateCoarseNodes();
-	// Generation produces particle data using the cell's logical center
-	// (CoarseCoordToCenter). Octree insert is a separate post-generation pass.
-	void GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InSlotIndex, FNiagaraParticleBuffer& InClusterBuffer, FNiagaraParticleBuffer& InGasBuffer);
-	// Walks the cluster buffer slot and inserts each live particle into the
-	// octree. Gas shares 1:1 positions with cluster so only cluster is inserted.
-	void InsertCoarseCellIntoOctree(const FIntVector& InCoarseCoord, int32 InSlotIndex, const FNiagaraParticleBuffer& InClusterBuffer, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes) const;
-	void PushCoarseToNiagara();
-
-	FIntVector PositionToCoarseCoord(const FVector& InWorldPos) const;
-	FVector CoarseCoordToCenter(const FIntVector& InCoord) const;
-#pragma endregion
-
-#pragma region Proximity Galaxy Streaming
-	// --- Slot State (only touched by async task, guarded by bProximityUpdateInProgress) ---
-	struct FProximitySlotEntry
-	{
-		int32 SlotIndex = -1;
-		TArray<TSharedPtr<FOctreeNode>> InsertedNodes;
-	};
-
-	FIntVector CurrentScanCoord = FIntVector(INT32_MIN);
-	TMap<FIntVector, FProximitySlotEntry> ActiveNodeSlots;
-	TArray<int32> FreeSlots;
-	TArray<int32> SlotParticleCounts;
-
-	// --- Double-Buffered Particle Data ---
-	FNiagaraParticleBuffer ProximityBuffers[2];
-	std::atomic<int32> FrontBufferIndex{ 0 };
-	std::atomic<bool> bProximityUpdateInProgress{ false };
-	std::atomic<bool> bProximityNeedsPush{ false };
-
-	// --- Proximity Niagara ---
-	UPROPERTY()
-	UNiagaraComponent* ProximityNiagaraComponent;
-
-	// --- Methods ---
-	void InitializeProximitySystem();
-	void UpdateProximityNodes();
-	// Generation produces particles using the cell's logical center (ScanCoordToCenter).
-	// Octree insert is a separate post-generation pass.
-	void GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InSlotIndex, FNiagaraParticleBuffer& InBuffer);
-	void InsertProximityCellIntoOctree(const FIntVector& InNodeCoord, int32 InSlotIndex, const FNiagaraParticleBuffer& InBuffer, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes) const;
-	void PushProximityToNiagara();
-
-	FIntVector PositionToScanCoord(const FVector& InLocalPos) const;
-	FVector ScanCoordToCenter(const FIntVector& InCoord) const;
-	double GetScanNodeExtent() const;
+	// Proximity tier: generates galaxy-scale particles using batched noise.
+	// Candidates scatter within ±CellExtent of the cell center; noise offset
+	// is computed per-candidate (may straddle coarse cell boundaries).
+	void GenerateNodeGalaxies(const FIntVector& InCoord, int32 InSlotIndex,
+		FNiagaraParticleBuffer& InBuffer);
 #pragma endregion
 
 #pragma region Public Octree Queries

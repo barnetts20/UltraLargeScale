@@ -278,13 +278,11 @@ void ASectorActor::InitializeVolumetric()
 
 void ASectorActor::InitializeNiagara()
 {
-	// Dispatches to the two streaming subsystem initializers. Both own their
-	// own Niagara components, double-buffered particle state, and push/activate
-	// sequence. Ordering between them is not significant.
 	double StartTime = FPlatformTime::Seconds();
 
-	InitializeProximitySystem();
-	InitializeCoarseSystem();
+	BuildTierConfigs();
+	InitializeTier(CoarseTierConfig, CoarseTierState);
+	InitializeTier(ProximityTierConfig, ProximityTierState);
 
 	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeNiagara total duration: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
 }
@@ -788,17 +786,12 @@ void ASectorActor::ApplyParallaxOffset()
 	// VirtualTraversal grows by Ratio * PlayerDelta, so stored needs to
 	// shrink by the same amount.
 	const FVector ParallaxOffset = -PlayerDelta * Ratio;
-	if (CoarseClusterNiagara)
+	for (FParticleTierState* Tier : { &CoarseTierState, &ProximityTierState })
 	{
-		CoarseClusterNiagara->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
-	}
-	if (CoarseGasNiagara)
-	{
-		CoarseGasNiagara->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
-	}
-	if (ProximityNiagaraComponent)
-	{
-		ProximityNiagaraComponent->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
+		for (UNiagaraComponent* NC : Tier->NiagaraComponents)
+		{
+			if (NC) NC->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
+		}
 	}
 
 	// Peg the actor. Components follow via attachment.
@@ -811,26 +804,19 @@ void ASectorActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	StopSpawnScanTimer();
 
-	if (ProximityNiagaraComponent)
+	for (FParticleTierState* Tier : { &CoarseTierState, &ProximityTierState })
 	{
-		ProximityNiagaraComponent->Deactivate();
-		ProximityNiagaraComponent->DestroyComponent();
-		ProximityNiagaraComponent = nullptr;
+		for (UNiagaraComponent*& NC : Tier->NiagaraComponents)
+		{
+			if (NC)
+			{
+				NC->Deactivate();
+				NC->DestroyComponent();
+				NC = nullptr;
+			}
+		}
 	}
-
-	if (CoarseClusterNiagara)
-	{
-		CoarseClusterNiagara->Deactivate();
-		CoarseClusterNiagara->DestroyComponent();
-		CoarseClusterNiagara = nullptr;
-	}
-
-	if (CoarseGasNiagara)
-	{
-		CoarseGasNiagara->Deactivate();
-		CoarseGasNiagara->DestroyComponent();
-		CoarseGasNiagara = nullptr;
-	}
+	TierNiagaraComponents.Empty();
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -916,313 +902,9 @@ void ASectorActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 }
 #pragma endregion
 
-#pragma region Coarse Cluster Streaming
+#pragma region Tier-Specific Generation Callbacks
 
-// Coarse cells are 2*Params.Extent on a side, centered at integer-coord multiples.
-// Cell (N, M, K) occupies [(N-0.5)*2*Extent .. (N+0.5)*2*Extent]. Coord (0,0,0)
-// is centered at the sector's CellOrigin.
-FIntVector ASectorActor::PositionToCoarseCoord(const FVector& InWorldPos) const
-{
-	const double CellSize = 2.0 * Params.Extent;
-	return FIntVector(
-		FMath::FloorToInt32(InWorldPos.X / CellSize + 0.5),
-		FMath::FloorToInt32(InWorldPos.Y / CellSize + 0.5),
-		FMath::FloorToInt32(InWorldPos.Z / CellSize + 0.5));
-}
-
-FVector ASectorActor::CoarseCoordToCenter(const FIntVector& InCoord) const
-{
-	const double CellSize = 2.0 * Params.Extent;
-	return FVector(
-		static_cast<double>(InCoord.X) * CellSize,
-		static_cast<double>(InCoord.Y) * CellSize,
-		static_cast<double>(InCoord.Z) * CellSize);
-}
-
-void ASectorActor::InitializeCoarseSystem()
-{
-	double StartTime = FPlatformTime::Seconds();
-
-	// Slot pool sized to 3x3x3 = 27 at radius 1. Wider radii multiply.
-	const int32 Side = 2 * Params.CoarseNeighborhoodRadius + 1;
-	const int32 TotalSlots = Side * Side * Side;
-
-	CoarseClusterBuffers[0].Allocate(TotalSlots, Params.MaxClusterPerCoarseNode, /*bWantRotations=*/true);
-	CoarseClusterBuffers[1].Allocate(TotalSlots, Params.MaxClusterPerCoarseNode, /*bWantRotations=*/true);
-	CoarseGasBuffers[0].Allocate(TotalSlots, Params.MaxClusterPerCoarseNode);
-	CoarseGasBuffers[1].Allocate(TotalSlots, Params.MaxClusterPerCoarseNode);
-	CoarseFrontIdx.store(0);
-
-	CoarseSlotCounts.SetNumZeroed(TotalSlots);
-	CoarseFreeSlots.Empty(TotalSlots);
-	for (int32 i = TotalSlots - 1; i >= 0; --i)
-	{
-		CoarseFreeSlots.Add(i);
-	}
-	ActiveCoarseNodes.Empty();
-
-	// VirtualTraversal is 0 at init — player starts at virtual coord (0,0,0).
-	const FVector LocalPlayerPos = VirtualTraversal;
-	CoarseCenterCell = PositionToCoarseCoord(LocalPlayerPos);
-
-	// Two-phase pipeline:
-	//   (1) Serial slot allocation — CoarseFreeSlots / ActiveCoarseNodes aren't threadsafe.
-	//   (2) Parallel generation — each worker writes to a disjoint slot-indexed slice.
-	//   (3) Serial octree insert — InsertPosition mutex-guards internally.
-	TArray<TPair<FIntVector, int32>> ToGenerate;
-	ToGenerate.Reserve(TotalSlots);
-	for (int32 dz = -Params.CoarseNeighborhoodRadius; dz <= Params.CoarseNeighborhoodRadius; ++dz)
-	{
-		for (int32 dy = -Params.CoarseNeighborhoodRadius; dy <= Params.CoarseNeighborhoodRadius; ++dy)
-		{
-			for (int32 dx = -Params.CoarseNeighborhoodRadius; dx <= Params.CoarseNeighborhoodRadius; ++dx)
-			{
-				const FIntVector NeighborCoord = CoarseCenterCell + FIntVector(dx, dy, dz);
-				const int32 SlotIndex = CoarseFreeSlots.Pop();
-				ActiveCoarseNodes.Add(NeighborCoord, FCoarseSlotEntry{ SlotIndex, {} });
-				ToGenerate.Emplace(NeighborCoord, SlotIndex);
-			}
-		}
-	}
-
-	ParallelFor(ToGenerate.Num(), [this, &ToGenerate](int32 i)
-		{
-			const TPair<FIntVector, int32>& Pair = ToGenerate[i];
-			GenerateCoarseNode(Pair.Key, Pair.Value, CoarseClusterBuffers[0], CoarseGasBuffers[0]);
-		}, EParallelForFlags::BackgroundPriority);
-
-	for (const TPair<FIntVector, int32>& Pair : ToGenerate)
-	{
-		FCoarseSlotEntry* Entry = ActiveCoarseNodes.Find(Pair.Key);
-		if (Entry)
-		{
-			InsertCoarseCellIntoOctree(Pair.Key, Pair.Value, CoarseClusterBuffers[0], Entry->InsertedNodes);
-		}
-	}
-
-	// Mirror front → back so either buffer is a valid starting state.
-	CoarseClusterBuffers[1].CopyFrom(CoarseClusterBuffers[0]);
-	CoarseGasBuffers[1].CopyFrom(CoarseGasBuffers[0]);
-
-	// Spawn Niagara components on game thread, push real data, activate.
-	FVector PlayerPos = FVector::ZeroVector;
-	if (const auto* World = GetWorld())
-	{
-		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-		{
-			if (APawn* Pawn = Controller->GetPawn())
-			{
-				PlayerPos = Pawn->GetActorLocation();
-			}
-		}
-	}
-
-	TPromise<void> CompletionPromise;
-	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	AsyncTask(ENamedThreads::GameThread, [this, PlayerPos, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-		{
-			UNiagaraSystem* ClusterTemplate = SectorClusterCloud;
-			UNiagaraSystem* GasTemplate = SectorGasCloud;
-
-			if (!SectorClusterCloud)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("ASectorActor::InitializeCoarseSystem - SectorClusterCloud not assigned; falling back to SectorGalaxyCloud."));
-			}
-			if (!SectorGasCloud)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("ASectorActor::InitializeCoarseSystem - SectorGasCloud not assigned; falling back to SectorGalaxyCloud."));
-			}
-
-			CoarseClusterNiagara = UNiagaraFunctionLibrary::SpawnSystemAttached(
-				ClusterTemplate,
-				GetRootComponent(),
-				NAME_None,
-				FVector::ZeroVector,
-				FRotator::ZeroRotator,
-				EAttachLocation::SnapToTarget,
-				/*bAutoDestroy=*/ false,
-				/*bAutoActivate=*/ true);
-
-			CoarseGasNiagara = UNiagaraFunctionLibrary::SpawnSystemAttached(
-				GasTemplate,
-				GetRootComponent(),
-				NAME_None,
-				FVector::ZeroVector,
-				FRotator::ZeroRotator,
-				EAttachLocation::SnapToTarget,
-				/*bAutoDestroy=*/ false,
-				/*bAutoActivate=*/ true);
-
-			// Fixed bounds cover the full active neighborhood.
-			const double BoundsExtent = (2 * Params.CoarseNeighborhoodRadius + 1) * Params.Extent;
-			const FBox CoarseBounds(FVector(-BoundsExtent), FVector(BoundsExtent));
-
-			if (CoarseClusterNiagara)
-			{
-				CoarseClusterNiagara->SetSystemFixedBounds(CoarseBounds);
-				CoarseClusterNiagara->TranslucencySortPriority = 0;
-			}
-			else
-			{
-				UE_LOG(LogTemp, Error, TEXT("ASectorActor::InitializeCoarseSystem - Failed to create CoarseClusterNiagara"));
-			}
-
-			if (CoarseGasNiagara)
-			{
-				CoarseGasNiagara->SetSystemFixedBounds(CoarseBounds);
-				CoarseGasNiagara->TranslucencySortPriority = 0;
-			}
-			else
-			{
-				UE_LOG(LogTemp, Error, TEXT("ASectorActor::InitializeCoarseSystem - Failed to create CoarseGasNiagara"));
-			}
-
-			PushCoarseToNiagara();
-			CompletionPromise.SetValue();
-		});
-	CompletionFuture.Wait();
-
-	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeCoarseSystem took %.3f sec (%d slots, %d max particles/slot, center %d,%d,%d)"),
-		FPlatformTime::Seconds() - StartTime, TotalSlots, Params.MaxClusterPerCoarseNode,
-		CoarseCenterCell.X, CoarseCenterCell.Y, CoarseCenterCell.Z);
-}
-
-void ASectorActor::UpdateCoarseNodes()
-{
-	if (InitializationState != ELifecycleState::Ready) return;
-	if (!CoarseClusterNiagara && !CoarseGasNiagara) return;
-
-	// If async generation completed a swap, push the new front buffer.
-	// ReinitializeSystem() forces Niagara to re-spawn with the new user arrays.
-	if (bCoarseNeedsPush.load())
-	{
-		PushCoarseToNiagara();
-		if (CoarseClusterNiagara) CoarseClusterNiagara->ReinitializeSystem();
-		if (CoarseGasNiagara) CoarseGasNiagara->ReinitializeSystem();
-		bCoarseNeedsPush.store(false);
-	}
-
-	if (bCoarseUpdateInProgress.load()) return;
-
-	const FVector LocalPlayerPos = VirtualTraversal;
-	const FIntVector NewCoarseCoord = PositionToCoarseCoord(LocalPlayerPos);
-
-	if (NewCoarseCoord == CoarseCenterCell) return;
-
-	UE_LOG(LogTemp, Log, TEXT("ASectorActor::UpdateCoarseNodes - boundary cross: (%d,%d,%d) -> (%d,%d,%d)"),
-		CoarseCenterCell.X, CoarseCenterCell.Y, CoarseCenterCell.Z,
-		NewCoarseCoord.X, NewCoarseCoord.Y, NewCoarseCoord.Z);
-
-	bCoarseUpdateInProgress.store(true);
-	const FIntVector OldCenter = CoarseCenterCell;
-	CoarseCenterCell = NewCoarseCoord;
-
-	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, OldCenter, NewCoarseCoord]()
-		{
-			double StartTime = FPlatformTime::Seconds();
-
-			// Copy front → back; unchanged slots carry over untouched.
-			const int32 FrontIdx = CoarseFrontIdx.load();
-			const int32 BackIdx = 1 - FrontIdx;
-			CoarseClusterBuffers[BackIdx].CopyFrom(CoarseClusterBuffers[FrontIdx]);
-			CoarseGasBuffers[BackIdx].CopyFrom(CoarseGasBuffers[FrontIdx]);
-
-			// Coarse coords are universe-wide integer space with no bounds.
-			TSet<FIntVector> OldSet;
-			TSet<FIntVector> NewSet;
-			for (int32 dz = -Params.CoarseNeighborhoodRadius; dz <= Params.CoarseNeighborhoodRadius; ++dz)
-			{
-				for (int32 dy = -Params.CoarseNeighborhoodRadius; dy <= Params.CoarseNeighborhoodRadius; ++dy)
-				{
-					for (int32 dx = -Params.CoarseNeighborhoodRadius; dx <= Params.CoarseNeighborhoodRadius; ++dx)
-					{
-						const FIntVector Offset(dx, dy, dz);
-						if (OldCenter.X != INT32_MIN)
-						{
-							OldSet.Add(OldCenter + Offset);
-						}
-						NewSet.Add(NewCoarseCoord + Offset);
-					}
-				}
-			}
-
-			TArray<FIntVector> ExitingNodes;
-			TArray<FIntVector> EnteringNodes;
-			for (const FIntVector& Coord : OldSet)
-			{
-				if (!NewSet.Contains(Coord)) ExitingNodes.Add(Coord);
-			}
-			for (const FIntVector& Coord : NewSet)
-			{
-				if (!OldSet.Contains(Coord)) EnteringNodes.Add(Coord);
-			}
-
-			// Free exiting slots: dead-stub their data, retire from octree, return slot.
-			const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
-			for (const FIntVector& Coord : ExitingNodes)
-			{
-				FCoarseSlotEntry* Entry = ActiveCoarseNodes.Find(Coord);
-				if (Entry)
-				{
-					CoarseClusterBuffers[BackIdx].ClearSlot(Entry->SlotIndex, DeadPos);
-					CoarseGasBuffers[BackIdx].ClearSlot(Entry->SlotIndex, DeadPos);
-					CoarseFreeSlots.Add(Entry->SlotIndex);
-
-					for (const TSharedPtr<FOctreeNode>& Node : Entry->InsertedNodes)
-					{
-						if (Octree.IsValid())
-						{
-							Octree->RemoveObjectIdFromNode(Node, Entry->SlotIndex);
-						}
-					}
-					ActiveCoarseNodes.Remove(Coord);
-				}
-			}
-
-			// Generate entering nodes:
-			//   (1) Serial slot allocation.
-			//   (2) Parallel generation into back buffer slices.
-			//   (3) Serial octree insert.
-			TArray<TPair<FIntVector, int32>> ToGenerate;
-			ToGenerate.Reserve(EnteringNodes.Num());
-			for (const FIntVector& Coord : EnteringNodes)
-			{
-				if (CoarseFreeSlots.Num() == 0)
-				{
-					UE_LOG(LogTemp, Warning, TEXT("ASectorActor::UpdateCoarseNodes - no free slots; dropping cell (%d,%d,%d)"),
-						Coord.X, Coord.Y, Coord.Z);
-					continue;
-				}
-				const int32 SlotIndex = CoarseFreeSlots.Pop();
-				ActiveCoarseNodes.Add(Coord, FCoarseSlotEntry{ SlotIndex, {} });
-				ToGenerate.Emplace(Coord, SlotIndex);
-			}
-
-			ParallelFor(ToGenerate.Num(), [this, &ToGenerate, BackIdx](int32 i)
-				{
-					const TPair<FIntVector, int32>& Pair = ToGenerate[i];
-					GenerateCoarseNode(Pair.Key, Pair.Value, CoarseClusterBuffers[BackIdx], CoarseGasBuffers[BackIdx]);
-				}, EParallelForFlags::BackgroundPriority);
-
-			for (const TPair<FIntVector, int32>& Pair : ToGenerate)
-			{
-				FCoarseSlotEntry* Entry = ActiveCoarseNodes.Find(Pair.Key);
-				if (Entry)
-				{
-					InsertCoarseCellIntoOctree(Pair.Key, Pair.Value, CoarseClusterBuffers[BackIdx], Entry->InsertedNodes);
-				}
-			}
-
-			CoarseFrontIdx.store(BackIdx);
-			bCoarseNeedsPush.store(true);
-			bCoarseUpdateInProgress.store(false);
-
-			UE_LOG(LogTemp, Log, TEXT("ASectorActor::UpdateCoarseNodes - %d entering, %d exiting in %.3f sec"),
-				EnteringNodes.Num(), ExitingNodes.Num(), FPlatformTime::Seconds() - StartTime);
-		});
-}
-
-void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InSlotIndex, FNiagaraParticleBuffer& InClusterBuffer, FNiagaraParticleBuffer& InGasBuffer)
+void ASectorActor::GenerateCoarseNode(const FIntVector& InCoord, int32 InSlotIndex, FNiagaraParticleBuffer& InClusterBuffer, FNiagaraParticleBuffer& InGasBuffer)
 {
 	// Batched noise sampling — three phases:
 	//   1. Generate candidate positions + normalized noise coords.
@@ -1234,11 +916,11 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InS
 	// Gas extent is lerped by the same density value used for rejection.
 
 	const int32 BufferStart = InSlotIndex * InClusterBuffer.SlotCapacity;
-	const FVector NodeCenter = CoarseCoordToCenter(InCoarseCoord);
+	const FVector NodeCenter = GridCoordToCenter(InCoord, CoarseTierConfig.GridDepth);
 
 	const int32 CoordHash = HashCombine(
-		HashCombine(GetTypeHash(InCoarseCoord.X), GetTypeHash(InCoarseCoord.Y)),
-		GetTypeHash(InCoarseCoord.Z));
+		HashCombine(GetTypeHash(InCoord.X), GetTypeHash(InCoord.Y)),
+		GetTypeHash(InCoord.Z));
 	const int32 NodeSeed = HashCombine(Params.Seed, CoordHash);
 	FRandomStream Stream(NodeSeed);
 
@@ -1247,9 +929,9 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InS
 	const double InvExtent = 1.0 / (double)Params.Extent;
 
 	// Every candidate in this cell shares the same coord-derived noise offset.
-	const double NoiseOffsetX = (double)InCoarseCoord.X * 2.0;
-	const double NoiseOffsetY = (double)InCoarseCoord.Y * 2.0;
-	const double NoiseOffsetZ = (double)InCoarseCoord.Z * 2.0;
+	const double NoiseOffsetX = (double)InCoord.X * 2.0;
+	const double NoiseOffsetY = (double)InCoord.Y * 2.0;
+	const double NoiseOffsetZ = (double)InCoord.Z * 2.0;
 
 	// --- Phase 1: generate candidates + normalized noise coords ---
 	TArray<FVector> CandidatePositions;
@@ -1328,317 +1010,10 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InS
 	InClusterBuffer.PadSlotDead(InSlotIndex, ActualCount, DeadPos);
 	InGasBuffer.PadSlotDead(InSlotIndex, ActualCount, DeadPos);
 
-	CoarseSlotCounts[InSlotIndex] = ActualCount;
+	CoarseTierState.SlotCounts[InSlotIndex] = ActualCount;
 }
 
-void ASectorActor::InsertCoarseCellIntoOctree(const FIntVector& InCoarseCoord, int32 InSlotIndex, const FNiagaraParticleBuffer& InClusterBuffer, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes) const
-{
-	// Walk this cell's cluster slot; insert each live particle into the octree.
-	// Only cluster particles are inserted — gas shares 1:1 positions and slot
-	// indexing, so a cluster insert spatially represents both.
-	// ObjectId carries the slot index; TypeId tags nodes as galaxy content.
-	if (!Octree.IsValid())
-	{
-		return;
-	}
-
-	const double TreeExtent = Octree->Extent;
-	const int32 BufferStart = InSlotIndex * InClusterBuffer.SlotCapacity;
-	OutInsertedNodes.Reserve(InClusterBuffer.SlotCapacity);
-
-	for (int32 i = 0; i < InClusterBuffer.SlotCapacity; ++i)
-	{
-		const int32 Idx = BufferStart + i;
-		const float Extent = InClusterBuffer.Extents[Idx];
-		if (Extent <= 0.0f)
-		{
-			continue;
-		}
-
-		FPointData PointData = FPointData::MakePointDataFromWorldScale(
-			static_cast<double>(Extent),
-			/*InUnitScale=*/ 1.0,
-			static_cast<int64>(TreeExtent));
-		PointData.SetPosition(InClusterBuffer.Positions[Idx]);
-		PointData.Data.ObjectId = InSlotIndex;
-		PointData.Data.TypeId = GalaxyTypeId;
-
-		TSharedPtr<FOctreeNode> Node = Octree->InsertPosition(
-			PointData.GetPosition(), PointData.InsertDepth, PointData.Data);
-		if (Node.IsValid())
-		{
-			OutInsertedNodes.Add(Node);
-		}
-	}
-}
-
-void ASectorActor::PushCoarseToNiagara()
-{
-	const int32 FrontIdx = CoarseFrontIdx.load();
-	CoarseClusterBuffers[FrontIdx].PushToNiagara(CoarseClusterNiagara, VirtualTraversal);
-	CoarseGasBuffers[FrontIdx].PushToNiagara(CoarseGasNiagara, VirtualTraversal);
-}
-
-#pragma endregion
-
-#pragma region Proximity Galaxy Streaming
-
-void ASectorActor::InitializeProximitySystem()
-{
-	double StartTime = FPlatformTime::Seconds();
-
-	const int32 TotalSlots = 27;
-
-	ProximityBuffers[0].Allocate(TotalSlots, Params.MaxParticlesPerNode);
-	ProximityBuffers[1].Allocate(TotalSlots, Params.MaxParticlesPerNode);
-	FrontBufferIndex.store(0);
-
-	SlotParticleCounts.SetNumZeroed(TotalSlots);
-	FreeSlots.Empty(TotalSlots);
-	for (int32 i = TotalSlots - 1; i >= 0; --i)
-	{
-		FreeSlots.Add(i);
-	}
-	ActiveNodeSlots.Empty();
-	CurrentScanCoord = FIntVector(INT32_MIN);
-
-	// VirtualTraversal is 0 at init — player starts at virtual coord (0,0,0).
-	const FVector LocalPos = VirtualTraversal;
-	CurrentScanCoord = PositionToScanCoord(LocalPos);
-
-	// Two-phase pipeline: serial slot allocation → parallel generate → serial octree insert.
-	TArray<TPair<FIntVector, int32>> ToGenerate;
-	ToGenerate.Reserve(27);
-	for (int32 dz = -1; dz <= 1; ++dz)
-	{
-		for (int32 dy = -1; dy <= 1; ++dy)
-		{
-			for (int32 dx = -1; dx <= 1; ++dx)
-			{
-				FIntVector NeighborCoord = CurrentScanCoord + FIntVector(dx, dy, dz);
-				int32 SlotIndex = FreeSlots.Pop();
-				ActiveNodeSlots.Add(NeighborCoord, FProximitySlotEntry{ SlotIndex, {} });
-				ToGenerate.Emplace(NeighborCoord, SlotIndex);
-			}
-		}
-	}
-
-	ParallelFor(ToGenerate.Num(), [this, &ToGenerate](int32 i)
-		{
-			const TPair<FIntVector, int32>& Pair = ToGenerate[i];
-			GenerateNodeGalaxies(Pair.Key, Pair.Value, ProximityBuffers[0]);
-		}, EParallelForFlags::BackgroundPriority);
-
-	for (const TPair<FIntVector, int32>& Pair : ToGenerate)
-	{
-		FProximitySlotEntry* Entry = ActiveNodeSlots.Find(Pair.Key);
-		if (Entry)
-		{
-			InsertProximityCellIntoOctree(Pair.Key, Pair.Value, ProximityBuffers[0], Entry->InsertedNodes);
-		}
-	}
-
-	// Mirror front → back so either buffer is a valid starting state.
-	ProximityBuffers[1].CopyFrom(ProximityBuffers[0]);
-
-	// Create proximity Niagara component and push data on game thread.
-	TPromise<void> CompletionPromise;
-	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-		{
-			if (!SectorGalaxyCloud)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("ASectorActor::InitializeProximitySystem - SectorGalaxyCloud not assigned."));
-			}
-
-			ProximityNiagaraComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
-				SectorGalaxyCloud,
-				GetRootComponent(),
-				NAME_None,
-				FVector::ZeroVector,
-				FRotator::ZeroRotator,
-				EAttachLocation::SnapToTarget,
-				false,
-				true
-			);
-
-			if (ProximityNiagaraComponent)
-			{
-				ProximityNiagaraComponent->SetSystemFixedBounds(
-					FBox(FVector(-Params.Extent), FVector(Params.Extent)));
-
-				PushProximityToNiagara();
-			}
-			else
-			{
-				UE_LOG(LogTemp, Error, TEXT("ASectorActor::InitializeProximitySystem - Failed to create proximity Niagara component"));
-			}
-
-			CompletionPromise.SetValue();
-		});
-	CompletionFuture.Wait();
-
-	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeProximitySystem took %.3f sec (%d slots, %d max particles/slot)"),
-		FPlatformTime::Seconds() - StartTime, TotalSlots, Params.MaxParticlesPerNode);
-}
-
-void ASectorActor::UpdateProximityNodes()
-{
-	if (InitializationState != ELifecycleState::Ready) return;
-	if (!ProximityNiagaraComponent) return;
-
-	if (bProximityNeedsPush.load())
-	{
-		PushProximityToNiagara();
-		ProximityNiagaraComponent->ReinitializeSystem();
-		bProximityNeedsPush.store(false);
-	}
-
-	if (bProximityUpdateInProgress.load()) return;
-
-	const FVector LocalPos = VirtualTraversal;
-	FIntVector NewScanCoord = PositionToScanCoord(LocalPos);
-
-	if (NewScanCoord == CurrentScanCoord) return;
-
-	bProximityUpdateInProgress.store(true);
-	FIntVector OldScanCoord = CurrentScanCoord;
-	CurrentScanCoord = NewScanCoord;
-
-	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, OldScanCoord, NewScanCoord]()
-		{
-			double StartTime = FPlatformTime::Seconds();
-
-			// Copy front → back; unchanged slots carry over.
-			const int32 FrontIdx = FrontBufferIndex.load();
-			const int32 BackIdx = 1 - FrontIdx;
-			ProximityBuffers[BackIdx].CopyFrom(ProximityBuffers[FrontIdx]);
-
-			// Scan coords are universe-wide — no NodesPerSide bounds culling.
-			TSet<FIntVector> OldSet;
-			TSet<FIntVector> NewSet;
-			for (int32 dz = -1; dz <= 1; ++dz)
-			{
-				for (int32 dy = -1; dy <= 1; ++dy)
-				{
-					for (int32 dx = -1; dx <= 1; ++dx)
-					{
-						const FIntVector Offset(dx, dy, dz);
-						if (OldScanCoord.X != INT32_MIN)
-						{
-							OldSet.Add(OldScanCoord + Offset);
-						}
-						NewSet.Add(NewScanCoord + Offset);
-					}
-				}
-			}
-
-			TArray<FIntVector> ExitingNodes;
-			TArray<FIntVector> EnteringNodes;
-			for (const FIntVector& Coord : OldSet)
-			{
-				if (!NewSet.Contains(Coord)) ExitingNodes.Add(Coord);
-			}
-			for (const FIntVector& Coord : NewSet)
-			{
-				if (!OldSet.Contains(Coord)) EnteringNodes.Add(Coord);
-			}
-
-			// Free exiting slots: dead-stub their data, retire from octree, return slot.
-			const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
-			for (const FIntVector& Coord : ExitingNodes)
-			{
-				FProximitySlotEntry* Entry = ActiveNodeSlots.Find(Coord);
-				if (Entry)
-				{
-					ProximityBuffers[BackIdx].ClearSlot(Entry->SlotIndex, DeadPos);
-					FreeSlots.Add(Entry->SlotIndex);
-
-					for (const TSharedPtr<FOctreeNode>& Node : Entry->InsertedNodes)
-					{
-						if (Octree.IsValid())
-						{
-							Octree->RemoveObjectIdFromNode(Node, Entry->SlotIndex);
-						}
-					}
-					ActiveNodeSlots.Remove(Coord);
-				}
-			}
-
-			// Generate entering nodes:
-			//   (1) Serial slot allocation.
-			//   (2) Parallel generation into back buffer slices.
-			//   (3) Serial octree insert.
-			TArray<TPair<FIntVector, int32>> ToGenerate;
-			ToGenerate.Reserve(EnteringNodes.Num());
-			for (const FIntVector& Coord : EnteringNodes)
-			{
-				if (FreeSlots.Num() == 0)
-				{
-					break;
-				}
-				int32 SlotIndex = FreeSlots.Pop();
-				ActiveNodeSlots.Add(Coord, FProximitySlotEntry{ SlotIndex, {} });
-				ToGenerate.Emplace(Coord, SlotIndex);
-			}
-
-			ParallelFor(ToGenerate.Num(), [this, &ToGenerate, BackIdx](int32 i)
-				{
-					const TPair<FIntVector, int32>& Pair = ToGenerate[i];
-					GenerateNodeGalaxies(Pair.Key, Pair.Value, ProximityBuffers[BackIdx]);
-				}, EParallelForFlags::BackgroundPriority);
-
-			for (const TPair<FIntVector, int32>& Pair : ToGenerate)
-			{
-				FProximitySlotEntry* Entry = ActiveNodeSlots.Find(Pair.Key);
-				if (Entry)
-				{
-					InsertProximityCellIntoOctree(Pair.Key, Pair.Value, ProximityBuffers[BackIdx], Entry->InsertedNodes);
-				}
-			}
-
-			FrontBufferIndex.store(BackIdx);
-			bProximityNeedsPush.store(true);
-			bProximityUpdateInProgress.store(false);
-
-			UE_LOG(LogTemp, Log, TEXT("ASectorActor::UpdateProximityNodes - %d entering, %d exiting in %.3f sec"),
-				EnteringNodes.Num(), ExitingNodes.Num(), FPlatformTime::Seconds() - StartTime);
-		});
-}
-
-FIntVector ASectorActor::PositionToScanCoord(const FVector& InLocalPos) const
-{
-	int32 NodesPerSide = 1 << Params.ScanDepth;
-	double NodeSize = (2.0 * Params.Extent) / NodesPerSide;
-
-	// Scan coords are a universe-wide integer lattice — NOT clamped to [0, NodesPerSide).
-	// GenerateNodeGalaxies builds a coord-derived transient density field so there
-	// is no sector-wide volume to fall off the edge of.
-	const int32 X = FMath::FloorToInt((InLocalPos.X + Params.Extent) / NodeSize);
-	const int32 Y = FMath::FloorToInt((InLocalPos.Y + Params.Extent) / NodeSize);
-	const int32 Z = FMath::FloorToInt((InLocalPos.Z + Params.Extent) / NodeSize);
-
-	return FIntVector(X, Y, Z);
-}
-
-FVector ASectorActor::ScanCoordToCenter(const FIntVector& InCoord) const
-{
-	int32 NodesPerSide = 1 << Params.ScanDepth;
-	double NodeSize = (2.0 * Params.Extent) / NodesPerSide;
-
-	return FVector(
-		-Params.Extent + (InCoord.X + 0.5) * NodeSize,
-		-Params.Extent + (InCoord.Y + 0.5) * NodeSize,
-		-Params.Extent + (InCoord.Z + 0.5) * NodeSize
-	);
-}
-
-double ASectorActor::GetScanNodeExtent() const
-{
-	return Params.Extent / (double)(1 << Params.ScanDepth);
-}
-
-void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InSlotIndex, FNiagaraParticleBuffer& InBuffer)
+void ASectorActor::GenerateNodeGalaxies(const FIntVector& InCoord, int32 InSlotIndex, FNiagaraParticleBuffer& InBuffer)
 {
 	// Batched noise sampling — three phases matching GenerateCoarseNode.
 	// Candidates are scan-node-local rather than cell-local; each candidate
@@ -1646,12 +1021,12 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InS
 	// per-candidate rather than shared across the node.
 
 	const int32 BufferStart = InSlotIndex * InBuffer.SlotCapacity;
-	const FVector NodeCenter = ScanCoordToCenter(InNodeCoord);
-	const double NodeExt = GetScanNodeExtent();
+	const FVector NodeCenter = GridCoordToCenter(InCoord, ProximityTierConfig.GridDepth);
+	const double NodeExt = GetGridCellExtent(ProximityTierConfig.GridDepth);
 
 	int32 CoordHash = HashCombine(
-		HashCombine(GetTypeHash(InNodeCoord.X), GetTypeHash(InNodeCoord.Y)),
-		GetTypeHash(InNodeCoord.Z)
+		HashCombine(GetTypeHash(InCoord.X), GetTypeHash(InCoord.Y)),
+		GetTypeHash(InCoord.Z)
 	);
 	int32 NodeSeed = HashCombine(Params.Seed, CoordHash);
 	FRandomStream Stream(NodeSeed);
@@ -1741,49 +1116,7 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InS
 	const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
 	InBuffer.PadSlotDead(InSlotIndex, ActualCount, DeadPos);
 
-	SlotParticleCounts[InSlotIndex] = ActualCount;
-}
-
-void ASectorActor::InsertProximityCellIntoOctree(const FIntVector& InNodeCoord, int32 InSlotIndex, const FNiagaraParticleBuffer& InBuffer, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes) const
-{
-	if (!Octree.IsValid())
-	{
-		return;
-	}
-
-	const double TreeExtent = Octree->Extent;
-	const int32 BufferStart = InSlotIndex * InBuffer.SlotCapacity;
-	OutInsertedNodes.Reserve(InBuffer.SlotCapacity);
-
-	for (int32 i = 0; i < InBuffer.SlotCapacity; ++i)
-	{
-		const int32 Idx = BufferStart + i;
-		const float Extent = InBuffer.Extents[Idx];
-		if (Extent <= 0.0f)
-		{
-			continue;
-		}
-
-		FPointData PointData = FPointData::MakePointDataFromWorldScale(
-			static_cast<double>(Extent),
-			/*InUnitScale=*/ 1.0,
-			static_cast<int64>(TreeExtent));
-		PointData.SetPosition(InBuffer.Positions[Idx]);
-		PointData.Data.ObjectId = InSlotIndex;
-		PointData.Data.TypeId = GalaxyTypeId;
-
-		TSharedPtr<FOctreeNode> Node = Octree->InsertPosition(
-			PointData.GetPosition(), PointData.InsertDepth, PointData.Data);
-		if (Node.IsValid())
-		{
-			OutInsertedNodes.Add(Node);
-		}
-	}
-}
-
-void ASectorActor::PushProximityToNiagara()
-{
-	ProximityBuffers[FrontBufferIndex.load()].PushToNiagara(ProximityNiagaraComponent, VirtualTraversal);
+	ProximityTierState.SlotCounts[InSlotIndex] = ActualCount;
 }
 
 #pragma endregion
@@ -1794,8 +1127,8 @@ void ASectorActor::Tick(float DeltaTime)
 	Super::Tick(DeltaTime);
 
 	ApplyParallaxOffset();
-	UpdateCoarseNodes();
-	UpdateProximityNodes();
+	UpdateTier(CoarseTierConfig, CoarseTierState);
+	UpdateTier(ProximityTierConfig, ProximityTierState);
 }
 #pragma endregion
 
@@ -1891,9 +1224,9 @@ void ASectorActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) cons
 
 	if (bLogSpawnEnterExitBuffers)
 	{
-		// Identify tier by checking whether the slot index appears in ActiveCoarseNodes.
+		// Identify tier by checking whether the slot index appears in the coarse tier's active slots.
 		bool bIsCoarse = false;
-		for (const auto& Pair : ActiveCoarseNodes)
+		for (const auto& Pair : CoarseTierState.ActiveSlots)
 		{
 			if (Pair.Value.SlotIndex == SlotId)
 			{
@@ -1904,29 +1237,29 @@ void ASectorActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) cons
 
 		if (bIsCoarse)
 		{
-			const FNiagaraParticleBuffer& Front = CoarseClusterBuffers[CoarseFrontIdx.load()];
-			const int32 Start = SlotId * Params.MaxClusterPerCoarseNode;
+			const FNiagaraParticleBuffer& Front = CoarseTierState.Buffers[0][CoarseTierState.FrontIdx.load()];
+			const int32 Start = SlotId * CoarseTierConfig.SlotCapacity;
 			int32 LiveCount = 0;
-			for (int32 i = 0; i < Params.MaxClusterPerCoarseNode; ++i)
+			for (int32 i = 0; i < CoarseTierConfig.SlotCapacity; ++i)
 			{
 				if (Front.Extents[Start + i] > 0.0f) ++LiveCount;
 			}
 			UE_LOG(LogTemp, Log,
 				TEXT("  coarse slot %d: %d live cluster particles of %d capacity"),
-				SlotId, LiveCount, Params.MaxClusterPerCoarseNode);
+				SlotId, LiveCount, CoarseTierConfig.SlotCapacity);
 		}
 		else
 		{
-			const FNiagaraParticleBuffer& Front = ProximityBuffers[FrontBufferIndex.load()];
-			const int32 Start = SlotId * Params.MaxParticlesPerNode;
+			const FNiagaraParticleBuffer& Front = ProximityTierState.Buffers[0][ProximityTierState.FrontIdx.load()];
+			const int32 Start = SlotId * ProximityTierConfig.SlotCapacity;
 			int32 LiveCount = 0;
-			for (int32 i = 0; i < Params.MaxParticlesPerNode; ++i)
+			for (int32 i = 0; i < ProximityTierConfig.SlotCapacity; ++i)
 			{
 				if (Front.Extents[Start + i] > 0.0f) ++LiveCount;
 			}
 			UE_LOG(LogTemp, Log,
 				TEXT("  proximity slot %d: %d live particles of %d capacity"),
-				SlotId, LiveCount, Params.MaxParticlesPerNode);
+				SlotId, LiveCount, ProximityTierConfig.SlotCapacity);
 		}
 	}
 }
