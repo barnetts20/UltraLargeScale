@@ -11,6 +11,101 @@
 
 class AGalaxyActor;
 
+// ---------------------------------------------------------------------------
+// Unified Particle Tier System — structs
+// ---------------------------------------------------------------------------
+
+// Replaces FCoarseSlotEntry and FProximitySlotEntry (they were identical).
+// Maps a grid coord to its slot index in the flat particle buffers, plus the
+// octree nodes inserted from that slot (needed for cleanup on exit).
+struct FSlotEntry
+{
+	int32 SlotIndex = -1;
+	TArray<TSharedPtr<FOctreeNode>> InsertedNodes;
+};
+
+// Static descriptor for one particle streaming tier. Filled once before
+// InitializeTier() and not mutated at runtime. All behavioural differences
+// between tiers live here; the generic pipeline reads these fields.
+struct FParticleTierConfig
+{
+	// For logging only (e.g. "Coarse", "Proximity").
+	FString TierName;
+
+	// Depth in the octree that defines this tier's grid cell size.
+	// Cell extent = TreeExtent / (1 << GridDepth), where
+	// TreeExtent = Params.Extent * TreeExtentMultiplier.
+	//   Coarse   = 1  → cell extent = 2*Extent (matches current coarse cell size).
+	//   Proximity = ScanDepth + 1 → cell extent = Extent / 2^ScanDepth.
+	int32 GridDepth = 1;
+
+	// Half-width of the 3D neighborhood around the player's current cell.
+	// Coarse reads from Params.CoarseNeighborhoodRadius; proximity uses 1.
+	// Total slots = (2*NeighborhoodRadius + 1)^3.
+	int32 NeighborhoodRadius = 1;
+
+	// Max particles per slot. Coarse = Params.MaxClusterPerCoarseNode;
+	// proximity = Params.MaxParticlesPerNode.
+	int32 SlotCapacity = 0;
+
+	// One Niagara system template per buffer set. Coarse has two (cluster + gas);
+	// proximity has one. InitializeTier creates one UNiagaraComponent per entry.
+	TArray<UNiagaraSystem*> NiagaraAssets;
+
+	// Parallel to NiagaraAssets — whether each buffer should allocate the
+	// Rotations array. Coarse = {true, false}; proximity = {false}.
+	TArray<bool> bWantRotations;
+
+	// Called during parallel generation. Receives the grid coord, slot index,
+	// and raw buffer pointers (one per Niagara asset) sized to match
+	// NiagaraAssets. The callback writes directly into the slot.
+	// Captures `this` — needs Params, BuildNoise, Octree, etc.
+	TFunction<void(const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers)> GenerateCallback;
+
+	// Returns the fixed bounds box for all Niagara components in this tier.
+	TFunction<FBox()> ComputeBounds;
+
+	// Which buffer index (into the NiagaraAssets array) to walk for octree
+	// insertion. Set to -1 to skip octree insert entirely.
+	// Coarse = 0 (cluster buffer); proximity = 0 (only buffer).
+	int32 OctreeInsertBufferIndex = 0;
+};
+
+// Runtime state for one particle streaming tier. Fully owned by the tier
+// pipeline — generation callbacks don't touch these fields directly.
+// NOTE: This is a plain struct, not a USTRUCT. UNiagaraComponent* pointers
+// stored here are aliased from a UPROPERTY TArray on the actor for GC safety.
+struct FParticleTierState
+{
+	// One double-buffered pair per Niagara asset. Outer index = asset index,
+	// inner is always size 2 indexed by FrontIdx / (1 - FrontIdx).
+	TArray<TArray<FNiagaraParticleBuffer>> Buffers;
+
+	// Raw pointers into the actor's UPROPERTY component array. Parallel to
+	// config NiagaraAssets.
+	TArray<UNiagaraComponent*> NiagaraComponents;
+
+	// Which of the two buffers is live. Shared across all buffer pairs —
+	// they swap in lockstep.
+	std::atomic<int32> FrontIdx{ 0 };
+	std::atomic<bool> bUpdateInProgress{ false };
+	std::atomic<bool> bNeedsPush{ false };
+
+	// Current neighborhood center in this tier's grid coords.
+	FIntVector CenterCoord = FIntVector(INT32_MIN);
+
+	// Maps grid coord → slot index + inserted octree nodes.
+	TMap<FIntVector, FSlotEntry> ActiveSlots;
+
+	// Available slot indices (used as a stack).
+	TArray<int32> FreeSlots;
+
+	// Per-slot live particle count, written by the generate callback.
+	TArray<int32> SlotCounts;
+};
+
+// ---------------------------------------------------------------------------
+
 UCLASS()
 class SVO_API ASectorActor : public AActor
 {
@@ -123,6 +218,53 @@ protected:
 	// Distinct from the cluster layer so it can carry its own material and fade range.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
 	UNiagaraSystem* SectorGalaxyCloud;
+#pragma endregion
+
+#pragma region Unified Particle Tier System
+	// --- Tier Config/State Pairs ---
+	FParticleTierConfig CoarseTierConfig;
+	FParticleTierState  CoarseTierState;
+	FParticleTierConfig ProximityTierConfig;
+	FParticleTierState  ProximityTierState;
+
+	// GC-safe storage for all Niagara components created by the tier system.
+	// FParticleTierState::NiagaraComponents holds raw pointers that alias
+	// entries in this array. Do not reorder or remove entries at runtime.
+	UPROPERTY()
+	TArray<UNiagaraComponent*> TierNiagaraComponents;
+
+	// --- Generic Tier Pipeline ---
+	// Populates CoarseTierConfig and ProximityTierConfig from Params and
+	// the Niagara asset pointers. Called once at the start of InitializeNiagara.
+	void BuildTierConfigs();
+
+	// Allocate buffers → build neighborhood → serial slot alloc → parallel
+	// generate (via Config.GenerateCallback) → serial octree insert (if
+	// OctreeInsertBufferIndex >= 0) → mirror front→back → game-thread
+	// Niagara spawn + bounds + push.
+	void InitializeTier(FParticleTierConfig& Config, FParticleTierState& State);
+
+	// Per-tick streaming update. Checks bNeedsPush → push + reinit → checks
+	// bUpdateInProgress → coord-diff old vs new neighborhood → free exiting
+	// → alloc entering → parallel generate into back → octree insert → swap
+	// FrontIdx → set bNeedsPush.
+	void UpdateTier(FParticleTierConfig& Config, FParticleTierState& State);
+
+	// For each buffer pair, push Buffers[i][FrontIdx] to NiagaraComponents[i].
+	void PushTierToNiagara(const FParticleTierConfig& Config, FParticleTierState& State);
+
+	// --- Generic Grid Coord Helpers ---
+	// All parameterized by GridDepth so both tiers share one implementation.
+
+	// World-local position → grid coord at a given depth.
+	// Uses center-aligned lattice: coord (0,0,0) is centered at the origin.
+	FIntVector PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const;
+
+	// Grid coord → cell center position.
+	FVector GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const;
+
+	// Cell half-extent at a given depth.
+	double GetGridCellExtent(int32 InGridDepth) const;
 #pragma endregion
 
 #pragma region Volumetric

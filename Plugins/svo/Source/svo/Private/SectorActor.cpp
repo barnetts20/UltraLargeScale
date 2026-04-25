@@ -290,6 +290,456 @@ void ASectorActor::InitializeNiagara()
 }
 #pragma endregion
 
+#pragma region Unified Particle Tier System
+
+// ---------------------------------------------------------------------------
+// Generic grid coord helpers — parameterized by GridDepth
+// ---------------------------------------------------------------------------
+
+FIntVector ASectorActor::PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const
+{
+	const double CellSize = (Params.Extent * TreeExtentMultiplier) / (1 << InGridDepth);
+	return FIntVector(
+		FMath::FloorToInt32(InPos.X / CellSize + 0.5),
+		FMath::FloorToInt32(InPos.Y / CellSize + 0.5),
+		FMath::FloorToInt32(InPos.Z / CellSize + 0.5));
+}
+
+FVector ASectorActor::GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const
+{
+	const double CellSize = (Params.Extent * TreeExtentMultiplier) / (1 << InGridDepth);
+	return FVector(
+		static_cast<double>(InCoord.X) * CellSize,
+		static_cast<double>(InCoord.Y) * CellSize,
+		static_cast<double>(InCoord.Z) * CellSize);
+}
+
+double ASectorActor::GetGridCellExtent(int32 InGridDepth) const
+{
+	return (Params.Extent * TreeExtentMultiplier) / (1 << (InGridDepth + 1));
+}
+
+// ---------------------------------------------------------------------------
+// BuildTierConfigs — populate config structs from Params + Niagara assets
+// ---------------------------------------------------------------------------
+
+void ASectorActor::BuildTierConfigs()
+{
+	// --- Coarse tier ---
+	CoarseTierConfig.TierName = TEXT("Coarse");
+	CoarseTierConfig.GridDepth = 1;
+	CoarseTierConfig.NeighborhoodRadius = Params.CoarseNeighborhoodRadius;
+	CoarseTierConfig.SlotCapacity = Params.MaxClusterPerCoarseNode;
+	CoarseTierConfig.NiagaraAssets = { SectorClusterCloud, SectorGasCloud };
+	CoarseTierConfig.bWantRotations = { true, false };
+	CoarseTierConfig.OctreeInsertBufferIndex = 0;
+
+	CoarseTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers)
+		{
+			GenerateCoarseNode(Coord, SlotIndex, *Buffers[0], *Buffers[1]);
+		};
+
+	CoarseTierConfig.ComputeBounds = [this]() -> FBox
+		{
+			const double BoundsExtent = (2 * Params.CoarseNeighborhoodRadius + 1) * Params.Extent;
+			return FBox(FVector(-BoundsExtent), FVector(BoundsExtent));
+		};
+
+	// --- Proximity tier ---
+	ProximityTierConfig.TierName = TEXT("Proximity");
+	ProximityTierConfig.GridDepth = Params.ScanDepth + 1;
+	ProximityTierConfig.NeighborhoodRadius = 1;
+	ProximityTierConfig.SlotCapacity = Params.MaxParticlesPerNode;
+	ProximityTierConfig.NiagaraAssets = { SectorGalaxyCloud };
+	ProximityTierConfig.bWantRotations = { false };
+	ProximityTierConfig.OctreeInsertBufferIndex = 0;
+
+	ProximityTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers)
+		{
+			GenerateNodeGalaxies(Coord, SlotIndex, *Buffers[0]);
+		};
+
+	ProximityTierConfig.ComputeBounds = [this]() -> FBox
+		{
+			return FBox(FVector(-Params.Extent), FVector(Params.Extent));
+		};
+}
+
+// ---------------------------------------------------------------------------
+// InitializeTier — generic init pipeline
+// ---------------------------------------------------------------------------
+
+void ASectorActor::InitializeTier(FParticleTierConfig& Config, FParticleTierState& State)
+{
+	double StartTime = FPlatformTime::Seconds();
+
+	const int32 Side = 2 * Config.NeighborhoodRadius + 1;
+	const int32 TotalSlots = Side * Side * Side;
+	const int32 NumBuffers = Config.NiagaraAssets.Num();
+
+	// Allocate double-buffered particle data — one pair per Niagara asset.
+	State.Buffers.SetNum(NumBuffers);
+	for (int32 b = 0; b < NumBuffers; ++b)
+	{
+		State.Buffers[b].SetNum(2);
+		State.Buffers[b][0].Allocate(TotalSlots, Config.SlotCapacity, Config.bWantRotations[b]);
+		State.Buffers[b][1].Allocate(TotalSlots, Config.SlotCapacity, Config.bWantRotations[b]);
+	}
+	State.FrontIdx.store(0);
+
+	State.SlotCounts.SetNumZeroed(TotalSlots);
+	State.FreeSlots.Empty(TotalSlots);
+	for (int32 i = TotalSlots - 1; i >= 0; --i)
+	{
+		State.FreeSlots.Add(i);
+	}
+	State.ActiveSlots.Empty();
+
+	// VirtualTraversal is 0 at init — player starts at virtual coord (0,0,0).
+	const FVector LocalPlayerPos = VirtualTraversal;
+	State.CenterCoord = PositionToGridCoord(LocalPlayerPos, Config.GridDepth);
+
+	// Serial slot allocation → parallel generation → serial octree insert.
+	TArray<TPair<FIntVector, int32>> ToGenerate;
+	ToGenerate.Reserve(TotalSlots);
+	for (int32 dz = -Config.NeighborhoodRadius; dz <= Config.NeighborhoodRadius; ++dz)
+	{
+		for (int32 dy = -Config.NeighborhoodRadius; dy <= Config.NeighborhoodRadius; ++dy)
+		{
+			for (int32 dx = -Config.NeighborhoodRadius; dx <= Config.NeighborhoodRadius; ++dx)
+			{
+				const FIntVector NeighborCoord = State.CenterCoord + FIntVector(dx, dy, dz);
+				const int32 SlotIndex = State.FreeSlots.Pop();
+				State.ActiveSlots.Add(NeighborCoord, FSlotEntry{ SlotIndex, {} });
+				ToGenerate.Emplace(NeighborCoord, SlotIndex);
+			}
+		}
+	}
+
+	// Build buffer pointer arrays for the front buffer (index 0 at init).
+	TArray<TArray<FNiagaraParticleBuffer*>> PerSlotBufferPtrs;
+	PerSlotBufferPtrs.SetNum(ToGenerate.Num());
+	for (int32 i = 0; i < ToGenerate.Num(); ++i)
+	{
+		PerSlotBufferPtrs[i].SetNum(NumBuffers);
+		for (int32 b = 0; b < NumBuffers; ++b)
+		{
+			PerSlotBufferPtrs[i][b] = &State.Buffers[b][0];
+		}
+	}
+
+	ParallelFor(ToGenerate.Num(), [this, &Config, &ToGenerate, &PerSlotBufferPtrs](int32 i)
+		{
+			Config.GenerateCallback(ToGenerate[i].Key, ToGenerate[i].Value, PerSlotBufferPtrs[i]);
+		}, EParallelForFlags::BackgroundPriority);
+
+	// Serial octree insert.
+	if (Config.OctreeInsertBufferIndex >= 0 && Octree.IsValid())
+	{
+		const int32 InsertBufIdx = Config.OctreeInsertBufferIndex;
+		const FNiagaraParticleBuffer& InsertBuffer = State.Buffers[InsertBufIdx][0];
+		const double TreeExtent = Octree->Extent;
+
+		for (const TPair<FIntVector, int32>& Pair : ToGenerate)
+		{
+			FSlotEntry* Entry = State.ActiveSlots.Find(Pair.Key);
+			if (!Entry) continue;
+
+			const int32 BufferStart = Pair.Value * InsertBuffer.SlotCapacity;
+			Entry->InsertedNodes.Reserve(InsertBuffer.SlotCapacity);
+
+			for (int32 i = 0; i < InsertBuffer.SlotCapacity; ++i)
+			{
+				const int32 Idx = BufferStart + i;
+				const float Extent = InsertBuffer.Extents[Idx];
+				if (Extent <= 0.0f) continue;
+
+				FPointData PointData = FPointData::MakePointDataFromWorldScale(
+					static_cast<double>(Extent),
+					/*InUnitScale=*/ 1.0,
+					static_cast<int64>(TreeExtent));
+				PointData.SetPosition(InsertBuffer.Positions[Idx]);
+				PointData.Data.ObjectId = Pair.Value;
+				PointData.Data.TypeId = GalaxyTypeId;
+
+				TSharedPtr<FOctreeNode> Node = Octree->InsertPosition(
+					PointData.GetPosition(), PointData.InsertDepth, PointData.Data);
+				if (Node.IsValid())
+				{
+					Entry->InsertedNodes.Add(Node);
+				}
+			}
+		}
+	}
+
+	// Mirror front → back so either buffer is a valid starting state.
+	for (int32 b = 0; b < NumBuffers; ++b)
+	{
+		State.Buffers[b][1].CopyFrom(State.Buffers[b][0]);
+	}
+
+	// Spawn Niagara components on game thread, push real data, activate.
+	TPromise<void> CompletionPromise;
+	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
+	AsyncTask(ENamedThreads::GameThread, [this, &Config, &State, NumBuffers,
+		CompletionPromise = MoveTemp(CompletionPromise)]() mutable
+		{
+			const FBox Bounds = Config.ComputeBounds();
+
+			State.NiagaraComponents.SetNum(NumBuffers);
+			for (int32 b = 0; b < NumBuffers; ++b)
+			{
+				UNiagaraSystem* Template = Config.NiagaraAssets[b];
+				if (!Template)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("ASectorActor::InitializeTier [%s] - NiagaraAssets[%d] not assigned."),
+						*Config.TierName, b);
+				}
+
+				UNiagaraComponent* NC = UNiagaraFunctionLibrary::SpawnSystemAttached(
+					Template,
+					GetRootComponent(),
+					NAME_None,
+					FVector::ZeroVector,
+					FRotator::ZeroRotator,
+					EAttachLocation::SnapToTarget,
+					/*bAutoDestroy=*/ false,
+					/*bAutoActivate=*/ true);
+
+				if (NC)
+				{
+					NC->SetSystemFixedBounds(Bounds);
+					NC->TranslucencySortPriority = 0;
+				}
+				else
+				{
+					UE_LOG(LogTemp, Error, TEXT("ASectorActor::InitializeTier [%s] - Failed to create NiagaraComponent[%d]"),
+						*Config.TierName, b);
+				}
+
+				State.NiagaraComponents[b] = NC;
+				TierNiagaraComponents.Add(NC);
+			}
+
+			PushTierToNiagara(Config, State);
+			CompletionPromise.SetValue();
+		});
+	CompletionFuture.Wait();
+
+	const int32 Side_Log = 2 * Config.NeighborhoodRadius + 1;
+	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeTier [%s] took %.3f sec (%d slots, %d max particles/slot, center %d,%d,%d)"),
+		*Config.TierName, FPlatformTime::Seconds() - StartTime,
+		Side_Log * Side_Log * Side_Log, Config.SlotCapacity,
+		State.CenterCoord.X, State.CenterCoord.Y, State.CenterCoord.Z);
+}
+
+// ---------------------------------------------------------------------------
+// UpdateTier — per-tick streaming update
+// ---------------------------------------------------------------------------
+
+void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& State)
+{
+	if (InitializationState != ELifecycleState::Ready) return;
+
+	// Check that at least one component exists.
+	bool bHasComponent = false;
+	for (UNiagaraComponent* NC : State.NiagaraComponents)
+	{
+		if (NC) { bHasComponent = true; break; }
+	}
+	if (!bHasComponent) return;
+
+	// If async generation completed a swap, push the new front buffer.
+	if (State.bNeedsPush.load())
+	{
+		PushTierToNiagara(Config, State);
+		for (UNiagaraComponent* NC : State.NiagaraComponents)
+		{
+			if (NC) NC->ReinitializeSystem();
+		}
+		State.bNeedsPush.store(false);
+	}
+
+	if (State.bUpdateInProgress.load()) return;
+
+	const FVector LocalPlayerPos = VirtualTraversal;
+	const FIntVector NewCoord = PositionToGridCoord(LocalPlayerPos, Config.GridDepth);
+
+	if (NewCoord == State.CenterCoord) return;
+
+	UE_LOG(LogTemp, Log, TEXT("ASectorActor::UpdateTier [%s] - boundary cross: (%d,%d,%d) -> (%d,%d,%d)"),
+		*Config.TierName,
+		State.CenterCoord.X, State.CenterCoord.Y, State.CenterCoord.Z,
+		NewCoord.X, NewCoord.Y, NewCoord.Z);
+
+	State.bUpdateInProgress.store(true);
+	const FIntVector OldCenter = State.CenterCoord;
+	State.CenterCoord = NewCoord;
+
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, &Config, &State, OldCenter, NewCoord]()
+		{
+			double StartTime = FPlatformTime::Seconds();
+
+			const int32 NumBuffers = Config.NiagaraAssets.Num();
+			const int32 FrontIdx = State.FrontIdx.load();
+			const int32 BackIdx = 1 - FrontIdx;
+
+			// Copy front → back; unchanged slots carry over untouched.
+			for (int32 b = 0; b < NumBuffers; ++b)
+			{
+				State.Buffers[b][BackIdx].CopyFrom(State.Buffers[b][FrontIdx]);
+			}
+
+			// Build old and new neighborhood coord sets.
+			TSet<FIntVector> OldSet;
+			TSet<FIntVector> NewSet;
+			for (int32 dz = -Config.NeighborhoodRadius; dz <= Config.NeighborhoodRadius; ++dz)
+			{
+				for (int32 dy = -Config.NeighborhoodRadius; dy <= Config.NeighborhoodRadius; ++dy)
+				{
+					for (int32 dx = -Config.NeighborhoodRadius; dx <= Config.NeighborhoodRadius; ++dx)
+					{
+						const FIntVector Offset(dx, dy, dz);
+						if (OldCenter.X != INT32_MIN)
+						{
+							OldSet.Add(OldCenter + Offset);
+						}
+						NewSet.Add(NewCoord + Offset);
+					}
+				}
+			}
+
+			TArray<FIntVector> ExitingNodes;
+			TArray<FIntVector> EnteringNodes;
+			for (const FIntVector& Coord : OldSet)
+			{
+				if (!NewSet.Contains(Coord)) ExitingNodes.Add(Coord);
+			}
+			for (const FIntVector& Coord : NewSet)
+			{
+				if (!OldSet.Contains(Coord)) EnteringNodes.Add(Coord);
+			}
+
+			// Free exiting slots: dead-stub their data, retire from octree, return slot.
+			const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
+			for (const FIntVector& Coord : ExitingNodes)
+			{
+				FSlotEntry* Entry = State.ActiveSlots.Find(Coord);
+				if (Entry)
+				{
+					for (int32 b = 0; b < NumBuffers; ++b)
+					{
+						State.Buffers[b][BackIdx].ClearSlot(Entry->SlotIndex, DeadPos);
+					}
+					State.FreeSlots.Add(Entry->SlotIndex);
+
+					for (const TSharedPtr<FOctreeNode>& Node : Entry->InsertedNodes)
+					{
+						if (Octree.IsValid())
+						{
+							Octree->RemoveObjectIdFromNode(Node, Entry->SlotIndex);
+						}
+					}
+					State.ActiveSlots.Remove(Coord);
+				}
+			}
+
+			// Generate entering nodes: serial slot alloc → parallel gen → serial octree insert.
+			TArray<TPair<FIntVector, int32>> ToGenerate;
+			ToGenerate.Reserve(EnteringNodes.Num());
+			for (const FIntVector& Coord : EnteringNodes)
+			{
+				if (State.FreeSlots.Num() == 0)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("ASectorActor::UpdateTier [%s] - no free slots; dropping cell (%d,%d,%d)"),
+						*Config.TierName, Coord.X, Coord.Y, Coord.Z);
+					continue;
+				}
+				const int32 SlotIndex = State.FreeSlots.Pop();
+				State.ActiveSlots.Add(Coord, FSlotEntry{ SlotIndex, {} });
+				ToGenerate.Emplace(Coord, SlotIndex);
+			}
+
+			// Build buffer pointer arrays for the back buffer.
+			TArray<TArray<FNiagaraParticleBuffer*>> PerSlotBufferPtrs;
+			PerSlotBufferPtrs.SetNum(ToGenerate.Num());
+			for (int32 i = 0; i < ToGenerate.Num(); ++i)
+			{
+				PerSlotBufferPtrs[i].SetNum(NumBuffers);
+				for (int32 b = 0; b < NumBuffers; ++b)
+				{
+					PerSlotBufferPtrs[i][b] = &State.Buffers[b][BackIdx];
+				}
+			}
+
+			ParallelFor(ToGenerate.Num(), [this, &Config, &ToGenerate, &PerSlotBufferPtrs](int32 i)
+				{
+					Config.GenerateCallback(ToGenerate[i].Key, ToGenerate[i].Value, PerSlotBufferPtrs[i]);
+				}, EParallelForFlags::BackgroundPriority);
+
+			// Serial octree insert.
+			if (Config.OctreeInsertBufferIndex >= 0 && Octree.IsValid())
+			{
+				const int32 InsertBufIdx = Config.OctreeInsertBufferIndex;
+				const FNiagaraParticleBuffer& InsertBuffer = State.Buffers[InsertBufIdx][BackIdx];
+				const double TreeExtent = Octree->Extent;
+
+				for (const TPair<FIntVector, int32>& Pair : ToGenerate)
+				{
+					FSlotEntry* Entry = State.ActiveSlots.Find(Pair.Key);
+					if (!Entry) continue;
+
+					const int32 BufferStart = Pair.Value * InsertBuffer.SlotCapacity;
+					Entry->InsertedNodes.Reserve(InsertBuffer.SlotCapacity);
+
+					for (int32 i = 0; i < InsertBuffer.SlotCapacity; ++i)
+					{
+						const int32 Idx = BufferStart + i;
+						const float Extent = InsertBuffer.Extents[Idx];
+						if (Extent <= 0.0f) continue;
+
+						FPointData PointData = FPointData::MakePointDataFromWorldScale(
+							static_cast<double>(Extent),
+							/*InUnitScale=*/ 1.0,
+							static_cast<int64>(TreeExtent));
+						PointData.SetPosition(InsertBuffer.Positions[Idx]);
+						PointData.Data.ObjectId = Pair.Value;
+						PointData.Data.TypeId = GalaxyTypeId;
+
+						TSharedPtr<FOctreeNode> Node = Octree->InsertPosition(
+							PointData.GetPosition(), PointData.InsertDepth, PointData.Data);
+						if (Node.IsValid())
+						{
+							Entry->InsertedNodes.Add(Node);
+						}
+					}
+				}
+			}
+
+			State.FrontIdx.store(BackIdx);
+			State.bNeedsPush.store(true);
+			State.bUpdateInProgress.store(false);
+
+			UE_LOG(LogTemp, Log, TEXT("ASectorActor::UpdateTier [%s] - %d entering, %d exiting in %.3f sec"),
+				*Config.TierName, EnteringNodes.Num(), ExitingNodes.Num(), FPlatformTime::Seconds() - StartTime);
+		});
+}
+
+// ---------------------------------------------------------------------------
+// PushTierToNiagara — push front buffers to all Niagara components
+// ---------------------------------------------------------------------------
+
+void ASectorActor::PushTierToNiagara(const FParticleTierConfig& Config, FParticleTierState& State)
+{
+	const int32 FrontIdx = State.FrontIdx.load();
+	for (int32 b = 0; b < Config.NiagaraAssets.Num(); ++b)
+	{
+		State.Buffers[b][FrontIdx].PushToNiagara(State.NiagaraComponents[b], VirtualTraversal);
+	}
+}
+
+#pragma endregion
+
 #pragma region Player-Centered Parallax
 // VirtualTraversal-based pegged-actor parallax model:
 //   1. Actor is pegged to the player every tick (SetActorLocation).
