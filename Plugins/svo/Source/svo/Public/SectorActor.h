@@ -123,19 +123,6 @@ protected:
 	// Distinct from the cluster layer so it can carry its own material and fade range.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
 	UNiagaraSystem* SectorGalaxyCloud;
-
-	// Number of candidate positions to test for gas sprite placement.
-	// Final particle count is the subset that pass the density rejection gate.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
-	int32 GasParticleCount = 15000;
-
-	// Per-particle extent at density=0 (lower bound of the density-driven extent lerp).
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
-	float GasMinExtent = 1e15f;
-
-	// Per-particle extent at density=1 (upper bound of the density-driven extent lerp).
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
-	float GasMaxExtent = 5e16f;
 #pragma endregion
 
 #pragma region Volumetric
@@ -219,15 +206,6 @@ protected:
 	// feeds generated cluster + gas sprite data into two dedicated Niagara
 	// components. Cluster and gas share slot indexing (1:1 per coarse node).
 
-	// --- Configuration ---
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coarse")
-	int32 CoarseNeighborhoodRadius = 1;
-
-	// Slot capacity per coarse node. Should be >= Params.Count so every node's
-	// full candidate set fits; unused entries are written as dead-particle stubs.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coarse")
-	int32 MaxClusterPerCoarseNode = 500;
-
 	// --- Slot State (only touched by async task, guarded by bCoarseUpdateInProgress) ---
 	struct FCoarseSlotEntry
 	{
@@ -272,13 +250,6 @@ protected:
 #pragma endregion
 
 #pragma region Proximity Galaxy Streaming
-	// --- Configuration ---
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Proximity")
-	int32 ScanDepth = 6;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Proximity")
-	int32 MaxParticlesPerNode = 2000;
-
 	// --- Slot State (only touched by async task, guarded by bProximityUpdateInProgress) ---
 	struct FProximitySlotEntry
 	{

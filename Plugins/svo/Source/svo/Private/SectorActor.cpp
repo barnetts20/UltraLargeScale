@@ -16,7 +16,7 @@ ASectorActor::ASectorActor()
 	PrimaryActorTick.bCanEverTick = true;
 	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent")));
 
-	SectorGalaxyCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/NG_SectorParallaxCloud.NG_SectorParallaxCloud"));
+	SectorGalaxyCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorGalaxyCloud.NG_SectorGalaxyCloud"));
 	SectorClusterCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorClusterCloud.NG_SectorClusterCloud"));
 	SectorGasCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorGasCloud.NG_SectorGasCloud"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
@@ -494,13 +494,13 @@ void ASectorActor::InitializeCoarseSystem()
 	double StartTime = FPlatformTime::Seconds();
 
 	// Slot pool sized to 3x3x3 = 27 at radius 1. Wider radii multiply.
-	const int32 Side = 2 * CoarseNeighborhoodRadius + 1;
+	const int32 Side = 2 * Params.CoarseNeighborhoodRadius + 1;
 	const int32 TotalSlots = Side * Side * Side;
 
-	CoarseClusterBuffers[0].Allocate(TotalSlots, MaxClusterPerCoarseNode, /*bWantRotations=*/true);
-	CoarseClusterBuffers[1].Allocate(TotalSlots, MaxClusterPerCoarseNode, /*bWantRotations=*/true);
-	CoarseGasBuffers[0].Allocate(TotalSlots, MaxClusterPerCoarseNode);
-	CoarseGasBuffers[1].Allocate(TotalSlots, MaxClusterPerCoarseNode);
+	CoarseClusterBuffers[0].Allocate(TotalSlots, Params.MaxClusterPerCoarseNode, /*bWantRotations=*/true);
+	CoarseClusterBuffers[1].Allocate(TotalSlots, Params.MaxClusterPerCoarseNode, /*bWantRotations=*/true);
+	CoarseGasBuffers[0].Allocate(TotalSlots, Params.MaxClusterPerCoarseNode);
+	CoarseGasBuffers[1].Allocate(TotalSlots, Params.MaxClusterPerCoarseNode);
 	CoarseFrontIdx.store(0);
 
 	CoarseSlotCounts.SetNumZeroed(TotalSlots);
@@ -521,11 +521,11 @@ void ASectorActor::InitializeCoarseSystem()
 	//   (3) Serial octree insert — InsertPosition mutex-guards internally.
 	TArray<TPair<FIntVector, int32>> ToGenerate;
 	ToGenerate.Reserve(TotalSlots);
-	for (int32 dz = -CoarseNeighborhoodRadius; dz <= CoarseNeighborhoodRadius; ++dz)
+	for (int32 dz = -Params.CoarseNeighborhoodRadius; dz <= Params.CoarseNeighborhoodRadius; ++dz)
 	{
-		for (int32 dy = -CoarseNeighborhoodRadius; dy <= CoarseNeighborhoodRadius; ++dy)
+		for (int32 dy = -Params.CoarseNeighborhoodRadius; dy <= Params.CoarseNeighborhoodRadius; ++dy)
 		{
-			for (int32 dx = -CoarseNeighborhoodRadius; dx <= CoarseNeighborhoodRadius; ++dx)
+			for (int32 dx = -Params.CoarseNeighborhoodRadius; dx <= Params.CoarseNeighborhoodRadius; ++dx)
 			{
 				const FIntVector NeighborCoord = CoarseCenterCell + FIntVector(dx, dy, dz);
 				const int32 SlotIndex = CoarseFreeSlots.Pop();
@@ -571,8 +571,8 @@ void ASectorActor::InitializeCoarseSystem()
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, PlayerPos, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
-			UNiagaraSystem* ClusterTemplate = SectorClusterCloud ? SectorClusterCloud : SectorGalaxyCloud;
-			UNiagaraSystem* GasTemplate = SectorGasCloud ? SectorGasCloud : SectorGalaxyCloud;
+			UNiagaraSystem* ClusterTemplate = SectorClusterCloud;
+			UNiagaraSystem* GasTemplate = SectorGasCloud;
 
 			if (!SectorClusterCloud)
 			{
@@ -604,7 +604,7 @@ void ASectorActor::InitializeCoarseSystem()
 				/*bAutoActivate=*/ true);
 
 			// Fixed bounds cover the full active neighborhood.
-			const double BoundsExtent = (2 * CoarseNeighborhoodRadius + 1) * Params.Extent;
+			const double BoundsExtent = (2 * Params.CoarseNeighborhoodRadius + 1) * Params.Extent;
 			const FBox CoarseBounds(FVector(-BoundsExtent), FVector(BoundsExtent));
 
 			if (CoarseClusterNiagara)
@@ -633,7 +633,7 @@ void ASectorActor::InitializeCoarseSystem()
 	CompletionFuture.Wait();
 
 	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeCoarseSystem took %.3f sec (%d slots, %d max particles/slot, center %d,%d,%d)"),
-		FPlatformTime::Seconds() - StartTime, TotalSlots, MaxClusterPerCoarseNode,
+		FPlatformTime::Seconds() - StartTime, TotalSlots, Params.MaxClusterPerCoarseNode,
 		CoarseCenterCell.X, CoarseCenterCell.Y, CoarseCenterCell.Z);
 }
 
@@ -680,11 +680,11 @@ void ASectorActor::UpdateCoarseNodes()
 			// Coarse coords are universe-wide integer space with no bounds.
 			TSet<FIntVector> OldSet;
 			TSet<FIntVector> NewSet;
-			for (int32 dz = -CoarseNeighborhoodRadius; dz <= CoarseNeighborhoodRadius; ++dz)
+			for (int32 dz = -Params.CoarseNeighborhoodRadius; dz <= Params.CoarseNeighborhoodRadius; ++dz)
 			{
-				for (int32 dy = -CoarseNeighborhoodRadius; dy <= CoarseNeighborhoodRadius; ++dy)
+				for (int32 dy = -Params.CoarseNeighborhoodRadius; dy <= Params.CoarseNeighborhoodRadius; ++dy)
 				{
-					for (int32 dx = -CoarseNeighborhoodRadius; dx <= CoarseNeighborhoodRadius; ++dx)
+					for (int32 dx = -Params.CoarseNeighborhoodRadius; dx <= Params.CoarseNeighborhoodRadius; ++dx)
 					{
 						const FIntVector Offset(dx, dy, dz);
 						if (OldCenter.X != INT32_MIN)
@@ -792,8 +792,8 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InS
 	const int32 NodeSeed = HashCombine(Params.Seed, CoordHash);
 	FRandomStream Stream(NodeSeed);
 
-	const float ExtentRange = GasMaxExtent - GasMinExtent;
-	const int32 NumCandidates = MaxClusterPerCoarseNode;
+	const float ExtentRange = Params.GasMaxExtent - Params.GasMinExtent;
+	const int32 NumCandidates = Params.MaxClusterPerCoarseNode;
 	const double InvExtent = 1.0 / (double)Params.Extent;
 
 	// Every candidate in this cell shares the same coord-derived noise offset.
@@ -858,7 +858,7 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoarseCoord, int32 InS
 
 		const FVector CompVec = Stream.GetUnitVector();
 		const FVector Rotation = Stream.GetUnitVector();
-		const float GasExtent = GasMinExtent + ExtentRange * Density;
+		const float GasExtent = Params.GasMinExtent + ExtentRange * Density;
 		const FVector LocalPos = CandidatePositions[i] + NodeCenter;
 
 		const int32 Idx = BufferStart + ActualCount;
@@ -939,8 +939,8 @@ void ASectorActor::InitializeProximitySystem()
 
 	const int32 TotalSlots = 27;
 
-	ProximityBuffers[0].Allocate(TotalSlots, MaxParticlesPerNode);
-	ProximityBuffers[1].Allocate(TotalSlots, MaxParticlesPerNode);
+	ProximityBuffers[0].Allocate(TotalSlots, Params.MaxParticlesPerNode);
+	ProximityBuffers[1].Allocate(TotalSlots, Params.MaxParticlesPerNode);
 	FrontBufferIndex.store(0);
 
 	SlotParticleCounts.SetNumZeroed(TotalSlots);
@@ -1029,7 +1029,7 @@ void ASectorActor::InitializeProximitySystem()
 	CompletionFuture.Wait();
 
 	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeProximitySystem took %.3f sec (%d slots, %d max particles/slot)"),
-		FPlatformTime::Seconds() - StartTime, TotalSlots, MaxParticlesPerNode);
+		FPlatformTime::Seconds() - StartTime, TotalSlots, Params.MaxParticlesPerNode);
 }
 
 void ASectorActor::UpdateProximityNodes()
@@ -1158,7 +1158,7 @@ void ASectorActor::UpdateProximityNodes()
 
 FIntVector ASectorActor::PositionToScanCoord(const FVector& InLocalPos) const
 {
-	int32 NodesPerSide = 1 << ScanDepth;
+	int32 NodesPerSide = 1 << Params.ScanDepth;
 	double NodeSize = (2.0 * Params.Extent) / NodesPerSide;
 
 	// Scan coords are a universe-wide integer lattice — NOT clamped to [0, NodesPerSide).
@@ -1173,7 +1173,7 @@ FIntVector ASectorActor::PositionToScanCoord(const FVector& InLocalPos) const
 
 FVector ASectorActor::ScanCoordToCenter(const FIntVector& InCoord) const
 {
-	int32 NodesPerSide = 1 << ScanDepth;
+	int32 NodesPerSide = 1 << Params.ScanDepth;
 	double NodeSize = (2.0 * Params.Extent) / NodesPerSide;
 
 	return FVector(
@@ -1185,7 +1185,7 @@ FVector ASectorActor::ScanCoordToCenter(const FIntVector& InCoord) const
 
 double ASectorActor::GetScanNodeExtent() const
 {
-	return Params.Extent / (double)(1 << ScanDepth);
+	return Params.Extent / (double)(1 << Params.ScanDepth);
 }
 
 void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InSlotIndex, FNiagaraParticleBuffer& InBuffer)
@@ -1206,7 +1206,7 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InNodeCoord, int32 InS
 	int32 NodeSeed = HashCombine(Params.Seed, CoordHash);
 	FRandomStream Stream(NodeSeed);
 
-	const int32 NumCandidates = MaxParticlesPerNode;
+	const int32 NumCandidates = Params.MaxParticlesPerNode;
 	const double InvExtent = 1.0 / (double)Params.Extent;
 	const double TwoExtent = 2.0 * (double)Params.Extent;
 
@@ -1455,28 +1455,28 @@ void ASectorActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) cons
 		if (bIsCoarse)
 		{
 			const FNiagaraParticleBuffer& Front = CoarseClusterBuffers[CoarseFrontIdx.load()];
-			const int32 Start = SlotId * MaxClusterPerCoarseNode;
+			const int32 Start = SlotId * Params.MaxClusterPerCoarseNode;
 			int32 LiveCount = 0;
-			for (int32 i = 0; i < MaxClusterPerCoarseNode; ++i)
+			for (int32 i = 0; i < Params.MaxClusterPerCoarseNode; ++i)
 			{
 				if (Front.Extents[Start + i] > 0.0f) ++LiveCount;
 			}
 			UE_LOG(LogTemp, Log,
 				TEXT("  coarse slot %d: %d live cluster particles of %d capacity"),
-				SlotId, LiveCount, MaxClusterPerCoarseNode);
+				SlotId, LiveCount, Params.MaxClusterPerCoarseNode);
 		}
 		else
 		{
 			const FNiagaraParticleBuffer& Front = ProximityBuffers[FrontBufferIndex.load()];
-			const int32 Start = SlotId * MaxParticlesPerNode;
+			const int32 Start = SlotId * Params.MaxParticlesPerNode;
 			int32 LiveCount = 0;
-			for (int32 i = 0; i < MaxParticlesPerNode; ++i)
+			for (int32 i = 0; i < Params.MaxParticlesPerNode; ++i)
 			{
 				if (Front.Extents[Start + i] > 0.0f) ++LiveCount;
 			}
 			UE_LOG(LogTemp, Log,
 				TEXT("  proximity slot %d: %d live particles of %d capacity"),
-				SlotId, LiveCount, MaxParticlesPerNode);
+				SlotId, LiveCount, Params.MaxParticlesPerNode);
 		}
 	}
 }

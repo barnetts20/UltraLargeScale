@@ -91,6 +91,40 @@ struct SVO_API FUniverseParams : public FBaseParams {
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
 	FNoiseParams NoiseParams;
 
+	// --- Streaming / Niagara tuning params (previously on ASectorActor) ---
+
+	// Number of candidate positions to test for gas sprite placement.
+	// Final particle count is the subset that pass the density rejection gate.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gas")
+	int32 GasParticleCount = 15000;
+
+	// Per-particle extent at density=0 (lower bound of the density-driven extent lerp).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gas")
+	float GasMinExtent = 1e15f;
+
+	// Per-particle extent at density=1 (upper bound of the density-driven extent lerp).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gas")
+	float GasMaxExtent = 5e16f;
+
+	// Slot capacity per coarse node. Should be >= Count so every node's
+	// full candidate set fits; unused entries are written as dead-particle stubs.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coarse")
+	int32 MaxClusterPerCoarseNode = 500;
+
+	// How many coarse cells to stream in each direction from the player's
+	// current coarse cell. 1 → 3x3x3 = 27 slots.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coarse")
+	int32 CoarseNeighborhoodRadius = 1;
+
+	// Max particles per proximity scan node slot.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Proximity")
+	int32 MaxParticlesPerNode = 2000;
+
+	// Octree depth at which the proximity scan grid subdivides. Higher values
+	// produce smaller scan nodes (finer streaming granularity).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Proximity")
+	int32 ScanDepth = 6;
+
 	static constexpr const char* EncodedTree = "EAAAAIA/GQAbABsAEwAAAEBAJAAgAAAAFwAAAAAAAACAP8UggD8AAAAADQADAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAAEXAAAAAAAAAIA/zcxMvQAAgD8kAAIAAAD//wEAAAAASEIB//8GAAAAAIA+";
 
 	FUniverseParams() {
