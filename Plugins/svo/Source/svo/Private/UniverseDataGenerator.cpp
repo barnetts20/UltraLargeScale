@@ -15,6 +15,10 @@ namespace
 	{
 		Self.GeneratedData.Empty();
 
+		// Ensure scale ranges are up-to-date in case MaxEntityScale or depths
+		// were modified after construction.
+		Self.Params.DeriveScaleRanges();
+
 		// Pre-allocate with extra space to avoid race conditions
 		Self.GeneratedData.AddUninitialized(Self.Params.Count);
 		auto LocalNoise = FastNoise::NewFromEncodedNodeTree(Self.Params.EncodedTree);
@@ -51,7 +55,7 @@ namespace
 					continue; // Reject this point
 				}
 
-				double scale = FPointData::SampleScaleFromDistribution(LocalParams.LargeTier.MinScale, LocalParams.LargeTier.MaxScale, NoiseVal, LocalParams.ScaleDistributionCurve);
+				double scale = FPointData::SampleScaleFromDistribution(LocalParams.LargeTier.MinScale, LocalParams.LargeTier.MaxScale, NoiseVal, LocalParams.LargeTier.ScaleDistribution);
 				FPointData InsertData = FPointData::MakePointDataFromWorldScale(scale, LocalParams.UnitScale, LocalParams.Extent);
 				InsertData.Data.Density = LocalStream.FRandRange(0.5, 1.5);
 				InsertData.Data.Composition = LocalStream.GetUnitVector();

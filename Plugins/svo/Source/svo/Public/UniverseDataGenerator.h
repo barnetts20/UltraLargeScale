@@ -49,9 +49,10 @@ struct SVO_API FNoiseParams
 	float WarpFreq = 1.0f;
 };
 
-/// Per-tier streaming parameters exposed in the editor. One instance per
-/// galaxy-sprite scale band (Large / Mid / Small). BuildTierConfigs reads
-/// these to populate FParticleTierConfig at init time.
+/// Per-tier streaming parameters exposed in the editor.
+/// Scale ranges (MinScale / MaxScale) are NOT edited directly — they are
+/// derived at runtime by FUniverseParams::DeriveScaleRanges() from
+/// MaxEntityScale and the tier depth sequence.
 USTRUCT(BlueprintType)
 struct SVO_API FTierParams
 {
@@ -59,8 +60,8 @@ struct SVO_API FTierParams
 
 	// Octree grid depth that defines this tier's cell size.
 	// Cell extent = TreeExtent / (1 << GridDepth).
-	//   Large = 1 (cell = 2*Extent), Mid = 2 (cell = Extent),
-	//   Small = 7 at default ScanDepth 6 (cell = Extent / 32).
+	// Use evenly-spaced depths (e.g. 1, 4, 7 → spacing of 3).
+	// Scale ratio between adjacent tiers = 2^spacing (spacing 3 → ratio 8).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming")
 	int32 GridDepth = 1;
 
@@ -73,12 +74,37 @@ struct SVO_API FTierParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming")
 	int32 MaxParticlesPerSlot = 500;
 
-	// Scale range for particles generated in this tier.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
-	double MinScale = 3e23;
+	// Maps a uniform [0,1] sample to a [0,1] t-value that lerps between
+	// MinScale and MaxScale. Controls the size distribution of particles
+	// within this tier. Defaults to identity (linear).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distribution")
+	FRuntimeFloatCurve ScaleDistribution;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
-	double MaxScale = 3e25;
+	// Maps the raw noise density [0,1] to a modified density [0,1] before
+	// the rejection gate. Controls how aggressively the noise field is
+	// interpreted — e.g. a steep curve concentrates particles in high-density
+	// regions, a flat curve makes them more uniform. Defaults to identity.
+	// Values > 1.0 are clamped, allowing the curve to sharpen features.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distribution")
+	FRuntimeFloatCurve DensityResponse;
+
+	// --- Derived at runtime — not directly editable ---
+
+	// Largest entity scale this tier represents.
+	double MaxScale = 0.0;
+
+	// Smallest entity scale this tier represents.
+	double MinScale = 0.0;
+
+	// Initialize both curves to identity: f(x) = x.
+	FTierParams()
+	{
+		ScaleDistribution.GetRichCurve()->AddKey(0.0f, 0.0f);
+		ScaleDistribution.GetRichCurve()->AddKey(1.0f, 1.0f);
+
+		DensityResponse.GetRichCurve()->AddKey(0.0f, 0.0f);
+		DensityResponse.GetRichCurve()->AddKey(1.0f, 1.0f);
+	}
 };
 
 /// UNIVERSE GENERATION PARAM STRUCT
@@ -86,25 +112,28 @@ USTRUCT(BlueprintType)
 struct SVO_API FUniverseParams : public FBaseParams {
 	GENERATED_BODY()
 
-	// --- Universe data generator params (used by UniverseDataGenerator) ---
+	// --- Universe data generator params ---
 
-	// Number of galaxy objects to place in the sector volume.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
 	int Count = 500;
 
-	// Scale distribution curve shared across all tiers and the data generator.
-	// Maps a uniform [0,1] sample to a [0,1] t-value that lerps between
-	// the tier's MinScale and MaxScale.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	FRuntimeFloatCurve ScaleDistributionCurve;
-
-	// Position jitter applied to generated galaxy positions (data generator only).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
 	double Jitter = .02;
 
 	// --- Noise ---
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
 	FNoiseParams NoiseParams;
+
+	// --- Tier scale derivation ---
+
+	// The absolute largest entity scale (world units) that the sector supports.
+	// All tier scale ranges cascade downward from this single value:
+	//   Tier[0].MaxScale = MaxEntityScale
+	//   Tier[0].MinScale = MaxEntityScale / 2^(depth[1] - depth[0])
+	//   Tier[1].MaxScale = Tier[0].MinScale
+	//   ... and so on.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
+	double MaxEntityScale = 1e23;
 
 	// --- Per-tier streaming configs ---
 
@@ -119,15 +148,54 @@ struct SVO_API FUniverseParams : public FBaseParams {
 
 	// --- Gas layer params (paired with the large tier) ---
 
-	// Per-particle extent at density=0 (lower bound of density-driven lerp).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gas")
 	float GasMinExtent = 1e15f;
 
-	// Per-particle extent at density=1 (upper bound of density-driven lerp).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gas")
 	float GasMaxExtent = 5e16f;
 
 	static constexpr const char* EncodedTree = "EAAAAIA/GQAbABsAEwAAAEBAJAAgAAAAFwAAAAAAAACAP8UggD8AAAAADQADAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAAEXAAAAAAAAAIA/zcxMvQAAgD8kAAIAAAD//wEAAAAASEIB//8GAAAAAIA+";
+
+	/// Derive MinScale/MaxScale for each tier from MaxEntityScale and the
+	/// depth sequence. Call after setting depths and MaxEntityScale.
+	///
+	/// Tiers are ordered shallowest-first (Large → Mid → Small).
+	/// The depth spacing between adjacent tiers determines the scale ratio:
+	///   ratio = 2 ^ (nextDepth - thisDepth)
+	/// The last tier mirrors the spacing of the previous pair.
+	///
+	/// Example with depths 1, 4, 7 and MaxEntityScale = 1e23:
+	///   Large: 1.25e22 → 1e23    (ratio 8, spacing 3)
+	///   Mid:   1.5625e21 → 1.25e22 (ratio 8, spacing 3)
+	///   Small: 1.953125e20 → 1.5625e21 (ratio 8, mirrors spacing 3)
+	void DeriveScaleRanges()
+	{
+		FTierParams* Tiers[] = { &LargeTier, &MidTier, &SmallTier };
+		constexpr int32 NumTiers = UE_ARRAY_COUNT(Tiers);
+
+		Tiers[0]->MaxScale = MaxEntityScale;
+
+		for (int32 i = 0; i < NumTiers; ++i)
+		{
+			int32 DepthDelta;
+			if (i + 1 < NumTiers)
+			{
+				DepthDelta = Tiers[i + 1]->GridDepth - Tiers[i]->GridDepth;
+			}
+			else
+			{
+				DepthDelta = Tiers[i]->GridDepth - Tiers[i - 1]->GridDepth;
+			}
+
+			const double Ratio = static_cast<double>(1 << FMath::Clamp(DepthDelta, 1, 20));
+			Tiers[i]->MinScale = Tiers[i]->MaxScale / Ratio;
+
+			if (i + 1 < NumTiers)
+			{
+				Tiers[i + 1]->MaxScale = Tiers[i]->MinScale;
+			}
+		}
+	}
 
 	FUniverseParams() {
 		Seed = 69;
@@ -136,37 +204,29 @@ struct SVO_API FUniverseParams : public FBaseParams {
 		Rotation = FRotator::ZeroRotator;
 		ParentColor = FLinearColor(1, 1, 1);
 
-		// Large tier (was "Coarse")
+		// Tier streaming params — depths evenly spaced by 3.
 		LargeTier.GridDepth = 1;
 		LargeTier.NeighborhoodRadius = 1;
-		LargeTier.MaxParticlesPerSlot = 500;
-		LargeTier.MinScale = 3e23;
-		LargeTier.MaxScale = 3e25;
+		LargeTier.MaxParticlesPerSlot = 8000;
 
-		// Mid tier
-		MidTier.GridDepth = 2;
+		MidTier.GridDepth = 4;
 		MidTier.NeighborhoodRadius = 1;
-		MidTier.MaxParticlesPerSlot = 500;
-		MidTier.MinScale = 3e20;
-		MidTier.MaxScale = 3e23;
+		MidTier.MaxParticlesPerSlot = 4000;
 
-		// Small tier (was "Proximity")
-		SmallTier.GridDepth = 7;   // old ScanDepth(6) + 1
+		SmallTier.GridDepth = 7;
 		SmallTier.NeighborhoodRadius = 1;
 		SmallTier.MaxParticlesPerSlot = 2000;
-		SmallTier.MinScale = 1e16;
-		SmallTier.MaxScale = 1e18;
 
-		ScaleDistributionCurve.GetRichCurve()->AddKey(0.0f, 0.0f);
-		ScaleDistributionCurve.GetRichCurve()->AddKey(0.05f, 0.0025f);
-		ScaleDistributionCurve.GetRichCurve()->AddKey(0.15f, 0.005f);
-		ScaleDistributionCurve.GetRichCurve()->AddKey(0.3f, 0.015f);
-		ScaleDistributionCurve.GetRichCurve()->AddKey(0.5f, 0.02f);
-		ScaleDistributionCurve.GetRichCurve()->AddKey(0.9f, 0.04f);
-		ScaleDistributionCurve.GetRichCurve()->AddKey(0.975f, 0.1f);
-		ScaleDistributionCurve.GetRichCurve()->AddKey(0.99f, 0.20f);
-		ScaleDistributionCurve.GetRichCurve()->AddKey(0.99999f, 0.40f);
-		ScaleDistributionCurve.GetRichCurve()->AddKey(1.0f, 1.0f);
+		// Scale ranges derived from MaxEntityScale (1e23) + depth spacing (3).
+		// 2^3 = 8, so each tier covers one octave of scale:
+		//   Large: 1.25e22 → 1e23
+		//   Mid:   1.5625e21 → 1.25e22
+		//   Small: 1.953125e20 → 1.5625e21
+		DeriveScaleRanges();
+
+		// Per-tier ScaleDistribution and DensityResponse curves default to
+		// identity (linear) via FTierParams(). Override in BP defaults or
+		// editor if a non-linear distribution is desired.
 	}
 };
 

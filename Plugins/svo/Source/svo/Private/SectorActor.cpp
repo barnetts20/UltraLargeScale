@@ -172,29 +172,14 @@ FastNoise::SmartNode<> ASectorActor::BuildNoise(int InSeed) {
 void ASectorActor::InitializeData()
 {
 	double TotalStart = FPlatformTime::Seconds();
-	double StepStart;
 
-	// With the coarse and proximity streaming tiers both sampling noise
-	// directly per-candidate, nothing in the particle pipeline reads the
-	// sector-wide DensityVolume. The only consumer is the debug volumetric
-	// raymarcher, which samples the PseudoVolumeTexture thousands of times
-	// per ray. When bEnableVolumetric is false (the default), skip the entire
-	// noise-to-volume pipeline — it was a ~120ms unconditional cost per init.
-	if (!bEnableVolumetric)
-	{
-		UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeData - volumetric disabled, skipping density volume build (%.3f sec)"),
-			FPlatformTime::Seconds() - TotalStart);
-		return;
-	}
-
-	StepStart = FPlatformTime::Seconds();
+	// Legacy density volume for CPU-side sampling (data generator fallback).
+	// Only built when volumetric is enabled, since it's a consumer of the
+	// same noise field.
+	double StepStart = FPlatformTime::Seconds();
 	int noiseResolution = 128;
-
 	auto DensityNoise = BuildNoise(69);
 
-	// Cell-coord WorldOffset for the noise sampler. Each cell extends
-	// 2 units in normalized noise-space, so adjacent cells offset by
-	// (2 * CellCoord) to produce a continuous noise field.
 	const FVector NoiseOffset(
 		static_cast<double>(CellCoord.X) * 2.0,
 		static_cast<double>(CellCoord.Y) * 2.0,
@@ -208,73 +193,17 @@ void ASectorActor::InitializeData()
 		nullptr,
 		-1,
 		1.0f,
-		3,        // alpha only (gas density)
+		3,
 		NoiseOffset
 	);
 	UE_LOG(LogTemp, Log, TEXT("  [InitData] Noise sampling (%d^3): %.3f sec"), noiseResolution, FPlatformTime::Seconds() - StepStart);
 	if (InitializationState == ELifecycleState::Pooling) return;
-
-	if (noiseResolution == 256) {
-		DensityBuffer = MoveTemp(LowResData);
-	}
-	else {
-		StepStart = FPlatformTime::Seconds();
-		DensityBuffer = FVolumeTextureUtils::UpscaleVolumeData(LowResData, noiseResolution);
-		LowResData.Empty();
-		UE_LOG(LogTemp, Log, TEXT("  [InitData] Upscale (%d^3 -> 256^3): %.3f sec"), noiseResolution, FPlatformTime::Seconds() - StepStart);
-	}
-
-	DensityVolume = FDensityVolume(
-		DensityBuffer,
-		FVector::ZeroVector,
-		FVector(Params.Extent, Params.Extent, Params.Extent),
-		256);
-
-	if (InitializationState == ELifecycleState::Pooling) return;
-
-	StepStart = FPlatformTime::Seconds();
-	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(FVolumeTextureUtils::PackToPseudoVolumeLayout(DensityBuffer));
-	UE_LOG(LogTemp, Log, TEXT("  [InitData] CreatePseudoVolumeTexture: %.3f sec"), FPlatformTime::Seconds() - StepStart);
 
 	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeData total: %.3f sec"), FPlatformTime::Seconds() - TotalStart);
 }
 
 void ASectorActor::InitializeVolumetric()
 {
-	if (!bEnableVolumetric)
-	{
-		UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeVolumetric skipped (bEnableVolumetric=false)"));
-		return;
-	}
-
-	double StartTime = FPlatformTime::Seconds();
-
-	TPromise<void> CompletionPromise;
-	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-		{
-			VolumetricComponent = NewObject<UStaticMeshComponent>(this);
-			VolumetricComponent->SetVisibility(false);
-			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));
-			VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-			VolumetricComponent->TranslucencySortPriority = 1;
-			VolumetricComponent->RegisterComponent();
-			VolumetricComponent->SetWorldScale3D(FVector(2 * Params.Extent));
-
-			UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(
-				LoadObject<UMaterialInterface>(nullptr, *VolumetricMaterialPath),
-				this
-			);
-
-			DynamicMaterial->SetTextureParameterValue(FName("VolumeTexture"), PseudoVolumeTexture);
-			VolumetricComponent->SetMaterial(0, DynamicMaterial);
-			VolumetricComponent->SetVisibility(true);
-
-			CompletionPromise.SetValue();
-		});
-	CompletionFuture.Wait();
-
-	UE_LOG(LogTemp, Log, TEXT("ASectorActor::Volumetric initialization took: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
 }
 
 void ASectorActor::InitializeNiagara()
@@ -325,6 +254,10 @@ double ASectorActor::GetGridCellExtent(int32 InGridDepth) const
 
 void ASectorActor::BuildTierConfigs()
 {
+	// Derive MinScale/MaxScale for all tiers from MaxEntityScale + depth spacing.
+	// Must be called before any generate callback reads scale ranges.
+	Params.DeriveScaleRanges();
+
 	// --- Large tier (was "Coarse") ---
 	CoarseTierConfig.TierName = TEXT("Large");
 	CoarseTierConfig.GridDepth = Params.LargeTier.GridDepth;
@@ -411,13 +344,14 @@ void ASectorActor::BuildTierConfigs()
 			int32 ActualCount = 0;
 			for (int32 i = 0; i < NumCandidates; ++i)
 			{
-				const float Density = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
+				const float RawDensity = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
+				const float Density = FMath::Clamp(Params.MidTier.DensityResponse.GetRichCurveConst()->Eval(RawDensity), 0.0f, 1.0f);
 				if (Stream.FRand() > Density) continue;
 
 				const float ScaleSample = Stream.FRand();
 				const double Scale = FPointData::SampleScaleFromDistribution(
 					Params.MidTier.MinScale, Params.MidTier.MaxScale,
-					ScaleSample, Params.ScaleDistributionCurve);
+					ScaleSample, Params.MidTier.ScaleDistribution);
 				FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
 				const double ExtentAtDepth = (double)Params.Extent / (double)(1 << PointData.InsertDepth);
 				const float ClusterExtent = static_cast<float>(ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
@@ -533,7 +467,7 @@ void ASectorActor::InitializeTier(FParticleTierConfig& Config, FParticleTierStat
 			Config.GenerateCallback(ToGenerate[i].Key, ToGenerate[i].Value, PerSlotBufferPtrs[i]);
 		}, EParallelForFlags::BackgroundPriority);
 
-	// Serial octree insert.
+	// Serial octree insert - This should use a bulk insert flow
 	if (Config.OctreeInsertBufferIndex >= 0 && Octree.IsValid())
 	{
 		const int32 InsertBufIdx = Config.OctreeInsertBufferIndex;
@@ -742,6 +676,12 @@ void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 					}
 					State.ActiveSlots.Remove(Coord);
 				}
+			}
+
+			// Fire optional boundary-cross hook (e.g. streaming volumetric).
+			if (Config.OnBoundaryCross)
+			{
+				Config.OnBoundaryCross(EnteringNodes, ExitingNodes, NewCoord);
 			}
 
 			// Generate entering nodes: serial slot alloc → parallel gen → serial octree insert.
@@ -1077,14 +1017,15 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoord, int32 InSlotInd
 	int32 ActualCount = 0;
 	for (int32 i = 0; i < NumCandidates; ++i)
 	{
-		const float Density = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
+		const float RawDensity = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
+		const float Density = FMath::Clamp(Params.LargeTier.DensityResponse.GetRichCurveConst()->Eval(RawDensity), 0.0f, 1.0f);
 		if (Stream.FRand() > Density) continue;
 
 		const float ScaleSample = Stream.FRand();
 		const double Scale = FPointData::SampleScaleFromDistribution(
 			Params.LargeTier.MinScale,
 			Params.LargeTier.MaxScale,
-			ScaleSample, Params.ScaleDistributionCurve);
+			ScaleSample, Params.LargeTier.ScaleDistribution);
 
 		FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
 		const double ExtentAtDepth = (double)Params.Extent / (double)(1 << PointData.InsertDepth);
@@ -1192,7 +1133,8 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InCoord, int32 InSlotI
 	int32 ActualCount = 0;
 	for (int32 i = 0; i < NumCandidates; ++i)
 	{
-		const float Density = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
+		const float RawDensity = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
+		const float Density = FMath::Clamp(Params.SmallTier.DensityResponse.GetRichCurveConst()->Eval(RawDensity), 0.0f, 1.0f);
 		if (Stream.FRand() > Density) continue;
 
 		FVector CompVec = Stream.GetUnitVector();
@@ -1201,7 +1143,7 @@ void ASectorActor::GenerateNodeGalaxies(const FIntVector& InCoord, int32 InSlotI
 		const double Scale = FPointData::SampleScaleFromDistribution(
 			Params.SmallTier.MinScale,
 			Params.SmallTier.MaxScale,
-			ScaleSample, Params.ScaleDistributionCurve);
+			ScaleSample, Params.SmallTier.ScaleDistribution);
 
 		FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
 		const double ExtentAtDepth = (double)Params.Extent / (double)(1 << PointData.InsertDepth);

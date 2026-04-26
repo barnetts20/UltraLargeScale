@@ -201,6 +201,39 @@ public:
 		float InNoisePower = 2.0f,
 		int InChannel = 3,
 		FVector InWorldOffset = FVector::ZeroVector);
+
+	/// <summary>
+	/// Sample a noise function into a sub-region of an existing volume buffer.
+	/// The sub-region is defined by a voxel bounding box [Min, Max) per axis.
+	///
+	/// InExtent is the half-size of the volume in world space (determines where
+	/// each voxel sits spatially). InNoiseNormExtent is the half-size used to
+	/// normalize positions into noise space — typically Params.Extent (one cell)
+	/// so that noise coordinates match the particle generators. InWorldOffset
+	/// is added after normalization for seamless cross-cell tiling.
+	/// </summary>
+	static void SampleNoiseToSubRegion(
+		TArray<uint8>& InOutVolumeData,
+		int InResolution,
+		double InExtent,
+		double InNoiseNormExtent,
+		FastNoise::SmartNode<> InNoise,
+		int InSeed,
+		FIntVector InVoxelMin,
+		FIntVector InVoxelMax,
+		float InNoisePower = 2.0f,
+		int InChannel = 3,
+		FVector InWorldOffset = FVector::ZeroVector);
+
+	/// <summary>
+	/// Zero all voxels in a sub-region of a volume buffer. Used to clear
+	/// exiting cells before sampling entering cells into the same buffer.
+	/// </summary>
+	static void ClearSubRegion(
+		TArray<uint8>& InOutVolumeData,
+		int InResolution,
+		FIntVector InVoxelMin,
+		FIntVector InVoxelMax);
 #pragma endregion
 
 #pragma region Extract Mip Data From Volume Nodes

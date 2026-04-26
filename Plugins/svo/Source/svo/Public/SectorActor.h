@@ -69,6 +69,13 @@ struct FParticleTierConfig
 	// insertion. Set to -1 to skip octree insert entirely.
 	// Coarse = 0 (cluster buffer); proximity = 0 (only buffer).
 	int32 OctreeInsertBufferIndex = 0;
+
+	// Optional callback fired inside UpdateTier's async task after the
+	// entering/exiting coord sets are computed and exiting slots are freed,
+	// but before particle generation begins. Used by the streaming volumetric
+	// to update sub-regions of the density buffer in lockstep with the large
+	// tier's boundary crosses. Not set for mid/small tiers.
+	TFunction<void(const TArray<FIntVector>& Entering, const TArray<FIntVector>& Exiting, const FIntVector& NewCenter)> OnBoundaryCross;
 };
 
 // Runtime state for one particle streaming tier. Fully owned by the tier
@@ -268,38 +275,6 @@ protected:
 
 	// Cell half-extent at a given depth.
 	double GetGridCellExtent(int32 InGridDepth) const;
-#pragma endregion
-
-#pragma region Volumetric
-	FString VolumetricMaterialPath = FString("/svo/Materials/RayMarchers/MT_UniverseRaymarchPseudoVolume_Inst.MT_UniverseRaymarchPseudoVolume_Inst");
-
-	// Per-sector raymarched volumetric. Default OFF — 27 simultaneous raymarch
-	// volumes in a full grid are unaffordable. Enable on a single directly-placed
-	// sector for volumetric debugging or single-sector dev work.
-	// Retained as a debug/reference path; the grid-aligned octree may eventually
-	// allow a lower-resolution per-cell volumetric to be revisited.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volumetric")
-	bool bEnableVolumetric = false;
-
-	// Only populated when bEnableVolumetric is true.
-	UPROPERTY()
-	UTexture2D* PseudoVolumeTexture;
-
-	UPROPERTY()
-	UStaticMeshComponent* VolumetricComponent;
-
-	UPROPERTY()
-	UMaterialInstanceDynamic* VolumeMaterial;
-#pragma endregion
-
-#pragma region Density Field (CPU-side authoritative copy)
-	// Persistent uint8 BGRA8 buffer from SampleNoiseToVolume.
-	// Only populated when bEnableVolumetric is true.
-	TArray<uint8> DensityBuffer;
-
-	// Non-owning view over DensityBuffer with source-space metadata.
-	// Rebuilt whenever DensityBuffer is (re)generated.
-	FDensityVolume DensityVolume;
 #pragma endregion
 
 #pragma region Galaxy Pool

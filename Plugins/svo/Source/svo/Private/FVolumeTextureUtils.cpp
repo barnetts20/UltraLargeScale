@@ -286,3 +286,126 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 
 	return TextureData;
 }
+
+void FVolumeTextureUtils::SampleNoiseToSubRegion(
+	TArray<uint8>& InOutVolumeData,
+	int InResolution,
+	double InExtent,
+	double InNoiseNormExtent,
+	FastNoise::SmartNode<> InNoise,
+	int InSeed,
+	FIntVector InVoxelMin,
+	FIntVector InVoxelMax,
+	float InNoisePower,
+	int InChannel,
+	FVector InWorldOffset)
+{
+	double StartTime = FPlatformTime::Seconds();
+
+	constexpr int BytesPerVoxel = 4;
+	// VoxelSize is derived from the buffer-layout extent (the full volume).
+	const double VoxelSize = (2.0 * InExtent) / InResolution;
+	// InvNoiseExtent normalizes world positions into noise space per-cell.
+	const double InvNoiseExtent = 1.0 / InNoiseNormExtent;
+	const int Channel = FMath::Clamp(InChannel, 0, 3);
+
+	const int MinX = FMath::Max(InVoxelMin.X, 0);
+	const int MinY = FMath::Max(InVoxelMin.Y, 0);
+	const int MinZ = FMath::Max(InVoxelMin.Z, 0);
+	const int MaxX = FMath::Min(InVoxelMax.X, InResolution);
+	const int MaxY = FMath::Min(InVoxelMax.Y, InResolution);
+	const int MaxZ = FMath::Min(InVoxelMax.Z, InResolution);
+
+	const int RangeX = MaxX - MinX;
+	const int RangeY = MaxY - MinY;
+	const int RangeZ = MaxZ - MinZ;
+	if (RangeX <= 0 || RangeY <= 0 || RangeZ <= 0) return;
+
+	ParallelFor(RangeZ, [&](int LocalZ)
+		{
+			const int z = MinZ + LocalZ;
+			const int SamplesPerSlice = RangeX * RangeY;
+
+			TArray<float> XCoords, YCoords, ZCoords, NoiseOut;
+			XCoords.SetNumUninitialized(SamplesPerSlice);
+			YCoords.SetNumUninitialized(SamplesPerSlice);
+			ZCoords.SetNumUninitialized(SamplesPerSlice);
+			NoiseOut.SetNumUninitialized(SamplesPerSlice);
+
+			int SampleIdx = 0;
+			for (int y = MinY; y < MaxY; ++y)
+			{
+				for (int x = MinX; x < MaxX; ++x)
+				{
+					// World position from the buffer layout (full neighborhood).
+					double wx = -InExtent + (x + 0.5) * VoxelSize;
+					double wy = -InExtent + (y + 0.5) * VoxelSize;
+					double wz = -InExtent + (z + 0.5) * VoxelSize;
+
+					// Normalize by the per-cell extent, then add the cell offset.
+					// This matches how the particle generators compute noise coords.
+					XCoords[SampleIdx] = (float)(wx * InvNoiseExtent + InWorldOffset.X);
+					YCoords[SampleIdx] = (float)(wy * InvNoiseExtent + InWorldOffset.Y);
+					ZCoords[SampleIdx] = (float)(wz * InvNoiseExtent + InWorldOffset.Z);
+					SampleIdx++;
+				}
+			}
+
+			InNoise->GenPositionArray3D(
+				NoiseOut.GetData(),
+				SamplesPerSlice,
+				XCoords.GetData(),
+				YCoords.GetData(),
+				ZCoords.GetData(),
+				0.0f, 0.0f, 0.0f,
+				InSeed);
+
+			SampleIdx = 0;
+			uint8* DataPtr = InOutVolumeData.GetData();
+			for (int y = MinY; y < MaxY; ++y)
+			{
+				for (int x = MinX; x < MaxX; ++x)
+				{
+					float density = FMath::Pow(FMath::Clamp(NoiseOut[SampleIdx], 0.0f, 1.0f), InNoisePower);
+					uint8 densityByte = (uint8)FMath::Clamp(density * 255.0f, 0.0f, 255.0f);
+
+					int64 idx = ((int64)z * InResolution * InResolution + (int64)y * InResolution + x) * BytesPerVoxel;
+					DataPtr[idx + Channel] = densityByte;
+					SampleIdx++;
+				}
+			}
+		}, EParallelForFlags::BackgroundPriority);
+
+	double Duration = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Log, TEXT("FVolumeTextureUtils::SampleNoiseToSubRegion [%d,%d,%d]->[%d,%d,%d] took %.3f sec"),
+		MinX, MinY, MinZ, MaxX, MaxY, MaxZ, Duration);
+}
+
+void FVolumeTextureUtils::ClearSubRegion(
+	TArray<uint8>& InOutVolumeData,
+	int InResolution,
+	FIntVector InVoxelMin,
+	FIntVector InVoxelMax)
+{
+	constexpr int BytesPerVoxel = 4;
+
+	const int MinX = FMath::Max(InVoxelMin.X, 0);
+	const int MinY = FMath::Max(InVoxelMin.Y, 0);
+	const int MinZ = FMath::Max(InVoxelMin.Z, 0);
+	const int MaxX = FMath::Min(InVoxelMax.X, InResolution);
+	const int MaxY = FMath::Min(InVoxelMax.Y, InResolution);
+	const int MaxZ = FMath::Min(InVoxelMax.Z, InResolution);
+
+	const int RowBytes = (MaxX - MinX) * BytesPerVoxel;
+	if (RowBytes <= 0) return;
+
+	uint8* DataPtr = InOutVolumeData.GetData();
+	for (int z = MinZ; z < MaxZ; ++z)
+	{
+		for (int y = MinY; y < MaxY; ++y)
+		{
+			int64 idx = ((int64)z * InResolution * InResolution + (int64)y * InResolution + MinX) * BytesPerVoxel;
+			FMemory::Memzero(DataPtr + idx, RowBytes);
+		}
+	}
+}
