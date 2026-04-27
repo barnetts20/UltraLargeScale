@@ -1,4 +1,4 @@
-// NiagaraParticleBuffer.h
+ï»¿// NiagaraParticleBuffer.h
 #pragma once
 #include "CoreMinimal.h"
 #include "NiagaraComponent.h"
@@ -15,7 +15,7 @@ namespace NiagaraBufferParams
 }
 
 // A slot-packed, double-buffer-friendly array of particle data for a single
-// Niagara component. Arrays are optional — only allocate what the tier needs.
+// Niagara component. Arrays are optional ï¿½ only allocate what the tier needs.
 // Dead particles are written with Extent == 0 and an off-screen DeadPos so
 // Niagara culls them regardless of which arrays are active.
 //
@@ -29,14 +29,18 @@ struct FNiagaraParticleBuffer
     TArray<FLinearColor>    Colors;
     TArray<FVector>         Rotations;  // Face normals for non-billboard rendering
 
-    // Slot geometry — set once in Allocate, read-only after.
+    // Persistent scratch buffer for MakeRelativePositions. Avoids allocating
+    // and discarding a large TArray on every PushToNiagara call.
+    mutable TArray<FVector> RelativePositionsScratch;
+
+    // Slot geometry ï¿½ set once in Allocate, read-only after.
     int32 TotalSlots = 0;
     int32 SlotCapacity = 0;
 
     // --- Lifecycle ---
 
     // Allocate (or reallocate) all active arrays. Pass bWantRotations=false for
-    // tiers that don't need face-normal data — saves the alloc and push cost.
+    // tiers that don't need face-normal data ï¿½ saves the alloc and push cost.
     void Allocate(int32 InTotalSlots, int32 InSlotCapacity, bool bWantRotations = false)
     {
         TotalSlots = InTotalSlots;
@@ -46,6 +50,7 @@ struct FNiagaraParticleBuffer
         Positions.SetNumZeroed(Total);
         Extents.SetNumZeroed(Total);
         Colors.SetNumZeroed(Total);
+        RelativePositionsScratch.SetNumUninitialized(Total);
 
         if (bWantRotations)
             Rotations.SetNumZeroed(Total);
@@ -54,7 +59,7 @@ struct FNiagaraParticleBuffer
     }
 
     // Deep copy from another buffer. Only copies arrays that are allocated in
-    // this buffer — if we didn't allocate Rotations, we don't copy them.
+    // this buffer. Used for initial front-to-back mirroring at init time.
     void CopyFrom(const FNiagaraParticleBuffer& Other)
     {
         Positions = Other.Positions;
@@ -62,6 +67,20 @@ struct FNiagaraParticleBuffer
         Colors = Other.Colors;
         if (Rotations.Num() > 0 && Other.Rotations.Num() > 0)
             Rotations = Other.Rotations;
+    }
+
+    // Swap array storage with another buffer. O(1) pointer swap instead of
+    // O(N) memcpy. Use for the front/back double-buffer exchange in
+    // UpdateTier where the old front becomes the new back baseline.
+    // Both buffers must have the same allocation shape (same TotalSlots,
+    // SlotCapacity, and Rotations presence).
+    void SwapWith(FNiagaraParticleBuffer& Other)
+    {
+        Swap(Positions, Other.Positions);
+        Swap(Extents, Other.Extents);
+        Swap(Colors, Other.Colors);
+        if (Rotations.Num() > 0 && Other.Rotations.Num() > 0)
+            Swap(Rotations, Other.Rotations);
     }
 
     // --- Slot helpers ---
@@ -95,20 +114,22 @@ struct FNiagaraParticleBuffer
 
     // --- Push helpers ---
 
-    // Build a camera-relative position array. Dead particles (Extent == 0)
-    // get ZeroVector rather than their parked DeadPos — on ReinitializeSystem
-    // they'd otherwise drift in from off-screen.
-    TArray<FVector> MakeRelativePositions(const FVector& VirtualTraversal) const
+    // Build a camera-relative position array into the persistent scratch
+    // buffer. Dead particles (Extent == 0) get ZeroVector rather than their
+    // parked DeadPos so they don't drift in on ReinitializeSystem.
+    // Returns a const reference to the internal scratch buffer.
+    const TArray<FVector>& MakeRelativePositions(const FVector& VirtualTraversal) const
     {
-        TArray<FVector> Out;
-        Out.SetNumUninitialized(Positions.Num());
-        for (int32 i = 0; i < Positions.Num(); ++i)
+        const int32 Num = Positions.Num();
+        if (RelativePositionsScratch.Num() != Num)
+            RelativePositionsScratch.SetNumUninitialized(Num);
+        for (int32 i = 0; i < Num; ++i)
         {
-            Out[i] = (Extents[i] > 0.0f)
+            RelativePositionsScratch[i] = (Extents[i] > 0.0f)
                 ? (Positions[i] - VirtualTraversal)
                 : FVector::ZeroVector;
         }
-        return Out;
+        return RelativePositionsScratch;
     }
 
     // Push all allocated arrays to a Niagara component. Relative positions are
@@ -118,7 +139,7 @@ struct FNiagaraParticleBuffer
     {
         if (!Component) return;
 
-        TArray<FVector> RelPos = MakeRelativePositions(VirtualTraversal);
+        const TArray<FVector>& RelPos = MakeRelativePositions(VirtualTraversal);
 
         UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
             Component, NiagaraBufferParams::Positions, RelPos);

@@ -224,7 +224,7 @@ void ASectorActor::BuildTierConfigs()
 
 	CoarseTierConfig.ComputeBounds = [this]() -> FBox
 		{
-			const double BoundsExtent = (2 * Params.LargeTier.NeighborhoodRadius + 1) * Params.Extent;
+			const double BoundsExtent = (2 * Params.LargeTier.NeighborhoodRadius + 1) * GetGridCellExtent(Params.LargeTier.GridDepth) * 2.0;
 			return FBox(FVector(-BoundsExtent), FVector(BoundsExtent));
 		};
 
@@ -366,6 +366,12 @@ void ASectorActor::InitializeTier(FParticleTierConfig& Config, FParticleTierStat
 				const float Extent = InsertBuffer.Extents[Idx];
 				if (Extent <= 0.0f) continue;
 
+				// Extent is already in sector-local units — the generation
+				// callback converts world scale to local via
+				// MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent)
+				// then derives ExtentAtDepth in the same coordinate space.
+				// UnitScale=1.0 here because we're mapping a local-unit size
+				// into the tree, not a world-scale size.
 				FPointData PointData = FPointData::MakePointDataFromWorldScale(
 					static_cast<double>(Extent),
 					/*InUnitScale=*/ 1.0,
@@ -616,6 +622,8 @@ void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 						const float Extent = InsertBuffer.Extents[Idx];
 						if (Extent <= 0.0f) continue;
 
+						// See InitializeTier comment: Extent is already in
+						// sector-local units. UnitScale=1.0 avoids double-conversion.
 						FPointData PointData = FPointData::MakePointDataFromWorldScale(
 							static_cast<double>(Extent),
 							/*InUnitScale=*/ 1.0,

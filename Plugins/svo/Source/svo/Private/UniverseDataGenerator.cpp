@@ -273,13 +273,13 @@ void UniverseDataGenerator::GenerateLargeTierNode(
 		const float ClusterExtent = static_cast<float>(ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
 
 		const FVector CompVec = Stream.GetUnitVector();
-		const FVector Rotation = Stream.GetUnitVector();
+		const FVector NodeRotation = Stream.GetUnitVector();
 		const float GasExtent = Params.GasMinExtent + ExtentRange * Density;
 		const FVector LocalPos = CandidatePositions[i] + InNodeCenter;
 
 		const int32 Idx = BufferStart + ActualCount;
 		InClusterBuffer.Positions[Idx] = LocalPos;
-		InClusterBuffer.Rotations[Idx] = Rotation;
+		InClusterBuffer.Rotations[Idx] = NodeRotation;
 		InClusterBuffer.Extents[Idx] = ClusterExtent;
 		InClusterBuffer.Colors[Idx] = FLinearColor(FMath::Abs(CompVec.X), FMath::Abs(CompVec.Y), FMath::Abs(CompVec.Z));
 
@@ -368,11 +368,11 @@ void UniverseDataGenerator::GenerateMidTierNode(
 		const float ClusterExtent = static_cast<float>(ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
 
 		const FVector CompVec = Stream.GetUnitVector();
-		const FVector Rotation = Stream.GetUnitVector();
+		const FVector NodeRotation = Stream.GetUnitVector();
 
 		const int32 Idx = BufferStart + ActualCount;
 		InBuffer.Positions[Idx] = CandidatePositions[i];
-		InBuffer.Rotations[Idx] = Rotation;
+		InBuffer.Rotations[Idx] = NodeRotation;
 		InBuffer.Extents[Idx] = ClusterExtent;
 		InBuffer.Colors[Idx] = FLinearColor(FMath::Abs(CompVec.X), FMath::Abs(CompVec.Y), FMath::Abs(CompVec.Z));
 		ActualCount++;

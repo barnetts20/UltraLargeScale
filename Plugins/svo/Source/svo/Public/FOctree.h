@@ -184,6 +184,12 @@ public:
 		}
 		if (InData.TypeId == -1 && InPosition == FVector::ZeroVector) return nullptr; //Ignore typeless inserts into 0,0,0
 
+		// Clamp to MaxDepth so we never subdivide past the representable
+		// precision of the tree. MakePointDataFromWorldScale can return
+		// depths up to log2(TreeExtent); without this clamp, very small
+		// particles would create nodes with sub-unit extents.
+		const int ClampedDepth = FMath::Min(InDepth, MaxDepth);
+
 		TSharedPtr<FOctreeNode> Current = Root;
 		double CurrentExtent = Extent;
 
@@ -196,7 +202,7 @@ public:
 			FScopeLock Lock(&OctreeMutex);
 		}
 
-		for (int Depth = Current->Depth; Depth < InDepth; Depth++) {
+		for (int Depth = Current->Depth; Depth < ClampedDepth; Depth++) {
 			CurrentExtent /= 2;
 
 			uint8 ChildIndex = 0;

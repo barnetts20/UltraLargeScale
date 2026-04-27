@@ -82,6 +82,16 @@ struct FParticleTierConfig
 // pipeline — generation callbacks don't touch these fields directly.
 // NOTE: This is a plain struct, not a USTRUCT. UNiagaraComponent* pointers
 // stored here are aliased from a UPROPERTY TArray on the actor for GC safety.
+//
+// Threading contract:
+//   - CenterCoord, ActiveSlots, FreeSlots, SlotCounts, and the back-buffer
+//     are written exclusively by the async task spawned from UpdateTier.
+//     The game thread must not read them while bUpdateInProgress is true.
+//   - FrontIdx, bUpdateInProgress, and bNeedsPush are std::atomic and safe
+//     for cross-thread reads.
+//   - The front-buffer (Buffers[b][FrontIdx]) is read-only to the game
+//     thread (PushTierToNiagara) and must not be written by async tasks.
+//   - NiagaraComponents are only touched on the game thread.
 struct FParticleTierState
 {
 	// One double-buffered pair per Niagara asset. Outer index = asset index,
@@ -187,8 +197,8 @@ public:
 
 	// When true (default), the sector calls Initialize() automatically from
 	// BeginPlay — convenient for sectors dragged into the level for testing.
-	// AUniverseActor sets this to false on the sectors it spawns so it can
-	// ConfigureCell() first, then drive Initialize() itself.
+	// When spawned by AUniverseActor, ConfigureCell() runs before
+	// FinishSpawning so Params are already set when BeginPlay fires.
 	UPROPERTY()
 	bool bAutoInitializeOnBeginPlay = true;
 
