@@ -144,11 +144,11 @@ public:
 #pragma region Lifecycle State
 	ELifecycleState InitializationState = ELifecycleState::Uninitialized;
 
-	// Sector-scope spatial index. Sized to 4 * Params.Extent and corner-
-	// aligned with center = (Params.Extent, Params.Extent, Params.Extent)
-	// so that the tree's depth-2 grid lines up with the sector's coarse
-	// cell grid: 3 of the 4 depth-2 cells along each axis correspond to
-	// real sector cells (-1, 0, +1 coords); the 4th is unused buffer.
+	// Sector-scope spatial index. Rebuilt from scratch on boundary crosses
+	// so the tree stays centered on the current neighborhood. The tree is
+	// sized to TreeExtentMultiplier * Params.Extent; positions outside that
+	// range would silently land in wrong nodes, so we rebuild rather than
+	// grow.
 	//
 	// Particles (cluster sprites + galaxy points) are inserted individually
 	// at depths derived from each particle's extent via
@@ -167,6 +167,11 @@ public:
 	// proximity queries can filter for galaxy content vs. anything else
 	// that may live in the tree later.
 	static constexpr int32 GalaxyTypeId = 0;
+
+	// Set by any tier's UpdateTier async task after modifying octree
+	// content. Consumed on the game thread in Tick to trigger a full
+	// octree rebuild centered on the current VirtualTraversal.
+	std::atomic<bool> bOctreeRebuildNeeded{ false };
 
 	// Kicks off async init — InitializeChildPool → InitializeData →
 	// InitializeVolumetric → InitializeNiagara, with Pooling-state guards
@@ -275,7 +280,18 @@ protected:
 	void UpdateTier(FParticleTierConfig& Config, FParticleTierState& State);
 
 	// For each buffer pair, push Buffers[i][FrontIdx] to NiagaraComponents[i].
+	// Also updates the Niagara fixed bounds relative to VirtualTraversal so
+	// Lumen/rendering sees a tight bounding box around the actual particles.
 	void PushTierToNiagara(const FParticleTierConfig& Config, FParticleTierState& State);
+
+	// Reset the octree centered on VirtualTraversal and re-insert all active
+	// slots from all three tiers. Called on the game thread when
+	// bOctreeRebuildNeeded is set after a boundary cross.
+	void RebuildOctree();
+
+	// Insert one tier's active front-buffer particles into the octree.
+	// Helper for RebuildOctree and InitializeTier.
+	void InsertTierIntoOctree(const FParticleTierConfig& Config, FParticleTierState& State, int32 BufferIdx);
 
 	// --- Generic Grid Coord Helpers ---
 	// All parameterized by GridDepth so both tiers share one implementation.

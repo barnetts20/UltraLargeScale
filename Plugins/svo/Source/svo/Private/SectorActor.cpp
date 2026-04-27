@@ -22,12 +22,10 @@ ASectorActor::ASectorActor()
 	SectorGasCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorGas.NG_SectorGas"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
 
-	// Corner-align the tree so depth-2 cells line up with sector coarse cells.
-	// Center = (SE, SE, SE), extent = 4*SE → depth-2 grid centers at
-	// {-2*SE, 0, +2*SE, +4*SE} along each axis. The first three match
-	// coarse cell coords {-1, 0, +1}; the fourth is unused buffer.
-	const FVector TreeCenter(Params.Extent, Params.Extent, Params.Extent);
-	Octree = MakeShared<FOctree>(Params.Extent * TreeExtentMultiplier, TreeCenter);
+	// Initial tree centered at origin. RebuildOctree() re-centers it on the
+	// current large-tier grid center each time a boundary cross occurs, so
+	// the neighborhood always fits within the tree bounds.
+	Octree = MakeShared<FOctree>(Params.Extent * TreeExtentMultiplier, FVector::ZeroVector);
 }
 #pragma endregion
 
@@ -115,9 +113,9 @@ void ASectorActor::ConfigureCell(FIntVector InCellCoord)
 	SetActorLocation(CellOrigin);
 
 	// Rebuild the octree against the actual extent in case Params were
-	// overridden after construction (see constructor comment for sizing).
-	const FVector TreeCenter(Params.Extent, Params.Extent, Params.Extent);
-	Octree = MakeShared<FOctree>(Params.Extent * TreeExtentMultiplier, TreeCenter);
+	// overridden after construction. Centered at origin; RebuildOctree()
+	// will re-center on first boundary cross.
+	Octree = MakeShared<FOctree>(Params.Extent * TreeExtentMultiplier, FVector::ZeroVector);
 }
 
 void ASectorActor::InitializeChildPool()
@@ -345,50 +343,8 @@ void ASectorActor::InitializeTier(FParticleTierConfig& Config, FParticleTierStat
 			Config.GenerateCallback(ToGenerate[i].Key, ToGenerate[i].Value, PerSlotBufferPtrs[i]);
 		}, EParallelForFlags::BackgroundPriority);
 
-	// Serial octree insert - This should use a bulk insert flow
-	if (Config.OctreeInsertBufferIndex >= 0 && Octree.IsValid())
-	{
-		const int32 InsertBufIdx = Config.OctreeInsertBufferIndex;
-		const FNiagaraParticleBuffer& InsertBuffer = State.Buffers[InsertBufIdx][0];
-		const double TreeExtent = Octree->Extent;
-
-		for (const TPair<FIntVector, int32>& Pair : ToGenerate)
-		{
-			FSlotEntry* Entry = State.ActiveSlots.Find(Pair.Key);
-			if (!Entry) continue;
-
-			const int32 BufferStart = Pair.Value * InsertBuffer.SlotCapacity;
-			Entry->InsertedNodes.Reserve(InsertBuffer.SlotCapacity);
-
-			for (int32 i = 0; i < InsertBuffer.SlotCapacity; ++i)
-			{
-				const int32 Idx = BufferStart + i;
-				const float Extent = InsertBuffer.Extents[Idx];
-				if (Extent <= 0.0f) continue;
-
-				// Extent is already in sector-local units — the generation
-				// callback converts world scale to local via
-				// MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent)
-				// then derives ExtentAtDepth in the same coordinate space.
-				// UnitScale=1.0 here because we're mapping a local-unit size
-				// into the tree, not a world-scale size.
-				FPointData PointData = FPointData::MakePointDataFromWorldScale(
-					static_cast<double>(Extent),
-					/*InUnitScale=*/ 1.0,
-					static_cast<int64>(TreeExtent));
-				PointData.SetPosition(InsertBuffer.Positions[Idx]);
-				PointData.Data.ObjectId = Pair.Value;
-				PointData.Data.TypeId = GalaxyTypeId;
-
-				TSharedPtr<FOctreeNode> Node = Octree->InsertPosition(
-					PointData.GetPosition(), PointData.InsertDepth, PointData.Data);
-				if (Node.IsValid())
-				{
-					Entry->InsertedNodes.Add(Node);
-				}
-			}
-		}
-	}
+	// Insert this tier's generated particles into the octree.
+	InsertTierIntoOctree(Config, State, /*BufferIdx=*/ 0);
 
 	// Mirror front → back so either buffer is a valid starting state.
 	for (int32 b = 0; b < NumBuffers; ++b)
@@ -538,7 +494,9 @@ void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 				if (!OldSet.Contains(Coord)) EnteringNodes.Add(Coord);
 			}
 
-			// Free exiting slots: dead-stub their data, retire from octree, return slot.
+			// Free exiting slots: dead-stub their data, return slot index.
+			// Octree nodes are not individually removed here — the full tree
+			// is rebuilt by RebuildOctree() on the game thread after the swap.
 			const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
 			for (const FIntVector& Coord : ExitingNodes)
 			{
@@ -550,14 +508,6 @@ void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 						State.Buffers[b][BackIdx].ClearSlot(Entry->SlotIndex, DeadPos);
 					}
 					State.FreeSlots.Add(Entry->SlotIndex);
-
-					for (const TSharedPtr<FOctreeNode>& Node : Entry->InsertedNodes)
-					{
-						if (Octree.IsValid())
-						{
-							Octree->RemoveObjectIdFromNode(Node, Entry->SlotIndex);
-						}
-					}
 					State.ActiveSlots.Remove(Coord);
 				}
 			}
@@ -601,49 +551,14 @@ void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 					Config.GenerateCallback(ToGenerate[i].Key, ToGenerate[i].Value, PerSlotBufferPtrs[i]);
 				}, EParallelForFlags::BackgroundPriority);
 
-			// Serial octree insert.
-			if (Config.OctreeInsertBufferIndex >= 0 && Octree.IsValid())
-			{
-				const int32 InsertBufIdx = Config.OctreeInsertBufferIndex;
-				const FNiagaraParticleBuffer& InsertBuffer = State.Buffers[InsertBufIdx][BackIdx];
-				const double TreeExtent = Octree->Extent;
-
-				for (const TPair<FIntVector, int32>& Pair : ToGenerate)
-				{
-					FSlotEntry* Entry = State.ActiveSlots.Find(Pair.Key);
-					if (!Entry) continue;
-
-					const int32 BufferStart = Pair.Value * InsertBuffer.SlotCapacity;
-					Entry->InsertedNodes.Reserve(InsertBuffer.SlotCapacity);
-
-					for (int32 i = 0; i < InsertBuffer.SlotCapacity; ++i)
-					{
-						const int32 Idx = BufferStart + i;
-						const float Extent = InsertBuffer.Extents[Idx];
-						if (Extent <= 0.0f) continue;
-
-						// See InitializeTier comment: Extent is already in
-						// sector-local units. UnitScale=1.0 avoids double-conversion.
-						FPointData PointData = FPointData::MakePointDataFromWorldScale(
-							static_cast<double>(Extent),
-							/*InUnitScale=*/ 1.0,
-							static_cast<int64>(TreeExtent));
-						PointData.SetPosition(InsertBuffer.Positions[Idx]);
-						PointData.Data.ObjectId = Pair.Value;
-						PointData.Data.TypeId = GalaxyTypeId;
-
-						TSharedPtr<FOctreeNode> Node = Octree->InsertPosition(
-							PointData.GetPosition(), PointData.InsertDepth, PointData.Data);
-						if (Node.IsValid())
-						{
-							Entry->InsertedNodes.Add(Node);
-						}
-					}
-				}
-			}
+			// Octree insert is deferred — RebuildOctree() on the game thread
+			// will reset the tree centered on the current neighborhood and
+			// re-insert all tiers. This avoids the tree going out-of-bounds
+			// as grid coords grow away from the original tree center.
 
 			State.FrontIdx.store(BackIdx);
 			State.bNeedsPush.store(true);
+			bOctreeRebuildNeeded.store(true);
 			State.bUpdateInProgress.store(false);
 
 			UE_LOG(LogTemp, Log, TEXT("ASectorActor::UpdateTier [%s] - %d entering, %d exiting in %.3f sec"),
@@ -658,10 +573,88 @@ void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 void ASectorActor::PushTierToNiagara(const FParticleTierConfig& Config, FParticleTierState& State)
 {
 	const int32 FrontIdx = State.FrontIdx.load();
+
+	// Recompute bounds relative to VirtualTraversal. The positions pushed
+	// to Niagara are (LocalPos - VirtualTraversal), so the bounds box must
+	// encompass that range, not the absolute neighborhood extent. Without
+	// this, particles at high SpeedScale can end up far outside the fixed
+	// bounds, causing Lumen/radiance-cache crashes on the render thread.
+	const FBox Bounds = Config.ComputeBounds();
+
 	for (int32 b = 0; b < Config.NiagaraAssets.Num(); ++b)
 	{
-		State.Buffers[b][FrontIdx].PushToNiagara(State.NiagaraComponents[b], VirtualTraversal);
+		UNiagaraComponent* NC = State.NiagaraComponents[b];
+		if (NC)
+		{
+			NC->SetSystemFixedBounds(Bounds);
+		}
+		State.Buffers[b][FrontIdx].PushToNiagara(NC, VirtualTraversal);
 	}
+}
+
+// ---------------------------------------------------------------------------
+// InsertTierIntoOctree — insert one tier's active front-buffer particles
+// ---------------------------------------------------------------------------
+
+void ASectorActor::InsertTierIntoOctree(const FParticleTierConfig& Config, FParticleTierState& State, int32 BufferIdx)
+{
+	if (Config.OctreeInsertBufferIndex < 0 || !Octree.IsValid()) return;
+
+	const int32 InsertBufIdx = Config.OctreeInsertBufferIndex;
+	const FNiagaraParticleBuffer& InsertBuffer = State.Buffers[InsertBufIdx][BufferIdx];
+	const double TreeExtent = Octree->Extent;
+
+	for (auto& Pair : State.ActiveSlots)
+	{
+		FSlotEntry& Entry = Pair.Value;
+		Entry.InsertedNodes.Reset();
+		Entry.InsertedNodes.Reserve(InsertBuffer.SlotCapacity);
+
+		const int32 BufferStart = Entry.SlotIndex * InsertBuffer.SlotCapacity;
+		for (int32 i = 0; i < InsertBuffer.SlotCapacity; ++i)
+		{
+			const int32 Idx = BufferStart + i;
+			const float Extent = InsertBuffer.Extents[Idx];
+			if (Extent <= 0.0f) continue;
+
+			// See InitializeTier comment: Extent is already in sector-local
+			// units. UnitScale=1.0 avoids double-conversion.
+			FPointData PointData = FPointData::MakePointDataFromWorldScale(
+				static_cast<double>(Extent),
+				/*InUnitScale=*/ 1.0,
+				static_cast<int64>(TreeExtent));
+			PointData.SetPosition(InsertBuffer.Positions[Idx]);
+			PointData.Data.ObjectId = Entry.SlotIndex;
+			PointData.Data.TypeId = GalaxyTypeId;
+
+			TSharedPtr<FOctreeNode> Node = Octree->InsertPosition(
+				PointData.GetPosition(), PointData.InsertDepth, PointData.Data);
+			if (Node.IsValid())
+			{
+				Entry.InsertedNodes.Add(Node);
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RebuildOctree — reset and re-insert all tiers centered on VirtualTraversal
+// ---------------------------------------------------------------------------
+
+void ASectorActor::RebuildOctree()
+{
+	if (!Octree.IsValid()) return;
+
+	// Re-center the tree on the current large-tier grid center so that
+	// the neighborhood positions fall within the tree bounds.
+	const FVector GridCenter = GridCoordToCenter(CoarseTierState.CenterCoord, CoarseTierConfig.GridDepth);
+	const double TreeExtent = Params.Extent * TreeExtentMultiplier;
+	Octree = MakeShared<FOctree>(TreeExtent, GridCenter);
+
+	// Re-insert all tiers' active slot particles.
+	InsertTierIntoOctree(CoarseTierConfig, CoarseTierState, CoarseTierState.FrontIdx.load());
+	InsertTierIntoOctree(MidTierConfig, MidTierState, MidTierState.FrontIdx.load());
+	InsertTierIntoOctree(ProximityTierConfig, ProximityTierState, ProximityTierState.FrontIdx.load());
 }
 
 #pragma endregion
@@ -736,6 +729,28 @@ void ASectorActor::Tick(float DeltaTime)
 	UpdateTier(CoarseTierConfig, CoarseTierState);
 	UpdateTier(MidTierConfig, MidTierState);
 	UpdateTier(ProximityTierConfig, ProximityTierState);
+
+	// Rebuild the octree on the game thread after any tier boundary cross.
+	// This must happen after UpdateTier (which sets the flag) and before
+	// the next spawn scan tick (which queries the tree).
+	if (bOctreeRebuildNeeded.exchange(false))
+	{
+		// Only rebuild if no tier is mid-update — otherwise the front
+		// buffer may not yet reflect the new slot layout.
+		const bool bAnyUpdating =
+			CoarseTierState.bUpdateInProgress.load() ||
+			MidTierState.bUpdateInProgress.load() ||
+			ProximityTierState.bUpdateInProgress.load();
+		if (!bAnyUpdating)
+		{
+			RebuildOctree();
+		}
+		else
+		{
+			// Defer to next tick.
+			bOctreeRebuildNeeded.store(true);
+		}
+	}
 }
 #pragma endregion
 
