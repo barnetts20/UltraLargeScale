@@ -1044,7 +1044,7 @@ void ASectorActor::GenerateCoarseNode(const FIntVector& InCoord, int32 InSlotInd
 
 		InGasBuffer.Positions[Idx] = LocalPos;
 		InGasBuffer.Extents[Idx] = GasExtent;
-		InGasBuffer.Colors[Idx] = FLinearColor(1.0f, 1.0f, 1.0f, Density);
+		InGasBuffer.Colors[Idx] = FLinearColor(1.0f, 1.0f, 1.0f, 1.0);
 
 		ActualCount++;
 	}
