@@ -15,7 +15,6 @@ class AGalaxyActor;
 // Unified Particle Tier System — structs
 // ---------------------------------------------------------------------------
 
-// Replaces FCoarseSlotEntry and FProximitySlotEntry (they were identical).
 // Maps a grid coord to its slot index in the flat particle buffers, plus the
 // octree nodes inserted from that slot (needed for cleanup on exit).
 struct FSlotEntry
@@ -29,52 +28,47 @@ struct FSlotEntry
 // between tiers live here; the generic pipeline reads these fields.
 struct FParticleTierConfig
 {
-	// For logging only (e.g. "Coarse", "Proximity").
+	// For logging only (e.g. "Large", "Mid", "Small").
 	FString TierName;
 
 	// Depth in the octree that defines this tier's grid cell size.
 	// Cell extent = TreeExtent / (1 << GridDepth), where
 	// TreeExtent = Params.Extent * TreeExtentMultiplier.
-	//   Coarse   = 1  → cell extent = 2*Extent (matches current coarse cell size).
-	//   Proximity = ScanDepth + 1 → cell extent = Extent / 2^ScanDepth.
 	int32 GridDepth = 1;
 
 	// Half-width of the 3D neighborhood around the player's current cell.
-	// Coarse reads from Params.CoarseNeighborhoodRadius; proximity uses 1.
 	// Total slots = (2*NeighborhoodRadius + 1)^3.
 	int32 NeighborhoodRadius = 1;
 
-	// Max particles per slot. Coarse = Params.MaxClusterPerCoarseNode;
-	// proximity = Params.MaxParticlesPerNode.
+	// Max particles per slot.
 	int32 SlotCapacity = 0;
 
-	// One Niagara system template per buffer set. Coarse has two (cluster + gas);
-	// proximity has one. InitializeTier creates one UNiagaraComponent per entry.
+	// One Niagara system template per buffer set. Large has two (cluster + gas);
+	// mid and small have one each. InitializeTier creates one UNiagaraComponent
+	// per entry.
 	TArray<UNiagaraSystem*> NiagaraAssets;
 
 	// Parallel to NiagaraAssets — whether each buffer should allocate the
-	// Rotations array. Coarse = {true, false}; proximity = {false}.
+	// Rotations array. Large = {true, false}; mid = {true}; small = {false}.
 	TArray<bool> bWantRotations;
 
 	// Called during parallel generation. Receives the grid coord, slot index,
 	// and raw buffer pointers (one per Niagara asset) sized to match
-	// NiagaraAssets. The callback writes directly into the slot.
-	// Captures `this` — needs Params, BuildNoise, Octree, etc.
-	TFunction<void(const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers)> GenerateCallback;
+	// NiagaraAssets. The callback writes directly into the slot and returns
+	// the number of accepted particles.
+	TFunction<int32(const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers)> GenerateCallback;
 
 	// Returns the fixed bounds box for all Niagara components in this tier.
 	TFunction<FBox()> ComputeBounds;
 
 	// Which buffer index (into the NiagaraAssets array) to walk for octree
 	// insertion. Set to -1 to skip octree insert entirely.
-	// Coarse = 0 (cluster buffer); proximity = 0 (only buffer).
+	// Large = 0 (cluster buffer); mid = 0; small = 0.
 	int32 OctreeInsertBufferIndex = 0;
 
 	// Optional callback fired inside UpdateTier's async task after the
 	// entering/exiting coord sets are computed and exiting slots are freed,
-	// but before particle generation begins. Used by the streaming volumetric
-	// to update sub-regions of the density buffer in lockstep with the large
-	// tier's boundary crosses. Not set for mid/small tiers.
+	// but before particle generation begins. Not currently set for any tier.
 	TFunction<void(const TArray<FIntVector>& Entering, const TArray<FIntVector>& Exiting, const FIntVector& NewCenter)> OnBoundaryCross;
 };
 
@@ -84,17 +78,21 @@ struct FParticleTierConfig
 // stored here are aliased from a UPROPERTY TArray on the actor for GC safety.
 struct FParticleTierState
 {
-	// One double-buffered pair per Niagara asset. Outer index = asset index,
-	// inner is always size 2 indexed by FrontIdx / (1 - FrontIdx).
+	// One pair per Niagara asset. Outer index = asset index,
+	// inner is always size 2 indexed by ActiveIdx / (1 - ActiveIdx).
+	// On boundary cross, continuing slots are copied from active → inactive,
+	// entering slots are generated fresh, and exiting slots are dead-stubbed,
+	// then ActiveIdx is swapped. This avoids copying the full buffer while
+	// keeping both sides consistent.
 	TArray<TArray<FNiagaraParticleBuffer>> Buffers;
 
 	// Raw pointers into the actor's UPROPERTY component array. Parallel to
 	// config NiagaraAssets.
 	TArray<UNiagaraComponent*> NiagaraComponents;
 
-	// Which of the two buffers is live. Shared across all buffer pairs —
-	// they swap in lockstep.
-	std::atomic<int32> FrontIdx{ 0 };
+	// Which of the two buffers is currently being read by Niagara.
+	// Toggled atomically after the inactive buffer has been updated.
+	std::atomic<int32> ActiveIdx{ 0 };
 	std::atomic<bool> bUpdateInProgress{ false };
 	std::atomic<bool> bNeedsPush{ false };
 
@@ -137,15 +135,7 @@ public:
 	// Sector-scope spatial index. Sized to 4 * Params.Extent and corner-
 	// aligned with center = (Params.Extent, Params.Extent, Params.Extent)
 	// so that the tree's depth-2 grid lines up with the sector's coarse
-	// cell grid: 3 of the 4 depth-2 cells along each axis correspond to
-	// real sector cells (-1, 0, +1 coords); the 4th is unused buffer.
-	//
-	// Particles (cluster sprites + galaxy points) are inserted individually
-	// at depths derived from each particle's extent via
-	// FPointData::MakePointDataFromWorldScale. The tree is a registry, not
-	// authoritative storage — Data.ObjectId carries the slot index into the
-	// flat particle buffers, and queries dereference back through that
-	// index to read pre-quantized positions/extents.
+	// cell grid.
 	TSharedPtr<FOctree> Octree;
 
 	// Tree sizing convention. Multiplier is fixed by the 3x3 coarse
@@ -158,15 +148,13 @@ public:
 	// that may live in the tree later.
 	static constexpr int32 GalaxyTypeId = 0;
 
-	// Kicks off async init — InitializeChildPool → InitializeData →
-	// InitializeVolumetric → InitializeNiagara, with Pooling-state guards
-	// between each step.
+	// Kicks off async init — InitializeChildPool → InitializeNiagara,
+	// with Pooling-state guards between each step.
 	void Initialize();
 #pragma endregion
 
 #pragma region Pooled Spawn/Despawn Hooks
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
-	// TODO: Wire these into the spawn scanning system once the clean-up pass is complete.
 	void SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode);
 	void ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode);
 #pragma endregion
@@ -179,11 +167,19 @@ public:
 	FIntVector CellCoord = FIntVector::ZeroValue;
 
 	// World-space center of this sector's cell. Derived: CellCoord * (2 * Params.Extent).
-	// Set once in ConfigureCell and used as the initial actor placement
-	// location, plus as the authoritative sector-grid origin for cross-
-	// sector child-spawn math.
 	UPROPERTY(VisibleAnywhere, Category = "Sector Grid")
 	FVector CellOrigin = FVector::ZeroVector;
+
+	// Read-only debug display — current player grid coord for each tier.
+	// Updated every tick from each tier's CenterCoord.
+	UPROPERTY(VisibleAnywhere, Category = "Sector Grid|Debug")
+	FIntVector LargeTierPlayerCoord = FIntVector(INT32_MIN);
+
+	UPROPERTY(VisibleAnywhere, Category = "Sector Grid|Debug")
+	FIntVector MidTierPlayerCoord = FIntVector(INT32_MIN);
+
+	UPROPERTY(VisibleAnywhere, Category = "Sector Grid|Debug")
+	FIntVector SmallTierPlayerCoord = FIntVector(INT32_MIN);
 
 	// When true (default), the sector calls Initialize() automatically from
 	// BeginPlay — convenient for sectors dragged into the level for testing.
@@ -200,15 +196,8 @@ public:
 
 protected:
 #pragma region Initialization
-	void InitializeData();
-	void InitializeVolumetric();
 	void InitializeNiagara();
 	void InitializeChildPool();
-	FastNoise::SmartNode<> BuildNoise(int InSeed);
-#pragma endregion
-
-#pragma region Data Generation
-	UniverseDataGenerator UniverseGenerator;
 #pragma endregion
 
 #pragma region Niagara Assets
@@ -230,12 +219,20 @@ protected:
 
 #pragma region Unified Particle Tier System
 	// --- Tier Config/State Pairs ---
-	FParticleTierConfig CoarseTierConfig;
-	FParticleTierState  CoarseTierState;
+	FParticleTierConfig LargeTierConfig;
+	FParticleTierState  LargeTierState;
 	FParticleTierConfig MidTierConfig;
 	FParticleTierState  MidTierState;
-	FParticleTierConfig ProximityTierConfig;
-	FParticleTierState  ProximityTierState;
+	FParticleTierConfig SmallTierConfig;
+	FParticleTierState  SmallTierState;
+
+	// Density noise graph — built once during initialization and shared
+	// (read-only) across all tiers and threads for generation.
+	FastNoise::SmartNode<> DensityNoise;
+
+	// Generator instance — owns generation methods and noise construction.
+	// Params are synced from the actor's Params before use.
+	UniverseDataGenerator Generator;
 
 	// GC-safe storage for all Niagara components created by the tier system.
 	// FParticleTierState::NiagaraComponents holds raw pointers that alias
@@ -244,37 +241,30 @@ protected:
 	TArray<UNiagaraComponent*> TierNiagaraComponents;
 
 	// --- Generic Tier Pipeline ---
-	// Populates CoarseTierConfig and ProximityTierConfig from Params and
-	// the Niagara asset pointers. Called once at the start of InitializeNiagara.
+	// Populates tier configs from Params and the Niagara asset pointers.
+	// Called once at the start of InitializeNiagara.
 	void BuildTierConfigs();
 
 	// Allocate buffers → build neighborhood → serial slot alloc → parallel
 	// generate (via Config.GenerateCallback) → serial octree insert (if
-	// OctreeInsertBufferIndex >= 0) → mirror front→back → game-thread
-	// Niagara spawn + bounds + push.
+	// OctreeInsertBufferIndex >= 0) → game-thread Niagara spawn + bounds + push.
 	void InitializeTier(FParticleTierConfig& Config, FParticleTierState& State);
 
 	// Per-tick streaming update. Checks bNeedsPush → push + reinit → checks
-	// bUpdateInProgress → coord-diff old vs new neighborhood → free exiting
-	// → alloc entering → parallel generate into back → octree insert → swap
-	// FrontIdx → set bNeedsPush.
+	// bUpdateInProgress → coord-diff old vs new neighborhood → clear exiting
+	// in inactive buffer → generate entering in inactive buffer → octree
+	// insert → swap ActiveIdx → set bNeedsPush.
 	void UpdateTier(FParticleTierConfig& Config, FParticleTierState& State);
 
-	// For each buffer pair, push Buffers[i][FrontIdx] to NiagaraComponents[i].
+	// For each buffer pair, push Buffers[i][ActiveIdx] to NiagaraComponents[i].
 	void PushTierToNiagara(const FParticleTierConfig& Config, FParticleTierState& State);
 
 	// --- Generic Grid Coord Helpers ---
-	// All parameterized by GridDepth so both tiers share one implementation.
+	// All parameterized by GridDepth so all tiers share one implementation.
 
 	// World-local position → grid coord at a given depth.
 	// Uses center-aligned lattice: coord (0,0,0) is centered at the origin.
 	FIntVector PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const;
-
-	// Grid coord → cell center position.
-	FVector GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const;
-
-	// Cell half-extent at a given depth.
-	double GetGridCellExtent(int32 InGridDepth) const;
 #pragma endregion
 
 #pragma region Galaxy Pool
@@ -294,60 +284,59 @@ protected:
 #pragma endregion
 
 #pragma region Player-Centered Parallax
-	// Reference positions tracked frame-to-frame for parallax math.
-	// LastFrameOfReferenceLocation is used to compute PlayerDelta;
-	// CurrentFrameOfReferenceLocation is the most recent sampled player pos.
+	// Player world position from previous frame — used to compute per-frame delta.
 	FVector LastFrameOfReferenceLocation = FVector::ZeroVector;
+
+	// Current player world position, sampled once per frame.
 	FVector CurrentFrameOfReferenceLocation = FVector::ZeroVector;
 
-	// Accumulated virtual-space traversal. Advances by Ratio * PlayerDelta
-	// each tick inside ApplyParallaxOffset. The actor itself stays pegged to
-	// the player so UE's rendering systems remain in a clean numerical range;
-	// VirtualTraversal is the player's position in the sector's virtual frame.
+	// --- Parallax Drift with Threshold Rebase ---
 	//
-	// Used by:
-	//   - PushTierToNiagara to compute camera-relative particle positions
-	//     (Relative = LocalPos - VirtualTraversal).
-	//   - Streaming coord tracking (PositionToGridCoord consumes
-	//     VirtualTraversal directly via UpdateTier).
-	//   - DebugDrawSpawnNode and UpdateSpawnRangeNodes.
-	//   - Scratch pad broadcast: User.ParallaxOffset = -Ratio * PlayerDelta
-	//     per tick, drifts stored particle positions to stay aligned with
-	//     VirtualTraversal between pushes.
-	FVector VirtualTraversal = FVector::ZeroVector;
+	// Rendered position for each particle:
+	//   P = Array[i] + RebaseAccum + Drift
+	//
+	// Array[i]     = raw virtual-space position, only written on cell
+	//                enter/exit pushes. CPU buffers are the source of truth.
+	// RebaseAccum  = accumulated sum of all previous rebases. Grows in
+	//                steps each time Drift exceeds the threshold. Sent to
+	//                Niagara as User.ParallaxRebase every frame.
+	// Drift        = accumulated Ratio * PlayerDelta since last rebase.
+	//                Always small (bounded by RebaseThreshold). Sent to
+	//                Niagara as User.ParallaxOffset every frame.
+	//
+	// On rebase: RebaseAccum += Drift, Drift = 0. No buffer writes,
+	// no scratch pad writes. The equation stays balanced because what
+	// left Drift got added to RebaseAccum.
+	//
+	// GridVirtualOffset: separate accumulator for grid coord lookups.
+	// Runs forever, never resets. Precision doesn't matter.
+	//
+	// Niagara Particle Update scratch pad:
+	//   Position = PositionArray[UniqueID] + ParallaxRebase + ParallaxOffset
+	FVector GridVirtualOffset = FVector::ZeroVector;
+	FVector Drift = FVector::ZeroVector;
+	FVector RebaseAccum = FVector::ZeroVector;
 
-	// Per-frame update: peg actor to player, advance VirtualTraversal, and
-	// broadcast User.ParallaxOffset to all Niagara scratch pads.
+	// Rebase when any component of Drift exceeds this value.
+	// Float precision at 1e6 is ~0.06 units — still sub-unit accuracy.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parallax Properties")
+	double RebaseThreshold = 2000000000.0;
+
+	// Per-frame update: peg actor to player, advance Drift, check
+	// threshold, broadcast User.ParallaxOffset and User.ParallaxRebase
+	// to all Niagara components.
 	void ApplyParallaxOffset();
-#pragma endregion
-
-#pragma region Tier-Specific Generation Callbacks
-	// These remain as named methods wired into FParticleTierConfig.GenerateCallback.
-	// Each receives raw buffer pointers and writes directly into the slot.
-
-	// Coarse tier: generates cluster + gas particles using batched noise.
-	// Candidates scatter within ±Extent of the cell center; noise offset is
-	// shared across all candidates in a cell (coord-derived).
-	void GenerateCoarseNode(const FIntVector& InCoord, int32 InSlotIndex,
-		FNiagaraParticleBuffer& InClusterBuffer, FNiagaraParticleBuffer& InGasBuffer);
-
-	// Proximity tier: generates galaxy-scale particles using batched noise.
-	// Candidates scatter within ±CellExtent of the cell center; noise offset
-	// is computed per-candidate (may straddle coarse cell boundaries).
-	void GenerateNodeGalaxies(const FIntVector& InCoord, int32 InSlotIndex,
-		FNiagaraParticleBuffer& InBuffer);
 #pragma endregion
 
 #pragma region Public Octree Queries
 public:
 	// Spatial range query — returns every node within InRadius of InCenter
 	// (sector-actor-local space) matching the given TypeId. Pass -1 for no
-	// type filter. Both tiers' particles are interleaved in the result.
+	// type filter. All tiers' particles are interleaved in the result.
 	TArray<TSharedPtr<FOctreeNode>> GetNodesInRange(const FVector& InCenter, double InRadius, int32 InTypeId = -1) const;
 
 	// Screen-space-culled variant. Traverses the tree top-down and prunes nodes
 	// whose (Extent * (1 + ScaleFactor)) / Distance falls below InScreenSpaceThreshold.
-	// Pass -1 for InTypeId for no type filter.
 	TArray<TSharedPtr<FOctreeNode>> GetNodesByScreenSpace(const FVector& InCenter, double InExtent, double InScreenSpaceThreshold, int32 InTypeId = -1) const;
 #pragma endregion
 
@@ -358,7 +347,7 @@ public:
 
 	// Extent of the spatial query box around the player (sector-actor-local space).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
-	double SpawnScanExtent = 200000.0;
+	double SpawnScanExtent = 20000.0;
 
 	// Screen-space size threshold, angular-size proxy (Extent / Distance).
 	// Lower => smaller things pass => more results.
@@ -384,5 +373,9 @@ private:
 	void LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) const;
 	void LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const;
 	void DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) const;
+
+	// Identifies which tier a slot index belongs to. Returns the tier config
+	// and state, or nullptr pair if not found.
+	TPair<const FParticleTierConfig*, const FParticleTierState*> FindTierForSlot(int32 InSlotIndex) const;
 #pragma endregion
 };

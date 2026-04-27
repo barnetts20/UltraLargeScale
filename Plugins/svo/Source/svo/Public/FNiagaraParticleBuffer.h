@@ -33,6 +33,11 @@ struct FNiagaraParticleBuffer
     int32 TotalSlots = 0;
     int32 SlotCapacity = 0;
 
+    // Reusable scratch buffer for camera-relative position computation.
+    // Sized once in Allocate, reused every PushToNiagara call to avoid
+    // per-push heap allocation.
+    TArray<FVector> RelativePositionsScratch;
+
     // --- Lifecycle ---
 
     // Allocate (or reallocate) all active arrays. Pass bWantRotations=false for
@@ -46,6 +51,7 @@ struct FNiagaraParticleBuffer
         Positions.SetNumZeroed(Total);
         Extents.SetNumZeroed(Total);
         Colors.SetNumZeroed(Total);
+        RelativePositionsScratch.SetNumUninitialized(Total);
 
         if (bWantRotations)
             Rotations.SetNumZeroed(Total);
@@ -85,6 +91,28 @@ struct FNiagaraParticleBuffer
             WriteDeadParticle(Start + i, DeadPos);
     }
 
+    // Copy a single slot's data from another buffer into this buffer.
+    // Used to sync continuing slots from the active buffer into the inactive
+    // buffer before a swap, avoiding a full-buffer copy.
+    void CopySlotFrom(const FNiagaraParticleBuffer& Other, int32 SlotIndex)
+    {
+        const int32 Start = SlotStart(SlotIndex);
+        const int32 End = Start + SlotCapacity;
+        for (int32 i = Start; i < End; ++i)
+        {
+            Positions[i] = Other.Positions[i];
+            Extents[i] = Other.Extents[i];
+            Colors[i] = Other.Colors[i];
+        }
+        if (Rotations.Num() > 0 && Other.Rotations.Num() > 0)
+        {
+            for (int32 i = Start; i < End; ++i)
+            {
+                Rotations[i] = Other.Rotations[i];
+            }
+        }
+    }
+
     // Fill trailing dead particles after ActualCount accepted particles.
     void PadSlotDead(int32 SlotIndex, int32 ActualCount, const FVector& DeadPos)
     {
@@ -95,33 +123,33 @@ struct FNiagaraParticleBuffer
 
     // --- Push helpers ---
 
-    // Build a camera-relative position array. Dead particles (Extent == 0)
-    // get ZeroVector rather than their parked DeadPos — on ReinitializeSystem
-    // they'd otherwise drift in from off-screen.
-    TArray<FVector> MakeRelativePositions(const FVector& VirtualTraversal) const
+    // Prepare positions for Niagara push. Dead particles (Extent == 0) get
+    // ZeroVector to prevent off-screen DeadPos from causing issues on reinit.
+    // Live particles are pushed as raw virtual-space coordinates — the
+    // camera-relative transform is handled entirely by User.ParallaxOffset
+    // in Niagara's Particle Update scratch pad.
+    void BuildPushPositions()
     {
-        TArray<FVector> Out;
-        Out.SetNumUninitialized(Positions.Num());
+        check(RelativePositionsScratch.Num() == Positions.Num());
         for (int32 i = 0; i < Positions.Num(); ++i)
         {
-            Out[i] = (Extents[i] > 0.0f)
-                ? (Positions[i] - VirtualTraversal)
+            RelativePositionsScratch[i] = (Extents[i] > 0.0f)
+                ? Positions[i]
                 : FVector::ZeroVector;
         }
-        return Out;
     }
 
-    // Push all allocated arrays to a Niagara component. Relative positions are
-    // computed here so the caller doesn't need to manage the intermediate array.
-    // Call after a buffer swap and before ReinitializeSystem.
-    void PushToNiagara(UNiagaraComponent* Component, const FVector& VirtualTraversal) const
+    // Push all allocated arrays to a Niagara component's data interfaces.
+    // Safe to call from background threads — only writes to data interfaces,
+    // does not touch the component's render state.
+    void PushArraysToNiagara(UNiagaraComponent* Component)
     {
         if (!Component) return;
 
-        TArray<FVector> RelPos = MakeRelativePositions(VirtualTraversal);
+        BuildPushPositions();
 
         UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
-            Component, NiagaraBufferParams::Positions, RelPos);
+            Component, NiagaraBufferParams::Positions, RelativePositionsScratch);
         UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(
             Component, NiagaraBufferParams::Extents, Extents);
         UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(
@@ -132,7 +160,13 @@ struct FNiagaraParticleBuffer
             UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
                 Component, NiagaraBufferParams::Rotations, Rotations);
         }
+    }
 
+    // Push arrays and activate. Call from game thread only.
+    void PushToNiagara(UNiagaraComponent* Component)
+    {
+        if (!Component) return;
+        PushArraysToNiagara(Component);
         Component->Activate(true);
     }
 };

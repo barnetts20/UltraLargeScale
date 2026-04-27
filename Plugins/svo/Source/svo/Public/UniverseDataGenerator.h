@@ -6,9 +6,10 @@
 #include "PointCloudGenerator.h"
 #include "ProceduralSpaceActor.h"
 #include "FVolumeTextureUtils.h"
+#include "FNiagaraParticleBuffer.h"
 #include "UniverseDataGenerator.generated.h"
 
-/// Noise-graph tuning knobs consumed by ASectorActor::BuildNoise().
+/// Noise-graph tuning knobs consumed by UniverseDataGenerator::BuildNoise().
 /// Defaults reproduce the original hardcoded values.
 USTRUCT(BlueprintType)
 struct SVO_API FNoiseParams
@@ -108,17 +109,15 @@ struct SVO_API FTierParams
 };
 
 /// UNIVERSE GENERATION PARAM STRUCT
+///
+/// Inherits Seed, Extent, UnitScale from FBaseParams.
+/// NOTE: Rotation and ParentColor are also inherited from FBaseParams but are
+/// unused at the sector level — they exist for child actors (Galaxy, StarSystem)
+/// that receive these values from their spawning parent. They will appear in
+/// the editor but have no effect on sector behavior.
 USTRUCT(BlueprintType)
 struct SVO_API FUniverseParams : public FBaseParams {
 	GENERATED_BODY()
-
-	// --- Universe data generator params ---
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	int Count = 500;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	double Jitter = .02;
 
 	// --- Noise ---
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
@@ -217,20 +216,13 @@ struct SVO_API FUniverseParams : public FBaseParams {
 		SmallTier.NeighborhoodRadius = 1;
 		SmallTier.MaxParticlesPerSlot = 2000;
 
-		// Scale ranges derived from MaxEntityScale (1e23) + depth spacing (3).
-		// 2^3 = 8, so each tier covers one octave of scale:
-		//   Large: 1.25e22 → 1e23
-		//   Mid:   1.5625e21 → 1.25e22
-		//   Small: 1.953125e20 → 1.5625e21
 		DeriveScaleRanges();
-
-		// Per-tier ScaleDistribution and DensityResponse curves default to
-		// identity (linear) via FTierParams(). Override in BP defaults or
-		// editor if a non-linear distribution is desired.
 	}
 };
 
-/// UNIVERSE GENERATOR - GENERATES DATA FOR POPULATING A UNIVERSE
+/// UNIVERSE GENERATOR — Owns noise construction, grid math helpers, and
+/// per-tier particle generation methods. Used exclusively by ASectorActor
+/// but encapsulates all generation logic independent of the actor.
 class SVO_API UniverseDataGenerator : public PointCloudGenerator {
 public:
 	UniverseDataGenerator() : PointCloudGenerator(8647) {};
@@ -246,4 +238,47 @@ public:
 	void GenerateData(const FDensityVolume& InDensityVolume);
 
 	TArray<FPointData> GeneratedData;
+
+	// --- Noise Construction ---
+
+	// Build the sector density noise graph from Params.NoiseParams.
+	// The returned node is immutable and safe to share across threads for
+	// read-only evaluation via GenPositionArray3D.
+	FastNoise::SmartNode<> BuildNoise(int InSeed) const;
+
+	// --- Grid Coord Helpers ---
+	// Static helpers parameterized by extent and tree multiplier so generation
+	// methods don't need a reference back to the actor.
+
+	static FVector GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth,
+		double InExtent, double InTreeExtentMultiplier);
+
+	static double GetGridCellExtent(int32 InGridDepth,
+		double InExtent, double InTreeExtentMultiplier);
+
+	// --- Tier-Specific Generation Methods ---
+	// Each receives the grid coord, slot index, buffer(s), and a pre-built
+	// noise instance. Returns the number of accepted particles written.
+	// Dead-particle padding is written internally; the caller writes SlotCounts.
+
+	// Large tier: generates cluster + gas particles using batched noise.
+	// Candidates scatter within ±Extent of the cell center; noise offset is
+	// shared across all candidates in a cell (coord-derived).
+	int32 GenerateLargeNode(const FIntVector& InCoord, int32 InSlotIndex,
+		FNiagaraParticleBuffer& InClusterBuffer, FNiagaraParticleBuffer& InGasBuffer,
+		const FastNoise::SmartNode<>& InNoise, int32 InGridDepth) const;
+
+	// Mid tier: generates cluster particles at mid-tier grid scale.
+	// Same noise-driven rejection as the large tier but writes a single buffer
+	// with rotations.
+	int32 GenerateMidNode(const FIntVector& InCoord, int32 InSlotIndex,
+		FNiagaraParticleBuffer& InBuffer,
+		const FastNoise::SmartNode<>& InNoise, int32 InGridDepth) const;
+
+	// Small tier: generates galaxy-scale particles using batched noise.
+	// Candidates scatter within ±CellExtent of the cell center; noise offset
+	// is computed per-candidate (may straddle coarse cell boundaries).
+	int32 GenerateSmallNode(const FIntVector& InCoord, int32 InSlotIndex,
+		FNiagaraParticleBuffer& InBuffer,
+		const FastNoise::SmartNode<>& InNoise, int32 InGridDepth) const;
 };
