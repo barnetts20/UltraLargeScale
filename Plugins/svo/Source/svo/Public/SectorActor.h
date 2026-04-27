@@ -59,7 +59,7 @@ struct FParticleTierConfig
 	// Called during parallel generation. Receives the grid coord, slot index,
 	// and raw buffer pointers (one per Niagara asset) sized to match
 	// NiagaraAssets. The callback writes directly into the slot.
-	// Captures `this` — needs Params, BuildNoise, Octree, etc.
+	// Delegates to UniverseDataGenerator generation methods.
 	TFunction<void(const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers)> GenerateCallback;
 
 	// Returns the fixed bounds box for all Niagara components in this tier.
@@ -204,10 +204,12 @@ protected:
 	void InitializeVolumetric();
 	void InitializeNiagara();
 	void InitializeChildPool();
-	FastNoise::SmartNode<> BuildNoise(int InSeed);
 #pragma endregion
 
 #pragma region Data Generation
+	// Owns all noise composition and particle generation logic.
+	// The tier callbacks in BuildTierConfigs() delegate to this generator,
+	// keeping the actor free of noise/generation implementation details.
 	UniverseDataGenerator UniverseGenerator;
 #pragma endregion
 
@@ -244,8 +246,10 @@ protected:
 	TArray<UNiagaraComponent*> TierNiagaraComponents;
 
 	// --- Generic Tier Pipeline ---
-	// Populates CoarseTierConfig and ProximityTierConfig from Params and
-	// the Niagara asset pointers. Called once at the start of InitializeNiagara.
+	// Populates CoarseTierConfig, MidTierConfig, and ProximityTierConfig
+	// from Params and the Niagara asset pointers. Generation callbacks
+	// delegate to UniverseGenerator methods. Called once at the start of
+	// InitializeNiagara.
 	void BuildTierConfigs();
 
 	// Allocate buffers → build neighborhood → serial slot alloc → parallel
@@ -319,23 +323,6 @@ protected:
 	// Per-frame update: peg actor to player, advance VirtualTraversal, and
 	// broadcast User.ParallaxOffset to all Niagara scratch pads.
 	void ApplyParallaxOffset();
-#pragma endregion
-
-#pragma region Tier-Specific Generation Callbacks
-	// These remain as named methods wired into FParticleTierConfig.GenerateCallback.
-	// Each receives raw buffer pointers and writes directly into the slot.
-
-	// Coarse tier: generates cluster + gas particles using batched noise.
-	// Candidates scatter within ±Extent of the cell center; noise offset is
-	// shared across all candidates in a cell (coord-derived).
-	void GenerateCoarseNode(const FIntVector& InCoord, int32 InSlotIndex,
-		FNiagaraParticleBuffer& InClusterBuffer, FNiagaraParticleBuffer& InGasBuffer);
-
-	// Proximity tier: generates galaxy-scale particles using batched noise.
-	// Candidates scatter within ±CellExtent of the cell center; noise offset
-	// is computed per-candidate (may straddle coarse cell boundaries).
-	void GenerateNodeGalaxies(const FIntVector& InCoord, int32 InSlotIndex,
-		FNiagaraParticleBuffer& InBuffer);
 #pragma endregion
 
 #pragma region Public Octree Queries

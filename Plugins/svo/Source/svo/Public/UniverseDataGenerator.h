@@ -6,9 +6,10 @@
 #include "PointCloudGenerator.h"
 #include "ProceduralSpaceActor.h"
 #include "FVolumeTextureUtils.h"
+#include "FNiagaraParticleBuffer.h"
 #include "UniverseDataGenerator.generated.h"
 
-/// Noise-graph tuning knobs consumed by ASectorActor::BuildNoise().
+/// Noise-graph tuning knobs consumed by UniverseDataGenerator::BuildNoise().
 /// Defaults reproduce the original hardcoded values.
 USTRUCT(BlueprintType)
 struct SVO_API FNoiseParams
@@ -231,6 +232,10 @@ struct SVO_API FUniverseParams : public FBaseParams {
 };
 
 /// UNIVERSE GENERATOR - GENERATES DATA FOR POPULATING A UNIVERSE
+///
+/// Owns all noise composition and particle generation logic. The sector actor
+/// wires tier callbacks that delegate here; this class has no knowledge of
+/// actors, Niagara, octrees, or the streaming pipeline.
 class SVO_API UniverseDataGenerator : public PointCloudGenerator {
 public:
 	UniverseDataGenerator() : PointCloudGenerator(8647) {};
@@ -246,4 +251,59 @@ public:
 	void GenerateData(const FDensityVolume& InDensityVolume);
 
 	TArray<FPointData> GeneratedData;
+
+	// -----------------------------------------------------------------------
+	// Noise Composition
+	// -----------------------------------------------------------------------
+
+	// Build the sector-scale density noise graph from the current Params.
+	// Pure function of FNoiseParams — no actor state needed.
+	FastNoise::SmartNode<> BuildNoise(int InSeed) const;
+
+	// Sample the noise field into a CPU-side volume texture buffer.
+	// Returns the raw BGRA8 data suitable for FDensityVolume or GPU upload.
+	TArray<uint8> SampleNoiseVolume(
+		int InNoiseResolution,
+		const FIntVector& InCellCoord) const;
+
+	// -----------------------------------------------------------------------
+	// Tier Generation Callbacks
+	// -----------------------------------------------------------------------
+	// These are self-contained generation functions that write directly into
+	// particle buffers. The sector actor's tier system calls them via
+	// FParticleTierConfig::GenerateCallback lambdas.
+	//
+	// Grid geometry (NodeCenter, CellExtent) is passed in rather than
+	// computed internally so the generator stays decoupled from the actor's
+	// tree extent multiplier and grid-depth conventions.
+
+	// Large tier: generates cluster + gas particles using batched noise.
+	// OutSlotCount receives the number of accepted particles.
+	void GenerateLargeTierNode(
+		const FIntVector& InCoord,
+		int32 InSlotIndex,
+		FNiagaraParticleBuffer& InClusterBuffer,
+		FNiagaraParticleBuffer& InGasBuffer,
+		const FVector& InNodeCenter,
+		int32& OutSlotCount) const;
+
+	// Mid tier: generates cluster particles at mid-grid scale.
+	// OutSlotCount receives the number of accepted particles.
+	void GenerateMidTierNode(
+		const FIntVector& InCoord,
+		int32 InSlotIndex,
+		FNiagaraParticleBuffer& InBuffer,
+		const FVector& InNodeCenter,
+		double InCellExtent,
+		int32& OutSlotCount) const;
+
+	// Small tier: generates galaxy-scale particles.
+	// OutSlotCount receives the number of accepted particles.
+	void GenerateSmallTierNode(
+		const FIntVector& InCoord,
+		int32 InSlotIndex,
+		FNiagaraParticleBuffer& InBuffer,
+		const FVector& InNodeCenter,
+		double InCellExtent,
+		int32& OutSlotCount) const;
 };
