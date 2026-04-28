@@ -1199,6 +1199,6 @@ void ASectorActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) con
 		/*bPersistent=*/ false,
 		/*Lifetime=*/ SpawnScanInterval,
 		/*DepthPriority=*/ 0,
-		/*Thickness=*/ 1000.0f);
+		/*Thickness=*/ 3000.0f);
 }
 #pragma endregion
