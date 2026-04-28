@@ -146,6 +146,35 @@ public:
 	}
 };
 
+// ---------------------------------------------------------------------------
+// Cached cell data — stores all generated particle data for a single
+// streaming cell so it can be restored on re-entry without re-running
+// procgen. Used by the persistent-cache refactor; the streaming pipeline
+// writes one of these on first generation (cache-miss) and reads it back
+// on subsequent entries (cache-hit).
+//
+// Each tier may have multiple Niagara buffers (e.g. Large = cluster + gas).
+// PerBufferPositions / PerBufferExtents / etc. are outer-indexed by buffer
+// index (parallel to FParticleTierConfig::NiagaraAssets).
+// ---------------------------------------------------------------------------
+struct SVO_API FCachedCellData
+{
+	// Per-buffer particle arrays. Outer index = buffer index within the tier.
+	// Inner arrays hold exactly ParticleCount elements (no dead padding).
+	TArray<TArray<FVector>>        PerBufferPositions;
+	TArray<TArray<float>>          PerBufferExtents;
+	TArray<TArray<FLinearColor>>   PerBufferColors;
+	TArray<TArray<FVector>>        PerBufferRotations; // Empty inner array if tier doesn't use rotations.
+
+	// The procedural center offset used when this cell was generated.
+	// Final position = NodeCenter + CenterOffset + local offsets.
+	// Persisting this avoids re-quantization artifacts on cache restore.
+	FVector CenterOffset = FVector::ZeroVector;
+
+	// Number of accepted (live) particles this cell produced.
+	int32 ParticleCount = 0;
+};
+
 UENUM()
 enum class ELifecycleState : uint8
 {

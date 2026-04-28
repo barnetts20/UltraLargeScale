@@ -346,6 +346,12 @@ void ASectorActor::InitializeTier(FParticleTierConfig& Config, FParticleTierStat
 	// Insert this tier's generated particles into the octree.
 	InsertTierIntoOctree(Config, State, /*BufferIdx=*/ 0);
 
+	// Cache generated data for each cell so re-entry can skip procgen.
+	for (const auto& Pair : ToGenerate)
+	{
+		CacheCellFromBuffers(Config, State, Pair.Key, Pair.Value, /*BufferIdx=*/ 0);
+	}
+
 	// Mirror front → back so either buffer is a valid starting state.
 	for (int32 b = 0; b < NumBuffers; ++b)
 	{
@@ -518,9 +524,12 @@ void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 				Config.OnBoundaryCross(EnteringNodes, ExitingNodes, NewCoord);
 			}
 
-			// Generate entering nodes: serial slot alloc → parallel gen → serial octree insert.
-			TArray<TPair<FIntVector, int32>> ToGenerate;
+			// Generate entering nodes: serial slot alloc → cache-hit restore
+			// or cache-miss parallel gen → serial octree insert.
+			TArray<TPair<FIntVector, int32>> ToGenerate;  // Cache misses.
 			ToGenerate.Reserve(EnteringNodes.Num());
+			int32 CacheHitCount = 0;
+
 			for (const FIntVector& Coord : EnteringNodes)
 			{
 				if (State.FreeSlots.Num() == 0)
@@ -531,10 +540,49 @@ void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 				}
 				const int32 SlotIndex = State.FreeSlots.Pop();
 				State.ActiveSlots.Add(Coord, FSlotEntry{ SlotIndex, {} });
-				ToGenerate.Emplace(Coord, SlotIndex);
+
+				// --- Cache-hit path: restore from CellCache ---
+				const FCachedCellData* Cached = State.CellCache.Find(Coord);
+				if (Cached && Cached->ParticleCount > 0)
+				{
+					const int32 LiveCount = Cached->ParticleCount;
+					State.SlotCounts[SlotIndex] = LiveCount;
+
+					for (int32 b = 0; b < NumBuffers; ++b)
+					{
+						FNiagaraParticleBuffer& Buf = State.Buffers[b][BackIdx];
+						const int32 Start = SlotIndex * Buf.SlotCapacity;
+
+						const TArray<FVector>& CPos = Cached->PerBufferPositions[b];
+						const TArray<float>& CExt = Cached->PerBufferExtents[b];
+						const TArray<FLinearColor>& CCol = Cached->PerBufferColors[b];
+						const TArray<FVector>& CRot = Cached->PerBufferRotations[b];
+
+						for (int32 i = 0; i < LiveCount; ++i)
+						{
+							const int32 Idx = Start + i;
+							Buf.Positions[Idx] = CPos[i];
+							Buf.Extents[Idx] = CExt[i];
+							Buf.Colors[Idx] = CCol[i];
+							if (Buf.Rotations.Num() > 0 && CRot.Num() > 0)
+							{
+								Buf.Rotations[Idx] = CRot[i];
+							}
+						}
+
+						Buf.PadSlotDead(SlotIndex, LiveCount, DeadPos);
+					}
+
+					++CacheHitCount;
+				}
+				else
+				{
+					// --- Cache-miss path: queue for generation ---
+					ToGenerate.Emplace(Coord, SlotIndex);
+				}
 			}
 
-			// Build buffer pointer arrays for the back buffer.
+			// Build buffer pointer arrays for the back buffer (cache-miss cells only).
 			TArray<TArray<FNiagaraParticleBuffer*>> PerSlotBufferPtrs;
 			PerSlotBufferPtrs.SetNum(ToGenerate.Num());
 			for (int32 i = 0; i < ToGenerate.Num(); ++i)
@@ -551,6 +599,12 @@ void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 					Config.GenerateCallback(ToGenerate[i].Key, ToGenerate[i].Value, PerSlotBufferPtrs[i]);
 				}, EParallelForFlags::BackgroundPriority);
 
+			// Cache generated data for each cache-miss cell.
+			for (const auto& Pair : ToGenerate)
+			{
+				CacheCellFromBuffers(Config, State, Pair.Key, Pair.Value, BackIdx);
+			}
+
 			// Octree insert is deferred — RebuildOctree() on the game thread
 			// will reset the tree centered on the current neighborhood and
 			// re-insert all tiers. This avoids the tree going out-of-bounds
@@ -561,8 +615,8 @@ void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 			bOctreeRebuildNeeded.store(true);
 			State.bUpdateInProgress.store(false);
 
-			UE_LOG(LogTemp, Log, TEXT("ASectorActor::UpdateTier [%s] - %d entering, %d exiting in %.3f sec"),
-				*Config.TierName, EnteringNodes.Num(), ExitingNodes.Num(), FPlatformTime::Seconds() - StartTime);
+			UE_LOG(LogTemp, Log, TEXT("ASectorActor::UpdateTier [%s] - %d entering (%d cached, %d generated), %d exiting in %.3f sec"),
+				*Config.TierName, EnteringNodes.Num(), CacheHitCount, ToGenerate.Num(), ExitingNodes.Num(), FPlatformTime::Seconds() - StartTime);
 		});
 }
 
@@ -632,6 +686,62 @@ void ASectorActor::InsertTierIntoOctree(const FParticleTierConfig& Config, FPart
 			if (Node.IsValid())
 			{
 				Entry.InsertedNodes.Add(Node);
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CacheCellFromBuffers — snapshot live particles into the persistent cache
+// ---------------------------------------------------------------------------
+
+void ASectorActor::CacheCellFromBuffers(const FParticleTierConfig& Config, FParticleTierState& State,
+	const FIntVector& Coord, int32 SlotIndex, int32 BufferIdx)
+{
+	const int32 NumBuffers = Config.NiagaraAssets.Num();
+	const int32 LiveCount = State.SlotCounts[SlotIndex];
+
+	FCachedCellData& Cache = State.CellCache.FindOrAdd(Coord);
+	Cache.ParticleCount = LiveCount;
+	Cache.CenterOffset = FVector::ZeroVector; // Positions are stored absolute.
+
+	Cache.PerBufferPositions.SetNum(NumBuffers);
+	Cache.PerBufferExtents.SetNum(NumBuffers);
+	Cache.PerBufferColors.SetNum(NumBuffers);
+	Cache.PerBufferRotations.SetNum(NumBuffers);
+
+	for (int32 b = 0; b < NumBuffers; ++b)
+	{
+		const FNiagaraParticleBuffer& Buf = State.Buffers[b][BufferIdx];
+		const int32 Start = SlotIndex * Buf.SlotCapacity;
+
+		TArray<FVector>& CPos = Cache.PerBufferPositions[b];
+		TArray<float>& CExt = Cache.PerBufferExtents[b];
+		TArray<FLinearColor>& CCol = Cache.PerBufferColors[b];
+		TArray<FVector>& CRot = Cache.PerBufferRotations[b];
+
+		CPos.SetNumUninitialized(LiveCount);
+		CExt.SetNumUninitialized(LiveCount);
+		CCol.SetNumUninitialized(LiveCount);
+
+		if (Buf.Rotations.Num() > 0)
+		{
+			CRot.SetNumUninitialized(LiveCount);
+		}
+		else
+		{
+			CRot.Empty();
+		}
+
+		for (int32 i = 0; i < LiveCount; ++i)
+		{
+			const int32 Idx = Start + i;
+			CPos[i] = Buf.Positions[Idx];
+			CExt[i] = Buf.Extents[Idx];
+			CCol[i] = Buf.Colors[Idx];
+			if (CRot.Num() > 0)
+			{
+				CRot[i] = Buf.Rotations[Idx];
 			}
 		}
 	}

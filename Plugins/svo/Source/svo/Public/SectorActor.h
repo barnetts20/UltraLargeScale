@@ -119,6 +119,12 @@ struct FParticleTierState
 
 	// Per-slot live particle count, written by the generate callback.
 	TArray<int32> SlotCounts;
+
+	// Persistent cache of generated particle data, keyed by grid coord.
+	// Populated on first generation (cache-miss); read back on re-entry
+	// (cache-hit) to skip procgen. Data survives cell exit — only the
+	// particle buffer slot is recycled, not the cached arrays.
+	TMap<FIntVector, FCachedCellData> CellCache;
 };
 
 // ---------------------------------------------------------------------------
@@ -292,6 +298,12 @@ protected:
 	// Insert one tier's active front-buffer particles into the octree.
 	// Helper for RebuildOctree and InitializeTier.
 	void InsertTierIntoOctree(const FParticleTierConfig& Config, FParticleTierState& State, int32 BufferIdx);
+
+	// Extract the live particles from a buffer slot into a FCachedCellData
+	// entry in State.CellCache[Coord]. Called after generation for both
+	// InitializeTier and UpdateTier (cache-write on generation).
+	void CacheCellFromBuffers(const FParticleTierConfig& Config, FParticleTierState& State,
+		const FIntVector& Coord, int32 SlotIndex, int32 BufferIdx);
 
 	// --- Generic Grid Coord Helpers ---
 	// All parameterized by GridDepth so both tiers share one implementation.
