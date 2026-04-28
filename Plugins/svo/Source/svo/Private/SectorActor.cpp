@@ -358,7 +358,10 @@ void ASectorActor::InitializeTier(FParticleTierConfig& Config, FParticleTierStat
 		State.Buffers[b][1].CopyFrom(State.Buffers[b][0]);
 	}
 
-	// Spawn Niagara components on game thread, push real data, activate.
+	// Spawn Niagara components on game thread. Push the full dead buffer first
+	// so Niagara sees the correct particle count, then activate exactly once.
+	// Particle IDs are stable from this point forward — no further
+	// Activate/ReinitializeSystem calls are made for the lifetime of the tier.
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
 	AsyncTask(ENamedThreads::GameThread, [this, &Config, &State, NumBuffers,
@@ -384,7 +387,7 @@ void ASectorActor::InitializeTier(FParticleTierConfig& Config, FParticleTierStat
 					FRotator::ZeroRotator,
 					EAttachLocation::SnapToTarget,
 					/*bAutoDestroy=*/ false,
-					/*bAutoActivate=*/ true);
+					/*bAutoActivate=*/ false);
 
 				if (NC)
 				{
@@ -401,7 +404,19 @@ void ASectorActor::InitializeTier(FParticleTierConfig& Config, FParticleTierStat
 				TierNiagaraComponents.Add(NC);
 			}
 
-			PushTierToNiagara(Config, State);
+			// Push initial data (includes real particle data already generated
+			// above) and activate each component exactly once.
+			const int32 FrontIdx = State.FrontIdx.load();
+			for (int32 b = 0; b < NumBuffers; ++b)
+			{
+				UNiagaraComponent* NC = State.NiagaraComponents[b];
+				if (NC)
+				{
+					NC->SetSystemFixedBounds(Bounds);
+					State.Buffers[b][FrontIdx].ActivateOnce(NC, VirtualTraversal);
+				}
+			}
+
 			CompletionPromise.SetValue();
 		});
 	CompletionFuture.Wait();
@@ -433,10 +448,6 @@ void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 	if (State.bNeedsPush.load())
 	{
 		PushTierToNiagara(Config, State);
-		for (UNiagaraComponent* NC : State.NiagaraComponents)
-		{
-			if (NC) NC->ReinitializeSystem();
-		}
 		State.bNeedsPush.store(false);
 	}
 
@@ -900,21 +911,29 @@ void ASectorActor::ApplyParallaxOffset()
 
 	VirtualTraversal += PlayerDelta * Ratio;
 
-	// Scratch-pad broadcast. Stored particle positions satisfy
-	// stored = LocalPos - VirtualTraversal at every tick. Each frame
-	// VirtualTraversal grows by Ratio * PlayerDelta, so stored needs to
-	// shrink by the same amount.
-	const FVector ParallaxOffset = -PlayerDelta * Ratio;
-	for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &ProximityTierState })
-	{
-		for (UNiagaraComponent* NC : Tier->NiagaraComponents)
-		{
-			if (NC) NC->SetVectorParameter(FName("User.ParallaxOffset"), ParallaxOffset);
-		}
-	}
-
 	// Peg the actor. Components follow via attachment.
 	SetActorLocation(CurrentPlayerPos);
+
+	// Push updated relative positions to all tier buffers every tick.
+	// Because particle IDs are now stable (no reinit), the GPU-side positions
+	// are never reset — so we must re-push LocalPos - VirtualTraversal each
+	// frame as VirtualTraversal grows with the player. This replaces the old
+	// per-tick ParallaxOffset accumulation which depended on Activate(bReset)
+	// clearing the accumulator on each boundary-cross push.
+	for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &ProximityTierState })
+	{
+		const int32 FrontIdx = Tier->FrontIdx.load();
+		for (int32 b = 0; b < Tier->NiagaraComponents.Num(); ++b)
+		{
+			UNiagaraComponent* NC = Tier->NiagaraComponents[b];
+			if (!NC || b >= Tier->Buffers.Num()) continue;
+
+			const TArray<FVector>& RelPos =
+				Tier->Buffers[b][FrontIdx].MakeRelativePositions(VirtualTraversal);
+			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
+				NC, NiagaraBufferParams::Positions, RelPos);
+		}
+	}
 }
 #pragma endregion
 

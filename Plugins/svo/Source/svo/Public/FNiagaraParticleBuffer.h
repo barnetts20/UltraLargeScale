@@ -115,8 +115,9 @@ struct FNiagaraParticleBuffer
     // --- Push helpers ---
 
     // Build a camera-relative position array into the persistent scratch
-    // buffer. Dead particles (Extent == 0) get ZeroVector rather than their
-    // parked DeadPos so they don't drift in on ReinitializeSystem.
+    // buffer. Dead particles (Extent == 0) get ZeroVector so they collapse
+    // to the camera origin and are culled by the Niagara material, rather
+    // than appearing at the parked DeadPos far off-screen.
     // Returns a const reference to the internal scratch buffer.
     const TArray<FVector>& MakeRelativePositions(const FVector& VirtualTraversal) const
     {
@@ -134,7 +135,8 @@ struct FNiagaraParticleBuffer
 
     // Push all allocated arrays to a Niagara component. Relative positions are
     // computed here so the caller doesn't need to manage the intermediate array.
-    // Call after a buffer swap and before ReinitializeSystem.
+    // Does NOT call Activate — particle IDs are stable for the system lifetime;
+    // the Niagara scratch-pad reads the updated arrays each tick automatically.
     void PushToNiagara(UNiagaraComponent* Component, const FVector& VirtualTraversal) const
     {
         if (!Component) return;
@@ -153,7 +155,16 @@ struct FNiagaraParticleBuffer
             UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
                 Component, NiagaraBufferParams::Rotations, Rotations);
         }
+    }
 
+    // Called exactly once at tier init. Pushes the full dead-particle buffer
+    // (all slots zeroed) so Niagara spawns TotalSlots * SlotCapacity particles
+    // with stable IDs, then activates the system. Never called again — all
+    // subsequent updates go through PushToNiagara which only writes data.
+    void ActivateOnce(UNiagaraComponent* Component, const FVector& VirtualTraversal) const
+    {
+        if (!Component) return;
+        PushToNiagara(Component, VirtualTraversal);
         Component->Activate(true);
     }
 };
