@@ -22,10 +22,11 @@ ASectorActor::ASectorActor()
 	SectorGasCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorGas.NG_SectorGas"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
 
-	// Initial tree centered at origin. RebuildOctree() re-centers it on the
-	// current large-tier grid center each time a boundary cross occurs, so
-	// the neighborhood always fits within the tree bounds.
-	Octree = MakeShared<FOctree>(Params.Extent * TreeExtentMultiplier, FVector::ZeroVector);
+	// Initial tree centered at origin, sized large enough for extended
+	// traversal without rebasing. Grid cell sizes use the smaller
+	// GridExtentMultiplier; only the octree spatial index uses the
+	// larger PersistentTreeMultiplier.
+	Octree = MakeShared<FOctree>(Params.Extent * PersistentTreeMultiplier, FVector::ZeroVector);
 }
 #pragma endregion
 
@@ -113,9 +114,8 @@ void ASectorActor::ConfigureCell(FIntVector InCellCoord)
 	SetActorLocation(CellOrigin);
 
 	// Rebuild the octree against the actual extent in case Params were
-	// overridden after construction. Centered at origin; RebuildOctree()
-	// will re-center on first boundary cross.
-	Octree = MakeShared<FOctree>(Params.Extent * TreeExtentMultiplier, FVector::ZeroVector);
+	// overridden after construction. Centered at origin with persistent sizing.
+	Octree = MakeShared<FOctree>(Params.Extent * PersistentTreeMultiplier, FVector::ZeroVector);
 }
 
 void ASectorActor::InitializeChildPool()
@@ -169,7 +169,7 @@ void ASectorActor::InitializeNiagara()
 
 FIntVector ASectorActor::PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const
 {
-	const double CellSize = (Params.Extent * TreeExtentMultiplier) / (1 << InGridDepth);
+	const double CellSize = (Params.Extent * GridExtentMultiplier) / (1 << InGridDepth);
 	return FIntVector(
 		FMath::FloorToInt32(InPos.X / CellSize + 0.5),
 		FMath::FloorToInt32(InPos.Y / CellSize + 0.5),
@@ -178,7 +178,7 @@ FIntVector ASectorActor::PositionToGridCoord(const FVector& InPos, int32 InGridD
 
 FVector ASectorActor::GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const
 {
-	const double CellSize = (Params.Extent * TreeExtentMultiplier) / (1 << InGridDepth);
+	const double CellSize = (Params.Extent * GridExtentMultiplier) / (1 << InGridDepth);
 	return FVector(
 		static_cast<double>(InCoord.X) * CellSize,
 		static_cast<double>(InCoord.Y) * CellSize,
@@ -187,7 +187,7 @@ FVector ASectorActor::GridCoordToCenter(const FIntVector& InCoord, int32 InGridD
 
 double ASectorActor::GetGridCellExtent(int32 InGridDepth) const
 {
-	return (Params.Extent * TreeExtentMultiplier) / (1 << (InGridDepth + 1));
+	return (Params.Extent * GridExtentMultiplier) / (1 << (InGridDepth + 1));
 }
 
 // ---------------------------------------------------------------------------
@@ -501,8 +501,9 @@ void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 			}
 
 			// Free exiting slots: dead-stub their data, return slot index.
-			// Octree nodes are not individually removed here — the full tree
-			// is rebuilt by RebuildOctree() on the game thread after the swap.
+			// Octree nodes from exiting cells are left in place — they
+			// persist as part of the spatial cache. The slot index is
+			// recycled for reuse by entering cells.
 			const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
 			for (const FIntVector& Coord : ExitingNodes)
 			{
@@ -525,9 +526,11 @@ void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 			}
 
 			// Generate entering nodes: serial slot alloc → cache-hit restore
-			// or cache-miss parallel gen → serial octree insert.
+			// or cache-miss parallel gen → incremental octree insert.
 			TArray<TPair<FIntVector, int32>> ToGenerate;  // Cache misses.
+			TArray<int32> AllEnteringSlots;  // All entering slots for octree insert.
 			ToGenerate.Reserve(EnteringNodes.Num());
+			AllEnteringSlots.Reserve(EnteringNodes.Num());
 			int32 CacheHitCount = 0;
 
 			for (const FIntVector& Coord : EnteringNodes)
@@ -540,6 +543,7 @@ void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 				}
 				const int32 SlotIndex = State.FreeSlots.Pop();
 				State.ActiveSlots.Add(Coord, FSlotEntry{ SlotIndex, {} });
+				AllEnteringSlots.Add(SlotIndex);
 
 				// --- Cache-hit path: restore from CellCache ---
 				const FCachedCellData* Cached = State.CellCache.Find(Coord);
@@ -570,6 +574,7 @@ void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 							}
 						}
 
+						// Dead-pad the remainder of the slot.
 						Buf.PadSlotDead(SlotIndex, LiveCount, DeadPos);
 					}
 
@@ -605,14 +610,14 @@ void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 				CacheCellFromBuffers(Config, State, Pair.Key, Pair.Value, BackIdx);
 			}
 
-			// Octree insert is deferred — RebuildOctree() on the game thread
-			// will reset the tree centered on the current neighborhood and
-			// re-insert all tiers. This avoids the tree going out-of-bounds
-			// as grid coords grow away from the original tree center.
+			// Incremental octree insert for all entering cells (hits + misses).
+			for (int32 Slot : AllEnteringSlots)
+			{
+				InsertSlotIntoOctree(Config, State, Slot, BackIdx);
+			}
 
 			State.FrontIdx.store(BackIdx);
 			State.bNeedsPush.store(true);
-			bOctreeRebuildNeeded.store(true);
 			State.bUpdateInProgress.store(false);
 
 			UE_LOG(LogTemp, Log, TEXT("ASectorActor::UpdateTier [%s] - %d entering (%d cached, %d generated), %d exiting in %.3f sec"),
@@ -748,23 +753,106 @@ void ASectorActor::CacheCellFromBuffers(const FParticleTierConfig& Config, FPart
 }
 
 // ---------------------------------------------------------------------------
-// RebuildOctree — reset and re-insert all tiers centered on VirtualTraversal
+// InsertSlotIntoOctree — insert a single slot's particles incrementally
 // ---------------------------------------------------------------------------
 
-void ASectorActor::RebuildOctree()
+void ASectorActor::InsertSlotIntoOctree(const FParticleTierConfig& Config, FParticleTierState& State,
+	int32 SlotIndex, int32 BufferIdx)
+{
+	if (Config.OctreeInsertBufferIndex < 0 || !Octree.IsValid()) return;
+
+	const int32 InsertBufIdx = Config.OctreeInsertBufferIndex;
+	const FNiagaraParticleBuffer& InsertBuffer = State.Buffers[InsertBufIdx][BufferIdx];
+	const double TreeExtent = Octree->Extent;
+
+	FSlotEntry* Entry = nullptr;
+	for (auto& Pair : State.ActiveSlots)
+	{
+		if (Pair.Value.SlotIndex == SlotIndex)
+		{
+			Entry = &Pair.Value;
+			break;
+		}
+	}
+	if (!Entry) return;
+
+	Entry->InsertedNodes.Reset();
+	const int32 BufferStart = SlotIndex * InsertBuffer.SlotCapacity;
+	const int32 LiveCount = State.SlotCounts[SlotIndex];
+
+	Entry->InsertedNodes.Reserve(LiveCount);
+
+	for (int32 i = 0; i < LiveCount; ++i)
+	{
+		const int32 Idx = BufferStart + i;
+		const float Extent = InsertBuffer.Extents[Idx];
+		if (Extent <= 0.0f) continue;
+
+		FPointData PointData = FPointData::MakePointDataFromWorldScale(
+			static_cast<double>(Extent),
+			/*InUnitScale=*/ 1.0,
+			static_cast<int64>(TreeExtent));
+		PointData.SetPosition(InsertBuffer.Positions[Idx]);
+		PointData.Data.ObjectId = SlotIndex;
+		PointData.Data.TypeId = GalaxyTypeId;
+
+		TSharedPtr<FOctreeNode> Node = Octree->InsertPosition(
+			PointData.GetPosition(), PointData.InsertDepth, PointData.Data);
+		if (Node.IsValid())
+		{
+			Entry->InsertedNodes.Add(Node);
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RebaseOctree — exceptional full rebuild centered on VirtualTraversal
+// ---------------------------------------------------------------------------
+
+void ASectorActor::RebaseOctree()
 {
 	if (!Octree.IsValid()) return;
 
-	// Re-center the tree on the current large-tier grid center so that
-	// the neighborhood positions fall within the tree bounds.
-	const FVector GridCenter = GridCoordToCenter(CoarseTierState.CenterCoord, CoarseTierConfig.GridDepth);
-	const double TreeExtent = Params.Extent * TreeExtentMultiplier;
-	Octree = MakeShared<FOctree>(TreeExtent, GridCenter);
+	UE_LOG(LogTemp, Warning, TEXT("ASectorActor::RebaseOctree — rebasing octree to VirtualTraversal (%.1f, %.1f, %.1f)"),
+		VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z);
+
+	const double TreeExtent = Params.Extent * PersistentTreeMultiplier;
+	Octree = MakeShared<FOctree>(TreeExtent, VirtualTraversal);
 
 	// Re-insert all tiers' active slot particles.
 	InsertTierIntoOctree(CoarseTierConfig, CoarseTierState, CoarseTierState.FrontIdx.load());
 	InsertTierIntoOctree(MidTierConfig, MidTierState, MidTierState.FrontIdx.load());
 	InsertTierIntoOctree(ProximityTierConfig, ProximityTierState, ProximityTierState.FrontIdx.load());
+}
+
+// ---------------------------------------------------------------------------
+// CheckOctreeBounds — trigger rebase if VirtualTraversal nears tree edge
+// ---------------------------------------------------------------------------
+
+void ASectorActor::CheckOctreeBounds()
+{
+	if (!Octree.IsValid()) return;
+
+	// Rebase when VirtualTraversal is within 25% of the tree edge on any axis.
+	const FVector TreeCenter = Octree->Root->Center;
+	const double TreeExtent = Octree->Extent;
+	const double Margin = TreeExtent * 0.75;
+
+	const FVector Delta = VirtualTraversal - TreeCenter;
+	if (FMath::Abs(Delta.X) > Margin ||
+		FMath::Abs(Delta.Y) > Margin ||
+		FMath::Abs(Delta.Z) > Margin)
+	{
+		// Only rebase if no tier is mid-update.
+		const bool bAnyUpdating =
+			CoarseTierState.bUpdateInProgress.load() ||
+			MidTierState.bUpdateInProgress.load() ||
+			ProximityTierState.bUpdateInProgress.load();
+		if (!bAnyUpdating)
+		{
+			RebaseOctree();
+		}
+	}
 }
 
 #pragma endregion
@@ -840,27 +928,9 @@ void ASectorActor::Tick(float DeltaTime)
 	UpdateTier(MidTierConfig, MidTierState);
 	UpdateTier(ProximityTierConfig, ProximityTierState);
 
-	// Rebuild the octree on the game thread after any tier boundary cross.
-	// This must happen after UpdateTier (which sets the flag) and before
-	// the next spawn scan tick (which queries the tree).
-	if (bOctreeRebuildNeeded.exchange(false))
-	{
-		// Only rebuild if no tier is mid-update — otherwise the front
-		// buffer may not yet reflect the new slot layout.
-		const bool bAnyUpdating =
-			CoarseTierState.bUpdateInProgress.load() ||
-			MidTierState.bUpdateInProgress.load() ||
-			ProximityTierState.bUpdateInProgress.load();
-		if (!bAnyUpdating)
-		{
-			RebuildOctree();
-		}
-		else
-		{
-			// Defer to next tick.
-			bOctreeRebuildNeeded.store(true);
-		}
-	}
+	// Exceptional rebase check — only triggers when VirtualTraversal
+	// approaches the persistent octree's bounds (very rare).
+	CheckOctreeBounds();
 }
 #pragma endregion
 
@@ -1129,6 +1199,6 @@ void ASectorActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) con
 		/*bPersistent=*/ false,
 		/*Lifetime=*/ SpawnScanInterval,
 		/*DepthPriority=*/ 0,
-		/*Thickness=*/ 10.0f);
+		/*Thickness=*/ 1000.0f);
 }
 #pragma endregion

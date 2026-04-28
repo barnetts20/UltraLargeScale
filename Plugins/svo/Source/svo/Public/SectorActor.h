@@ -33,10 +33,10 @@ struct FParticleTierConfig
 	FString TierName;
 
 	// Depth in the octree that defines this tier's grid cell size.
-	// Cell extent = TreeExtent / (1 << GridDepth), where
-	// TreeExtent = Params.Extent * TreeExtentMultiplier.
-	//   Coarse   = 1  → cell extent = 2*Extent (matches current coarse cell size).
-	//   Proximity = ScanDepth + 1 → cell extent = Extent / 2^ScanDepth.
+	// Cell extent = GridExtent / (1 << GridDepth), where
+	// GridExtent = Params.Extent * GridExtentMultiplier.
+	//   Large    = 1  → cell extent = 2*Extent.
+	//   Small    = ScanDepth + 1 → cell extent = Extent / 2^ScanDepth.
 	int32 GridDepth = 1;
 
 	// Half-width of the 3D neighborhood around the player's current cell.
@@ -150,11 +150,12 @@ public:
 #pragma region Lifecycle State
 	ELifecycleState InitializationState = ELifecycleState::Uninitialized;
 
-	// Sector-scope spatial index. Rebuilt from scratch on boundary crosses
-	// so the tree stays centered on the current neighborhood. The tree is
-	// sized to TreeExtentMultiplier * Params.Extent; positions outside that
-	// range would silently land in wrong nodes, so we rebuild rather than
-	// grow.
+	// Sector-scope spatial index. Persistent across boundary crosses —
+	// nodes survive cell exit and are reused on cache-hit re-entry. The
+	// tree is sized to PersistentTreeMultiplier * Params.Extent, large
+	// enough that normal traversal stays within bounds. Rebasing only
+	// occurs in the exceptional case that VirtualTraversal exits the
+	// root bounds.
 	//
 	// Particles (cluster sprites + galaxy points) are inserted individually
 	// at depths derived from each particle's extent via
@@ -164,20 +165,22 @@ public:
 	// index to read pre-quantized positions/extents.
 	TSharedPtr<FOctree> Octree;
 
-	// Tree sizing convention. Multiplier is fixed by the 3x3 coarse
-	// neighborhood requirement; if CoarseNeighborhoodRadius ever exceeds 1
-	// this needs to scale.
-	static constexpr double TreeExtentMultiplier = 4.0;
+	// Grid cell sizing multiplier. Defines the streaming cell sizes via
+	// CellSize = (Params.Extent * GridExtentMultiplier) / (1 << GridDepth).
+	// Kept at 4.0 to preserve existing cell sizes and generation behavior.
+	static constexpr double GridExtentMultiplier = 4.0;
+
+	// Octree spatial extent multiplier. The octree is sized to
+	// PersistentTreeMultiplier * Params.Extent, giving the player many
+	// cell-widths of travel before hitting the bounds. Must be a power
+	// of 2 for clean octree subdivision. 128 = 2^7, so tree extent =
+	// 2^(31+7) = 2^38, covering ±64× the sector extent per axis.
+	static constexpr double PersistentTreeMultiplier = 128.0;
 
 	// Both tiers' particles tag their octree nodes with this TypeId so
 	// proximity queries can filter for galaxy content vs. anything else
 	// that may live in the tree later.
 	static constexpr int32 GalaxyTypeId = 0;
-
-	// Set by any tier's UpdateTier async task after modifying octree
-	// content. Consumed on the game thread in Tick to trigger a full
-	// octree rebuild centered on the current VirtualTraversal.
-	std::atomic<bool> bOctreeRebuildNeeded{ false };
 
 	// Kicks off async init — InitializeChildPool → InitializeData →
 	// InitializeVolumetric → InitializeNiagara, with Pooling-state guards
@@ -290,14 +293,25 @@ protected:
 	// Lumen/rendering sees a tight bounding box around the actual particles.
 	void PushTierToNiagara(const FParticleTierConfig& Config, FParticleTierState& State);
 
-	// Reset the octree centered on VirtualTraversal and re-insert all active
-	// slots from all three tiers. Called on the game thread when
-	// bOctreeRebuildNeeded is set after a boundary cross.
-	void RebuildOctree();
+	// Exceptional rebase: destroy the octree, re-create it centered on
+	// VirtualTraversal, and re-insert all active slots from all tiers.
+	// Only called when VirtualTraversal exits the root bounds — should
+	// be extremely rare in normal play.
+	void RebaseOctree();
+
+	// Check whether VirtualTraversal is approaching the octree bounds.
+	// If so, trigger RebaseOctree. Called from Tick.
+	void CheckOctreeBounds();
 
 	// Insert one tier's active front-buffer particles into the octree.
-	// Helper for RebuildOctree and InitializeTier.
+	// Helper for RebaseOctree and InitializeTier.
 	void InsertTierIntoOctree(const FParticleTierConfig& Config, FParticleTierState& State, int32 BufferIdx);
+
+	// Insert a single slot's particles into the octree. Used by UpdateTier
+	// for incremental insert of entering cells (both cache-hit and
+	// cache-miss) without a full tree rebuild.
+	void InsertSlotIntoOctree(const FParticleTierConfig& Config, FParticleTierState& State,
+		int32 SlotIndex, int32 BufferIdx);
 
 	// Extract the live particles from a buffer slot into a FCachedCellData
 	// entry in State.CellCache[Coord]. Called after generation for both
