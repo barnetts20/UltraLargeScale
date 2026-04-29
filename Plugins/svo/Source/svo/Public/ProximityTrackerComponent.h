@@ -3,7 +3,7 @@
 #pragma region Includes/ForwardDec
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
-#include <SectorActor.h>
+#include <UniverseActor.h>
 #include <GalaxyActor.h>
 #include <StarSystemActor.h>
 #include "ProximityTrackerComponent.generated.h"
@@ -30,7 +30,7 @@ public:
 	bool DebugMode = true;
 
 	UPROPERTY()
-	ASectorActor* UniverseActor;
+	AUniverseActor* UniverseActor;
 	#pragma endregion
 	
 protected:

@@ -4,7 +4,7 @@
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include "Async/Async.h"
-#include "SectorActor.h"
+#include "UniverseActor.h"
 #include "DataTypes.h"
 
 // -----------------------------------------------------------------------------
@@ -49,7 +49,7 @@ void UClusterNiagaraSystem::ConfigureFromPointNodes(
 	Colors.SetNumUninitialized(Num);
 
 	// Mirror of the per-node array build that used to live inline in
-	// ASectorActor::InitializeData. Per-point rotation is derived from a
+	// AUniverseActor::InitializeData. Per-point rotation is derived from a
 	// random stream seeded on ObjectId so the rotation is stable across runs.
 	ParallelFor(Num, [&](int32 Index)
 		{
@@ -64,7 +64,7 @@ void UClusterNiagaraSystem::ConfigureFromPointNodes(
 }
 
 TFuture<void> UClusterNiagaraSystem::Initialize(
-	ASectorActor* InOwner,
+	AUniverseActor* InOwner,
 	USceneComponent* InOwnerRoot,
 	UNiagaraSystem* InTemplate,
 	const FVector& InInitialPlayerPos)

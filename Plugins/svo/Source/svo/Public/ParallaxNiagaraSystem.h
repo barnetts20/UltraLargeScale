@@ -8,7 +8,7 @@
 #include "FOctree.h"
 #include "ParallaxNiagaraSystem.generated.h"
 
-class ASectorActor;
+class AUniverseActor;
 
 /// <summary>
 /// Abstract base for parallax-driven Niagara visualization layers owned by a
@@ -41,7 +41,7 @@ public:
 	/// Must be called on the game thread.
 	/// </summary>
 	virtual TFuture<void> Initialize(
-		ASectorActor* InOwner,
+		AUniverseActor* InOwner,
 		USceneComponent* InOwnerRoot,
 		UNiagaraSystem* InTemplate,
 		const FVector& InInitialPlayerPos)
@@ -72,7 +72,7 @@ protected:
 	// state (e.g. Params.Extent, DensityVolume) during streaming updates.
 	// Weak to avoid cycles and to gracefully handle sector teardown.
 	UPROPERTY()
-	TWeakObjectPtr<ASectorActor> OwnerSector;
+	TWeakObjectPtr<AUniverseActor> OwnerSector;
 };
 
 
@@ -100,7 +100,7 @@ public:
 	void ConfigureFromPointNodes(const TArray<TSharedPtr<FOctreeNode>>& InPointNodes, double InSectorExtent);
 
 	virtual TFuture<void> Initialize(
-		ASectorActor* InOwner,
+		AUniverseActor* InOwner,
 		USceneComponent* InOwnerRoot,
 		UNiagaraSystem* InTemplate,
 		const FVector& InInitialPlayerPos) override;
