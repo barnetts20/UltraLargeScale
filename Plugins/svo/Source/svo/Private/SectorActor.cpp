@@ -148,7 +148,6 @@ void ASectorActor::InitializeNiagara()
 // ---------------------------------------------------------------------------
 // Generic grid coord helpers — parameterized by GridDepth
 // ---------------------------------------------------------------------------
-
 FIntVector ASectorActor::PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const
 {
 	const double CellSize = (Params.Extent * GridExtentMultiplier) / (1 << InGridDepth);
@@ -175,7 +174,6 @@ double ASectorActor::GetGridCellExtent(int32 InGridDepth) const
 // ---------------------------------------------------------------------------
 // BuildTierConfigs — populate config structs from Params + Niagara assets
 // ---------------------------------------------------------------------------
-
 void ASectorActor::BuildTierConfigs()
 {
 	// Derive MinScale/MaxScale for all tiers from MaxEntityScale + depth spacing.
@@ -257,7 +255,6 @@ void ASectorActor::BuildTierConfigs()
 // ---------------------------------------------------------------------------
 // InitializeTier — generic init pipeline
 // ---------------------------------------------------------------------------
-
 void ASectorActor::InitializeTier(FParticleTierConfig& Config, FParticleTierState& State)
 {
 	double StartTime = FPlatformTime::Seconds();
@@ -410,7 +407,6 @@ void ASectorActor::InitializeTier(FParticleTierConfig& Config, FParticleTierStat
 // ---------------------------------------------------------------------------
 // UpdateTier — per-tick streaming update
 // ---------------------------------------------------------------------------
-
 void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& State)
 {
 	if (InitializationState != ELifecycleState::Ready) return;
@@ -618,7 +614,6 @@ void ASectorActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 // ---------------------------------------------------------------------------
 // PushTierToNiagara — push front buffers to all Niagara components
 // ---------------------------------------------------------------------------
-
 void ASectorActor::PushTierToNiagara(const FParticleTierConfig& Config, FParticleTierState& State)
 {
 	const int32 FrontIdx = State.FrontIdx.load();
@@ -644,7 +639,6 @@ void ASectorActor::PushTierToNiagara(const FParticleTierConfig& Config, FParticl
 // ---------------------------------------------------------------------------
 // InsertTierIntoOctree — insert one tier's active front-buffer particles
 // ---------------------------------------------------------------------------
-
 void ASectorActor::InsertTierIntoOctree(const FParticleTierConfig& Config, FParticleTierState& State, int32 BufferIdx)
 {
 	if (Config.OctreeInsertBufferIndex < 0 || !Octree.IsValid()) return;
@@ -689,9 +683,7 @@ void ASectorActor::InsertTierIntoOctree(const FParticleTierConfig& Config, FPart
 // ---------------------------------------------------------------------------
 // CacheCellFromBuffers — snapshot live particles into the persistent cache
 // ---------------------------------------------------------------------------
-
-void ASectorActor::CacheCellFromBuffers(const FParticleTierConfig& Config, FParticleTierState& State,
-	const FIntVector& Coord, int32 SlotIndex, int32 BufferIdx)
+void ASectorActor::CacheCellFromBuffers(const FParticleTierConfig& Config, FParticleTierState& State, const FIntVector& Coord, int32 SlotIndex, int32 BufferIdx)
 {
 	const int32 NumBuffers = Config.NiagaraAssets.Num();
 	const int32 LiveCount = State.SlotCounts[SlotIndex];
@@ -745,9 +737,7 @@ void ASectorActor::CacheCellFromBuffers(const FParticleTierConfig& Config, FPart
 // ---------------------------------------------------------------------------
 // InsertSlotIntoOctree — insert a single slot's particles incrementally
 // ---------------------------------------------------------------------------
-
-void ASectorActor::InsertSlotIntoOctree(const FParticleTierConfig& Config, FParticleTierState& State,
-	int32 SlotIndex, int32 BufferIdx)
+void ASectorActor::InsertSlotIntoOctree(const FParticleTierConfig& Config, FParticleTierState& State, int32 SlotIndex, int32 BufferIdx)
 {
 	if (Config.OctreeInsertBufferIndex < 0 || !Octree.IsValid()) return;
 
@@ -798,7 +788,6 @@ void ASectorActor::InsertSlotIntoOctree(const FParticleTierConfig& Config, FPart
 // ---------------------------------------------------------------------------
 // RebaseOctree — exceptional full rebuild centered on VirtualTraversal
 // ---------------------------------------------------------------------------
-
 void ASectorActor::RebaseOctree()
 {
 	if (!Octree.IsValid()) return;
@@ -818,7 +807,6 @@ void ASectorActor::RebaseOctree()
 // ---------------------------------------------------------------------------
 // CheckOctreeBounds — trigger rebase if VirtualTraversal nears tree edge
 // ---------------------------------------------------------------------------
-
 void ASectorActor::CheckOctreeBounds()
 {
 	if (!Octree.IsValid()) return;
