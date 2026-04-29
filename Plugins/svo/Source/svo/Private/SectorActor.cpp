@@ -57,9 +57,6 @@ void ASectorActor::Initialize()
 			InitializeData();
 			if (InitializationState == ELifecycleState::Pooling) return;
 
-			InitializeVolumetric();
-			if (InitializationState == ELifecycleState::Pooling) return;
-
 			InitializeNiagara();
 			if (InitializationState == ELifecycleState::Pooling) return;
 
@@ -127,25 +124,10 @@ void ASectorActor::InitializeData()
 {
 	double TotalStart = FPlatformTime::Seconds();
 
-	// Sync generator params before use.
 	UniverseGenerator.Params = Params;
-
-	// Legacy density volume for CPU-side sampling (data generator fallback).
-	// Only built when volumetric is enabled, since it's a consumer of the
-	// same noise field.
-	double StepStart = FPlatformTime::Seconds();
-	int noiseResolution = 128;
-
-	TArray<uint8> LowResData = UniverseGenerator.SampleNoiseVolume(noiseResolution, CellCoord);
-
-	UE_LOG(LogTemp, Log, TEXT("  [InitData] Noise sampling (%d^3): %.3f sec"), noiseResolution, FPlatformTime::Seconds() - StepStart);
-	if (InitializationState == ELifecycleState::Pooling) return;
+	UniverseGenerator.Initialize();
 
 	UE_LOG(LogTemp, Log, TEXT("ASectorActor::InitializeData total: %.3f sec"), FPlatformTime::Seconds() - TotalStart);
-}
-
-void ASectorActor::InitializeVolumetric()
-{
 }
 
 void ASectorActor::InitializeNiagara()
@@ -199,9 +181,6 @@ void ASectorActor::BuildTierConfigs()
 	// Derive MinScale/MaxScale for all tiers from MaxEntityScale + depth spacing.
 	// Must be called before any generate callback reads scale ranges.
 	Params.DeriveScaleRanges();
-
-	// Sync generator params so all generation methods see current values.
-	UniverseGenerator.Params = Params;
 
 	// --- Large tier (was "Coarse") ---
 	CoarseTierConfig.TierName = TEXT("Large");

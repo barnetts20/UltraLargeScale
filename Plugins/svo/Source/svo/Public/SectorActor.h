@@ -175,7 +175,7 @@ public:
 	// cell-widths of travel before hitting the bounds. Must be a power
 	// of 2 for clean octree subdivision. 128 = 2^7, so tree extent =
 	// 2^(31+7) = 2^38, covering ±64× the sector extent per axis.
-	static constexpr double PersistentTreeMultiplier = 128.0;
+	static constexpr double PersistentTreeMultiplier = 32;
 
 	// Both tiers' particles tag their octree nodes with this TypeId so
 	// proximity queries can filter for galaxy content vs. anything else
@@ -225,7 +225,6 @@ public:
 protected:
 #pragma region Initialization
 	void InitializeData();
-	void InitializeVolumetric();
 	void InitializeNiagara();
 	void InitializeChildPool();
 #pragma endregion

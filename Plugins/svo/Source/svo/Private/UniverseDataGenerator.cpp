@@ -1,122 +1,20 @@
 ﻿#include "UniverseDataGenerator.h"
 
-#pragma region UniverseGenerator
-//BEGIN UNIVERSE GENERATOR
-
-namespace
-{
-	// Shared generation worker. Density sampling is abstracted via a callable so
-	// the two public entry points can supply either the legacy octree path or
-	// the new FDensityVolume path without duplicating the generation loop.
-	template <typename TDensitySampler>
-	void GenerateDataInternal(
-		UniverseDataGenerator& Self,
-		TDensitySampler&& SampleDensity)
-	{
-		Self.GeneratedData.Empty();
-
-		// Ensure scale ranges are up-to-date in case MaxEntityScale or depths
-		// were modified after construction.
-		Self.Params.DeriveScaleRanges();
-
-		// Pre-allocate with extra space to avoid race conditions
-		Self.GeneratedData.AddUninitialized(Self.Params.Count);
-		auto LocalNoise = FastNoise::NewFromEncodedNodeTree(Self.Params.EncodedTree);
-
-		const int32 LocalSeed = Self.Seed;
-		const FUniverseParams& LocalParams = Self.Params;
-
-		ParallelFor(LocalParams.Count, [&](int32 i) {
-			FRandomStream LocalStream(LocalSeed + 4713 + i * 10007);
-			bool PointInserted = false;
-			while (!PointInserted) {
-				FVector PointCenter(
-					LocalStream.FRandRange(-LocalParams.Extent, LocalParams.Extent),
-					LocalStream.FRandRange(-LocalParams.Extent, LocalParams.Extent),
-					LocalStream.FRandRange(-LocalParams.Extent, LocalParams.Extent)
-				);
-
-				const float areaDensity = SampleDensity(PointCenter);
-				if (LocalStream.FRand() > areaDensity) continue;
-
-				const double ScaleFactor = 1.0 / static_cast<double>(LocalParams.Extent);
-				const double NX = PointCenter.X * ScaleFactor;
-				const double NY = PointCenter.Y * ScaleFactor;
-				const double NZ = PointCenter.Z * ScaleFactor;
-
-
-				//const double RadialWeight = FMath::Pow(1.0 - FMath::Clamp(PointCenter.Size() / LocalParams.Extent, 0.0, 1.0), .3);
-
-				const double NoiseVal = LocalStream.FRand();
-				const double NoiseSample = FMath::Pow(LocalNoise->GenSingle3D(NX, NY, NZ, LocalSeed), 2.0);// *RadialWeight;
-
-				if (NoiseVal >= NoiseSample)
-				{
-					continue; // Reject this point
-				}
-
-				double scale = FPointData::SampleScaleFromDistribution(LocalParams.LargeTier.MinScale, LocalParams.LargeTier.MaxScale, NoiseVal, LocalParams.LargeTier.ScaleDistribution);
-				FPointData InsertData = FPointData::MakePointDataFromWorldScale(scale, LocalParams.UnitScale, LocalParams.Extent);
-				InsertData.Data.Density = LocalStream.FRandRange(0.5, 1.5);
-				InsertData.Data.Composition = LocalStream.GetUnitVector();
-				InsertData.Data.ObjectId = i;
-				InsertData.Data.TypeId = 1;
-
-				PointCenter *= FVector(
-					1.0 + LocalStream.FRandRange(-LocalParams.Jitter, LocalParams.Jitter),
-					1.0 + LocalStream.FRandRange(-LocalParams.Jitter, LocalParams.Jitter),
-					1.0 + LocalStream.FRandRange(-LocalParams.Jitter, LocalParams.Jitter)
-				);
-
-				InsertData.SetPosition(PointCenter);
-
-				Self.GeneratedData[i] = InsertData;
-				PointInserted = true;
-			}
-			}, EParallelForFlags::BackgroundPriority);
-	}
-}
-
-// Legacy override required by PointCloudGenerator base class.
-void UniverseDataGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
-{
-	UE_LOG(LogTemp, Warning,
-		TEXT("UniverseDataGenerator::GenerateData(FOctree) called — legacy octree density path is deprecated. ")
-		TEXT("Falling back to uniform density. Migrate caller to the FDensityVolume overload."));
-
-	GenerateDataInternal(*this, [](const FVector& /*Pos*/) -> float
-		{
-			return 1.0f; // Uniform acceptance — no octree density read
-		});
-}
-
-// Preferred entry point. Density is sampled directly from the CPU-side BGRA8
-// volume buffer via FDensityVolume (alpha channel = gas density, matching
-// SampleNoiseToVolume's default output channel).
-void UniverseDataGenerator::GenerateData(const FDensityVolume& InDensityVolume)
-{
-	checkf(InDensityVolume.IsValid(),
-		TEXT("UniverseDataGenerator::GenerateData: FDensityVolume is not valid"));
-
-	GenerateDataInternal(*this, [&InDensityVolume](const FVector& Pos) -> float
-		{
-			return InDensityVolume.SampleDensityAtLocalPos(Pos, 3);
-		});
-}
-
-//END UNIVERSE GENERATOR
-#pragma endregion
-
 #pragma region Noise Composition
 
-FastNoise::SmartNode<> UniverseDataGenerator::BuildNoise(int InSeed) const
+void UniverseDataGenerator::Initialize()
+{
+	DensityNoise = BuildNoise();
+}
+
+FastNoise::SmartNode<> UniverseDataGenerator::BuildNoise() const
 {
 	auto Voronoi = FastNoise::New<FastNoise::CellularDistance>();
 	Voronoi->SetDistanceFunction(FastNoise::DistanceFunction::EuclideanSquared);
 	Voronoi->SetReturnType(FastNoise::CellularDistance::ReturnType::Index0);
 	auto SeedOffset = FastNoise::New<FastNoise::SeedOffset>();
 	SeedOffset->SetSource(Voronoi);
-	SeedOffset->SetOffset(InSeed);
+	SeedOffset->SetOffset(Params.Seed);
 	auto DomainScale = FastNoise::New<FastNoise::DomainScale>();
 	DomainScale->SetSource(SeedOffset);
 	DomainScale->SetScale(Params.NoiseParams.MasterScale);
@@ -154,12 +52,7 @@ FastNoise::SmartNode<> UniverseDataGenerator::BuildNoise(int InSeed) const
 	return Warp0;
 }
 
-TArray<uint8> UniverseDataGenerator::SampleNoiseVolume(
-	int InNoiseResolution,
-	const FIntVector& InCellCoord) const
-{
-	auto DensityNoise = BuildNoise(69);
-
+TArray<uint8> UniverseDataGenerator::SampleNoiseVolume(int InNoiseResolution, const FIntVector& InCellCoord) const {
 	const FVector NoiseOffset(
 		static_cast<double>(InCellCoord.X) * 2.0,
 		static_cast<double>(InCellCoord.Y) * 2.0,
@@ -182,14 +75,7 @@ TArray<uint8> UniverseDataGenerator::SampleNoiseVolume(
 
 #pragma region Tier Generation Callbacks
 
-void UniverseDataGenerator::GenerateLargeTierNode(
-	const FIntVector& InCoord,
-	int32 InSlotIndex,
-	FNiagaraParticleBuffer& InClusterBuffer,
-	FNiagaraParticleBuffer& InGasBuffer,
-	const FVector& InNodeCenter,
-	int32& OutSlotCount) const
-{
+void UniverseDataGenerator::GenerateLargeTierNode(const FIntVector& InCoord, int32 InSlotIndex, FNiagaraParticleBuffer& InClusterBuffer, FNiagaraParticleBuffer& InGasBuffer, const FVector& InNodeCenter, int32& OutSlotCount) const {
 	// Batched noise sampling — three phases:
 	//   1. Generate candidate positions + normalized noise coords.
 	//   2. One GenPositionArray3D call covering all candidates.
@@ -238,7 +124,6 @@ void UniverseDataGenerator::GenerateLargeTierNode(
 	}
 
 	// --- Phase 2: batch noise evaluation ---
-	auto DensityNoise = BuildNoise(69);
 	TArray<float> NoiseOut;
 	NoiseOut.SetNumUninitialized(NumCandidates);
 	DensityNoise->GenPositionArray3D(
@@ -344,7 +229,6 @@ void UniverseDataGenerator::GenerateMidTierNode(
 		NoiseZ[i] = (float)((Candidate.Z - CenterZ) * InvExtent + (double)CZ * 2.0);
 	}
 
-	auto DensityNoise = BuildNoise(69);
 	TArray<float> NoiseOut;
 	NoiseOut.SetNumUninitialized(NumCandidates);
 	DensityNoise->GenPositionArray3D(
@@ -443,7 +327,6 @@ void UniverseDataGenerator::GenerateSmallTierNode(
 	}
 
 	// --- Phase 2: batch noise evaluation ---
-	auto DensityNoise = BuildNoise(69);
 	TArray<float> NoiseOut;
 	NoiseOut.SetNumUninitialized(NumCandidates);
 	DensityNoise->GenPositionArray3D(
@@ -493,5 +376,4 @@ void UniverseDataGenerator::GenerateSmallTierNode(
 
 	OutSlotCount = ActualCount;
 }
-
 #pragma endregion

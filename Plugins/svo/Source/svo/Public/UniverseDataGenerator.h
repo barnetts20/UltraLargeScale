@@ -236,20 +236,15 @@ struct SVO_API FUniverseParams : public FBaseParams {
 /// Owns all noise composition and particle generation logic. The sector actor
 /// wires tier callbacks that delegate here; this class has no knowledge of
 /// actors, Niagara, octrees, or the streaming pipeline.
-class SVO_API UniverseDataGenerator : public PointCloudGenerator {
+class SVO_API UniverseDataGenerator {
 public:
-	UniverseDataGenerator() : PointCloudGenerator(8647) {};
-	UniverseDataGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
+	UniverseDataGenerator() {};
+	UniverseDataGenerator(FUniverseParams InParams) {
+		Params = InParams;
+	};
 
 	FUniverseParams Params;
-
-	// Legacy override required by PointCloudGenerator base class.
-	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
-
-	// Preferred entry point: uses a pre-built CPU-side density volume for
-	// rejection sampling instead of going through the octree.
-	void GenerateData(const FDensityVolume& InDensityVolume);
-
+	FastNoise::SmartNode<> DensityNoise;
 	TArray<FPointData> GeneratedData;
 
 	// -----------------------------------------------------------------------
@@ -258,7 +253,8 @@ public:
 
 	// Build the sector-scale density noise graph from the current Params.
 	// Pure function of FNoiseParams — no actor state needed.
-	FastNoise::SmartNode<> BuildNoise(int InSeed) const;
+	void Initialize();
+	FastNoise::SmartNode<> BuildNoise() const;
 
 	// Sample the noise field into a CPU-side volume texture buffer.
 	// Returns the raw BGRA8 data suitable for FDensityVolume or GPU upload.
