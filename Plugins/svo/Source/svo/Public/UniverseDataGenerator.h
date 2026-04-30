@@ -113,14 +113,6 @@ USTRUCT(BlueprintType)
 struct SVO_API FUniverseParams : public FBaseParams {
 	GENERATED_BODY()
 
-	// --- Universe data generator params ---
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	int Count = 500;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	double Jitter = .02;
-
 	// --- Noise ---
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
 	FNoiseParams NoiseParams;
@@ -149,6 +141,7 @@ struct SVO_API FUniverseParams : public FBaseParams {
 
 	// --- Gas layer params (paired with the large tier) ---
 
+	//TODO: these are currently direct set extents. if we want them to behave like the galaxy sprites, they would need to be remapped into the virtual coord space and then back to the particle system extent
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gas")
 	float GasMinExtent = 1e15f;
 

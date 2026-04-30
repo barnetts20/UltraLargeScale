@@ -173,9 +173,9 @@ public:
 	// Octree spatial extent multiplier. The octree is sized to
 	// PersistentTreeMultiplier * Params.Extent, giving the player many
 	// cell-widths of travel before hitting the bounds. Must be a power
-	// of 2 for clean octree subdivision. 128 = 2^7, so tree extent =
-	// 2^(31+7) = 2^38, covering ±64× the sector extent per axis.
-	static constexpr double PersistentTreeMultiplier = 32;
+	// of 2 for clean octree subdivision. 64 = 2^6, so tree extent =
+	// 2^(31+6) = 2^37, covering ±32× the sector extent per axis.
+	static constexpr double PersistentTreeMultiplier = 64;
 
 	// Both tiers' particles tag their octree nodes with this TypeId so
 	// proximity queries can filter for galaxy content vs. anything else

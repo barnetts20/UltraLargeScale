@@ -141,10 +141,11 @@ void UniverseDataGenerator::GenerateLargeTierNode(const FIntVector& InCoord, int
 
 	// --- Phase 3: accept/reject + write to slot ---
 	int32 ActualCount = 0;
+	auto dCurve = Params.LargeTier.DensityResponse.GetRichCurveConst();
 	for (int32 i = 0; i < NumCandidates; ++i)
 	{
 		const float RawDensity = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
-		const float Density = FMath::Clamp(Params.LargeTier.DensityResponse.GetRichCurveConst()->Eval(RawDensity), 0.0f, 1.0f);
+		const float Density = FMath::Clamp(dCurve->Eval(RawDensity), 0.0f, 1.0f);
 		if (Stream.FRand() > Density) continue;
 
 		const float ScaleSample = Stream.FRand();
@@ -235,12 +236,17 @@ void UniverseDataGenerator::GenerateMidTierNode(
 		NoiseOut.GetData(), NumCandidates,
 		NoiseX.GetData(), NoiseY.GetData(), NoiseZ.GetData(),
 		0.0f, 0.0f, 0.0f, Params.Seed);
-
+	
+	NoiseX.Empty();
+	NoiseY.Empty();
+	NoiseZ.Empty();
+	
 	int32 ActualCount = 0;
+	auto dCurve = Params.MidTier.DensityResponse.GetRichCurveConst();
 	for (int32 i = 0; i < NumCandidates; ++i)
 	{
 		const float RawDensity = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
-		const float Density = FMath::Clamp(Params.MidTier.DensityResponse.GetRichCurveConst()->Eval(RawDensity), 0.0f, 1.0f);
+		const float Density = FMath::Clamp(dCurve->Eval(RawDensity), 0.0f, 1.0f);
 		if (Stream.FRand() > Density) continue;
 
 		const float ScaleSample = Stream.FRand();
@@ -345,10 +351,11 @@ void UniverseDataGenerator::GenerateSmallTierNode(
 
 	// --- Phase 3: accept/reject + write to slot ---
 	int32 ActualCount = 0;
+	auto dCurve = Params.SmallTier.DensityResponse.GetRichCurveConst();
 	for (int32 i = 0; i < NumCandidates; ++i)
 	{
 		const float RawDensity = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
-		const float Density = FMath::Clamp(Params.SmallTier.DensityResponse.GetRichCurveConst()->Eval(RawDensity), 0.0f, 1.0f);
+		const float Density = FMath::Clamp(dCurve->Eval(RawDensity), 0.0f, 1.0f);
 		if (Stream.FRand() > Density) continue;
 
 		FVector CompVec = Stream.GetUnitVector();
