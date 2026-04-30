@@ -16,16 +16,19 @@ AUniverseActor::AUniverseActor()
 	PrimaryActorTick.bCanEverTick = true;
 	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent")));
 
+	//Load Niagara Components
 	SectorLargeCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorLarge.NG_SectorLarge"));
 	SectorMidCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorMid.NG_SectorMid"));
 	SectorSmallCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorSmall.NG_SectorSmall"));
 	SectorGasCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorGas.NG_SectorGas"));
+	
+	//Static class for galaxy spawn logic
 	GalaxyActorClass = AGalaxyActor::StaticClass();
 
 	// Initial tree centered at origin, sized large enough for extended
 	// traversal without rebasing. Grid cell sizes use the smaller
 	// GridExtentMultiplier; only the octree spatial index uses the
-	// larger PersistentTreeMultiplier.
+	// larger PersistentTreeMultiplier. Rebased when player leaves its bounds.
 	Octree = MakeShared<FOctree>(Params.Extent * PersistentTreeMultiplier, FVector::ZeroVector);
 }
 #pragma endregion
@@ -730,6 +733,7 @@ void AUniverseActor::CacheCellFromBuffers(const FParticleTierConfig& Config, FPa
 		}
 	}
 }
+
 
 void AUniverseActor::CullTierCache(const FParticleTierConfig& Config, FParticleTierState& State, const FIntVector& NewCenter)
 {
