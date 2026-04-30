@@ -196,7 +196,7 @@ void UniverseDataGenerator::GenerateMidTierNode(
 	const int32 CoordHash = HashCombine(
 		HashCombine(GetTypeHash(InCoord.X), GetTypeHash(InCoord.Y)),
 		GetTypeHash(InCoord.Z));
-	const int32 NodeSeed = HashCombine(Params.Seed + 1, CoordHash);
+	const int32 NodeSeed = HashCombine(Params.Seed + 7, CoordHash);
 	FRandomStream Stream(NodeSeed);
 
 	const int32 NumCandidates = InBuffer.SlotCapacity;
@@ -292,7 +292,7 @@ void UniverseDataGenerator::GenerateSmallTierNode(
 		HashCombine(GetTypeHash(InCoord.X), GetTypeHash(InCoord.Y)),
 		GetTypeHash(InCoord.Z)
 	);
-	int32 NodeSeed = HashCombine(Params.Seed, CoordHash);
+	int32 NodeSeed = HashCombine(Params.Seed + 23, CoordHash);
 	FRandomStream Stream(NodeSeed);
 
 	const int32 NumCandidates = InBuffer.SlotCapacity;

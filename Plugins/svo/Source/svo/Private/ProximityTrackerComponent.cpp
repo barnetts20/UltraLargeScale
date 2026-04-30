@@ -85,7 +85,6 @@ void UProximityTrackerComponent::OnProximityUpdate()
             // We're inside this star system - only scan entities here
             auto NearbyEntityNodes = StarSystemActor->Octree->GetNodesByScreenSpace(
                 StarSystemSampleLocation,
-                ScanExtent,
                 .0001,
                 -1,
                 -1,
@@ -171,8 +170,7 @@ void UProximityTrackerComponent::OnProximityUpdate()
             // We're inside this galaxy - only scan star systems here
             auto NearbyStarSystemNodes = GalaxyActor->Octree->GetNodesByScreenSpace(
                 GalaxySampleLocation,
-                ScanExtent,
-                .0001,
+                .01,
                 -1,
                 -1,
                 1
@@ -229,8 +227,7 @@ void UProximityTrackerComponent::OnProximityUpdate()
 
     TArray<TSharedPtr<FOctreeNode>> NearbyGalaxyNodes = UniverseActor->Octree->GetNodesByScreenSpace(
         SampleLocation,
-        ScanExtent,
-        .0001,
+        .01,
         -1,
         -1,
         1

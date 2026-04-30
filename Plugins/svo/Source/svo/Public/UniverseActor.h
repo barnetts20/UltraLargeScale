@@ -149,7 +149,7 @@ public:
 
 #pragma region Lifecycle State
 	ELifecycleState InitializationState = ELifecycleState::Uninitialized;
-
+	std::atomic<bool> bSpawnScanInProgress{ false };
 	// Sector-scope spatial index. Persistent across boundary crosses —
 	// nodes survive cell exit and are reused on cache-hit re-entry. The
 	// tree is sized to PersistentTreeMultiplier * Params.Extent, large
@@ -259,8 +259,8 @@ protected:
 	FParticleTierState  CoarseTierState;
 	FParticleTierConfig MidTierConfig;
 	FParticleTierState  MidTierState;
-	FParticleTierConfig ProximityTierConfig;
-	FParticleTierState  ProximityTierState;
+	FParticleTierConfig SmallTierConfig;
+	FParticleTierState  SmallTierState;
 
 	// GC-safe storage for all Niagara components created by the tier system.
 	// FParticleTierState::NiagaraComponents holds raw pointers that alias
@@ -318,6 +318,11 @@ protected:
 	void CacheCellFromBuffers(const FParticleTierConfig& Config, FParticleTierState& State,
 		const FIntVector& Coord, int32 SlotIndex, int32 BufferIdx);
 
+	// Evict CellCache entries that are more than NeighborhoodRadius + 4 grid
+	// cells away from NewCenter in Chebyshev distance. Called at the end of
+	// each UpdateTier boundary cross while the async task owns State.
+	void CullTierCache(const FParticleTierConfig& Config, FParticleTierState& State, const FIntVector& NewCenter);
+	
 	// --- Generic Grid Coord Helpers ---
 	// All parameterized by GridDepth so both tiers share one implementation.
 
@@ -386,7 +391,7 @@ public:
 	// Screen-space-culled variant. Traverses the tree top-down and prunes nodes
 	// whose (Extent * (1 + ScaleFactor)) / Distance falls below InScreenSpaceThreshold.
 	// Pass -1 for InTypeId for no type filter.
-	TArray<TSharedPtr<FOctreeNode>> GetNodesByScreenSpace(const FVector& InCenter, double InExtent, double InScreenSpaceThreshold, int32 InTypeId = -1) const;
+	TArray<TSharedPtr<FOctreeNode>> GetNodesByScreenSpace(const FVector& InCenter, double InScreenSpaceThreshold, int32 InTypeId = -1) const;
 #pragma endregion
 
 #pragma region Spawn Range Scanning
@@ -394,14 +399,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
 	float SpawnScanInterval = 0.1f;
 
-	// Extent of the spatial query box around the player (sector-actor-local space).
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
-	double SpawnScanExtent = 200000.0;
-
 	// Screen-space size threshold, angular-size proxy (Extent / Distance).
 	// Lower => smaller things pass => more results.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
-	double SpawnScreenSpaceThreshold = 0.0001;
+	double SpawnScreenSpaceThreshold = 0.033;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
 	bool bDebugDrawSpawnNodes = true;
@@ -414,6 +415,8 @@ public:
 private:
 	FTimerHandle SpawnScanTimerHandle;
 	TSet<TSharedPtr<FOctreeNode>> TrackedSpawnNodes;
+	
+	void InsertParticleIntoOctree(FSlotEntry& Entry, const FVector& Position, float Extent, int32 SlotIndex, double TreeExtent);
 
 	void StartSpawnScanTimer();
 	void StopSpawnScanTimer();

@@ -448,30 +448,38 @@ public:
 		return Nodes;
 	}
 
-	void CollectNodesByScreenSpace(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, const FVector& InCenter, const double InExtent, double ScreenSpaceThreshold, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
+	void CollectNodesByScreenSpace(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, const FVector& InCenter, double ScreenSpaceThresholdSq, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
 		if (!InNode.IsValid()) return;
 
-		const FVector QueryMin = InCenter - FVector(InExtent, InExtent, InExtent);
-		const FVector QueryMax = InCenter + FVector(InExtent, InExtent, InExtent);
-		const FVector NodeMin = InNode->Center - FVector(InNode->Extent, InNode->Extent, InNode->Extent);
-		const FVector NodeMax = InNode->Center + FVector(InNode->Extent, InNode->Extent, InNode->Extent);
+		const double DistSq = FVector::DistSquared(InNode->Center, InCenter);
+		const double ExtentSq = InNode->Extent * InNode->Extent;
 
-		const bool bIntersects = NodeMin.X <= QueryMax.X && NodeMax.X >= QueryMin.X && NodeMin.Y <= QueryMax.Y && NodeMax.Y >= QueryMin.Y && NodeMin.Z <= QueryMax.Z && NodeMax.Z >= QueryMin.Z;
-		if (!bIntersects) return;
-
-		const double Distance = FVector::Dist(InNode->Center, InCenter);
-		if (Distance > 0.0)
+		// Subtree prune: if this node's extent is too small relative to its
+		// distance to ever pass the screen space test, skip the whole subtree.
+		// Uses DistSq directly as a conservative (looser) bound — avoids sqrt
+		// at the cost of slightly less aggressive pruning vs the exact
+		// (Distance - Extent) formulation.
+		if (DistSq > ExtentSq)
 		{
-			if ((InNode->Extent * (1.0 + InNode->Data.ScaleFactor)) / Distance < ScreenSpaceThreshold) return;
+			if (ExtentSq < ScreenSpaceThresholdSq * DistSq) return;
 		}
 
+		// Recurse into children before testing this node.
 		for (const TSharedPtr<FOctreeNode>& Child : InNode->Children)
 		{
 			if (Child.IsValid())
 			{
-				CollectNodesByScreenSpace(Child, OutNodes, InCenter, InExtent, ScreenSpaceThreshold,
+				CollectNodesByScreenSpace(Child, OutNodes, InCenter, ScreenSpaceThresholdSq,
 					InMinDepth, InMaxDepth, InTypeIdFilter);
 			}
+		}
+
+		// Per-node screen space test — squared form of:
+		// (Extent * (1 + ScaleFactor)) / Distance >= Threshold
+		if (DistSq > 0.0)
+		{
+			const double ScaledExtent = InNode->Extent * (1.0 + InNode->Data.ScaleFactor);
+			if (ScaledExtent * ScaledExtent < ScreenSpaceThresholdSq * DistSq) return;
 		}
 
 		bool bPassesFilter = true;
@@ -480,16 +488,16 @@ public:
 		if (InTypeIdFilter != -1 && InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false;
 
 		if (bPassesFilter)
-		{
 			OutNodes.Add(InNode);
-		}
 	}
 
-	TArray<TSharedPtr<FOctreeNode>> GetNodesByScreenSpace(const FVector& InCenter, const double InExtent, const double ScreenSpaceThreshold, const int InMinDepth = -1, const int InMaxDepth = -1, const int InTypeIdFilter = -1) const {
+	TArray<TSharedPtr<FOctreeNode>> GetNodesByScreenSpace(const FVector& InCenter, double ScreenSpaceThreshold, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
 		TArray<TSharedPtr<FOctreeNode>> Nodes;
 		if (Root.IsValid())
 		{
-			CollectNodesByScreenSpace(Root, Nodes, InCenter, InExtent, ScreenSpaceThreshold, InMinDepth, InMaxDepth, InTypeIdFilter);
+			const double ThresholdSq = ScreenSpaceThreshold * ScreenSpaceThreshold;
+			CollectNodesByScreenSpace(Root, Nodes, InCenter, ThresholdSq,
+				InMinDepth, InMaxDepth, InTypeIdFilter);
 		}
 		return Nodes;
 	}
