@@ -12,7 +12,7 @@
 class AGalaxyActor;
 
 // ============================================================================
-//  Tier System - Supporting Structs
+//  Tier System — Supporting Structs
 //  Defined outside the class so they can be forward-declared by subsystems
 //  that only need to read tier data (e.g. volumetric streaming callbacks).
 // ============================================================================
@@ -249,24 +249,10 @@ public:
 	//  Both query functions are safe to call from any thread after Init.
 	// -------------------------------------------------------------------------
 #pragma region Public Octree Queries
-	/**
-	 * Persistent sector-scope spatial index. Survives boundary crosses -
-	 * nodes are inserted on cell entry and left in place on exit, forming a
-	 * spatial registry of all visited particles. Rebased only when
-	 * VirtualTraversal approaches the root bounds (extremely rare).
-	 *
-	 * Data.ObjectId on each node carries the flat slot index into the tier's
-	 * particle buffers. Queries dereference back through that index to read
-	 * pre-computed positions and extents.
-	 *
-	 * Sized to PersistentTreeMultiplier * Params.Extent to give many cell-widths
-	 * of travel before rebasing is needed.
-	 */
-	TSharedPtr<FOctree> Octree;
 
 	/**
 	 * Returns all octree nodes within InRadius of InCenter that match InTypeId.
-	 * Uses an AABB intersection traversal - O(log N) average, O(N) worst case.
+	 * Uses an AABB intersection traversal — O(log N) average, O(N) worst case.
 	 *
 	 * @param InCenter   Query origin in sector-local space.
 	 * @param InRadius   Search radius (half-extent of query box).
@@ -290,6 +276,42 @@ public:
 	 */
 	TArray<TSharedPtr<FOctreeNode>> GetNodesByScreenSpace(
 		const FVector& InCenter, double InScreenSpaceThreshold, int32 InTypeId = -1) const;
+
+#pragma endregion
+
+	// -------------------------------------------------------------------------
+	//  Spatial Index
+	// -------------------------------------------------------------------------
+#pragma region Spatial Index
+
+	/**
+	 * Persistent sector-scope spatial index. Survives boundary crosses --
+	 * nodes are inserted on cell entry and left in place on exit, forming a
+	 * spatial registry of all visited particles. Rebased only when
+	 * VirtualTraversal approaches the root bounds (extremely rare).
+	 *
+	 * Data.ObjectId on each node carries the flat slot index into the tier's
+	 * particle buffers. Queries dereference back through that index to read
+	 * pre-computed positions and extents.
+	 *
+	 * Sized to PersistentTreeMultiplier * Params.Extent to give many cell-widths
+	 * of travel before rebasing is needed.
+	 */
+	TSharedPtr<FOctree> Octree;
+
+	/** Multiplier applied to Params.Extent for streaming cell size computation.
+	 *  CellSize = (Params.Extent * GridExtentMultiplier) / (1 << GridDepth). */
+	static constexpr double GridExtentMultiplier = 4.0;
+
+	/** Multiplier applied to Params.Extent for octree root size.
+	 *  Must be a power of 2. 64 = 2^6, tree covers +/-32x the sector extent
+	 *  per axis, giving ~2^37 units of traversal range before a rebase. */
+	static constexpr double PersistentTreeMultiplier = 64.0;
+
+	/** TypeId tag written into every octree node inserted by the tier system.
+	 *  Allows spatial queries to filter for galaxy/sector content vs. other
+	 *  future node types. */
+	static constexpr int32 GalaxyTypeId = 0;
 
 #pragma endregion
 
@@ -408,7 +430,7 @@ public:
 protected:
 
 	// -------------------------------------------------------------------------
-	//  Initialization  (protected - called by Initialize's async chain)
+	//  Initialization  (protected — called by Initialize's async chain)
 	// -------------------------------------------------------------------------
 #pragma region Initialization
 
@@ -510,7 +532,7 @@ protected:
 	 * the octree, mirrors front→back, then rendezvouses with the game thread
 	 * to spawn Niagara components and activate them exactly once.
 	 *
-	 * Particle IDs are stable from this point forward - Activate is never
+	 * Particle IDs are stable from this point forward — Activate is never
 	 * called again for the lifetime of the tier.
 	 *
 	 * @param Config  Immutable tier descriptor.
@@ -544,14 +566,9 @@ protected:
 #pragma endregion
 
 #pragma region Tier System - Octree Integration
-
-	/**
-	 * Rebuilds the persistent octree centered on VirtualTraversal and
-	 * re-inserts all active slots from all three tiers. Only called when
-	 * VirtualTraversal approaches the tree's spatial bounds - should be
-	 * extremely rare under normal traversal speeds.
-	 */
-	void RebaseOctree();
+	/** True while an async rebase task owns the octree. UpdateTier and
+	 *  CheckOctreeBounds must not proceed while this is set. */
+	std::atomic<bool> bRebaseInProgress{ false };
 
 	/**
 	 * Checks whether VirtualTraversal is within 25% of the octree boundary
@@ -668,26 +685,6 @@ protected:
 #pragma endregion
 
 	// -------------------------------------------------------------------------
-	//  Spatial Index
-	// -------------------------------------------------------------------------
-#pragma region Spatial Index
-	/** Multiplier applied to Params.Extent for streaming cell size computation.
-	 *  CellSize = (Params.Extent * GridExtentMultiplier) / (1 << GridDepth). */
-	static constexpr double GridExtentMultiplier = 4.0;
-
-	/** Multiplier applied to Params.Extent for octree root size.
-	 *  Must be a power of 2. 64 → tree covers ±32× the sector extent per axis,
-	 *  giving ~2^37 units of traversal range before a rebase is needed. */
-	static constexpr double PersistentTreeMultiplier = 64.0;
-
-	/** TypeId tag written into every octree node inserted by the tier system.
-	 *  Allows spatial queries to filter for galaxy/sector content vs. other
-	 *  future node types. */
-	static constexpr int32 GalaxyTypeId = 0;
-
-#pragma endregion
-
-	// -------------------------------------------------------------------------
 	//  Parallax / Virtual Traversal
 	// -------------------------------------------------------------------------
 #pragma region Parallax
@@ -757,7 +754,7 @@ protected:
 private:
 
 	// -------------------------------------------------------------------------
-	//  Spawn Scan - Internal
+	//  Spawn Scan — Internal
 	// -------------------------------------------------------------------------
 #pragma region Spawn Scan - Internal
 

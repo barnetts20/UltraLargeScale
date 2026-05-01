@@ -418,7 +418,7 @@ void AUniverseActor::InitializeTier(FParticleTierConfig& Config, FParticleTierSt
 void AUniverseActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& State)
 {
 	if (InitializationState != ELifecycleState::Ready) return;
-
+	if (bRebaseInProgress.load()) return;
 	// Check that at least one component exists.
 	bool bHasComponent = false;
 	for (UNiagaraComponent* NC : State.NiagaraComponents)
@@ -792,51 +792,63 @@ void AUniverseActor::InsertSlotIntoOctree(const FParticleTierConfig& Config, FPa
 }
 
 // ---------------------------------------------------------------------------
-// RebaseOctree — exceptional full rebuild centered on VirtualTraversal
-// ---------------------------------------------------------------------------
-void AUniverseActor::RebaseOctree()
-{
-	if (!Octree.IsValid()) return;
-
-	UE_LOG(LogTemp, Warning, TEXT("AUniverseActor::RebaseOctree — rebasing octree to VirtualTraversal (%.1f, %.1f, %.1f)"),
-		VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z);
-
-	const double TreeExtent = Params.Extent * PersistentTreeMultiplier;
-	Octree = MakeShared<FOctree>(TreeExtent, VirtualTraversal);
-
-	// Re-insert all tiers' active slot particles.
-	InsertTierIntoOctree(CoarseTierConfig, CoarseTierState, CoarseTierState.FrontIdx.load());
-	InsertTierIntoOctree(MidTierConfig, MidTierState, MidTierState.FrontIdx.load());
-	InsertTierIntoOctree(SmallTierConfig, SmallTierState, SmallTierState.FrontIdx.load());
-}
-
-// ---------------------------------------------------------------------------
 // CheckOctreeBounds — trigger rebase if VirtualTraversal nears tree edge
 // ---------------------------------------------------------------------------
 void AUniverseActor::CheckOctreeBounds()
 {
 	if (!Octree.IsValid()) return;
+	if (bRebaseInProgress.load()) return;
 
-	// Rebase when VirtualTraversal is within 25% of the tree edge on any axis.
 	const FVector TreeCenter = Octree->Root->Center;
 	const double TreeExtent = Octree->Extent;
 	const double Margin = TreeExtent * 0.75;
 
 	const FVector Delta = VirtualTraversal - TreeCenter;
-	if (FMath::Abs(Delta.X) > Margin ||
-		FMath::Abs(Delta.Y) > Margin ||
-		FMath::Abs(Delta.Z) > Margin)
-	{
-		// Only rebase if no tier is mid-update.
-		const bool bAnyUpdating =
-			CoarseTierState.bUpdateInProgress.load() ||
-			MidTierState.bUpdateInProgress.load() ||
-			SmallTierState.bUpdateInProgress.load();
-		if (!bAnyUpdating)
+	if (FMath::Abs(Delta.X) <= Margin &&
+		FMath::Abs(Delta.Y) <= Margin &&
+		FMath::Abs(Delta.Z) <= Margin)
+		return;
+
+	// Only rebase if no tier is mid-update.
+	const bool bAnyUpdating =
+		CoarseTierState.bUpdateInProgress.load() ||
+		MidTierState.bUpdateInProgress.load() ||
+		SmallTierState.bUpdateInProgress.load();
+	if (bAnyUpdating) return;
+
+	bRebaseInProgress.store(true);
+
+	// Snapshot VirtualTraversal now — it will keep advancing on the
+	// game thread while the background task runs, but the new tree
+	// center only needs to be approximately correct. Any drift is
+	// absorbed by the large PersistentTreeMultiplier margin.
+	const FVector RebaseOrigin = VirtualTraversal;
+
+	TWeakObjectPtr<AUniverseActor> WeakThis(this);
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, RebaseOrigin]()
 		{
-			RebaseOctree();
-		}
-	}
+			AUniverseActor* Self = WeakThis.Get();
+			if (!Self) return;
+
+			UE_LOG(LogTemp, Warning,
+				TEXT("AUniverseActor::RebaseOctree -- rebasing to (%.1f, %.1f, %.1f)"),
+				RebaseOrigin.X, RebaseOrigin.Y, RebaseOrigin.Z);
+
+			const double TreeExtent = Self->Params.Extent * PersistentTreeMultiplier;
+			Self->Octree = MakeShared<FOctree>(TreeExtent, RebaseOrigin);
+
+			// Re-insert all tiers using their current front buffers.
+			// Front buffers are read-only on the game thread and won't be
+			// swapped while bRebaseInProgress is true (UpdateTier guards it).
+			Self->InsertTierIntoOctree(Self->CoarseTierConfig, Self->CoarseTierState,
+				Self->CoarseTierState.FrontIdx.load());
+			Self->InsertTierIntoOctree(Self->MidTierConfig, Self->MidTierState,
+				Self->MidTierState.FrontIdx.load());
+			Self->InsertTierIntoOctree(Self->SmallTierConfig, Self->SmallTierState,
+				Self->SmallTierState.FrontIdx.load());
+
+			Self->bRebaseInProgress.store(false);
+		});
 }
 
 #pragma endregion
