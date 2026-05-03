@@ -303,7 +303,8 @@ public:
 		bool bPassesFilter = true;
 		if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
 		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) bPassesFilter = false;
-		if (InTypeIdFilter != -1 && InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false;
+		if (InTypeIdFilter == -1) { if (InNode->Data.TypeId < 0) bPassesFilter = false; }
+		else { if (InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false; }
 
 		if (bIsLeaf && bPassesFilter) {
 			OutNodes.Add(InNode);
@@ -386,7 +387,8 @@ public:
 		if (InNode->Data.Density <= 0) bPassesFilter = false;
 		if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
 		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) bPassesFilter = false;
-		if (InTypeIdFilter != -1 && InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false;
+		if (InTypeIdFilter == -1) { if (InNode->Data.TypeId < 0) bPassesFilter = false; }
+		else { if (InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false; }
 
 		if (bPassesFilter) {
 			OutNodes.Add(InNode);
@@ -431,7 +433,8 @@ public:
 		bool bPassesFilter = true;
 		if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
 		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) bPassesFilter = false;
-		if (InTypeIdFilter != -1 && InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false;
+		if (InTypeIdFilter == -1) { if (InNode->Data.TypeId < 0) bPassesFilter = false; }
+		else { if (InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false; }
 
 		if (bPassesFilter)
 		{
@@ -485,7 +488,8 @@ public:
 		bool bPassesFilter = true;
 		if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
 		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) bPassesFilter = false;
-		if (InTypeIdFilter != -1 && InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false;
+		if (InTypeIdFilter == -1) { if (InNode->Data.TypeId < 0) bPassesFilter = false; }
+		else { if (InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false; }
 
 		if (bPassesFilter)
 			OutNodes.Add(InNode);

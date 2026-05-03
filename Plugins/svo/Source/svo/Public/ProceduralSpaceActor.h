@@ -57,7 +57,7 @@ public:
     virtual void ResetForPool();    // Called when returning to pool
 #pragma endregion
 
-protected:
+public:
 #pragma region Initialization (pure virtual - must implement)
     virtual void InitializeData();
     virtual void InitializeVolumetric();

@@ -42,35 +42,35 @@ void AUniverseActor::Initialize()
 
 	TWeakObjectPtr<AUniverseActor> WeakThis(this);
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis]()
-	{
-		AUniverseActor* Self = WeakThis.Get();
-		if (!Self) return;
-
-		double StartTime = FPlatformTime::Seconds();
-
-		Self->InitializeChildPool();
-		if (Self->InitializationState == ELifecycleState::Pooling) return;
-
-		Self->InitializeData();
-		if (Self->InitializationState == ELifecycleState::Pooling) return;
-
-		Self->InitializeNiagara();
-		if (Self->InitializationState == ELifecycleState::Pooling) return;
-
-		Self->InitializationState = ELifecycleState::Ready;
-
-		double TotalDuration = FPlatformTime::Seconds() - StartTime;
-		UE_LOG(LogTemp, Log, TEXT("%s::Initialize total duration: %.3f seconds"), *Self->GetClass()->GetName(), TotalDuration);
-
-		// TimerManager must be touched on the game thread.
-		AsyncTask(ENamedThreads::GameThread, [WeakThis]()
 		{
-			if (AUniverseActor* InnerSelf = WeakThis.Get())
-			{
-				InnerSelf->StartSpawnScanTimer();
-			}
+			AUniverseActor* Self = WeakThis.Get();
+			if (!Self) return;
+
+			double StartTime = FPlatformTime::Seconds();
+
+			Self->InitializeChildPool();
+			if (Self->InitializationState == ELifecycleState::Pooling) return;
+
+			Self->InitializeData();
+			if (Self->InitializationState == ELifecycleState::Pooling) return;
+
+			Self->InitializeNiagara();
+			if (Self->InitializationState == ELifecycleState::Pooling) return;
+
+			Self->InitializationState = ELifecycleState::Ready;
+
+			double TotalDuration = FPlatformTime::Seconds() - StartTime;
+			UE_LOG(LogTemp, Log, TEXT("%s::Initialize total duration: %.3f seconds"), *Self->GetClass()->GetName(), TotalDuration);
+
+			// TimerManager must be touched on the game thread.
+			AsyncTask(ENamedThreads::GameThread, [WeakThis]()
+				{
+					if (AUniverseActor* InnerSelf = WeakThis.Get())
+					{
+						InnerSelf->StartSpawnScanTimer();
+					}
+				});
 		});
-	});
 }
 #pragma endregion
 
@@ -102,7 +102,22 @@ void AUniverseActor::ConfigureCell(FIntVector InCellCoord)
 
 void AUniverseActor::InitializeChildPool()
 {
-	// TODO: Re-enable when galaxy spawning is wired up to UniverseActor
+	TPromise<void> CompletionPromise;
+	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
+	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
+		{
+			for (int32 i = 0; i < GalaxyPoolSize; i++)
+			{
+				AGalaxyActor* Galaxy = GetWorld()->SpawnActor<AGalaxyActor>(GalaxyActorClass, FVector::ZeroVector, FRotator::ZeroRotator);
+				Galaxy->bAutoInitializeOnBeginPlay = false;
+				Galaxy->Universe = this;
+				Galaxy->SetActorHiddenInGame(true);
+				GalaxyPool.Add(Galaxy);
+			}
+			UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeChildPool — pre-warmed %d galaxy actors"), GalaxyPoolSize);
+			CompletionPromise.SetValue();
+		});
+	CompletionFuture.Wait();
 }
 
 void AUniverseActor::InitializeData()
@@ -150,6 +165,7 @@ void AUniverseActor::BuildTierConfigs()
 
 	// --- Large tier (was "Coarse") ---
 	CoarseTierConfig.TierName = TEXT("Large");
+	CoarseTierConfig.TierIndex = 0;
 	CoarseTierConfig.GridDepth = Params.LargeTier.GridDepth;
 	CoarseTierConfig.NeighborhoodRadius = Params.LargeTier.NeighborhoodRadius;
 	CoarseTierConfig.SlotCapacity = Params.LargeTier.MaxParticlesPerSlot;
@@ -159,10 +175,11 @@ void AUniverseActor::BuildTierConfigs()
 	CoarseTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
 		const FVector NodeCenter = GridCoordToCenter(Coord, CoarseTierConfig.GridDepth);
 		UniverseGenerator.GenerateLargeTierNode(Coord, SlotIndex, *Buffers[0], *Buffers[1], NodeCenter, CoarseTierState.SlotCounts[SlotIndex]);
-	};
+		};
 
 	// --- Mid tier ---
 	MidTierConfig.TierName = TEXT("Mid");
+	MidTierConfig.TierIndex = 1;
 	MidTierConfig.GridDepth = Params.MidTier.GridDepth;
 	MidTierConfig.NeighborhoodRadius = Params.MidTier.NeighborhoodRadius;
 	MidTierConfig.SlotCapacity = Params.MidTier.MaxParticlesPerSlot;
@@ -173,10 +190,11 @@ void AUniverseActor::BuildTierConfigs()
 		const FVector NodeCenter = GridCoordToCenter(Coord, MidTierConfig.GridDepth);
 		const double CellExt = GetGridCellExtent(MidTierConfig.GridDepth);
 		UniverseGenerator.GenerateMidTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter, CellExt, MidTierState.SlotCounts[SlotIndex]);
-	};
+		};
 
 	// --- Small tier (was "Proximity") ---
 	SmallTierConfig.TierName = TEXT("Small");
+	SmallTierConfig.TierIndex = 2;
 	SmallTierConfig.GridDepth = Params.SmallTier.GridDepth;
 	SmallTierConfig.NeighborhoodRadius = Params.SmallTier.NeighborhoodRadius;
 	SmallTierConfig.SlotCapacity = Params.SmallTier.MaxParticlesPerSlot;
@@ -187,18 +205,18 @@ void AUniverseActor::BuildTierConfigs()
 		const FVector NodeCenter = GridCoordToCenter(Coord, SmallTierConfig.GridDepth);
 		const double CellExt = GetGridCellExtent(SmallTierConfig.GridDepth);
 		UniverseGenerator.GenerateSmallTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter, CellExt, SmallTierState.SlotCounts[SlotIndex]);
-	};
+		};
 
 	// Applied to each tier after its GridDepth/NeighborhoodRadius are set.
 	// Captures Config by ref — safe since Config outlives all lambda calls.
-	auto MakeBoundsLambda = [this](const FParticleTierConfig& Cfg) -> TFunction<FBox()> 
-	{
-		return [this, &Cfg]() -> FBox
+	auto MakeBoundsLambda = [this](const FParticleTierConfig& Cfg) -> TFunction<FBox()>
 		{
-			const double BoundsExtent = (2 * Cfg.NeighborhoodRadius + 1) * GetGridCellExtent(Cfg.GridDepth) * 2.0;
-			return FBox(FVector(-BoundsExtent), FVector(BoundsExtent));
+			return [this, &Cfg]() -> FBox
+				{
+					const double BoundsExtent = (2 * Cfg.NeighborhoodRadius + 1) * GetGridCellExtent(Cfg.GridDepth) * 2.0;
+					return FBox(FVector(-BoundsExtent), FVector(BoundsExtent));
+				};
 		};
-	};
 	CoarseTierConfig.ComputeBounds = MakeBoundsLambda(CoarseTierConfig);
 	MidTierConfig.ComputeBounds = MakeBoundsLambda(MidTierConfig);
 	SmallTierConfig.ComputeBounds = MakeBoundsLambda(SmallTierConfig);
@@ -258,7 +276,7 @@ void AUniverseActor::InitializeTier(FParticleTierConfig& Config, FParticleTierSt
 	}
 	ParallelFor(ToGenerate.Num(), [&Config, &ToGenerate, &PerSlotBufferPtrs](int32 i) {
 		Config.GenerateCallback(ToGenerate[i].Key, ToGenerate[i].Value, PerSlotBufferPtrs[i]);
-	}, EParallelForFlags::BackgroundPriority);
+		}, EParallelForFlags::BackgroundPriority);
 	// Insert this tier's generated particles into the octree.
 	InsertTierIntoOctree(Config, State, 0);
 	// Cache generated data for each cell so re-entry can skip procgen.
@@ -313,7 +331,7 @@ void AUniverseActor::InitializeTier(FParticleTierConfig& Config, FParticleTierSt
 			}
 		}
 		CompletionPromise.SetValue();
-	});
+		});
 	CompletionFuture.Wait();
 	const int32 Side_Log = 2 * Config.NeighborhoodRadius + 1;
 	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeTier [%s] took %.3f sec (%d slots, %d max particles/slot, center %d,%d,%d)"), *Config.TierName, FPlatformTime::Seconds() - StartTime, Side_Log * Side_Log * Side_Log, Config.SlotCapacity, State.CenterCoord.X, State.CenterCoord.Y, State.CenterCoord.Z);
@@ -346,155 +364,155 @@ void AUniverseActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState&
 	State.CenterCoord = NewCoord;
 	TWeakObjectPtr<AUniverseActor> WeakThis(this);
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, &Config, &State, OldCenter, NewCoord]()
-	{
-		AUniverseActor* Self = WeakThis.Get();
-		if (!Self)
 		{
-			// Actor destroyed mid-flight — release the flag so nothing deadlocks.
-			State.bUpdateInProgress.store(false);
-			return;
-		}
-		double StartTime = FPlatformTime::Seconds();
-		const int32 NumBuffers = Config.NiagaraAssets.Num();
-		const int32 FrontIdx = State.FrontIdx.load();
-		const int32 BackIdx = 1 - FrontIdx;
-		// Copy front → back; unchanged slots carry over untouched.
-		for (int32 b = 0; b < NumBuffers; ++b)
-		{
-			State.Buffers[b][BackIdx].CopyFrom(State.Buffers[b][FrontIdx]);
-		}
-		// Build old and new neighborhood coord sets.
-		TSet<FIntVector> OldSet;
-		TSet<FIntVector> NewSet;
-		for (int32 dz = -Config.NeighborhoodRadius; dz <= Config.NeighborhoodRadius; ++dz)
-		{
-			for (int32 dy = -Config.NeighborhoodRadius; dy <= Config.NeighborhoodRadius; ++dy)
+			AUniverseActor* Self = WeakThis.Get();
+			if (!Self)
 			{
-				for (int32 dx = -Config.NeighborhoodRadius; dx <= Config.NeighborhoodRadius; ++dx)
-				{
-					const FIntVector Offset(dx, dy, dz);
-					if (OldCenter.X != INT32_MIN)
-					{
-						OldSet.Add(OldCenter + Offset);
-					}
-					NewSet.Add(NewCoord + Offset);
-				}
+				// Actor destroyed mid-flight — release the flag so nothing deadlocks.
+				State.bUpdateInProgress.store(false);
+				return;
 			}
-		}
-		TArray<FIntVector> ExitingNodes;
-		TArray<FIntVector> EnteringNodes;
-		for (const FIntVector& Coord : OldSet)
-		{
-			if (!NewSet.Contains(Coord)) ExitingNodes.Add(Coord);
-		}
-		for (const FIntVector& Coord : NewSet)
-		{
-			if (!OldSet.Contains(Coord)) EnteringNodes.Add(Coord);
-		}
-		// Free exiting slots: dead-stub their data, return slot index.
-		// Octree nodes from exiting cells are left in place — they
-		// persist as part of the spatial cache. The slot index is
-		// recycled for reuse by entering cells.
-		const FVector DeadPos(Self->Params.Extent * 10.0, Self->Params.Extent * 10.0, Self->Params.Extent * 10.0);
-		for (const FIntVector& Coord : ExitingNodes)
-		{
-			FSlotEntry* Entry = State.ActiveSlots.Find(Coord);
-			if (Entry)
-			{
-				for (int32 b = 0; b < NumBuffers; ++b)
-				{
-					State.Buffers[b][BackIdx].ClearSlot(Entry->SlotIndex, DeadPos);
-				}
-				State.FreeSlots.Add(Entry->SlotIndex);
-				State.ActiveSlots.Remove(Coord);
-			}
-		}
-		// Fire optional boundary-cross hook (e.g. streaming volumetric).
-		if (Config.OnBoundaryCross) Config.OnBoundaryCross(EnteringNodes, ExitingNodes, NewCoord);
-		// Generate entering nodes: serial slot alloc → cache-hit restore
-		// or cache-miss parallel gen → incremental octree insert.
-		TArray<TPair<FIntVector, int32>> ToGenerate;  // Cache misses.
-		TArray<int32> AllEnteringSlots;  // All entering slots for octree insert.
-		ToGenerate.Reserve(EnteringNodes.Num());
-		AllEnteringSlots.Reserve(EnteringNodes.Num());
-		int32 CacheHitCount = 0;
-		for (const FIntVector& Coord : EnteringNodes)
-		{
-			if (State.FreeSlots.Num() == 0)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("AUniverseActor::UpdateTier [%s] - no free slots; dropping cell (%d,%d,%d)"), *Config.TierName, Coord.X, Coord.Y, Coord.Z);
-				continue;
-			}
-			const int32 SlotIndex = State.FreeSlots.Pop();
-			State.ActiveSlots.Add(Coord, FSlotEntry{ SlotIndex, {} });
-			AllEnteringSlots.Add(SlotIndex);
-			// --- Cache-hit path: restore from CellCache ---
-			const FCachedCellData* Cached = State.CellCache.Find(Coord);
-			if (Cached && Cached->ParticleCount > 0)
-			{
-				const int32 LiveCount = Cached->ParticleCount;
-				State.SlotCounts[SlotIndex] = LiveCount;
-				for (int32 b = 0; b < NumBuffers; ++b)
-				{
-					FNiagaraParticleBuffer& Buf = State.Buffers[b][BackIdx];
-					const int32 Start = SlotIndex * Buf.SlotCapacity;
-					const TArray<FVector>& CPos = Cached->PerBufferPositions[b];
-					const TArray<float>& CExt = Cached->PerBufferExtents[b];
-					const TArray<FLinearColor>& CCol = Cached->PerBufferColors[b];
-					const TArray<FVector>& CRot = Cached->PerBufferRotations[b];
-					for (int32 i = 0; i < LiveCount; ++i)
-					{
-						const int32 Idx = Start + i;
-						Buf.Positions[Idx] = CPos[i];
-						Buf.Extents[Idx] = CExt[i];
-						Buf.Colors[Idx] = CCol[i];
-						if (Buf.Rotations.Num() > 0 && CRot.Num() > 0)
-						{
-							Buf.Rotations[Idx] = CRot[i];
-						}
-					}
-					// Dead-pad the remainder of the slot.
-					Buf.PadSlotDead(SlotIndex, LiveCount, DeadPos);
-				}
-				++CacheHitCount;
-			}
-			else
-			{
-				// --- Cache-miss path: queue for generation ---
-				ToGenerate.Emplace(Coord, SlotIndex);
-			}
-		}
-		// Build buffer pointer arrays for the back buffer (cache-miss cells only).
-		TArray<TArray<FNiagaraParticleBuffer*>> PerSlotBufferPtrs;
-		PerSlotBufferPtrs.SetNum(ToGenerate.Num());
-		for (int32 i = 0; i < ToGenerate.Num(); ++i)
-		{
-			PerSlotBufferPtrs[i].SetNum(NumBuffers);
+			double StartTime = FPlatformTime::Seconds();
+			const int32 NumBuffers = Config.NiagaraAssets.Num();
+			const int32 FrontIdx = State.FrontIdx.load();
+			const int32 BackIdx = 1 - FrontIdx;
+			// Copy front → back; unchanged slots carry over untouched.
 			for (int32 b = 0; b < NumBuffers; ++b)
 			{
-				PerSlotBufferPtrs[i][b] = &State.Buffers[b][BackIdx];
+				State.Buffers[b][BackIdx].CopyFrom(State.Buffers[b][FrontIdx]);
 			}
-		}
-		ParallelFor(ToGenerate.Num(), [&Config, &ToGenerate, &PerSlotBufferPtrs](int32 i) {
-			Config.GenerateCallback(ToGenerate[i].Key, ToGenerate[i].Value, PerSlotBufferPtrs[i]);
-		}, EParallelForFlags::BackgroundPriority);
-		// Cache generated data for each cache-miss cell.
-		for (const auto& Pair : ToGenerate)
-		{
-			Self->CacheCellFromBuffers(Config, State, Pair.Key, Pair.Value, BackIdx);
-		}
-		// Incremental octree insert for all entering cells (hits + misses).
-		for (int32 Slot : AllEnteringSlots)
-		{
-			Self->InsertSlotIntoOctree(Config, State, Slot, BackIdx);
-		}	
-		// Evict cache entries outside the proximity window.
-		State.FrontIdx.store(BackIdx);
-		State.bNeedsPush.store(true);
-		Self->CullTierCache(Config, State, NewCoord);
-		State.bUpdateInProgress.store(false);
-		UE_LOG(LogTemp, Verbose, TEXT("AUniverseActor::UpdateTier [%s] - %d entering (%d cached, %d generated), %d exiting in %.3f sec"), *Config.TierName, EnteringNodes.Num(), CacheHitCount, ToGenerate.Num(), ExitingNodes.Num(), FPlatformTime::Seconds() - StartTime);
-	});
+			// Build old and new neighborhood coord sets.
+			TSet<FIntVector> OldSet;
+			TSet<FIntVector> NewSet;
+			for (int32 dz = -Config.NeighborhoodRadius; dz <= Config.NeighborhoodRadius; ++dz)
+			{
+				for (int32 dy = -Config.NeighborhoodRadius; dy <= Config.NeighborhoodRadius; ++dy)
+				{
+					for (int32 dx = -Config.NeighborhoodRadius; dx <= Config.NeighborhoodRadius; ++dx)
+					{
+						const FIntVector Offset(dx, dy, dz);
+						if (OldCenter.X != INT32_MIN)
+						{
+							OldSet.Add(OldCenter + Offset);
+						}
+						NewSet.Add(NewCoord + Offset);
+					}
+				}
+			}
+			TArray<FIntVector> ExitingNodes;
+			TArray<FIntVector> EnteringNodes;
+			for (const FIntVector& Coord : OldSet)
+			{
+				if (!NewSet.Contains(Coord)) ExitingNodes.Add(Coord);
+			}
+			for (const FIntVector& Coord : NewSet)
+			{
+				if (!OldSet.Contains(Coord)) EnteringNodes.Add(Coord);
+			}
+			// Free exiting slots: dead-stub their data, return slot index.
+			// Octree nodes from exiting cells are left in place — they
+			// persist as part of the spatial cache. The slot index is
+			// recycled for reuse by entering cells.
+			const FVector DeadPos(Self->Params.Extent * 10.0, Self->Params.Extent * 10.0, Self->Params.Extent * 10.0);
+			for (const FIntVector& Coord : ExitingNodes)
+			{
+				FSlotEntry* Entry = State.ActiveSlots.Find(Coord);
+				if (Entry)
+				{
+					for (int32 b = 0; b < NumBuffers; ++b)
+					{
+						State.Buffers[b][BackIdx].ClearSlot(Entry->SlotIndex, DeadPos);
+					}
+					State.FreeSlots.Add(Entry->SlotIndex);
+					State.ActiveSlots.Remove(Coord);
+				}
+			}
+			// Fire optional boundary-cross hook (e.g. streaming volumetric).
+			if (Config.OnBoundaryCross) Config.OnBoundaryCross(EnteringNodes, ExitingNodes, NewCoord);
+			// Generate entering nodes: serial slot alloc → cache-hit restore
+			// or cache-miss parallel gen → incremental octree insert.
+			TArray<TPair<FIntVector, int32>> ToGenerate;  // Cache misses.
+			TArray<int32> AllEnteringSlots;  // All entering slots for octree insert.
+			ToGenerate.Reserve(EnteringNodes.Num());
+			AllEnteringSlots.Reserve(EnteringNodes.Num());
+			int32 CacheHitCount = 0;
+			for (const FIntVector& Coord : EnteringNodes)
+			{
+				if (State.FreeSlots.Num() == 0)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("AUniverseActor::UpdateTier [%s] - no free slots; dropping cell (%d,%d,%d)"), *Config.TierName, Coord.X, Coord.Y, Coord.Z);
+					continue;
+				}
+				const int32 SlotIndex = State.FreeSlots.Pop();
+				State.ActiveSlots.Add(Coord, FSlotEntry{ SlotIndex, {} });
+				AllEnteringSlots.Add(SlotIndex);
+				// --- Cache-hit path: restore from CellCache ---
+				const FCachedCellData* Cached = State.CellCache.Find(Coord);
+				if (Cached && Cached->ParticleCount > 0)
+				{
+					const int32 LiveCount = Cached->ParticleCount;
+					State.SlotCounts[SlotIndex] = LiveCount;
+					for (int32 b = 0; b < NumBuffers; ++b)
+					{
+						FNiagaraParticleBuffer& Buf = State.Buffers[b][BackIdx];
+						const int32 Start = SlotIndex * Buf.SlotCapacity;
+						const TArray<FVector>& CPos = Cached->PerBufferPositions[b];
+						const TArray<float>& CExt = Cached->PerBufferExtents[b];
+						const TArray<FLinearColor>& CCol = Cached->PerBufferColors[b];
+						const TArray<FVector>& CRot = Cached->PerBufferRotations[b];
+						for (int32 i = 0; i < LiveCount; ++i)
+						{
+							const int32 Idx = Start + i;
+							Buf.Positions[Idx] = CPos[i];
+							Buf.Extents[Idx] = CExt[i];
+							Buf.Colors[Idx] = CCol[i];
+							if (Buf.Rotations.Num() > 0 && CRot.Num() > 0)
+							{
+								Buf.Rotations[Idx] = CRot[i];
+							}
+						}
+						// Dead-pad the remainder of the slot.
+						Buf.PadSlotDead(SlotIndex, LiveCount, DeadPos);
+					}
+					++CacheHitCount;
+				}
+				else
+				{
+					// --- Cache-miss path: queue for generation ---
+					ToGenerate.Emplace(Coord, SlotIndex);
+				}
+			}
+			// Build buffer pointer arrays for the back buffer (cache-miss cells only).
+			TArray<TArray<FNiagaraParticleBuffer*>> PerSlotBufferPtrs;
+			PerSlotBufferPtrs.SetNum(ToGenerate.Num());
+			for (int32 i = 0; i < ToGenerate.Num(); ++i)
+			{
+				PerSlotBufferPtrs[i].SetNum(NumBuffers);
+				for (int32 b = 0; b < NumBuffers; ++b)
+				{
+					PerSlotBufferPtrs[i][b] = &State.Buffers[b][BackIdx];
+				}
+			}
+			ParallelFor(ToGenerate.Num(), [&Config, &ToGenerate, &PerSlotBufferPtrs](int32 i) {
+				Config.GenerateCallback(ToGenerate[i].Key, ToGenerate[i].Value, PerSlotBufferPtrs[i]);
+				}, EParallelForFlags::BackgroundPriority);
+			// Cache generated data for each cache-miss cell.
+			for (const auto& Pair : ToGenerate)
+			{
+				Self->CacheCellFromBuffers(Config, State, Pair.Key, Pair.Value, BackIdx);
+			}
+			// Incremental octree insert for all entering cells (hits + misses).
+			for (int32 Slot : AllEnteringSlots)
+			{
+				Self->InsertSlotIntoOctree(Config, State, Slot, BackIdx);
+			}
+			// Evict cache entries outside the proximity window.
+			State.FrontIdx.store(BackIdx);
+			State.bNeedsPush.store(true);
+			Self->CullTierCache(Config, State, NewCoord);
+			State.bUpdateInProgress.store(false);
+			UE_LOG(LogTemp, Verbose, TEXT("AUniverseActor::UpdateTier [%s] - %d entering (%d cached, %d generated), %d exiting in %.3f sec"), *Config.TierName, EnteringNodes.Num(), CacheHitCount, ToGenerate.Num(), ExitingNodes.Num(), FPlatformTime::Seconds() - StartTime);
+		});
 }
 
 void AUniverseActor::PushTierToNiagara(const FParticleTierConfig& Config, FParticleTierState& State)
@@ -587,7 +605,7 @@ void AUniverseActor::InsertTierIntoOctree(const FParticleTierConfig& Config, FPa
 		{
 			const int32 Idx = BufferStart + i;
 			if (InsertBuffer.Extents[Idx] <= 0.0f) continue;
-			InsertParticleIntoOctree(Entry, InsertBuffer.Positions[Idx], InsertBuffer.Extents[Idx], Entry.SlotIndex, TreeExtent);
+			InsertParticleIntoOctree(Entry, InsertBuffer.Positions[Idx], InsertBuffer.Extents[Idx], Entry.SlotIndex, TreeExtent, Config.TierIndex);
 		}
 	}
 }
@@ -611,17 +629,17 @@ void AUniverseActor::InsertSlotIntoOctree(const FParticleTierConfig& Config, FPa
 	{
 		const int32 Idx = BufferStart + i;
 		if (InsertBuffer.Extents[Idx] <= 0.0f) continue;
-		InsertParticleIntoOctree(*Entry, InsertBuffer.Positions[Idx], InsertBuffer.Extents[Idx], SlotIndex, TreeExtent);
+		InsertParticleIntoOctree(*Entry, InsertBuffer.Positions[Idx], InsertBuffer.Extents[Idx], SlotIndex, TreeExtent, Config.TierIndex);
 	}
 }
 
-void AUniverseActor::InsertParticleIntoOctree(FSlotEntry& Entry, const FVector& Position, float Extent, int32 SlotIndex, double TreeExtent)
+void AUniverseActor::InsertParticleIntoOctree(FSlotEntry& Entry, const FVector& Position, float Extent, int32 SlotIndex, double TreeExtent, int32 TierIndex)
 {
 	// Extent is already in sector-local units. UnitScale=1.0 avoids double-conversion.
 	FPointData PointData = FPointData::MakePointDataFromWorldScale(static_cast<double>(Extent), 1.0, static_cast<int64>(TreeExtent));
 	PointData.SetPosition(Position);
 	PointData.Data.ObjectId = SlotIndex;
-	PointData.Data.TypeId = GalaxyTypeId;
+	PointData.Data.TypeId = TierIndex;
 	TSharedPtr<FOctreeNode> Node = Octree->InsertPosition(PointData.GetPosition(), PointData.InsertDepth, PointData.Data);
 	if (Node.IsValid()) Entry.InsertedNodes.Add(Node);
 }
@@ -661,7 +679,7 @@ void AUniverseActor::CheckOctreeBounds()
 		Self->InsertTierIntoOctree(Self->SmallTierConfig, Self->SmallTierState,
 			Self->SmallTierState.FrontIdx.load());
 		Self->bRebaseInProgress.store(false);
-	});
+		});
 }
 #pragma endregion
 
@@ -747,10 +765,25 @@ void AUniverseActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 #pragma region Child Spawn Location
 FVector AUniverseActor::ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const
 {
-	const double ThisUnitScale = Params.UnitScale;
-	const double Ratio = (ChildUnitScale > 0.0) ? (ThisUnitScale / ChildUnitScale) : 1.0;
-	const FVector CellLocalOffset = NodeCenter - CellOrigin;
-	return CurrentFrameOfReferenceLocation + CellLocalOffset * Ratio;
+	// The debug box renders at: ActorLocation + NodeCenter - VirtualTraversal
+	// That's where the node's particle sprite appears in world space.
+	//
+	// The galaxy actor is physically larger than the node (Params.Extent vs
+	// InNode->Extent). To subtend the same angular size from the camera,
+	// it must be placed proportionally further along the same view vector.
+	//
+	// distance_galaxy / size_galaxy = distance_node / size_node
+	// distance_galaxy = distance_node * (size_galaxy / size_node)
+	//
+	// ChildUnitScale encodes the node-to-galaxy size relationship:
+	//   ChildUnitScale = (InNode->Extent * ParentUnitScale) / Galaxy->Params.Extent
+	// So: Galaxy->Params.Extent / InNode->Extent = ParentUnitScale / ChildUnitScale
+	const double SizeRatio = Params.UnitScale / ChildUnitScale;
+
+	const FVector DebugBoxCenter = GetActorLocation() + NodeCenter - VirtualTraversal;
+	const FVector CameraToNode = DebugBoxCenter - CurrentFrameOfReferenceLocation;
+
+	return CurrentFrameOfReferenceLocation + CameraToNode * SizeRatio;
 }
 #pragma endregion
 
@@ -758,6 +791,7 @@ FVector AUniverseActor::ComputeChildSpawnLocation(const FVector& NodeCenter, dou
 void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 {
 	if (!InNode.IsValid() || !GalaxyActorClass || SpawnedGalaxies.Contains(InNode) || InitializationState != ELifecycleState::Ready) return;
+	if (InNode->Data.ObjectId < 0) return;
 	if (GalaxyPool.Num() == 0)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("Galaxy pool exhausted, consider increasing GalaxyPoolSize"));
@@ -766,13 +800,65 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	AGalaxyActor* Galaxy = GalaxyPool.Pop();
 	SpawnedGalaxies.Add(InNode, TWeakObjectPtr<AGalaxyActor>(Galaxy));
 	Galaxy->ResetForSpawn();
-	Galaxy->Params.UnitScale = (InNode->Extent * this->Params.UnitScale) / Galaxy->Params.Extent;
+	Galaxy->Universe = this;
+	Galaxy->bAutoInitializeOnBeginPlay = false;
+
+	// TypeId carries the tier index (0=Large, 1=Mid, 2=Small),
+	// written during InsertParticleIntoOctree.
+	const int32 TierIndex = FMath::Clamp(InNode->Data.TypeId, 0, 2);
+	FParticleTierConfig* TierConfigs[] = { &CoarseTierConfig, &MidTierConfig, &SmallTierConfig };
+	FParticleTierState* TierStates[] = { &CoarseTierState, &MidTierState, &SmallTierState };
+	FParticleTierConfig& MatchedConfig = *TierConfigs[TierIndex];
+	FParticleTierState& MatchedState = *TierStates[TierIndex];
+
+	// ObjectId is the slot index within that tier's buffer.
+	const int32 SlotId = InNode->Data.ObjectId;
+	const int32 FrontIdx = MatchedState.FrontIdx.load();
+	const FNiagaraParticleBuffer& Front = MatchedState.Buffers[0][FrontIdx];
+	const int32 SlotStart = SlotId * MatchedConfig.SlotCapacity;
+	const int32 SlotCount = MatchedState.SlotCounts[SlotId];
+
+	// Find the particle closest to the node center (node is octree-quantized).
+	FVector ParticlePos = InNode->Center;
+	float ParticleExtent = static_cast<float>(InNode->Extent);
+	double BestDistSq = TNumericLimits<double>::Max();
+
+	for (int32 i = 0; i < SlotCount; ++i)
+	{
+		const double DistSq = FVector::DistSquared(Front.Positions[SlotStart + i], InNode->Center);
+		if (DistSq < BestDistSq)
+		{
+			BestDistSq = DistSq;
+			ParticlePos = Front.Positions[SlotStart + i];
+			ParticleExtent = Front.Extents[SlotStart + i];
+		}
+	}
+
+	// Derive UnitScale from the particle extent instead of the node extent.
+	Galaxy->Params.UnitScale = (static_cast<double>(ParticleExtent) * this->Params.UnitScale) / Galaxy->Params.Extent;
 	Galaxy->SpeedScale = SpeedScale;
 	Galaxy->Params.Seed = InNode->Data.ObjectId;
 	Galaxy->Params.ParentColor = FLinearColor(InNode->Data.Composition);
 	FRandomStream RandStream(InNode->Data.ObjectId);
 	Galaxy->Params.Rotation = RandStream.GetUnitVector().Rotation();
-	Galaxy->SetActorLocation(ComputeChildSpawnLocation(InNode->Center, Galaxy->Params.UnitScale));
+
+	// Place galaxy to match the particle sprite, not the node bounds.
+	const FVector SpawnLoc = ComputeChildSpawnLocation(ParticlePos, Galaxy->Params.UnitScale);
+	Galaxy->SetActorLocation(SpawnLoc);
+	Galaxy->LastFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
+	Galaxy->CurrentFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
+
+	UE_LOG(LogTemp, Warning, TEXT("=== SpawnGalaxyFromPool ==="));
+	UE_LOG(LogTemp, Warning, TEXT("  Node: center=(%.1f, %.1f, %.1f) extent=%.2f objId=%d tier=%s"),
+		InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Data.ObjectId, *MatchedConfig.TierName);
+	UE_LOG(LogTemp, Warning, TEXT("  Particle: pos=(%.1f, %.1f, %.1f) extent=%.2f"),
+		ParticlePos.X, ParticlePos.Y, ParticlePos.Z, ParticleExtent);
+	UE_LOG(LogTemp, Warning, TEXT("  Galaxy: spawnLoc=(%.1f, %.1f, %.1f) unitScale=%.2e extent=%.0f sizeRatio=%.2f seed=%d"),
+		SpawnLoc.X, SpawnLoc.Y, SpawnLoc.Z,
+		Galaxy->Params.UnitScale, Galaxy->Params.Extent,
+		Params.UnitScale / Galaxy->Params.UnitScale,
+		Galaxy->Params.Seed);
+
 	Galaxy->Initialize();
 	Galaxy->SetActorHiddenInGame(false);
 }
@@ -788,22 +874,22 @@ void AUniverseActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 	UE_LOG(LogTemp, Log, TEXT("Returning galaxy to pool for node ObjectId: %d"), InNode->Data.ObjectId);
 	Galaxy->ResetForPool();
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, WeakGalaxy]()
-	{
-		AGalaxyActor* AsyncGalaxy = WeakGalaxy.Get();
-		if (!AsyncGalaxy) return;
-		double StartTime = FPlatformTime::Seconds();
-		AsyncGalaxy->Octree->bIsResetting.store(true);
-		FPlatformProcess::Sleep(0.05f);
-		AsyncGalaxy->Octree = MakeShared<FOctree>(AsyncGalaxy->Params.Extent);
-		AsyncGalaxy->Octree->bIsResetting.store(false);
-		UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Flushing Octree took: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
-		AsyncTask(ENamedThreads::GameThread, [WeakThis, WeakGalaxy]()
 		{
-			AUniverseActor* Self = WeakThis.Get();
-			AGalaxyActor* InnerGalaxy = WeakGalaxy.Get();
-			if (Self && InnerGalaxy) Self->GalaxyPool.Insert(InnerGalaxy, 0);
+			AGalaxyActor* AsyncGalaxy = WeakGalaxy.Get();
+			if (!AsyncGalaxy) return;
+			double StartTime = FPlatformTime::Seconds();
+			AsyncGalaxy->Octree->bIsResetting.store(true);
+			FPlatformProcess::Sleep(0.05f);
+			AsyncGalaxy->Octree = MakeShared<FOctree>(AsyncGalaxy->Params.Extent);
+			AsyncGalaxy->Octree->bIsResetting.store(false);
+			UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Flushing Octree took: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, WeakGalaxy]()
+				{
+					AUniverseActor* Self = WeakThis.Get();
+					AGalaxyActor* InnerGalaxy = WeakGalaxy.Get();
+					if (Self && InnerGalaxy) Self->GalaxyPool.Insert(InnerGalaxy, 0);
+				});
 		});
-	});
 }
 #pragma endregion
 
@@ -840,29 +926,34 @@ void AUniverseActor::UpdateSpawnRangeNodes()
 	const FVector LocalPlayerPos = VirtualTraversal;
 	TWeakObjectPtr<AUniverseActor> WeakThis(this);
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, LocalPlayerPos]()
-	{
-		AUniverseActor* Self = WeakThis.Get();
-		if (!Self) return;
-		const TArray<TSharedPtr<FOctreeNode>> NearbyArray = Self->GetNodesByScreenSpace(LocalPlayerPos, Self->SpawnScreenSpaceThreshold, GalaxyTypeId);
-		AsyncTask(ENamedThreads::GameThread, [WeakThis, NearbyArray]()
 		{
-			AUniverseActor* InnerSelf = WeakThis.Get();
-			if (!InnerSelf) return;
-			TSet<TSharedPtr<FOctreeNode>> NearbySet(NearbyArray);
-			for (const TSharedPtr<FOctreeNode>& Node : NearbySet)
-			{
-				if (!InnerSelf->TrackedSpawnNodes.Contains(Node)) InnerSelf->LogSpawnNodeEnter(Node);
-				if (InnerSelf->bDebugDrawSpawnNodes) InnerSelf->DebugDrawSpawnNode(Node);
-			}
-			TSet<TSharedPtr<FOctreeNode>> Exited = InnerSelf->TrackedSpawnNodes.Difference(NearbySet);
-			for (const TSharedPtr<FOctreeNode>& Node : Exited)
-			{
-				InnerSelf->LogSpawnNodeExit(Node);
-			}
-			InnerSelf->TrackedSpawnNodes = MoveTemp(NearbySet);
-			InnerSelf->bSpawnScanInProgress.store(false);
+			AUniverseActor* Self = WeakThis.Get();
+			if (!Self) return;
+			const TArray<TSharedPtr<FOctreeNode>> NearbyArray = Self->GetNodesByScreenSpace(LocalPlayerPos, Self->SpawnScreenSpaceThreshold, -1);
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, NearbyArray]()
+				{
+					AUniverseActor* InnerSelf = WeakThis.Get();
+					if (!InnerSelf) return;
+					TSet<TSharedPtr<FOctreeNode>> NearbySet(NearbyArray);
+					for (const TSharedPtr<FOctreeNode>& Node : NearbySet)
+					{
+						if (!InnerSelf->TrackedSpawnNodes.Contains(Node))
+						{
+							InnerSelf->LogSpawnNodeEnter(Node);
+							InnerSelf->SpawnGalaxyFromPool(Node);
+						}
+						if (InnerSelf->bDebugDrawSpawnNodes) InnerSelf->DebugDrawSpawnNode(Node);
+					}
+					TSet<TSharedPtr<FOctreeNode>> Exited = InnerSelf->TrackedSpawnNodes.Difference(NearbySet);
+					for (const TSharedPtr<FOctreeNode>& Node : Exited)
+					{
+						InnerSelf->LogSpawnNodeExit(Node);
+						InnerSelf->ReturnGalaxyToPool(Node);
+					}
+					InnerSelf->TrackedSpawnNodes = MoveTemp(NearbySet);
+					InnerSelf->bSpawnScanInProgress.store(false);
+				});
 		});
-	});
 }
 
 void AUniverseActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) const

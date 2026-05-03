@@ -45,6 +45,45 @@ void AGalaxyActor::BeginPlay()
 }
 #pragma endregion
 
+#pragma region Pool Lifecycle
+void AGalaxyActor::ResetForPool()
+{
+	// Tear down tier Niagara components before base class teardown
+	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
+	{
+		for (UNiagaraComponent*& NC : Tier->NiagaraComponents)
+		{
+			if (NC)
+			{
+				NC->Deactivate();
+				NC->DestroyComponent();
+				NC = nullptr;
+			}
+		}
+		Tier->NiagaraComponents.Empty();
+		Tier->Buffers.Empty();
+		Tier->ActiveSlots.Empty();
+		Tier->FreeSlots.Empty();
+		Tier->SlotCounts.Empty();
+		Tier->CellCache.Empty();
+		Tier->CenterCoord = FIntVector(INT32_MIN);
+		Tier->FrontIdx.store(0);
+		Tier->bUpdateInProgress.store(false);
+		Tier->bNeedsPush.store(false);
+	}
+	TierNiagaraComponents.Empty();
+
+	// Base class handles VolumetricComponent and legacy NiagaraComponent
+	Super::ResetForPool();
+}
+
+void AGalaxyActor::ResetForSpawn()
+{
+	Super::ResetForSpawn();
+	VirtualTraversal = FVector::ZeroVector;
+}
+#pragma endregion
+
 #pragma region Initialization
 void AGalaxyActor::InitializeChildPool()
 {

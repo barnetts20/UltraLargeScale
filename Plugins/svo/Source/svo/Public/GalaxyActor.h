@@ -32,12 +32,23 @@ public:
 	bool bAutoInitializeOnBeginPlay = true;
 
 	virtual void BeginPlay() override;
+
+	FVector VirtualTraversal = FVector::ZeroVector;
 #pragma endregion
 
 #pragma region Pooled Spawn/Despawn Hooks
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AStarSystemActor>> SpawnedStarSystems;
 	void SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode);
 	void ReturnStarSystemToPool(TSharedPtr<FOctreeNode> InNode);
+#pragma endregion
+
+#pragma region Initialization
+	virtual void InitializeData() override;
+	virtual void InitializeVolumetric() override;
+	virtual void InitializeNiagara() override;
+	virtual void InitializeChildPool() override;
+	virtual void ResetForPool() override;
+	virtual void ResetForSpawn() override;
 #pragma endregion
 
 protected:
@@ -47,13 +58,6 @@ protected:
 	virtual double GetParentSpeedScale() const override {
 		return Universe ? Universe->SpeedScale : SpeedScale;
 	}
-#pragma endregion
-
-#pragma region Initialization
-	virtual void InitializeData() override;
-	virtual void InitializeVolumetric() override;
-	virtual void InitializeNiagara() override;
-	virtual void InitializeChildPool() override;
 #pragma endregion
 
 #pragma region Data Generation
@@ -108,7 +112,6 @@ protected:
 #pragma endregion
 
 #pragma region Tier System - Grid Coord Helpers
-	FVector VirtualTraversal{0,0,0};
 	FIntVector PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const;
 	FVector GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const;
 	double GetGridCellExtent(int32 InGridDepth) const;
