@@ -1,8 +1,13 @@
+// GalaxyActor.h
+// Full tier streaming system mirroring UniverseActor.
+// Large tier: exhaustive single-pass (NeighborhoodRadius=0), always loaded.
+// Mid/Small tiers: neighborhood streaming with cell cache.
+
 #pragma once
 #include "CoreMinimal.h"
 #include "ProceduralSpaceActor.h"
 #include "GalaxyDataGenerator.h"
-#include "UniverseActor.h" 
+#include "UniverseActor.h"
 #include "GalaxyActor.generated.h"
 
 class AStarSystemActor;
@@ -22,7 +27,11 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Galaxy Parent Actor")
 	AUniverseActor* Universe;
-	// SpeedScale, IsDebug, InitializationState, Octree inherited from base class
+
+	UPROPERTY(EditAnywhere, Category = "Galaxy Properties")
+	bool bAutoInitializeOnBeginPlay = true;
+
+	virtual void BeginPlay() override;
 #pragma endregion
 
 #pragma region Pooled Spawn/Despawn Hooks
@@ -32,7 +41,7 @@ public:
 #pragma endregion
 
 protected:
-#pragma region Params Accessors (implement pure virtuals from base)
+#pragma region Params Accessors
 	virtual double GetUnitScale() const override { return Params.UnitScale; }
 	virtual double GetExtent() const override { return Params.Extent; }
 	virtual double GetParentSpeedScale() const override {
@@ -40,30 +49,83 @@ protected:
 	}
 #pragma endregion
 
-#pragma region Initialization (implement pure virtuals from base)
+#pragma region Initialization
 	virtual void InitializeData() override;
 	virtual void InitializeVolumetric() override;
 	virtual void InitializeNiagara() override;
-	virtual void InitializeChildPool() override;  // Star system pool initialization
+	virtual void InitializeChildPool() override;
 #pragma endregion
 
 #pragma region Data Generation
 	GalaxyDataGenerator GalaxyGenerator;
 #pragma endregion
 
-#pragma region Niagara (galaxy-specific)
+#pragma region Niagara Assets
 	FString NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
-	// Positions, Extents, Colors, SectorGalaxyCloud, NiagaraComponent inherited from base
+
+	UPROPERTY()
+	UNiagaraSystem* GalaxyLargeCloud;
+
+	UPROPERTY()
+	UNiagaraSystem* GalaxyMidCloud;
+
+	UPROPERTY()
+	UNiagaraSystem* GalaxySmallCloud;
 #pragma endregion
 
-#pragma region Volumetric (galaxy-specific)
+#pragma region Tier System - Config / State
+	FParticleTierConfig LargeTierConfig;
+	FParticleTierState  LargeTierState;
+
+	FParticleTierConfig MidTierConfig;
+	FParticleTierState  MidTierState;
+
+	FParticleTierConfig SmallTierConfig;
+	FParticleTierState  SmallTierState;
+
+	UPROPERTY()
+	TArray<UNiagaraComponent*> TierNiagaraComponents;
+#pragma endregion
+
+#pragma region Tier System - Pipeline
+	void BuildTierConfigs();
+	void InitializeTier(FParticleTierConfig& Config, FParticleTierState& State);
+	void UpdateTier(FParticleTierConfig& Config, FParticleTierState& State);
+	void PushTierToNiagara(const FParticleTierConfig& Config, FParticleTierState& State);
+#pragma endregion
+
+#pragma region Tier System - Octree Integration
+	void InsertTierIntoOctree(const FParticleTierConfig& Config, FParticleTierState& State, int32 BufferIdx);
+	void InsertSlotIntoOctree(const FParticleTierConfig& Config, FParticleTierState& State, int32 SlotIndex, int32 BufferIdx);
+	void InsertParticleIntoOctree(FSlotEntry& Entry, const FVector& Position, float Extent, int32 SlotIndex, double TreeExtent);
+#pragma endregion
+
+#pragma region Tier System - Cell Cache
+	void CacheCellFromBuffers(const FParticleTierConfig& Config, FParticleTierState& State,
+		const FIntVector& Coord, int32 SlotIndex, int32 BufferIdx);
+	void CullTierCache(const FParticleTierConfig& Config, FParticleTierState& State,
+		const FIntVector& NewCenter);
+#pragma endregion
+
+#pragma region Tier System - Grid Coord Helpers
+	FVector VirtualTraversal{0,0,0};
+	FIntVector PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const;
+	FVector GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const;
+	double GetGridCellExtent(int32 InGridDepth) const;
+	static constexpr double GridExtentMultiplier = 4.0;
+#pragma endregion
+
+#pragma region Volumetric
 	FString VolumetricMaterialPath = FString("/svo/Materials/RayMarchers/MT_GalaxyRaymarchPseudoVolume_Inst.MT_GalaxyRaymarchPseudoVolume_Inst");
-	// PseudoVolumeTexture, VolumetricComponent, VolumeMaterial inherited from base
 #pragma endregion
 
 #pragma region Star System Pool
 	TSubclassOf<AStarSystemActor> StarSystemActorClass;
 	int StarSystemPoolSize = 5;
 	TArray<AStarSystemActor*> StarSystemPool;
+#pragma endregion
+
+#pragma region Tick
+	virtual void Tick(float DeltaTime) override;
 #pragma endregion
 };
