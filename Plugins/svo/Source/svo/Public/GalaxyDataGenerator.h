@@ -38,7 +38,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// All tier scale ranges cascade downward from this single value,
 	/// identical to FUniverseParams::MaxEntityScale logic.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
-	double MaxEntityScale = 1e16;
+	double MaxEntityScale = 1e18;
 
 	// --- Per-tier streaming configs ---
 
