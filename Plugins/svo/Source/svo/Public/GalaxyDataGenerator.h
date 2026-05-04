@@ -30,7 +30,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 
 	/// Voxel resolution per axis for the density pseudo-volume texture.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density Volume")
-	int32 DensityVolumeResolution = 64;
+	int32 DensityVolumeResolution = 128;
 
 	// --- Tier scale derivation ---
 
@@ -38,7 +38,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// All tier scale ranges cascade downward from this single value,
 	/// identical to FUniverseParams::MaxEntityScale logic.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
-	double MaxEntityScale = 1e16;
+	double MaxEntityScale = 1e20;
 
 	// --- Per-tier streaming configs ---
 
