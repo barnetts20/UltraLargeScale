@@ -29,7 +29,7 @@ public:
 	AUniverseActor* Universe;
 
 	UPROPERTY(EditAnywhere, Category = "Galaxy Properties")
-	bool bAutoInitializeOnBeginPlay = true;
+	bool bAutoInitializeOnBeginPlay = false;
 
 	virtual void BeginPlay() override;
 
@@ -65,7 +65,7 @@ protected:
 #pragma endregion
 
 #pragma region Niagara Assets
-	FString NiagaraPath = FString("/svo/NG_GalaxyCloud.NG_GalaxyCloud");
+	FString NiagaraPath = FString("/svo/Galaxy/NG_GalaxyLarge.NG_GalaxyLarge");
 
 	UPROPERTY()
 	UNiagaraSystem* GalaxyLargeCloud;
@@ -116,6 +116,12 @@ protected:
 	FVector GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const;
 	double GetGridCellExtent(int32 InGridDepth) const;
 	static constexpr double GridExtentMultiplier = 4.0;
+
+	/// Get the player's position in galaxy-local coordinates.
+	/// Since the galaxy uses actor-level drift (not VirtualTraversal-based
+	/// particle offset), the player's local position is derived from the
+	/// world-space offset between the camera and the actor.
+	FVector GetPlayerLocalPosition() const;
 #pragma endregion
 
 #pragma region Volumetric

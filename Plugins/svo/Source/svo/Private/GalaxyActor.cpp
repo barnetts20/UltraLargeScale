@@ -15,10 +15,9 @@ AGalaxyActor::AGalaxyActor()
 {
 	PrimaryActorTick.bCanEverTick = true;
 
-	UNiagaraSystem* SharedCloud = Cast<UNiagaraSystem>(FSoftObjectPath(NiagaraPath).TryLoad());
-	GalaxyLargeCloud = SharedCloud;
-	GalaxyMidCloud = SharedCloud;
-	GalaxySmallCloud = SharedCloud;
+	GalaxyLargeCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Galaxy/NG_GalaxyLarge.NG_GalaxyLarge"));
+	GalaxyMidCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Galaxy/NG_GalaxyLarge.NG_GalaxyLarge"));
+	GalaxySmallCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Galaxy/NG_GalaxyLarge.NG_GalaxyLarge"));
 
 	StarSystemActorClass = AStarSystemActor::StaticClass();
 	Octree = MakeShared<FOctree>(Params.Extent);
@@ -199,6 +198,15 @@ double AGalaxyActor::GetGridCellExtent(int32 InGridDepth) const
 {
 	return (Params.Extent * GridExtentMultiplier) / (1 << (InGridDepth + 1));
 }
+
+FVector AGalaxyActor::GetPlayerLocalPosition() const
+{
+	// The galaxy actor's attached components (volumetric, Niagara) are in
+	// galaxy-local coordinates where 1 unit = 1 UE unit. No actor scaling
+	// is applied, so the world-space offset from actor to player maps
+	// directly to galaxy-local coordinates.
+	return CurrentFrameOfReferenceLocation - GetActorLocation();
+}
 #pragma endregion
 
 #pragma region Tier System - BuildTierConfigs
@@ -247,16 +255,16 @@ void AGalaxyActor::BuildTierConfigs()
 		GalaxyGenerator.GenerateSmallTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter, CellExt, SmallTierState.SlotCounts[SlotIndex]);
 		};
 
-	// Shared ComputeBounds for all tiers
+	// Shared ComputeBounds for all tiers.
+	// Since galaxy particles are in actor space (no VirtualTraversal offset),
+	// bounds are centered on the actor origin.
 	auto MakeBounds = [this](const FParticleTierConfig& Config) {
 		const double HalfExt = GetGridCellExtent(Config.GridDepth) * (2 * Config.NeighborhoodRadius + 1);
-		const FVector Offset = VirtualTraversal;
-		return FBox(FVector(-HalfExt) - Offset, FVector(HalfExt) - Offset);
+		return FBox(FVector(-HalfExt), FVector(HalfExt));
 		};
 
 	LargeTierConfig.ComputeBounds = [this, MakeBounds]() {
-		// Large tier covers entire galaxy
-		return FBox(FVector(-Params.Extent) - VirtualTraversal, FVector(Params.Extent) - VirtualTraversal);
+		return FBox(FVector(-Params.Extent), FVector(Params.Extent));
 		};
 	MidTierConfig.ComputeBounds = [this, MakeBounds]() { return MakeBounds(MidTierConfig); };
 	SmallTierConfig.ComputeBounds = [this, MakeBounds]() { return MakeBounds(SmallTierConfig); };
@@ -288,47 +296,60 @@ void AGalaxyActor::InitializeTier(FParticleTierConfig& Config, FParticleTierStat
 	for (int32 i = TotalSlots - 1; i >= 0; --i)
 		State.FreeSlots.Add(i);
 	State.ActiveSlots.Empty();
-	State.CenterCoord = FIntVector(0, 0, 0);
 
-	// Build initial neighborhood and generate
-	TArray<FIntVector> InitialCoords;
-	for (int32 z = -Config.NeighborhoodRadius; z <= Config.NeighborhoodRadius; ++z)
-		for (int32 y = -Config.NeighborhoodRadius; y <= Config.NeighborhoodRadius; ++y)
-			for (int32 x = -Config.NeighborhoodRadius; x <= Config.NeighborhoodRadius; ++x)
-				InitialCoords.Add(FIntVector(x, y, z));
+	// For streaming tiers (mid/small), set CenterCoord to INT32_MIN so the
+	// first UpdateTier call in Tick detects a "boundary cross" and generates
+	// the neighborhood around the player's actual position at that time.
+	// For the large tier (radius 0, exhaustive), generate immediately.
+	const bool bIsStreamingTier = (Config.NeighborhoodRadius > 0);
 
-	// Assign slots and generate in parallel
-	TArray<TPair<FIntVector, int32>> ToGenerate;
-	for (const FIntVector& Coord : InitialCoords)
+	if (bIsStreamingTier)
 	{
-		int32 SlotIndex = State.FreeSlots.Pop();
-		FSlotEntry& Entry = State.ActiveSlots.Add(Coord);
-		Entry.SlotIndex = SlotIndex;
-		ToGenerate.Add({ Coord, SlotIndex });
+		State.CenterCoord = FIntVector(INT32_MIN, INT32_MIN, INT32_MIN);
 	}
-
-	if (ToGenerate.Num() > 0)
+	else
 	{
-		ParallelFor(ToGenerate.Num(), [&](int32 i)
-			{
-				const FIntVector& Coord = ToGenerate[i].Key;
-				int32 SlotIndex = ToGenerate[i].Value;
-				TArray<FNiagaraParticleBuffer*> BackBuffers;
-				for (int32 b = 0; b < NumBuffers; ++b)
-					BackBuffers.Add(&State.Buffers[b][0]);  // Front buffer for init
-				Config.GenerateCallback(Coord, SlotIndex, BackBuffers);
-			}, EParallelForFlags::BackgroundPriority);
+		State.CenterCoord = FIntVector(0, 0, 0);
+
+		// Build neighborhood and generate for exhaustive tier
+		TArray<FIntVector> InitialCoords;
+		for (int32 z = -Config.NeighborhoodRadius; z <= Config.NeighborhoodRadius; ++z)
+			for (int32 y = -Config.NeighborhoodRadius; y <= Config.NeighborhoodRadius; ++y)
+				for (int32 x = -Config.NeighborhoodRadius; x <= Config.NeighborhoodRadius; ++x)
+					InitialCoords.Add(FIntVector(x, y, z));
+
+		TArray<TPair<FIntVector, int32>> ToGenerate;
+		for (const FIntVector& Coord : InitialCoords)
+		{
+			int32 SlotIndex = State.FreeSlots.Pop();
+			FSlotEntry& Entry = State.ActiveSlots.Add(Coord);
+			Entry.SlotIndex = SlotIndex;
+			ToGenerate.Add({ Coord, SlotIndex });
+		}
+
+		if (ToGenerate.Num() > 0)
+		{
+			ParallelFor(ToGenerate.Num(), [&](int32 i)
+				{
+					const FIntVector& Coord = ToGenerate[i].Key;
+					int32 SlotIndex = ToGenerate[i].Value;
+					TArray<FNiagaraParticleBuffer*> BackBuffers;
+					for (int32 b = 0; b < NumBuffers; ++b)
+						BackBuffers.Add(&State.Buffers[b][0]);
+					Config.GenerateCallback(Coord, SlotIndex, BackBuffers);
+				}, EParallelForFlags::BackgroundPriority);
+		}
+
+		if (InitializationState == ELifecycleState::Pooling) return;
+
+		// Mirror front to back
+		for (int32 b = 0; b < NumBuffers; ++b)
+			State.Buffers[b][1].CopyFrom(State.Buffers[b][0]);
+
+		// Insert into octree
+		if (Config.OctreeInsertBufferIndex >= 0)
+			InsertTierIntoOctree(Config, State, 0);
 	}
-
-	if (InitializationState == ELifecycleState::Pooling) return;
-
-	// Mirror front to back
-	for (int32 b = 0; b < NumBuffers; ++b)
-		State.Buffers[b][1].CopyFrom(State.Buffers[b][0]);
-
-	// Insert into octree
-	if (Config.OctreeInsertBufferIndex >= 0)
-		InsertTierIntoOctree(Config, State, 0);
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
@@ -356,15 +377,15 @@ void AGalaxyActor::InitializeTier(FParticleTierConfig& Config, FParticleTierStat
 				State.NiagaraComponents[b] = NC;
 				TierNiagaraComponents.Add(NC);
 
-				State.Buffers[b][0].ActivateOnce(NC, VirtualTraversal);
+				State.Buffers[b][0].ActivateOnce(NC, FVector::ZeroVector);
 			}
 			Promise.SetValue();
 		});
 	Future.Wait();
 
 	State.FrontIdx.store(0);
-	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeTier [%s] - %d slots, %d capacity, %.3f sec"),
-		*Config.TierName, TotalSlots, Config.SlotCapacity, FPlatformTime::Seconds() - StartTime);
+	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeTier [%s] - %d slots, %d capacity, streaming=%d, %.3f sec"),
+		*Config.TierName, TotalSlots, Config.SlotCapacity, bIsStreamingTier ? 1 : 0, FPlatformTime::Seconds() - StartTime);
 }
 #pragma endregion
 
@@ -390,11 +411,12 @@ void AGalaxyActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 
 	State.bUpdateInProgress.store(true);
 	const FIntVector OldCoord = State.CenterCoord;
+	const bool bIsInitialPopulation = (OldCoord.X == INT32_MIN);
 	State.CenterCoord = NewCoord;
 
 	TWeakObjectPtr<AGalaxyActor> WeakThis(this);
 
-	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, &Config, &State, OldCoord, NewCoord]()
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, &Config, &State, OldCoord, NewCoord, bIsInitialPopulation]()
 		{
 			AGalaxyActor* Self = WeakThis.Get();
 			if (!Self || Self->InitializationState == ELifecycleState::Pooling)
@@ -414,27 +436,39 @@ void AGalaxyActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 
 			// Diff neighborhoods
 			TArray<FIntVector> EnteringNodes, ExitingNodes;
-			for (int32 z = -R; z <= R; ++z)
-				for (int32 y = -R; y <= R; ++y)
-					for (int32 x = -R; x <= R; ++x)
-					{
-						FIntVector NewCell = NewCoord + FIntVector(x, y, z);
-						FIntVector OldCell = OldCoord + FIntVector(x, y, z);
 
-						int32 OldDist = FMath::Max3(
-							FMath::Abs(NewCell.X - OldCoord.X),
-							FMath::Abs(NewCell.Y - OldCoord.Y),
-							FMath::Abs(NewCell.Z - OldCoord.Z));
-						if (OldDist > R)
-							EnteringNodes.Add(NewCell);
+			if (bIsInitialPopulation)
+			{
+				// First population: everything around NewCoord enters, nothing exits
+				for (int32 z = -R; z <= R; ++z)
+					for (int32 y = -R; y <= R; ++y)
+						for (int32 x = -R; x <= R; ++x)
+							EnteringNodes.Add(NewCoord + FIntVector(x, y, z));
+			}
+			else
+			{
+				for (int32 z = -R; z <= R; ++z)
+					for (int32 y = -R; y <= R; ++y)
+						for (int32 x = -R; x <= R; ++x)
+						{
+							FIntVector NewCell = NewCoord + FIntVector(x, y, z);
+							FIntVector OldCell = OldCoord + FIntVector(x, y, z);
 
-						int32 NewDist = FMath::Max3(
-							FMath::Abs(OldCell.X - NewCoord.X),
-							FMath::Abs(OldCell.Y - NewCoord.Y),
-							FMath::Abs(OldCell.Z - NewCoord.Z));
-						if (NewDist > R)
-							ExitingNodes.Add(OldCell);
-					}
+							int32 OldDist = FMath::Max3(
+								FMath::Abs(NewCell.X - OldCoord.X),
+								FMath::Abs(NewCell.Y - OldCoord.Y),
+								FMath::Abs(NewCell.Z - OldCoord.Z));
+							if (OldDist > R)
+								EnteringNodes.Add(NewCell);
+
+							int32 NewDist = FMath::Max3(
+								FMath::Abs(OldCell.X - NewCoord.X),
+								FMath::Abs(OldCell.Y - NewCoord.Y),
+								FMath::Abs(OldCell.Z - NewCoord.Z));
+							if (NewDist > R)
+								ExitingNodes.Add(OldCell);
+						}
+			}
 
 			// Free exiting slots
 			const FVector DeadPos(Self->Params.Extent * 10.0);
@@ -518,9 +552,14 @@ void AGalaxyActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 			Self->CullTierCache(Config, State, NewCoord);
 			State.bUpdateInProgress.store(false);
 
-			UE_LOG(LogTemp, Verbose, TEXT("AGalaxyActor::UpdateTier [%s] - %d entering (%d cached, %d gen), %d exiting, %.3f sec"),
-				*Config.TierName, EnteringNodes.Num(), CacheHitCount, ToGenerate.Num(), ExitingNodes.Num(),
-				FPlatformTime::Seconds() - StartTime);
+			int32 TotalParticles = 0;
+			for (int32 s = 0; s < State.SlotCounts.Num(); ++s)
+				TotalParticles += State.SlotCounts[s];
+
+			UE_LOG(LogTemp, Warning, TEXT("AGalaxyActor::UpdateTier [%s] - center=(%d,%d,%d) %d entering (%d cached, %d gen), %d exiting, %d total particles, %.3f sec"),
+				*Config.TierName, NewCoord.X, NewCoord.Y, NewCoord.Z,
+				EnteringNodes.Num(), CacheHitCount, ToGenerate.Num(), ExitingNodes.Num(),
+				TotalParticles, FPlatformTime::Seconds() - StartTime);
 		});
 }
 #pragma endregion
@@ -534,7 +573,7 @@ void AGalaxyActor::PushTierToNiagara(const FParticleTierConfig& Config, FParticl
 	{
 		UNiagaraComponent* NC = State.NiagaraComponents[b];
 		if (NC) NC->SetSystemFixedBounds(Bounds);
-		State.Buffers[b][FrontIdx].PushToNiagara(NC, VirtualTraversal);
+		State.Buffers[b][FrontIdx].PushToNiagara(NC, FVector::ZeroVector);
 	}
 }
 #pragma endregion
@@ -666,10 +705,18 @@ void AGalaxyActor::CullTierCache(const FParticleTierConfig& Config, FParticleTie
 #pragma region Tick
 void AGalaxyActor::Tick(float DeltaTime)
 {
+	// Base class handles parallax offset (actor drift) and debug bounds.
 	Super::Tick(DeltaTime);
+
 	if (InitializationState != ELifecycleState::Ready) return;
 
-	// Parallax push: update relative positions for all tier buffers
+	// The galaxy uses actor-level drift, not VirtualTraversal-based particle
+	// offset. Particles stay at their raw galaxy-local positions relative to
+	// the actor. We derive the player's galaxy-local position from the
+	// world-space offset for tier streaming purposes.
+	VirtualTraversal = GetPlayerLocalPosition();
+
+	// Push positions to Niagara — no offset needed, particles are in actor space
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 	{
 		const int32 FrontIdx = Tier->FrontIdx.load();
@@ -677,12 +724,29 @@ void AGalaxyActor::Tick(float DeltaTime)
 		{
 			UNiagaraComponent* NC = Tier->NiagaraComponents[b];
 			if (!NC || b >= Tier->Buffers.Num()) continue;
-			const TArray<FVector>& RelPos = Tier->Buffers[b][FrontIdx].MakeRelativePositions(VirtualTraversal);
+			const TArray<FVector>& RelPos = Tier->Buffers[b][FrontIdx].MakeRelativePositions(FVector::ZeroVector);
 			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NC, NiagaraBufferParams::Positions, RelPos);
 		}
 	}
 
 	// Stream mid/small tiers
+	{
+		const FIntVector MidCoord = PositionToGridCoord(VirtualTraversal, MidTierConfig.GridDepth);
+		const FIntVector SmallCoord = PositionToGridCoord(VirtualTraversal, SmallTierConfig.GridDepth);
+
+		static int32 TickCount = 0;
+		if (++TickCount % 60 == 0)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Galaxy Tick: localPos=(%.0f, %.0f, %.0f) midGrid=(%d,%d,%d) midCenter=(%d,%d,%d) smallGrid=(%d,%d,%d) smallCenter=(%d,%d,%d) midUpdate=%d smallUpdate=%d"),
+				VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z,
+				MidCoord.X, MidCoord.Y, MidCoord.Z,
+				MidTierState.CenterCoord.X, MidTierState.CenterCoord.Y, MidTierState.CenterCoord.Z,
+				SmallCoord.X, SmallCoord.Y, SmallCoord.Z,
+				SmallTierState.CenterCoord.X, SmallTierState.CenterCoord.Y, SmallTierState.CenterCoord.Z,
+				MidTierState.bUpdateInProgress.load() ? 1 : 0,
+				SmallTierState.bUpdateInProgress.load() ? 1 : 0);
+		}
+	}
 	UpdateTier(MidTierConfig, MidTierState);
 	UpdateTier(SmallTierConfig, SmallTierState);
 }
