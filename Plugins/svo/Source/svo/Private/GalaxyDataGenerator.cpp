@@ -10,7 +10,7 @@
 float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos)
 {
 	// -----------------------------------------------------------------------
-	// Hernquist-like radial density profile.
+	// Hernquist-like radial density profile with spherical cutoff.
 	//
 	// The Hernquist profile is: rho(r) = M / (2*pi) * a / (r * (r+a)^3)
 	// We use a simplified normalized form that maps nicely to [0, 1]:
@@ -23,17 +23,37 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos)
 	// a controls concentration: smaller a = sharper core, larger a = diffuse.
 	// We use a = 0.3 which gives a nice concentrated-but-not-too-sharp profile
 	// in the [-1, 1] normalized space.
+	//
+	// A smooth spherical cutoff is applied so density reaches exactly zero
+	// at r = CutoffRadius, preventing the cube-shaped octree bounds from
+	// being visible. The cutoff uses a smoothstep fade starting at
+	// FadeStart * CutoffRadius.
 	// -----------------------------------------------------------------------
 
-	const double a = 0.3;  // Scale radius in normalized space
+	const double a = 0.3;              // Scale radius in normalized space
+	const double CutoffRadius = 1.0;   // Hard zero at normalized radius 1.0
+	const double FadeStart = 0.7;      // Fade begins at 70% of cutoff radius
 
 	const double r = InNormPos.Size();
+
+	// Hard cutoff — nothing beyond the sphere
+	if (r >= CutoffRadius) return 0.0f;
 
 	// Hernquist profile: density = 1 / (1 + r/a)^2
 	const double ra = r / a;
 	const double Density = 1.0 / ((1.0 + ra) * (1.0 + ra));
 
-	return FMath::Clamp(static_cast<float>(Density), 0.0f, 1.0f);
+	// Smooth fade to zero approaching the cutoff radius
+	double Fade = 1.0;
+	const double FadeRadius = FadeStart * CutoffRadius;
+	if (r > FadeRadius)
+	{
+		// smoothstep: maps [FadeRadius, CutoffRadius] -> [1, 0]
+		const double t = (r - FadeRadius) / (CutoffRadius - FadeRadius);
+		Fade = 1.0 - t * t * (3.0 - 2.0 * t);
+	}
+
+	return FMath::Clamp(static_cast<float>(Density * Fade), 0.0f, 1.0f);
 }
 
 void GalaxyDataGenerator::SampleDensityBatch(
