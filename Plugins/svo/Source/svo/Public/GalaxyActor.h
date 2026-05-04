@@ -96,6 +96,9 @@ protected:
 	void InitializeTier(FParticleTierConfig& Config, FParticleTierState& State);
 	void UpdateTier(FParticleTierConfig& Config, FParticleTierState& State);
 	void PushTierToNiagara(const FParticleTierConfig& Config, FParticleTierState& State);
+
+	/// Returns true if the given grid coord's cell overlaps the galaxy volume.
+	bool CellOverlapsVolume(const FIntVector& Coord, int32 GridDepth) const;
 #pragma endregion
 
 #pragma region Tier System - Octree Integration

@@ -1,4 +1,4 @@
-// GalaxyActor.cpp
+ï»¿// GalaxyActor.cpp
 // Full tier streaming system mirroring UniverseActor pattern.
 
 #pragma region Includes
@@ -197,6 +197,16 @@ FVector AGalaxyActor::GridCoordToCenter(const FIntVector& InCoord, int32 InGridD
 double AGalaxyActor::GetGridCellExtent(int32 InGridDepth) const
 {
 	return (Params.Extent * GridExtentMultiplier) / (1 << (InGridDepth + 1));
+}
+
+bool AGalaxyActor::CellOverlapsVolume(const FIntVector& Coord, int32 GridDepth) const
+{
+	const FVector Center = GridCoordToCenter(Coord, GridDepth);
+	const double HalfCell = GetGridCellExtent(GridDepth);
+	const double Ext = Params.Extent;
+	return (Center.X + HalfCell > -Ext && Center.X - HalfCell < Ext) &&
+		(Center.Y + HalfCell > -Ext && Center.Y - HalfCell < Ext) &&
+		(Center.Z + HalfCell > -Ext && Center.Z - HalfCell < Ext);
 }
 
 FVector AGalaxyActor::GetPlayerLocalPosition() const
@@ -495,6 +505,15 @@ void AGalaxyActor::UpdateTier(FParticleTierConfig& Config, FParticleTierState& S
 				Entry.SlotIndex = SlotIndex;
 				AllEnteringSlots.Add(SlotIndex);
 
+				// Skip cells entirely outside the galaxy volume
+				if (!Self->CellOverlapsVolume(Coord, Config.GridDepth))
+				{
+					State.SlotCounts[SlotIndex] = 0;
+					for (int32 b = 0; b < NumBuffers; ++b)
+						State.Buffers[b][BackIdx].PadSlotDead(SlotIndex, 0, DeadPos);
+					continue;
+				}
+
 				// Check cache
 				FCachedCellData* Cached = State.CellCache.Find(Coord);
 				if (Cached && Cached->ParticleCount > 0)
@@ -573,7 +592,7 @@ void AGalaxyActor::PushTierToNiagara(const FParticleTierConfig& Config, FParticl
 	{
 		UNiagaraComponent* NC = State.NiagaraComponents[b];
 		if (NC) NC->SetSystemFixedBounds(Bounds);
-		State.Buffers[b][FrontIdx].PushToNiagara(NC, FVector::ZeroVector);
+		State.Buffers[b][FrontIdx].PushToNiagara(NC, VirtualTraversal);
 	}
 }
 #pragma endregion
@@ -716,7 +735,7 @@ void AGalaxyActor::Tick(float DeltaTime)
 	// world-space offset for tier streaming purposes.
 	VirtualTraversal = GetPlayerLocalPosition();
 
-	// Push positions to Niagara — no offset needed, particles are in actor space
+	// Push positions to Niagara ï¿½ no offset needed, particles are in actor space
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 	{
 		const int32 FrontIdx = Tier->FrontIdx.load();
@@ -724,7 +743,7 @@ void AGalaxyActor::Tick(float DeltaTime)
 		{
 			UNiagaraComponent* NC = Tier->NiagaraComponents[b];
 			if (!NC || b >= Tier->Buffers.Num()) continue;
-			const TArray<FVector>& RelPos = Tier->Buffers[b][FrontIdx].MakeRelativePositions(FVector::ZeroVector);
+			const TArray<FVector>& RelPos = Tier->Buffers[b][FrontIdx].MakeRelativePositions(GetActorLocation());
 			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NC, NiagaraBufferParams::Positions, RelPos);
 		}
 	}
