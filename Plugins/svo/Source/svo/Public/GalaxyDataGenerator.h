@@ -30,7 +30,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 
 	/// Voxel resolution per axis for the density pseudo-volume texture.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density Volume")
-	int32 DensityVolumeResolution = 128;
+	int32 DensityVolumeResolution = 32;
 
 	// --- Tier scale derivation ---
 
@@ -38,7 +38,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// All tier scale ranges cascade downward from this single value,
 	/// identical to FUniverseParams::MaxEntityScale logic.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
-	double MaxEntityScale = 1e20;
+	double MaxEntityScale = 1e18;
 
 	// --- Per-tier streaming configs ---
 
@@ -55,11 +55,11 @@ struct SVO_API FGalaxyParams : public FBaseParams
 
 	/// Min particle count for the large tier (smallest galaxy scale).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Large Tier")
-	int32 MinLargeParticles = 2000;
+	int32 MinLargeParticles = 1000;
 
 	/// Max particle count for the large tier (largest galaxy scale).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Large Tier")
-	int32 MaxLargeParticles = 8000;
+	int32 MaxLargeParticles = 4000;
 
 	/// Per-instance count variance fraction [0, 1]. Applied as a +/- offset
 	/// on the lerped particle count for visual variety across galaxies.
