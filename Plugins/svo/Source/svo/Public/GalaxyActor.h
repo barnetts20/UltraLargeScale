@@ -1,4 +1,4 @@
-// GalaxyActor.h
+ï»¿// GalaxyActor.h
 // Full tier streaming system mirroring UniverseActor.
 // Large tier: exhaustive single-pass (NeighborhoodRadius=0), always loaded.
 // Mid/Small tiers: neighborhood streaming with cell cache.
@@ -36,8 +36,8 @@ public:
 	// Virtual traversal of the player through galaxy-local space. Initialized
 	// at spawn to (PlayerPos - SpawnLoc) so particles appear at the correct
 	// world position from the first frame. Accumulates PlayerDelta *
-	// (SpeedScale / UnitScale) each tick — shrinking toward zero as the player
-	// approaches — giving full floating-point precision when nearby.
+	// (SpeedScale / UnitScale) each tick ï¿½ shrinking toward zero as the player
+	// approaches ï¿½ giving full floating-point precision when nearby.
 	// Used identically to AUniverseActor::VirtualTraversal.
 	FVector VirtualTraversal = FVector::ZeroVector;
 #pragma endregion
@@ -56,7 +56,7 @@ public:
 	virtual void ResetForPool() override;
 	virtual void ResetForSpawn() override;
 #pragma endregion
-
+	virtual void TickFromParent(float DeltaTime, const FVector& InPlayerPos) override;
 protected:
 #pragma region Params Accessors
 	virtual double GetUnitScale() const override { return Params.UnitScale; }

@@ -1,4 +1,4 @@
-// ProceduralSpaceActor.h
+﻿// ProceduralSpaceActor.h
 #pragma once
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
@@ -71,7 +71,7 @@ public:
     virtual double GetExtent() const { return 2147483648; }
     virtual int GetSeed() const { return 1; }
     virtual FRotator GetRotation() const { return FRotator::ZeroRotator; }
-    virtual FLinearColor GetParentColor() const { return FLinearColor(1,1,1); }
+    virtual FLinearColor GetParentColor() const { return FLinearColor(1, 1, 1); }
     // Only this one truly needs override (for parent chain)
     virtual double GetParentSpeedScale() const { return 1; }
 #pragma endregion
@@ -103,12 +103,20 @@ public:
     FVector LastFrameOfReferenceLocation = FVector::ZeroVector;
     FVector CurrentFrameOfReferenceLocation = FVector::ZeroVector;
 
-    #pragma region Parallax Spawn Calculation
+#pragma region Parallax Spawn Calculation
     // Computes correct spawn position for a child actor based on parallax ratios
     FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const;
 #pragma endregion
     virtual void ApplyParallaxOffset();
     virtual void DrawDebugBounds();
     virtual void Tick(float DeltaTime) override;
+
+    // Called by the parent actor (Universe→Galaxy, Galaxy→StarSystem) instead of
+    // UE's per-actor tick dispatch. InPlayerPos is the already-resolved player
+    // world position for this frame — no child needs to query the controller.
+    // Base implementation applies the standard parallax offset (covers StarSystem).
+    // Galaxy overrides this to also handle VirtualTraversal, Niagara pushes,
+    // tier streaming, and cascading down to its own star systems.
+    virtual void TickFromParent(float DeltaTime, const FVector& InPlayerPos);
 #pragma endregion
 };

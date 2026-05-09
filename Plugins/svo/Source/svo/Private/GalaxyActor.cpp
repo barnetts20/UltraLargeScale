@@ -730,60 +730,47 @@ void AGalaxyActor::CullTierCache(const FParticleTierConfig& Config, FParticleTie
 #pragma region Tick
 void AGalaxyActor::Tick(float DeltaTime)
 {
-	// Do NOT call Super::Tick — the base class ApplyParallaxOffset drifts the
-	// actor, which is exactly what we want to replace. We handle player tracking
-	// and debug bounds here instead.
+	// Pool-managed galaxies have UE tick disabled and are driven exclusively by
+	// AUniverseActor::Tick via TickFromParent. This path only executes for
+	// level-placed galaxies (bAutoInitializeOnBeginPlay = true).
 	AActor::Tick(DeltaTime);
-	if (IsDebug) DrawDebugBounds();
-
 	if (InitializationState != ELifecycleState::Ready) return;
 
-	// --- Player tracking (Universe-style) ---
-	// Resolve current player position.
 	FVector CurrentPlayerPos = FVector::ZeroVector;
-	bool bHasReference = false;
 	if (const auto* World = GetWorld())
-	{
 		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-		{
 			if (APawn* Pawn = Controller->GetPawn())
-			{
 				CurrentPlayerPos = Pawn->GetActorLocation();
-				bHasReference = true;
-			}
-		}
-	}
-	if (!bHasReference) return;
 
-	// Accumulate virtual traversal at the galaxy's parallax depth.
-	// ratio = SpeedScale / UnitScale mirrors the Universe formula.
-	// As the player approaches the galaxy, UnitScale grows smaller and the
-	// ratio shrinks, so VirtualTraversal converges toward zero — giving full
-	// floating-point precision exactly when the player is nearby.
-	const FVector PlayerDelta = CurrentPlayerPos - LastFrameOfReferenceLocation;
-	LastFrameOfReferenceLocation = CurrentPlayerPos;
-	CurrentFrameOfReferenceLocation = CurrentPlayerPos;
+	TickFromParent(DeltaTime, CurrentPlayerPos);
+}
+
+void AGalaxyActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
+{
+	if (InitializationState != ELifecycleState::Ready) return;
+
+	// --- VirtualTraversal accumulation ---
+	// Mirrors AUniverseActor::ApplyParallaxOffset. ratio = SpeedScale / UnitScale
+	// shrinks as the player approaches, giving full float precision when nearby.
+	const FVector PlayerDelta = InPlayerPos - LastFrameOfReferenceLocation;
+	LastFrameOfReferenceLocation = InPlayerPos;
+	CurrentFrameOfReferenceLocation = InPlayerPos;
 	const double ActiveSpeedScale = (Universe ? Universe->SpeedScale : SpeedScale);
 	const double Ratio = (Params.UnitScale > 0.0) ? (ActiveSpeedScale / Params.UnitScale) : 0.0;
 	VirtualTraversal += PlayerDelta * Ratio;
 
-	// Peg the actor to the player so UE's scene stays in a clean numerical
-	// range. All virtual position is encoded in VirtualTraversal.
-	SetActorLocation(CurrentPlayerPos);
+	// Peg the actor to the player so UE's scene stays in a clean numerical range.
+	SetActorLocation(InPlayerPos);
 
 	// Reposition the volumetric box to the galaxy's virtual world origin.
-	// Galaxy-origin in world space = PlayerPos - VirtualTraversal, which is
-	// the point that maps to local coords (0,0,0) in the particle system.
+	// Galaxy-origin in world space = PlayerPos - VirtualTraversal.
 	if (VolumetricComponent)
-	{
-		VolumetricComponent->SetWorldLocation(CurrentPlayerPos - VirtualTraversal);
-	}
+		VolumetricComponent->SetWorldLocation(InPlayerPos - VirtualTraversal);
 
 	// Peg Niagara components to the player and push camera-relative positions.
 	// MakeRelativePositions(VT) produces (pos - VT) so:
 	//   rendered = ComponentLoc + (pos - VT) = PlayerPos + pos - VT
 	//            = PlayerPos + pos - (PlayerPos - GalaxyOrigin) = GalaxyOrigin + pos ✓
-	const FVector PlayerPos = CurrentPlayerPos;
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 	{
 		const int32 FrontIdx = Tier->FrontIdx.load();
@@ -791,93 +778,92 @@ void AGalaxyActor::Tick(float DeltaTime)
 		{
 			UNiagaraComponent* NC = Tier->NiagaraComponents[b];
 			if (!NC || b >= Tier->Buffers.Num()) continue;
-			NC->SetWorldLocation(PlayerPos);
+			NC->SetWorldLocation(InPlayerPos);
 			const TArray<FVector>& RelPos = Tier->Buffers[b][FrontIdx].MakeRelativePositions(VirtualTraversal);
 			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NC, NiagaraBufferParams::Positions, RelPos);
 		}
 	}
 
-	// Stream mid/small tiers
+	// --- Tier streaming ---
+	UpdateTier(MidTierConfig, MidTierState);
+	UpdateTier(SmallTierConfig, SmallTierState);
+
+	// --- Drive active star systems with the already-resolved player position ---
+	// Star systems have UE tick disabled; this is their only per-frame entry point.
+	for (auto& Pair : SpawnedStarSystems)
 	{
+		if (AStarSystemActor* System = Pair.Value.Get())
+			System->TickFromParent(DeltaTime, InPlayerPos);
+	}
+
+	if (IsDebug) DrawDebugBounds();
+
+	// --- Per-instance diagnostics (Verbose, fires every 60 frames) ---
+	if (++DiagTickCount % 60 == 0)
+	{
+		const FVector ActorLoc = GetActorLocation();
+		FVector FirstParticlePos = FVector::ZeroVector;
+		if (LargeTierState.Buffers.Num() > 0 && LargeTierState.Buffers[0].Num() > 0)
+		{
+			const auto& Buf = LargeTierState.Buffers[0][LargeTierState.FrontIdx.load()];
+			for (int32 i = 0; i < Buf.Positions.Num(); ++i)
+				if (Buf.Extents[i] > 0.0f) { FirstParticlePos = Buf.Positions[i]; break; }
+		}
+		FVector NiagaraCompLoc = FVector::ZeroVector;
+		if (LargeTierState.NiagaraComponents.Num() > 0 && LargeTierState.NiagaraComponents[0])
+			NiagaraCompLoc = LargeTierState.NiagaraComponents[0]->GetComponentLocation();
+
+		UE_LOG(LogTemp, Verbose, TEXT("Galaxy Diag: ActorLoc=(%.0f,%.0f,%.0f) NiagaraComp=(%.0f,%.0f,%.0f) FirstParticle=(%.1f,%.1f,%.1f) VT=(%.0f,%.0f,%.0f) PlayerLocal=(%.0f,%.0f,%.0f)"),
+			ActorLoc.X, ActorLoc.Y, ActorLoc.Z,
+			NiagaraCompLoc.X, NiagaraCompLoc.Y, NiagaraCompLoc.Z,
+			FirstParticlePos.X, FirstParticlePos.Y, FirstParticlePos.Z,
+			VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z,
+			CurrentFrameOfReferenceLocation.X, CurrentFrameOfReferenceLocation.Y, CurrentFrameOfReferenceLocation.Z);
+
+		FVector VolWorldPos = FVector::ZeroVector;
+		FVector VolRelPos = FVector::ZeroVector;
+		FVector NCRelPos = FVector::ZeroVector;
+		if (VolumetricComponent)
+		{
+			VolWorldPos = VolumetricComponent->GetComponentLocation();
+			VolRelPos = VolumetricComponent->GetRelativeLocation();
+		}
+		if (LargeTierState.NiagaraComponents.Num() > 0 && LargeTierState.NiagaraComponents[0])
+			NCRelPos = LargeTierState.NiagaraComponents[0]->GetRelativeLocation();
+
+		UE_LOG(LogTemp, Verbose, TEXT("Galaxy Attach: VolWorld=(%.0f,%.0f,%.0f) VolRel=(%.0f,%.0f,%.0f) NCRel=(%.0f,%.0f,%.0f) RenderedParticle=(%.0f,%.0f,%.0f)"),
+			VolWorldPos.X, VolWorldPos.Y, VolWorldPos.Z,
+			VolRelPos.X, VolRelPos.Y, VolRelPos.Z,
+			NCRelPos.X, NCRelPos.Y, NCRelPos.Z,
+			NiagaraCompLoc.X + FirstParticlePos.X, NiagaraCompLoc.Y + FirstParticlePos.Y, NiagaraCompLoc.Z + FirstParticlePos.Z);
+
+		FVector MidFirstPos = FVector::ZeroVector;
+		int32 MidLiveCount = 0;
+		if (MidTierState.Buffers.Num() > 0 && MidTierState.Buffers[0].Num() > 0)
+		{
+			const auto& MidBuf = MidTierState.Buffers[0][MidTierState.FrontIdx.load()];
+			for (int32 i = 0; i < MidBuf.Positions.Num(); ++i)
+				if (MidBuf.Extents[i] > 0.0f) { if (MidLiveCount == 0) MidFirstPos = MidBuf.Positions[i]; ++MidLiveCount; }
+		}
+		const FBox MidBounds = MidTierConfig.ComputeBounds();
 		const FIntVector MidCoord = PositionToGridCoord(VirtualTraversal, MidTierConfig.GridDepth);
 		const FIntVector SmallCoord = PositionToGridCoord(VirtualTraversal, SmallTierConfig.GridDepth);
 
-		if (++DiagTickCount % 60 == 0)
-		{
-			const FVector ActorLoc = GetActorLocation();
-			// Log first live particle position from large tier for diagnostics
-			FVector FirstParticlePos = FVector::ZeroVector;
-			if (LargeTierState.Buffers.Num() > 0 && LargeTierState.Buffers[0].Num() > 0)
-			{
-				const auto& Buf = LargeTierState.Buffers[0][LargeTierState.FrontIdx.load()];
-				for (int32 i = 0; i < Buf.Positions.Num(); ++i)
-				{
-					if (Buf.Extents[i] > 0.0f) { FirstParticlePos = Buf.Positions[i]; break; }
-				}
-			}
-			FVector NiagaraCompLoc = FVector::ZeroVector;
-			if (LargeTierState.NiagaraComponents.Num() > 0 && LargeTierState.NiagaraComponents[0])
-				NiagaraCompLoc = LargeTierState.NiagaraComponents[0]->GetComponentLocation();
+		UE_LOG(LogTemp, Verbose, TEXT("Galaxy MidDiag: firstPos=(%.0f,%.0f,%.0f) live=%d bounds=[(%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f)] GridExtMult=%.1f"),
+			MidFirstPos.X, MidFirstPos.Y, MidFirstPos.Z, MidLiveCount,
+			MidBounds.Min.X, MidBounds.Min.Y, MidBounds.Min.Z,
+			MidBounds.Max.X, MidBounds.Max.Y, MidBounds.Max.Z,
+			GridExtentMultiplier);
 
-			UE_LOG(LogTemp, Warning, TEXT("Galaxy Diag: ActorLoc=(%.0f,%.0f,%.0f) NiagaraComp=(%.0f,%.0f,%.0f) FirstParticle=(%.1f,%.1f,%.1f) VT=(%.0f,%.0f,%.0f) PlayerLocal=(%.0f,%.0f,%.0f)"),
-				ActorLoc.X, ActorLoc.Y, ActorLoc.Z,
-				NiagaraCompLoc.X, NiagaraCompLoc.Y, NiagaraCompLoc.Z,
-				FirstParticlePos.X, FirstParticlePos.Y, FirstParticlePos.Z,
-				VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z,
-				CurrentFrameOfReferenceLocation.X, CurrentFrameOfReferenceLocation.Y, CurrentFrameOfReferenceLocation.Z);
-
-			// Log volumetric and niagara component relative positions to verify attachment
-			FVector VolWorldPos = FVector::ZeroVector;
-			FVector VolRelPos = FVector::ZeroVector;
-			FVector NCRelPos = FVector::ZeroVector;
-			if (VolumetricComponent)
-			{
-				VolWorldPos = VolumetricComponent->GetComponentLocation();
-				VolRelPos = VolumetricComponent->GetRelativeLocation();
-			}
-			if (LargeTierState.NiagaraComponents.Num() > 0 && LargeTierState.NiagaraComponents[0])
-				NCRelPos = LargeTierState.NiagaraComponents[0]->GetRelativeLocation();
-
-			UE_LOG(LogTemp, Warning, TEXT("Galaxy Attach: VolWorld=(%.0f,%.0f,%.0f) VolRel=(%.0f,%.0f,%.0f) NCRel=(%.0f,%.0f,%.0f) RenderedParticle=(%.0f,%.0f,%.0f)"),
-				VolWorldPos.X, VolWorldPos.Y, VolWorldPos.Z,
-				VolRelPos.X, VolRelPos.Y, VolRelPos.Z,
-				NCRelPos.X, NCRelPos.Y, NCRelPos.Z,
-				NiagaraCompLoc.X + FirstParticlePos.X, NiagaraCompLoc.Y + FirstParticlePos.Y, NiagaraCompLoc.Z + FirstParticlePos.Z);
-
-			// Mid tier diagnostics
-			FVector MidFirstPos = FVector::ZeroVector;
-			int32 MidLiveCount = 0;
-			if (MidTierState.Buffers.Num() > 0 && MidTierState.Buffers[0].Num() > 0)
-			{
-				const auto& MidBuf = MidTierState.Buffers[0][MidTierState.FrontIdx.load()];
-				for (int32 i = 0; i < MidBuf.Positions.Num(); ++i)
-				{
-					if (MidBuf.Extents[i] > 0.0f)
-					{
-						if (MidLiveCount == 0) MidFirstPos = MidBuf.Positions[i];
-						++MidLiveCount;
-					}
-				}
-			}
-			const FBox MidBounds = MidTierConfig.ComputeBounds();
-			UE_LOG(LogTemp, Warning, TEXT("Galaxy MidDiag: firstPos=(%.0f,%.0f,%.0f) live=%d bounds=[(%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f)] GridExtMult=%.1f"),
-				MidFirstPos.X, MidFirstPos.Y, MidFirstPos.Z, MidLiveCount,
-				MidBounds.Min.X, MidBounds.Min.Y, MidBounds.Min.Z,
-				MidBounds.Max.X, MidBounds.Max.Y, MidBounds.Max.Z,
-				GridExtentMultiplier);
-
-			UE_LOG(LogTemp, Warning, TEXT("Galaxy Tick: localPos=(%.0f, %.0f, %.0f) midGrid=(%d,%d,%d) midCenter=(%d,%d,%d) smallGrid=(%d,%d,%d) smallCenter=(%d,%d,%d) midUpdate=%d smallUpdate=%d"),
-				VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z,
-				MidCoord.X, MidCoord.Y, MidCoord.Z,
-				MidTierState.CenterCoord.X, MidTierState.CenterCoord.Y, MidTierState.CenterCoord.Z,
-				SmallCoord.X, SmallCoord.Y, SmallCoord.Z,
-				SmallTierState.CenterCoord.X, SmallTierState.CenterCoord.Y, SmallTierState.CenterCoord.Z,
-				MidTierState.bUpdateInProgress.load() ? 1 : 0,
-				SmallTierState.bUpdateInProgress.load() ? 1 : 0);
-		}
+		UE_LOG(LogTemp, Verbose, TEXT("Galaxy Tick: localPos=(%.0f,%.0f,%.0f) midGrid=(%d,%d,%d) midCenter=(%d,%d,%d) smallGrid=(%d,%d,%d) smallCenter=(%d,%d,%d) midUpdate=%d smallUpdate=%d"),
+			VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z,
+			MidCoord.X, MidCoord.Y, MidCoord.Z,
+			MidTierState.CenterCoord.X, MidTierState.CenterCoord.Y, MidTierState.CenterCoord.Z,
+			SmallCoord.X, SmallCoord.Y, SmallCoord.Z,
+			SmallTierState.CenterCoord.X, SmallTierState.CenterCoord.Y, SmallTierState.CenterCoord.Z,
+			MidTierState.bUpdateInProgress.load() ? 1 : 0,
+			SmallTierState.bUpdateInProgress.load() ? 1 : 0);
 	}
-	UpdateTier(MidTierConfig, MidTierState);
-	UpdateTier(SmallTierConfig, SmallTierState);
 }
 #pragma endregion
 

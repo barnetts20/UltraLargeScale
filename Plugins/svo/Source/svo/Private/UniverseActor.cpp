@@ -732,7 +732,17 @@ void AUniverseActor::ApplyParallaxOffset()
 void AUniverseActor::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-	ApplyParallaxOffset();
+	ApplyParallaxOffset();  // Resolves player pos once into CurrentFrameOfReferenceLocation
+
+	// Drive all active galaxies with the already-resolved player position.
+	// Galaxies have UE tick disabled; this is their only per-frame entry point.
+	// Each galaxy cascades down to its own star systems via TickFromParent.
+	for (auto& Pair : SpawnedGalaxies)
+	{
+		if (AGalaxyActor* Galaxy = Pair.Value.Get())
+			Galaxy->TickFromParent(DeltaTime, CurrentFrameOfReferenceLocation);
+	}
+
 	UpdateTier(CoarseTierConfig, CoarseTierState);
 	UpdateTier(MidTierConfig, MidTierState);
 	UpdateTier(SmallTierConfig, SmallTierState);
