@@ -138,6 +138,7 @@ protected:
 #pragma endregion
 
 #pragma region Tick
+	int32 DiagTickCount = 0;
 	virtual void Tick(float DeltaTime) override;
 #pragma endregion
 };

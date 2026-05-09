@@ -36,9 +36,11 @@ void AGalaxyActor::BeginPlay()
 	if (bAutoInitializeOnBeginPlay)
 	{
 		InitializationState = ELifecycleState::Initializing;
-		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this]()
+		TWeakObjectPtr<AGalaxyActor> WeakThis(this);
+		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis]()
 			{
-				Initialize();
+				if (AGalaxyActor* Self = WeakThis.Get())
+					Self->Initialize();
 			});
 	}
 }
@@ -800,8 +802,7 @@ void AGalaxyActor::Tick(float DeltaTime)
 		const FIntVector MidCoord = PositionToGridCoord(VirtualTraversal, MidTierConfig.GridDepth);
 		const FIntVector SmallCoord = PositionToGridCoord(VirtualTraversal, SmallTierConfig.GridDepth);
 
-		static int32 TickCount = 0;
-		if (++TickCount % 60 == 0)
+		if (++DiagTickCount % 60 == 0)
 		{
 			const FVector ActorLoc = GetActorLocation();
 			// Log first live particle position from large tier for diagnostics
@@ -897,7 +898,7 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 	SpawnedStarSystems.Add(InNode, TWeakObjectPtr<AStarSystemActor>(System));
 	System->ResetForSpawn();
 	System->Params.UnitScale = (InNode->Extent * Params.UnitScale) / System->Params.Extent;
-	System->SpeedScale = Universe->SpeedScale;
+	System->SpeedScale = Universe ? Universe->SpeedScale : SpeedScale;
 	System->Params.Seed = InNode->Data.ObjectId;
 	System->Params.ParentColor = FLinearColor(InNode->Data.Composition);
 	System->Params.Rotation = FRandomStream(InNode->Data.ObjectId).GetUnitVector().Rotation();

@@ -49,11 +49,13 @@ void AProceduralSpaceActor::Initialize()
 
 void AProceduralSpaceActor::ResetForSpawn()
 {
+    SetActorTickEnabled(true);
     InitializationState = ELifecycleState::Uninitialized;
 }
 
 void AProceduralSpaceActor::ResetForPool()
 {
+    SetActorTickEnabled(false);
     double StartTime = FPlatformTime::Seconds();
     InitializationState = ELifecycleState::Pooling;
 
