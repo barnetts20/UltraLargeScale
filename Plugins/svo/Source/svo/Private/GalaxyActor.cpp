@@ -80,6 +80,8 @@ void AGalaxyActor::ResetForSpawn()
 {
 	Super::ResetForSpawn();
 	VirtualTraversal = FVector::ZeroVector;
+	LastFrameOfReferenceLocation = FVector::ZeroVector;
+	CurrentFrameOfReferenceLocation = FVector::ZeroVector;
 }
 #pragma endregion
 
@@ -131,6 +133,10 @@ void AGalaxyActor::InitializeVolumetric()
 			VolumetricComponent->SetVisibility(false);
 			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));
 			VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+			// Absolute world transform: Tick sets VolumetricComponent->SetWorldLocation
+			// to (PlayerPos - VirtualTraversal) each frame so the box stays at the
+			// galaxy's virtual origin regardless of where the actor is pegged.
+			VolumetricComponent->SetAbsolute(true, false, false);
 			VolumetricComponent->TranslucencySortPriority = 1;
 			VolumetricComponent->DepthPriorityGroup = ESceneDepthPriorityGroup::SDPG_MAX;
 			VolumetricComponent->bRenderInDepthPass = false;
@@ -209,13 +215,6 @@ bool AGalaxyActor::CellOverlapsVolume(const FIntVector& Coord, int32 GridDepth) 
 		(Center.Z + HalfCell > -Ext && Center.Z - HalfCell < Ext);
 }
 
-FVector AGalaxyActor::GetPlayerLocalPosition() const
-{
-	// Galaxy-local coordinates map 1:1 to world units. The Niagara component
-	// is at the actor position, so particle position P renders at ActorPos + P.
-	// The player's galaxy-local position is simply the world-space offset.
-	return CurrentFrameOfReferenceLocation - GetActorLocation();
-}
 #pragma endregion
 
 #pragma region Tier System - BuildTierConfigs
@@ -729,23 +728,60 @@ void AGalaxyActor::CullTierCache(const FParticleTierConfig& Config, FParticleTie
 #pragma region Tick
 void AGalaxyActor::Tick(float DeltaTime)
 {
-	// Base class handles parallax offset (actor drift) and debug bounds.
-	Super::Tick(DeltaTime);
+	// Do NOT call Super::Tick — the base class ApplyParallaxOffset drifts the
+	// actor, which is exactly what we want to replace. We handle player tracking
+	// and debug bounds here instead.
+	AActor::Tick(DeltaTime);
+	if (IsDebug) DrawDebugBounds();
 
 	if (InitializationState != ELifecycleState::Ready) return;
 
-	// The galaxy uses actor-level drift, not VirtualTraversal-based particle
-	// offset. Particles stay at their raw galaxy-local positions relative to
-	// the actor. We derive the player's galaxy-local position from the
-	// world-space offset for tier streaming purposes.
-	VirtualTraversal = GetPlayerLocalPosition();
+	// --- Player tracking (Universe-style) ---
+	// Resolve current player position.
+	FVector CurrentPlayerPos = FVector::ZeroVector;
+	bool bHasReference = false;
+	if (const auto* World = GetWorld())
+	{
+		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
+		{
+			if (APawn* Pawn = Controller->GetPawn())
+			{
+				CurrentPlayerPos = Pawn->GetActorLocation();
+				bHasReference = true;
+			}
+		}
+	}
+	if (!bHasReference) return;
 
-	// Peg Niagara components to the player position and push camera-relative
-	// positions. MakeRelativePositions(VT) produces (pos - VT) which are small
-	// values near zero for nearby particles. The component is at PlayerPos, so
-	// rendered = PlayerPos + (pos - VT) = PlayerPos + pos - (PlayerPos - ActorPos)
-	//          = ActorPos + pos — the correct world position.
-	const FVector PlayerPos = CurrentFrameOfReferenceLocation;
+	// Accumulate virtual traversal at the galaxy's parallax depth.
+	// ratio = SpeedScale / UnitScale mirrors the Universe formula.
+	// As the player approaches the galaxy, UnitScale grows smaller and the
+	// ratio shrinks, so VirtualTraversal converges toward zero — giving full
+	// floating-point precision exactly when the player is nearby.
+	const FVector PlayerDelta = CurrentPlayerPos - LastFrameOfReferenceLocation;
+	LastFrameOfReferenceLocation = CurrentPlayerPos;
+	CurrentFrameOfReferenceLocation = CurrentPlayerPos;
+	const double ActiveSpeedScale = (Universe ? Universe->SpeedScale : SpeedScale);
+	const double Ratio = (Params.UnitScale > 0.0) ? (ActiveSpeedScale / Params.UnitScale) : 0.0;
+	VirtualTraversal += PlayerDelta * Ratio;
+
+	// Peg the actor to the player so UE's scene stays in a clean numerical
+	// range. All virtual position is encoded in VirtualTraversal.
+	SetActorLocation(CurrentPlayerPos);
+
+	// Reposition the volumetric box to the galaxy's virtual world origin.
+	// Galaxy-origin in world space = PlayerPos - VirtualTraversal, which is
+	// the point that maps to local coords (0,0,0) in the particle system.
+	if (VolumetricComponent)
+	{
+		VolumetricComponent->SetWorldLocation(CurrentPlayerPos - VirtualTraversal);
+	}
+
+	// Peg Niagara components to the player and push camera-relative positions.
+	// MakeRelativePositions(VT) produces (pos - VT) so:
+	//   rendered = ComponentLoc + (pos - VT) = PlayerPos + pos - VT
+	//            = PlayerPos + pos - (PlayerPos - GalaxyOrigin) = GalaxyOrigin + pos ✓
+	const FVector PlayerPos = CurrentPlayerPos;
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 	{
 		const int32 FrontIdx = Tier->FrontIdx.load();

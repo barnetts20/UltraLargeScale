@@ -848,6 +848,21 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	Galaxy->LastFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
 	Galaxy->CurrentFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
 
+	// Initialize VirtualTraversal so that at spawn time the galaxy's particles
+	// appear at exactly SpawnLoc in world space, matching where the Universe's
+	// particle sprite is rendered.
+	//
+	// Rendered position = PlayerPos + (LocalPos - VT).
+	// We want:           PlayerPos + (LocalPos - VT) = SpawnLoc + LocalPos
+	// Solving:           VT_initial = PlayerPos - SpawnLoc
+	//
+	// As the player flies toward the galaxy, VT accumulates at rate
+	// (SpeedScale / UnitScale).  UnitScale grows smaller as the galaxy actor
+	// is reconfigured for closer approach, so VT shrinks toward zero —
+	// yielding maximum floating-point precision exactly when the player is
+	// inside the galaxy.
+	Galaxy->VirtualTraversal = CurrentFrameOfReferenceLocation - SpawnLoc;
+
 	UE_LOG(LogTemp, Warning, TEXT("=== SpawnGalaxyFromPool ==="));
 	UE_LOG(LogTemp, Warning, TEXT("  Node: center=(%.1f, %.1f, %.1f) extent=%.2f objId=%d tier=%s"),
 		InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Data.ObjectId, *MatchedConfig.TierName);

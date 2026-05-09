@@ -33,6 +33,12 @@ public:
 
 	virtual void BeginPlay() override;
 
+	// Virtual traversal of the player through galaxy-local space. Initialized
+	// at spawn to (PlayerPos - SpawnLoc) so particles appear at the correct
+	// world position from the first frame. Accumulates PlayerDelta *
+	// (SpeedScale / UnitScale) each tick — shrinking toward zero as the player
+	// approaches — giving full floating-point precision when nearby.
+	// Used identically to AUniverseActor::VirtualTraversal.
 	FVector VirtualTraversal = FVector::ZeroVector;
 #pragma endregion
 
@@ -119,12 +125,6 @@ protected:
 	FVector GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const;
 	double GetGridCellExtent(int32 InGridDepth) const;
 	static constexpr double GridExtentMultiplier = 4.0;
-
-	/// Get the player's position in galaxy-local coordinates.
-	/// Since the galaxy uses actor-level drift (not VirtualTraversal-based
-	/// particle offset), the player's local position is derived from the
-	/// world-space offset between the camera and the actor.
-	FVector GetPlayerLocalPosition() const;
 #pragma endregion
 
 #pragma region Volumetric
