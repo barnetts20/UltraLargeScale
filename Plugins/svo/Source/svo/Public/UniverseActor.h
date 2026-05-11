@@ -9,6 +9,7 @@
 #include "FOctree.h"
 #include "DataTypes.h"
 #include "FNiagaraParticleBuffer.h"
+#include "FTierStreamingContext.h"
 #include "UniverseActor.generated.h"
 class AGalaxyActor;
 #pragma endregion
@@ -125,6 +126,18 @@ struct FParticleTierConfig
 	 * @param NewCenter  The tier's new center coord after the boundary cross.
 	 */
 	TFunction<void(const TArray<FIntVector>& Entering, const TArray<FIntVector>& Exiting, const FIntVector& NewCenter)> OnBoundaryCross;
+
+	/**
+	 * Optional per-cell culling predicate evaluated during UpdateTier for each
+	 * entering cell. Returns true if the cell should be skipped (dead-padded
+	 * with zero particles, no generation or cache lookup). Used by bounded
+	 * actors (e.g. GalaxyActor) to skip cells entirely outside their volume.
+	 * Not set for unbounded actors (UniverseActor).
+	 *
+	 * @param Coord  Grid coordinate of the entering cell.
+	 * @return       True to skip this cell entirely.
+	 */
+	TFunction<bool(const FIntVector& Coord)> ShouldSkipCell;
 };
 
 /**
@@ -480,41 +493,10 @@ protected:
 	void BuildTierConfigs();
 
 	/**
-	 * Full tier initialization: allocates double-buffered particle data,
-	 * builds the initial neighborhood, runs parallel generation, inserts into
-	 * the octree, mirrors front→back, then rendezvouses with the game thread
-	 * to spawn Niagara components and activate them exactly once.
-	 *
-	 * Particle IDs are stable from this point forward — Activate is never
-	 * called again for the lifetime of the tier.
-	 *
-	 * @param Config  Immutable tier descriptor.
-	 * @param State   Mutable tier runtime state to initialize.
+	 * Builds a FTierStreamingContext snapshot for the current frame.
+	 * Called by Tick before tier updates and by InitializeNiagara.
 	 */
-	void InitializeTier(FParticleTierConfig& Config, FParticleTierState& State);
-
-	/**
-	 * Per-tick streaming update. On game thread: checks bNeedsPush and pushes
-	 * if ready, then checks for a neighborhood center change. If the player has
-	 * crossed a cell boundary, kicks an async task that: copies front→back,
-	 * diffs old/new neighborhoods, frees exiting slots, generates entering slots
-	 * (cache-hit or procgen), inserts into the octree, culls the cell cache,
-	 * then swaps FrontIdx and sets bNeedsPush.
-	 *
-	 * @param Config  Immutable tier descriptor.
-	 * @param State   Mutable tier runtime state.
-	 */
-	void UpdateTier(FParticleTierConfig& Config, FParticleTierState& State);
-
-	/**
-	 * Pushes the front buffer of each buffer pair to its Niagara component.
-	 * Recomputes and sets the fixed bounds box each call so Lumen always
-	 * sees a tight volume around actual particle positions.
-	 *
-	 * @param Config  Immutable tier descriptor.
-	 * @param State   Mutable tier runtime state.
-	 */
-	void PushTierToNiagara(const FParticleTierConfig& Config, FParticleTierState& State);
+	FTierStreamingContext BuildStreamingContext() const;
 
 #pragma endregion
 
@@ -529,80 +511,6 @@ protected:
 	 * Called from Tick after all tier updates.
 	 */
 	void CheckOctreeBounds();
-
-	/**
-	 * Inserts all active slots of one tier's buffer into the octree.
-	 * Used by InitializeTier (full initial insert) and RebaseOctree (full
-	 * rebuild). For incremental per-cell insert during streaming use
-	 * InsertSlotIntoOctree instead.
-	 *
-	 * @param Config     Tier descriptor (provides OctreeInsertBufferIndex).
-	 * @param State      Tier state (provides ActiveSlots and Buffers).
-	 * @param BufferIdx  Which of the two buffers to read (front or back).
-	 */
-	void InsertTierIntoOctree(const FParticleTierConfig& Config, FParticleTierState& State, int32 BufferIdx);
-
-	/**
-	 * Inserts a single slot's live particles into the octree. Used by
-	 * UpdateTier for incremental insert of entering cells without a full
-	 * tree rebuild. Iterates only SlotCounts[SlotIndex] particles.
-	 *
-	 * @param Config     Tier descriptor.
-	 * @param State      Tier state.
-	 * @param SlotIndex  The flat slot index to insert.
-	 * @param BufferIdx  Which of the two buffers to read.
-	 */
-	void InsertSlotIntoOctree(const FParticleTierConfig& Config, FParticleTierState& State,
-		int32 SlotIndex, int32 BufferIdx);
-
-	/**
-	 * Shared inner loop for InsertTierIntoOctree and InsertSlotIntoOctree.
-	 * Computes insert depth from Extent via MakePointDataFromWorldScale,
-	 * calls Octree->InsertPosition, and appends the result to Entry.InsertedNodes.
-	 *
-	 * @param Entry       Slot entry to append the inserted node to.
-	 * @param Position    Particle position in sector-local space.
-	 * @param Extent      Particle extent in sector-local units (UnitScale = 1.0 assumed).
-	 * @param SlotIndex   Written into ObjectId for buffer dereference on query.
-	 * @param TreeExtent  Current octree root extent, used to derive insert depth.
-	 * @param TierIndex   Written into TypeId so spawn hooks can identify the source tier.
-	 */
-	void InsertParticleIntoOctree(FSlotEntry& Entry, const FVector& Position,
-		float Extent, int32 SlotIndex, double TreeExtent, int32 TierIndex = 0);
-
-#pragma endregion
-
-#pragma region Tier System - Cell Cache
-
-	/**
-	 * Snapshots the live particles from a buffer slot into State.CellCache[Coord].
-	 * Called after generation (cache-write on cache-miss). On re-entry the
-	 * stored arrays are blitted directly into the back-buffer, skipping procgen.
-	 *
-	 * @param Config     Tier descriptor (provides buffer count).
-	 * @param State      Tier state (provides Buffers and SlotCounts).
-	 * @param Coord      Grid coordinate key for the cache entry.
-	 * @param SlotIndex  Source slot to snapshot.
-	 * @param BufferIdx  Which of the two buffers to read from.
-	 */
-	void CacheCellFromBuffers(const FParticleTierConfig& Config, FParticleTierState& State,
-		const FIntVector& Coord, int32 SlotIndex, int32 BufferIdx);
-
-	/**
-	 * Evicts CellCache entries further than (NeighborhoodRadius + 4) cells
-	 * from NewCenter in Chebyshev distance. Called at the end of each
-	 * UpdateTier async task, before bUpdateInProgress is cleared, ensuring
-	 * exclusive write access to CellCache.
-	 *
-	 * The +4 buffer keeps two rings beyond the active neighborhood warm for
-	 * immediate cache-hits on the next boundary cross in any direction.
-	 *
-	 * @param Config     Tier descriptor (provides NeighborhoodRadius).
-	 * @param State      Tier state (provides CellCache).
-	 * @param NewCenter  The tier's new center coord after the boundary cross.
-	 */
-	void CullTierCache(const FParticleTierConfig& Config, FParticleTierState& State,
-		const FIntVector& NewCenter);
 
 #pragma endregion
 

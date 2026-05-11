@@ -8,6 +8,7 @@
 #include "ProceduralSpaceActor.h"
 #include "GalaxyDataGenerator.h"
 #include "UniverseActor.h"
+#include "FTierStreamingSystem.h"
 #include "GalaxyActor.generated.h"
 
 class AStarSystemActor;
@@ -99,25 +100,10 @@ protected:
 
 #pragma region Tier System - Pipeline
 	void BuildTierConfigs();
-	void InitializeTier(FParticleTierConfig& Config, FParticleTierState& State);
-	void UpdateTier(FParticleTierConfig& Config, FParticleTierState& State);
-	void PushTierToNiagara(const FParticleTierConfig& Config, FParticleTierState& State);
+	FTierStreamingContext BuildStreamingContext() const;
 
 	/// Returns true if the given grid coord's cell overlaps the galaxy volume.
 	bool CellOverlapsVolume(const FIntVector& Coord, int32 GridDepth) const;
-#pragma endregion
-
-#pragma region Tier System - Octree Integration
-	void InsertTierIntoOctree(const FParticleTierConfig& Config, FParticleTierState& State, int32 BufferIdx);
-	void InsertSlotIntoOctree(const FParticleTierConfig& Config, FParticleTierState& State, int32 SlotIndex, int32 BufferIdx);
-	void InsertParticleIntoOctree(FSlotEntry& Entry, const FVector& Position, float Extent, int32 SlotIndex, double TreeExtent);
-#pragma endregion
-
-#pragma region Tier System - Cell Cache
-	void CacheCellFromBuffers(const FParticleTierConfig& Config, FParticleTierState& State,
-		const FIntVector& Coord, int32 SlotIndex, int32 BufferIdx);
-	void CullTierCache(const FParticleTierConfig& Config, FParticleTierState& State,
-		const FIntVector& NewCenter);
 #pragma endregion
 
 #pragma region Tier System - Grid Coord Helpers

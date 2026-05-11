@@ -1,4 +1,4 @@
-// ProceduralSpaceActor.cpp
+ï»¿// ProceduralSpaceActor.cpp
 #include "ProceduralSpaceActor.h"
 #include <Kismet/GameplayStatics.h>
 
@@ -23,27 +23,31 @@ void AProceduralSpaceActor::Initialize()
         }
     }
 
-    AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this]()
+    TWeakObjectPtr<AProceduralSpaceActor> WeakThis(this);
+    AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis]()
         {
+            AProceduralSpaceActor* Self = WeakThis.Get();
+            if (!Self) return;
+
             double StartTime = FPlatformTime::Seconds();
 
-            InitializeChildPool();
-            if (InitializationState == ELifecycleState::Pooling) return;
+            Self->InitializeChildPool();
+            if (Self->InitializationState == ELifecycleState::Pooling) return;
 
-            InitializeData();
-            if (InitializationState == ELifecycleState::Pooling) return;
+            Self->InitializeData();
+            if (Self->InitializationState == ELifecycleState::Pooling) return;
 
-            InitializeVolumetric();
-            if (InitializationState == ELifecycleState::Pooling) return;
+            Self->InitializeVolumetric();
+            if (Self->InitializationState == ELifecycleState::Pooling) return;
 
-            InitializeNiagara();
-            if (InitializationState == ELifecycleState::Pooling) return;
+            Self->InitializeNiagara();
+            if (Self->InitializationState == ELifecycleState::Pooling) return;
 
-            InitializationState = ELifecycleState::Ready;
+            Self->InitializationState = ELifecycleState::Ready;
 
             double TotalDuration = FPlatformTime::Seconds() - StartTime;
             UE_LOG(LogTemp, Log, TEXT("%s::Initialize total duration: %.3f seconds"),
-                *GetClass()->GetName(), TotalDuration);
+                *Self->GetClass()->GetName(), TotalDuration);
         });
 }
 
@@ -180,7 +184,7 @@ void AProceduralSpaceActor::TickFromParent(float DeltaTime, const FVector& InPla
 {
     // Base implementation covers StarSystemActor: apply parallax offset using
     // the already-resolved player position passed down from the parent galaxy.
-    // No controller lookup needed — InPlayerPos is authoritative for this frame.
+    // No controller lookup needed ï¿½ InPlayerPos is authoritative for this frame.
     CurrentFrameOfReferenceLocation = InPlayerPos;
     const double ParallaxRatio = GetParentSpeedScale() / GetUnitScale();
     const FVector PlayerOffset = InPlayerPos - LastFrameOfReferenceLocation;
