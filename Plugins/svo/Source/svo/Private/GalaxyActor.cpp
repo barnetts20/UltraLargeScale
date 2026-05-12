@@ -94,12 +94,15 @@ void AGalaxyActor::InitializeChildPool()
 {
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
+	TWeakObjectPtr<AGalaxyActor> WeakThis(this);
+	AsyncTask(ENamedThreads::GameThread, [WeakThis, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
-			for (int i = 0; i < StarSystemPoolSize; i++) {
-				AStarSystemActor* System = GetWorld()->SpawnActor<AStarSystemActor>(StarSystemActorClass, FVector::ZeroVector, FRotator::ZeroRotator);
-				System->Galaxy = this;
-				StarSystemPool.Add(System);
+			AGalaxyActor* Self = WeakThis.Get();
+			if (!Self) { CompletionPromise.SetValue(); return; }
+			for (int i = 0; i < Self->StarSystemPoolSize; i++) {
+				AStarSystemActor* System = Self->GetWorld()->SpawnActor<AStarSystemActor>(Self->StarSystemActorClass, FVector::ZeroVector, FRotator::ZeroRotator);
+				System->Galaxy = Self;
+				Self->StarSystemPool.Add(System);
 			}
 			CompletionPromise.SetValue();
 		});
@@ -229,8 +232,10 @@ void AGalaxyActor::BuildTierConfigs()
 	LargeTierConfig.OctreeInsertBufferIndex = 0;
 	LargeTierConfig.TierIndex = 0;
 	LargeTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
-		const FVector NodeCenter = GridCoordToCenter(Coord, LargeTierConfig.GridDepth);
-		GalaxyGenerator.GenerateLargeTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter, LargeTierState.SlotCounts[SlotIndex]);
+		// Large tier covers the full galaxy volume in a single cell.
+		// Candidates are distributed around the galaxy origin, not the grid cell center.
+		GalaxyGenerator.GenerateTierNode(Coord, SlotIndex, *Buffers[0], FVector::ZeroVector,
+			static_cast<double>(Params.Extent), Params.LargeTier, 0, LargeTierState.SlotCounts[SlotIndex]);
 		};
 
 	// --- Mid tier: neighborhood streaming ---
@@ -248,7 +253,8 @@ void AGalaxyActor::BuildTierConfigs()
 	MidTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
 		const FVector NodeCenter = GridCoordToCenter(Coord, MidTierConfig.GridDepth);
 		const double CellExt = GetGridCellExtent(MidTierConfig.GridDepth);
-		GalaxyGenerator.GenerateMidTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter, CellExt, MidTierState.SlotCounts[SlotIndex]);
+		GalaxyGenerator.GenerateTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter,
+			CellExt, Params.MidTier, 7, MidTierState.SlotCounts[SlotIndex]);
 		};
 
 	// --- Small tier: neighborhood streaming ---
@@ -266,7 +272,8 @@ void AGalaxyActor::BuildTierConfigs()
 	SmallTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
 		const FVector NodeCenter = GridCoordToCenter(Coord, SmallTierConfig.GridDepth);
 		const double CellExt = GetGridCellExtent(SmallTierConfig.GridDepth);
-		GalaxyGenerator.GenerateSmallTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter, CellExt, SmallTierState.SlotCounts[SlotIndex]);
+		GalaxyGenerator.GenerateTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter,
+			CellExt, Params.SmallTier, 23, SmallTierState.SlotCounts[SlotIndex]);
 		};
 
 	// ComputeBounds for mid/small tiers.
@@ -381,64 +388,14 @@ void AGalaxyActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
 
 	if (IsDebug) DrawDebugBounds();
 
-	// --- Per-instance diagnostics (only when debug enabled, fires every 60 frames) ---
+	// --- Condensed diagnostics (debug only, every 60 frames) ---
 	if (IsDebug && ++DiagTickCount % 60 == 0)
 	{
-		const FVector ActorLoc = GetActorLocation();
-		FVector FirstParticlePos = FVector::ZeroVector;
-		if (LargeTierState.Buffers.Num() > 0 && LargeTierState.Buffers[0].Num() > 0)
-		{
-			const auto& Buf = LargeTierState.Buffers[0][LargeTierState.FrontIdx.load()];
-			for (int32 i = 0; i < Buf.Positions.Num(); ++i)
-				if (Buf.Extents[i] > 0.0f) { FirstParticlePos = Buf.Positions[i]; break; }
-		}
-		FVector NiagaraCompLoc = FVector::ZeroVector;
-		if (LargeTierState.NiagaraComponents.Num() > 0 && LargeTierState.NiagaraComponents[0])
-			NiagaraCompLoc = LargeTierState.NiagaraComponents[0]->GetComponentLocation();
-
-		UE_LOG(LogTemp, Verbose, TEXT("Galaxy Diag: ActorLoc=(%.0f,%.0f,%.0f) NiagaraComp=(%.0f,%.0f,%.0f) FirstParticle=(%.1f,%.1f,%.1f) VT=(%.0f,%.0f,%.0f) PlayerLocal=(%.0f,%.0f,%.0f)"),
-			ActorLoc.X, ActorLoc.Y, ActorLoc.Z,
-			NiagaraCompLoc.X, NiagaraCompLoc.Y, NiagaraCompLoc.Z,
-			FirstParticlePos.X, FirstParticlePos.Y, FirstParticlePos.Z,
-			VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z,
-			CurrentFrameOfReferenceLocation.X, CurrentFrameOfReferenceLocation.Y, CurrentFrameOfReferenceLocation.Z);
-
-		FVector VolWorldPos = FVector::ZeroVector;
-		FVector VolRelPos = FVector::ZeroVector;
-		FVector NCRelPos = FVector::ZeroVector;
-		if (VolumetricComponent)
-		{
-			VolWorldPos = VolumetricComponent->GetComponentLocation();
-			VolRelPos = VolumetricComponent->GetRelativeLocation();
-		}
-		if (LargeTierState.NiagaraComponents.Num() > 0 && LargeTierState.NiagaraComponents[0])
-			NCRelPos = LargeTierState.NiagaraComponents[0]->GetRelativeLocation();
-
-		UE_LOG(LogTemp, Verbose, TEXT("Galaxy Attach: VolWorld=(%.0f,%.0f,%.0f) VolRel=(%.0f,%.0f,%.0f) NCRel=(%.0f,%.0f,%.0f) RenderedParticle=(%.0f,%.0f,%.0f)"),
-			VolWorldPos.X, VolWorldPos.Y, VolWorldPos.Z,
-			VolRelPos.X, VolRelPos.Y, VolRelPos.Z,
-			NCRelPos.X, NCRelPos.Y, NCRelPos.Z,
-			NiagaraCompLoc.X + FirstParticlePos.X, NiagaraCompLoc.Y + FirstParticlePos.Y, NiagaraCompLoc.Z + FirstParticlePos.Z);
-
-		FVector MidFirstPos = FVector::ZeroVector;
-		int32 MidLiveCount = 0;
-		if (MidTierState.Buffers.Num() > 0 && MidTierState.Buffers[0].Num() > 0)
-		{
-			const auto& MidBuf = MidTierState.Buffers[0][MidTierState.FrontIdx.load()];
-			for (int32 i = 0; i < MidBuf.Positions.Num(); ++i)
-				if (MidBuf.Extents[i] > 0.0f) { if (MidLiveCount == 0) MidFirstPos = MidBuf.Positions[i]; ++MidLiveCount; }
-		}
-		const FBox MidBounds = MidTierConfig.ComputeBounds();
 		const FIntVector MidCoord = PositionToGridCoord(VirtualTraversal, MidTierConfig.GridDepth);
 		const FIntVector SmallCoord = PositionToGridCoord(VirtualTraversal, SmallTierConfig.GridDepth);
 
-		UE_LOG(LogTemp, Verbose, TEXT("Galaxy MidDiag: firstPos=(%.0f,%.0f,%.0f) live=%d bounds=[(%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f)] GridExtMult=%.1f"),
-			MidFirstPos.X, MidFirstPos.Y, MidFirstPos.Z, MidLiveCount,
-			MidBounds.Min.X, MidBounds.Min.Y, MidBounds.Min.Z,
-			MidBounds.Max.X, MidBounds.Max.Y, MidBounds.Max.Z,
-			GridExtentMultiplier);
-
-		UE_LOG(LogTemp, Verbose, TEXT("Galaxy Tick: localPos=(%.0f,%.0f,%.0f) midGrid=(%d,%d,%d) midCenter=(%d,%d,%d) smallGrid=(%d,%d,%d) smallCenter=(%d,%d,%d) midUpdate=%d smallUpdate=%d"),
+		UE_LOG(LogTemp, Verbose, TEXT("Galaxy [%s] VT=(%.0f,%.0f,%.0f) midGrid=(%d,%d,%d)->(%d,%d,%d) smallGrid=(%d,%d,%d)->(%d,%d,%d) updates=%d/%d"),
+			*GetName(),
 			VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z,
 			MidCoord.X, MidCoord.Y, MidCoord.Z,
 			MidTierState.CenterCoord.X, MidTierState.CenterCoord.Y, MidTierState.CenterCoord.Z,

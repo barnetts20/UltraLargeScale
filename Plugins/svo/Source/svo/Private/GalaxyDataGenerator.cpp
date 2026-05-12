@@ -1,4 +1,4 @@
-// GalaxyDataGenerator.cpp
+ï»¿// GalaxyDataGenerator.cpp
 // Refactored to mirror UniverseDataGenerator architecture.
 // Legacy code (GalaxyParamFactory, old GalaxyDataGenerator) is preserved
 // in a disabled #if 0 block at the bottom of this file.
@@ -36,7 +36,7 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos)
 
 	const double r = InNormPos.Size();
 
-	// Hard cutoff — nothing beyond the sphere
+	// Hard cutoff ï¿½ nothing beyond the sphere
 	if (r >= CutoffRadius) return 0.0f;
 
 	// Hernquist profile: density = 1 / (1 + r/a)^2
@@ -75,14 +75,14 @@ void GalaxyDataGenerator::SampleDensityBatch(
 
 void GalaxyDataGenerator::Initialize()
 {
-	// Build the encoded tree for future use (currently unused — C++ path active).
+	// Build the encoded tree for future use (currently unused ï¿½ C++ path active).
 	DensityNoise = BuildNoise();
 }
 
 FastNoise::SmartNode<> GalaxyDataGenerator::BuildNoise() const
 {
 	// -----------------------------------------------------------------------
-	// Encoded noise tree — kept for future FastNoise swap-in.
+	// Encoded noise tree ï¿½ kept for future FastNoise swap-in.
 	// Currently the C++ SampleDensity path is used instead.
 	// When ready to switch: replace SampleDensityBatch calls with
 	// DensityNoise->GenPositionArray3D and SampleNoiseVolume with
@@ -141,34 +141,21 @@ TArray<uint8> GalaxyDataGenerator::SampleNoiseVolume(int InNoiseResolution) cons
 #pragma endregion
 
 #pragma region Particle Count Derivation
-
-int32 GalaxyDataGenerator::DeriveLargeParticleCount(float ScaleFactor, int32 InSeed) const
-{
-	// Base count: lerp between min and max by the galaxy's scale factor.
-	const float BaseCount = FMath::Lerp(
-		static_cast<float>(Params.MinLargeParticles),
-		static_cast<float>(Params.MaxLargeParticles),
-		FMath::Clamp(ScaleFactor, 0.0f, 1.0f));
-
-	// Apply variance: seeded random offset within +/- ParticleCountVariance fraction.
-	FRandomStream VarStream(InSeed + 42);
-	const float VarianceFraction = VarStream.FRandRange(
-		-Params.ParticleCountVariance,
-		Params.ParticleCountVariance);
-	const int32 FinalCount = FMath::RoundToInt32(BaseCount * (1.0f + VarianceFraction));
-
-	return FMath::Max(FinalCount, 1);
-}
-
+// DeriveLargeParticleCount removed â€” was never called. Large tier particle
+// count is effectively determined by SlotCapacity * acceptance rate from the
+// density rejection sampling, which is the correct behavior.
 #pragma endregion
 
 #pragma region Tier Generation Callbacks
 
-void GalaxyDataGenerator::GenerateLargeTierNode(
+void GalaxyDataGenerator::GenerateTierNode(
 	const FIntVector& InCoord,
 	int32 InSlotIndex,
 	FNiagaraParticleBuffer& InBuffer,
 	const FVector& InNodeCenter,
+	double InCellExtent,
+	const FTierParams& InTierParams,
+	int32 InSeedOffset,
 	int32& OutSlotCount) const
 {
 	// -----------------------------------------------------------------------
@@ -177,8 +164,9 @@ void GalaxyDataGenerator::GenerateLargeTierNode(
 	//   2. Batch density evaluation via C++ SampleDensityBatch.
 	//   3. Walk results, rejection-gate, write accepted to slot buffers.
 	//
-	// The large tier covers the full galaxy extent in a single cell.
-	// All candidates are generated uniformly within [-Extent, +Extent].
+	// For the large tier, InNodeCenter is ZeroVector and InCellExtent is
+	// Params.Extent, so candidates span the full galaxy volume.
+	// For mid/small tiers, candidates are local to the cell.
 	// -----------------------------------------------------------------------
 
 	const int32 BufferStart = InSlotIndex * InBuffer.SlotCapacity;
@@ -186,102 +174,7 @@ void GalaxyDataGenerator::GenerateLargeTierNode(
 	const int32 CoordHash = HashCombine(
 		HashCombine(GetTypeHash(InCoord.X), GetTypeHash(InCoord.Y)),
 		GetTypeHash(InCoord.Z));
-	const int32 NodeSeed = HashCombine(Params.Seed, CoordHash);
-	FRandomStream Stream(NodeSeed);
-
-	const int32 NumCandidates = InBuffer.SlotCapacity;
-	const double InvExtent = 1.0 / static_cast<double>(Params.Extent);
-
-	// --- Phase 1: generate candidates + normalized noise coords ---
-	TArray<FVector> CandidatePositions;
-	TArray<float> NoiseX, NoiseY, NoiseZ;
-	CandidatePositions.SetNumUninitialized(NumCandidates);
-	NoiseX.SetNumUninitialized(NumCandidates);
-	NoiseY.SetNumUninitialized(NumCandidates);
-	NoiseZ.SetNumUninitialized(NumCandidates);
-
-	for (int32 i = 0; i < NumCandidates; ++i)
-	{
-		const FVector Candidate(
-			Stream.FRandRange(-static_cast<double>(Params.Extent), static_cast<double>(Params.Extent)),
-			Stream.FRandRange(-static_cast<double>(Params.Extent), static_cast<double>(Params.Extent)),
-			Stream.FRandRange(-static_cast<double>(Params.Extent), static_cast<double>(Params.Extent)));
-		CandidatePositions[i] = Candidate;
-
-		// Normalize to [-1, 1] noise space. No cross-cell offset needed
-		// because the galaxy is self-contained.
-		NoiseX[i] = static_cast<float>(Candidate.X * InvExtent);
-		NoiseY[i] = static_cast<float>(Candidate.Y * InvExtent);
-		NoiseZ[i] = static_cast<float>(Candidate.Z * InvExtent);
-	}
-
-	// --- Phase 2: batch density evaluation ---
-	TArray<float> NoiseOut;
-	NoiseOut.SetNumUninitialized(NumCandidates);
-	SampleDensityBatch(
-		NoiseOut.GetData(),
-		NumCandidates,
-		NoiseX.GetData(),
-		NoiseY.GetData(),
-		NoiseZ.GetData());
-
-	NoiseX.Empty();
-	NoiseY.Empty();
-	NoiseZ.Empty();
-
-	// --- Phase 3: accept/reject + write to slot ---
-	int32 ActualCount = 0;
-	auto dCurve = Params.LargeTier.DensityResponse.GetRichCurveConst();
-	for (int32 i = 0; i < NumCandidates; ++i)
-	{
-		const float RawDensity = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
-		const float Density = FMath::Clamp(dCurve->Eval(RawDensity), 0.0f, 1.0f);
-		if (Stream.FRand() > Density) continue;
-
-		const float ScaleSample = Stream.FRand();
-		const double Scale = FPointData::SampleScaleFromDistribution(
-			Params.LargeTier.MinScale, Params.LargeTier.MaxScale,
-			ScaleSample, Params.LargeTier.ScaleDistribution);
-		FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
-		const double ExtentAtDepth = static_cast<double>(Params.Extent) / static_cast<double>(1 << PointData.InsertDepth);
-		const float ClusterExtent = static_cast<float>(ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
-
-		const FVector CompVec = Stream.GetUnitVector();
-
-		const int32 Idx = BufferStart + ActualCount;
-		InBuffer.Positions[Idx] = CandidatePositions[i];
-		InBuffer.Extents[Idx] = ClusterExtent;
-		InBuffer.Colors[Idx] = FLinearColor(FMath::Abs(CompVec.X), FMath::Abs(CompVec.Y), FMath::Abs(CompVec.Z));
-
-		ActualCount++;
-	}
-
-	const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
-	InBuffer.PadSlotDead(InSlotIndex, ActualCount, DeadPos);
-	OutSlotCount = ActualCount;
-}
-
-void GalaxyDataGenerator::GenerateMidTierNode(
-	const FIntVector& InCoord,
-	int32 InSlotIndex,
-	FNiagaraParticleBuffer& InBuffer,
-	const FVector& InNodeCenter,
-	double InCellExtent,
-	int32& OutSlotCount) const
-{
-	// -----------------------------------------------------------------------
-	// Mid tier: neighborhood-streamed cells within the galaxy.
-	// Candidates are generated within the cell extent around NodeCenter.
-	// Noise coords are normalized to galaxy extent (self-contained volume,
-	// no cross-cell snapping needed unlike the universe layer).
-	// -----------------------------------------------------------------------
-
-	const int32 BufferStart = InSlotIndex * InBuffer.SlotCapacity;
-
-	const int32 CoordHash = HashCombine(
-		HashCombine(GetTypeHash(InCoord.X), GetTypeHash(InCoord.Y)),
-		GetTypeHash(InCoord.Z));
-	const int32 NodeSeed = HashCombine(Params.Seed + 7, CoordHash);
+	const int32 NodeSeed = HashCombine(Params.Seed + InSeedOffset, CoordHash);
 	FRandomStream Stream(NodeSeed);
 
 	const int32 NumCandidates = InBuffer.SlotCapacity;
@@ -305,8 +198,7 @@ void GalaxyDataGenerator::GenerateMidTierNode(
 		CandidatePositions[i] = Candidate;
 
 		// Normalize to [-1, 1] noise space relative to galaxy center.
-		// Galaxy is self-contained so no coarse-cell snapping is needed
-		// (unlike universe layer where candidates can straddle sector boundaries).
+		// Galaxy is self-contained so no cross-cell snapping is needed.
 		NoiseX[i] = static_cast<float>(Candidate.X * InvExtent);
 		NoiseY[i] = static_cast<float>(Candidate.Y * InvExtent);
 		NoiseZ[i] = static_cast<float>(Candidate.Z * InvExtent);
@@ -325,7 +217,7 @@ void GalaxyDataGenerator::GenerateMidTierNode(
 
 	// --- Phase 3: accept/reject + write to slot ---
 	int32 ActualCount = 0;
-	auto dCurve = Params.MidTier.DensityResponse.GetRichCurveConst();
+	auto dCurve = InTierParams.DensityResponse.GetRichCurveConst();
 	for (int32 i = 0; i < NumCandidates; ++i)
 	{
 		const float RawDensity = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
@@ -334,97 +226,8 @@ void GalaxyDataGenerator::GenerateMidTierNode(
 
 		const float ScaleSample = Stream.FRand();
 		const double Scale = FPointData::SampleScaleFromDistribution(
-			Params.MidTier.MinScale, Params.MidTier.MaxScale,
-			ScaleSample, Params.MidTier.ScaleDistribution);
-		FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
-		const double ExtentAtDepth = static_cast<double>(Params.Extent) / static_cast<double>(1 << PointData.InsertDepth);
-		const float ClusterExtent = static_cast<float>(ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
-
-		const FVector CompVec = Stream.GetUnitVector();
-
-		const int32 Idx = BufferStart + ActualCount;
-		InBuffer.Positions[Idx] = CandidatePositions[i];
-		InBuffer.Extents[Idx] = ClusterExtent;
-		InBuffer.Colors[Idx] = FLinearColor(FMath::Abs(CompVec.X), FMath::Abs(CompVec.Y), FMath::Abs(CompVec.Z));
-
-		ActualCount++;
-	}
-
-	const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
-	InBuffer.PadSlotDead(InSlotIndex, ActualCount, DeadPos);
-	OutSlotCount = ActualCount;
-}
-
-void GalaxyDataGenerator::GenerateSmallTierNode(
-	const FIntVector& InCoord,
-	int32 InSlotIndex,
-	FNiagaraParticleBuffer& InBuffer,
-	const FVector& InNodeCenter,
-	double InCellExtent,
-	int32& OutSlotCount) const
-{
-	// -----------------------------------------------------------------------
-	// Small tier: identical structure to mid tier with a different seed
-	// offset to isolate the random stream from mid tier at the same coord.
-	// -----------------------------------------------------------------------
-
-	const int32 BufferStart = InSlotIndex * InBuffer.SlotCapacity;
-
-	const int32 CoordHash = HashCombine(
-		HashCombine(GetTypeHash(InCoord.X), GetTypeHash(InCoord.Y)),
-		GetTypeHash(InCoord.Z));
-	const int32 NodeSeed = HashCombine(Params.Seed + 23, CoordHash);
-	FRandomStream Stream(NodeSeed);
-
-	const int32 NumCandidates = InBuffer.SlotCapacity;
-	const double InvExtent = 1.0 / static_cast<double>(Params.Extent);
-
-	// --- Phase 1 ---
-	TArray<FVector> CandidatePositions;
-	TArray<float> NoiseX, NoiseY, NoiseZ;
-	CandidatePositions.SetNumUninitialized(NumCandidates);
-	NoiseX.SetNumUninitialized(NumCandidates);
-	NoiseY.SetNumUninitialized(NumCandidates);
-	NoiseZ.SetNumUninitialized(NumCandidates);
-
-	for (int32 i = 0; i < NumCandidates; ++i)
-	{
-		FVector Candidate(
-			Stream.FRandRange(-InCellExtent, InCellExtent),
-			Stream.FRandRange(-InCellExtent, InCellExtent),
-			Stream.FRandRange(-InCellExtent, InCellExtent));
-		Candidate += InNodeCenter;
-		CandidatePositions[i] = Candidate;
-
-		NoiseX[i] = static_cast<float>(Candidate.X * InvExtent);
-		NoiseY[i] = static_cast<float>(Candidate.Y * InvExtent);
-		NoiseZ[i] = static_cast<float>(Candidate.Z * InvExtent);
-	}
-
-	// --- Phase 2 ---
-	TArray<float> NoiseOut;
-	NoiseOut.SetNumUninitialized(NumCandidates);
-	SampleDensityBatch(
-		NoiseOut.GetData(), NumCandidates,
-		NoiseX.GetData(), NoiseY.GetData(), NoiseZ.GetData());
-
-	NoiseX.Empty();
-	NoiseY.Empty();
-	NoiseZ.Empty();
-
-	// --- Phase 3 ---
-	int32 ActualCount = 0;
-	auto dCurve = Params.SmallTier.DensityResponse.GetRichCurveConst();
-	for (int32 i = 0; i < NumCandidates; ++i)
-	{
-		const float RawDensity = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
-		const float Density = FMath::Clamp(dCurve->Eval(RawDensity), 0.0f, 1.0f);
-		if (Stream.FRand() > Density) continue;
-
-		const float ScaleSample = Stream.FRand();
-		const double Scale = FPointData::SampleScaleFromDistribution(
-			Params.SmallTier.MinScale, Params.SmallTier.MaxScale,
-			ScaleSample, Params.SmallTier.ScaleDistribution);
+			InTierParams.MinScale, InTierParams.MaxScale,
+			ScaleSample, InTierParams.ScaleDistribution);
 		FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
 		const double ExtentAtDepth = static_cast<double>(Params.Extent) / static_cast<double>(1 << PointData.InsertDepth);
 		const float FinalExtent = static_cast<float>(ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
@@ -448,7 +251,7 @@ void GalaxyDataGenerator::GenerateSmallTierNode(
 
 
 // ============================================================================
-// LEGACY CODE — preserved for Phase E spiral density field reference
+// LEGACY CODE ï¿½ preserved for Phase E spiral density field reference
 // ============================================================================
 // The code below is the original galaxy generation system. It is compiled
 // out via #if 0 but kept in this file so that the arm, twist, bulge, disc,
@@ -492,14 +295,14 @@ LegacyGalaxyParamFactory::LegacyGalaxyParamFactory() {
 	// --- All archetype definitions (E0, E3, E5, E7, S0, Sa, Sb, Sc, SBa, SBb, SBc, Irr) ---
 	// --- and their min/max bounds would go here ---
 	// --- See original GalaxyDataGenerator.cpp for full archetype definitions ---
-	// [ARCHETYPE DEFINITIONS OMITTED FOR BREVITY — full original preserved in git history]
+	// [ARCHETYPE DEFINITIONS OMITTED FOR BREVITY ï¿½ full original preserved in git history]
 };
 
 FLegacyGalaxyParams LegacyGalaxyParamFactory::GenerateParams()
 {
 	int TypeIndex = SelectGalaxyTypeIndex();
 	FLegacyGalaxyParams Params;
-	// [Switch statement over all archetypes — see original]
+	// [Switch statement over all archetypes ï¿½ see original]
 	return Params;
 }
 
@@ -507,7 +310,7 @@ FLegacyGalaxyParams LegacyGalaxyParamFactory::BoundedRandomizeParams(FLegacyGala
 {
 	FRandomStream Stream(Seed);
 	FLegacyGalaxyParams Params;
-	// [Full bounded randomization — see original]
+	// [Full bounded randomization ï¿½ see original]
 	return Params;
 }
 

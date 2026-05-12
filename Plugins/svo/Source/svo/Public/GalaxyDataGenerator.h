@@ -1,4 +1,4 @@
-// GalaxyDataGenerator.h
+ï»¿// GalaxyDataGenerator.h
 // Refactored to mirror UniverseDataGenerator architecture.
 // Legacy galaxy generation code (FLegacyGalaxyParams, GalaxyParamFactory,
 // LegacyGalaxyDataGenerator) is preserved at the bottom of this file
@@ -14,7 +14,7 @@
 #include "GalaxyDataGenerator.generated.h"
 
 // ============================================================================
-// FGalaxyParams — extends FBaseParams (mirrors FUniverseParams structure)
+// FGalaxyParams ï¿½ extends FBaseParams (mirrors FUniverseParams structure)
 // ============================================================================
 
 USTRUCT(BlueprintType)
@@ -179,7 +179,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 
 
 // ============================================================================
-// GalaxyDataGenerator — owns noise composition and tier generation callbacks
+// GalaxyDataGenerator ï¿½ owns noise composition and tier generation callbacks
 // ============================================================================
 //
 // Mirrors UniverseDataGenerator structure. The galaxy actor wires tier
@@ -196,10 +196,10 @@ public:
 	FastNoise::SmartNode<> DensityNoise;
 
 	// -----------------------------------------------------------------------
-	// Density Sampling — C++ prototype
+	// Density Sampling ï¿½ C++ prototype
 	// -----------------------------------------------------------------------
 	// Pure C++ density field for rapid iteration. This is the authoritative
-	// density function — both volume texture baking and particle rejection
+	// density function ï¿½ both volume texture baking and particle rejection
 	// sampling call through here. When the math is finalized, port to a
 	// FastNoise encoded graph and swap back to the GenPositionArray3D path.
 
@@ -209,7 +209,7 @@ public:
 	static float SampleDensity(const FVector& InNormPos);
 
 	/// Batch-evaluate the density field for an array of positions.
-	/// Drop-in replacement for GenPositionArray3D — same signature pattern
+	/// Drop-in replacement for GenPositionArray3D ï¿½ same signature pattern
 	/// so swapping back to FastNoise is a one-line change.
 	static void SampleDensityBatch(
 		float* OutDensity,
@@ -242,47 +242,45 @@ public:
 
 	/// Large tier: generates particles across the full galaxy extent using
 	/// batched noise rejection sampling. Particle count is derived from
-	/// ScaleFactor lerp + variance at spawn time.
-	/// OutSlotCount receives the number of accepted particles.
-	void GenerateLargeTierNode(
-		const FIntVector& InCoord,
-		int32 InSlotIndex,
-		FNiagaraParticleBuffer& InBuffer,
-		const FVector& InNodeCenter,
-		int32& OutSlotCount) const;
+	// -----------------------------------------------------------------------
+	// Tier Generation â€” Unified
+	// -----------------------------------------------------------------------
+	// Single generation function used by all tiers. The only differences
+	// between Large/Mid/Small are: the candidate volume (full extent vs
+	// cell-local), the tier params (scale range, density curve), and the
+	// seed offset for stream isolation.
 
-	/// Mid tier: generates particles at mid-grid scale with neighborhood
-	/// streaming. Same three-phase batched pattern.
-	void GenerateMidTierNode(
+	/// Generates particles for a single tier cell via batched noise rejection
+	/// sampling. Candidates are distributed uniformly within InCellExtent
+	/// around InNodeCenter, density-gated by SampleDensity, and written
+	/// into InBuffer at the slot region for InSlotIndex.
+	///
+	/// For the Large tier (full galaxy), pass InNodeCenter = ZeroVector and
+	/// InCellExtent = Params.Extent to cover the entire volume.
+	///
+	/// @param InCoord        Grid coordinate of the cell.
+	/// @param InSlotIndex    Flat slot index within the particle buffer.
+	/// @param InBuffer       Target buffer to write accepted particles into.
+	/// @param InNodeCenter   Center of the cell in galaxy-local space.
+	/// @param InCellExtent   Half-extent of the candidate volume.
+	/// @param InTierParams   Tier config (scale range, density curve, etc).
+	/// @param InSeedOffset   Added to Params.Seed for stream isolation between tiers.
+	/// @param OutSlotCount   Receives the number of accepted particles.
+	void GenerateTierNode(
 		const FIntVector& InCoord,
 		int32 InSlotIndex,
 		FNiagaraParticleBuffer& InBuffer,
 		const FVector& InNodeCenter,
 		double InCellExtent,
+		const FTierParams& InTierParams,
+		int32 InSeedOffset,
 		int32& OutSlotCount) const;
 
-	/// Small tier: generates particles at small-grid scale.
-	void GenerateSmallTierNode(
-		const FIntVector& InCoord,
-		int32 InSlotIndex,
-		FNiagaraParticleBuffer& InBuffer,
-		const FVector& InNodeCenter,
-		double InCellExtent,
-		int32& OutSlotCount) const;
-
-	// -----------------------------------------------------------------------
-	// Particle Count Derivation
-	// -----------------------------------------------------------------------
-
-	/// Compute the large tier particle count for a galaxy with the given
-	/// ScaleFactor [0,1]. Lerps between MinLargeParticles and
-	/// MaxLargeParticles with optional seeded variance.
-	int32 DeriveLargeParticleCount(float ScaleFactor, int32 Seed) const;
 };
 
 
 // ============================================================================
-// LEGACY CODE — preserved for Phase E spiral density field reference
+// LEGACY CODE ï¿½ preserved for Phase E spiral density field reference
 // ============================================================================
 // The structures and classes below are the original galaxy generation system.
 // They use a fundamentally different approach (explicit point generation via
@@ -297,7 +295,7 @@ public:
 
 #include "PointCloudGenerator.h"
 
-/// LEGACY GALAXY GENERATION PARAM STRUCT — original implementation
+/// LEGACY GALAXY GENERATION PARAM STRUCT ï¿½ original implementation
 USTRUCT(BlueprintType)
 struct SVO_API FLegacyGalaxyParams {
 	GENERATED_BODY()
@@ -417,7 +415,7 @@ struct SVO_API FLegacyGalaxyParams {
 	}
 };
 
-/// LEGACY GALAXY PARAM FACTORY — defines randomization ranges and archetypes
+/// LEGACY GALAXY PARAM FACTORY ï¿½ defines randomization ranges and archetypes
 /// (E0, E3, E5, E7, S0, Sa, Sb, Sc, SBa, SBb, SBc, Irr)
 class SVO_API LegacyGalaxyParamFactory {
 public:
@@ -438,7 +436,7 @@ public:
 	int SelectGalaxyTypeIndex();
 };
 
-/// LEGACY GALAXY GENERATOR — explicit point generation with arms/bulge/twist
+/// LEGACY GALAXY GENERATOR ï¿½ explicit point generation with arms/bulge/twist
 class SVO_API LegacyGalaxyDataGenerator : public PointCloudGenerator {
 public:
 	LegacyGalaxyDataGenerator() : PointCloudGenerator(69) {};

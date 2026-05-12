@@ -7,8 +7,8 @@
 #include "CoreMinimal.h"
 #include "ProceduralSpaceActor.h"
 #include "GalaxyDataGenerator.h"
-#include "UniverseActor.h"
 #include "FTierStreamingSystem.h"
+#include "UniverseActor.h"
 #include "GalaxyActor.generated.h"
 
 class AStarSystemActor;
