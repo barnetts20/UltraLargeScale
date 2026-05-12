@@ -326,6 +326,14 @@ void AUniverseActor::Tick(float DeltaTime)
 	Super::Tick(DeltaTime);
 	ApplyParallaxOffset();  // Resolves player pos once into CurrentFrameOfReferenceLocation
 
+	// Process any pending spawn-scan results now that VirtualTraversal and
+	// CurrentFrameOfReferenceLocation are resolved for this frame. This
+	// guarantees SpawnGalaxyFromPool/ReturnGalaxyToPool always see the
+	// current frame's player position, eliminating the 1-frame parallax
+	// offset that occurred when the timer callback landed at an arbitrary
+	// point in the frame.
+	ProcessPendingScanResults();
+
 	// Drive all active galaxies with the already-resolved player position.
 	// Galaxies have UE tick disabled; this is their only per-frame entry point.
 	// Each galaxy cascades down to its own star systems via TickFromParent.
@@ -552,26 +560,40 @@ void AUniverseActor::UpdateSpawnRangeNodes()
 				{
 					AUniverseActor* InnerSelf = WeakThis.Get();
 					if (!InnerSelf) return;
-					TSet<TSharedPtr<FOctreeNode>> NearbySet(NearbyArray);
-					for (const TSharedPtr<FOctreeNode>& Node : NearbySet)
-					{
-						if (!InnerSelf->TrackedSpawnNodes.Contains(Node))
-						{
-							InnerSelf->LogSpawnNodeEnter(Node);
-							InnerSelf->SpawnGalaxyFromPool(Node);
-						}
-						if (InnerSelf->bDebugDrawSpawnNodes) InnerSelf->DebugDrawSpawnNode(Node);
-					}
-					TSet<TSharedPtr<FOctreeNode>> Exited = InnerSelf->TrackedSpawnNodes.Difference(NearbySet);
-					for (const TSharedPtr<FOctreeNode>& Node : Exited)
-					{
-						InnerSelf->LogSpawnNodeExit(Node);
-						InnerSelf->ReturnGalaxyToPool(Node);
-					}
-					InnerSelf->TrackedSpawnNodes = MoveTemp(NearbySet);
+					// Store results for deferred processing in Tick, after
+					// ApplyParallaxOffset has resolved the current frame's
+					// player position and VirtualTraversal.
+					InnerSelf->PendingScanResults = NearbyArray;
+					InnerSelf->bHasPendingScanResults = true;
 					InnerSelf->bSpawnScanInProgress.store(false);
 				});
 		});
+}
+
+void AUniverseActor::ProcessPendingScanResults()
+{
+	if (!bHasPendingScanResults) return;
+	bHasPendingScanResults = false;
+
+	TSet<TSharedPtr<FOctreeNode>> NearbySet(PendingScanResults);
+	PendingScanResults.Empty();
+
+	for (const TSharedPtr<FOctreeNode>& Node : NearbySet)
+	{
+		if (!TrackedSpawnNodes.Contains(Node))
+		{
+			LogSpawnNodeEnter(Node);
+			SpawnGalaxyFromPool(Node);
+		}
+		if (bDebugDrawSpawnNodes) DebugDrawSpawnNode(Node);
+	}
+	TSet<TSharedPtr<FOctreeNode>> Exited = TrackedSpawnNodes.Difference(NearbySet);
+	for (const TSharedPtr<FOctreeNode>& Node : Exited)
+	{
+		LogSpawnNodeExit(Node);
+		ReturnGalaxyToPool(Node);
+	}
+	TrackedSpawnNodes = MoveTemp(NearbySet);
 }
 
 void AUniverseActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) const

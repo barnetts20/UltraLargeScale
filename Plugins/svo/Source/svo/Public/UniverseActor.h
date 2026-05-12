@@ -633,6 +633,14 @@ private:
 	 *  interval to produce enter/exit events. Game-thread only. */
 	TSet<TSharedPtr<FOctreeNode>> TrackedSpawnNodes;
 
+	/** Pending scan results written by the async callback, consumed by Tick.
+	 *  Processing is deferred to Tick so that SpawnGalaxyFromPool always sees
+	 *  the current frame's VirtualTraversal and player position (set by
+	 *  ApplyParallaxOffset), eliminating the 1-frame parallax offset that
+	 *  occurs when the timer callback lands before or after the parallax update. */
+	bool bHasPendingScanResults = false;
+	TArray<TSharedPtr<FOctreeNode>> PendingScanResults;
+
 	/** Starts the recurring spawn-scan timer. Called on the game thread after
 	 *  initialization completes. */
 	void StartSpawnScanTimer();
@@ -641,11 +649,17 @@ private:
 	void StopSpawnScanTimer();
 
 	/**
-	 * Timer callback. Dispatches a background octree query, then marshals
-	 * enter/exit events back to the game thread. Skips if a scan is already
-	 * in progress (bSpawnScanInProgress).
+	 * Timer callback. Dispatches a background octree query, then stores
+	 * results into PendingScanResults for deferred processing in Tick.
+	 * Skips if a scan is already in progress (bSpawnScanInProgress).
 	 */
 	void UpdateSpawnRangeNodes();
+
+	/**
+	 * Processes pending scan results after ApplyParallaxOffset has resolved
+	 * the current frame's player position and VirtualTraversal. Called from Tick.
+	 */
+	void ProcessPendingScanResults();
 
 	/** Logs an ENTER event for a node that crossed into the spawn threshold. */
 	void LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) const;
