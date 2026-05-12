@@ -141,12 +141,14 @@ struct SVO_API FUniverseParams : public FBaseParams {
 
 	// --- Gas layer params (paired with the large tier) ---
 
-	//TODO: these are currently direct set extents. if we want them to behave like the galaxy sprites, they would need to be remapped into the virtual coord space and then back to the particle system extent
+	// Gas sprite extent as a multiplier of the per-particle cluster extent.
+	// GasExtent = ClusterExtent * Lerp(GasExtentMinMultiplier, GasExtentMaxMultiplier, Density).
+	// Keeps gas automatically in the same coordinate space as cluster sprites.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gas")
-	float GasMinExtent = 1e15f;
+	float GasExtentMinMultiplier = 500.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gas")
-	float GasMaxExtent = 5e16f;
+	float GasExtentMaxMultiplier = 1000.0f;
 
 	static constexpr const char* EncodedTree = "EAAAAIA/GQAbABsAEwAAAEBAJAAgAAAAFwAAAAAAAACAP8UggD8AAAAADQADAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAAEXAAAAAAAAAIA/zcxMvQAAgD8kAAIAAAD//wEAAAAASEIB//8GAAAAAIA+";
 

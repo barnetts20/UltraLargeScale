@@ -124,7 +124,7 @@ struct FTierStreamingSystem
 	/** Inserts a single slot's live particles into the octree. */
 	static void InsertSlotIntoOctree(const FTierStreamingContext& Ctx,
 		const FParticleTierConfig& Config, FParticleTierState& State,
-		int32 SlotIndex, int32 BufferIdx);
+		const FIntVector& Coord, int32 SlotIndex, int32 BufferIdx);
 
 	/** Inserts one particle into the octree and appends the node to Entry. */
 	static void InsertParticleIntoOctree(const FTierStreamingContext& Ctx,

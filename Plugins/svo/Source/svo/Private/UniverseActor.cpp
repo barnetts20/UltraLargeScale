@@ -297,22 +297,25 @@ void AUniverseActor::ApplyParallaxOffset()
 	VirtualTraversal += PlayerDelta * Ratio;
 	// Peg the actor. Components follow via attachment.
 	SetActorLocation(CurrentPlayerPos);
-	// Push updated relative positions to all tier buffers every tick.
-	// Because particle IDs are now stable (no reinit), the GPU-side positions
-	// are never reset — so we must re-push LocalPos - VirtualTraversal each
-	// frame as VirtualTraversal grows with the player. This replaces the old
-	// per-tick ParallaxOffset accumulation which depended on Activate(bReset)
-	// clearing the accumulator on each boundary-cross push.
-	for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &SmallTierState })
+	// Push updated relative positions to all tier buffers only when VirtualTraversal
+	// has changed enough that the nearest particle would shift by at least one
+	// sub-pixel. Sub-pixel changes are invisible so the push cost (full array
+	// copy + Niagara DI write per tier per buffer) can be skipped.
+	const double DeltaSq = FVector::DistSquared(VirtualTraversal, LastPushedVirtualTraversal);
+	if (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold)
 	{
-		const int32 FrontIdx = Tier->FrontIdx.load();
-		for (int32 b = 0; b < Tier->NiagaraComponents.Num(); ++b)
+		for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &SmallTierState })
 		{
-			UNiagaraComponent* NC = Tier->NiagaraComponents[b];
-			if (!NC || b >= Tier->Buffers.Num()) continue;
-			const TArray<FVector>& RelPos = Tier->Buffers[b][FrontIdx].MakeRelativePositions(VirtualTraversal);
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NC, NiagaraBufferParams::Positions, RelPos);
+			const int32 FrontIdx = Tier->FrontIdx.load();
+			for (int32 b = 0; b < Tier->NiagaraComponents.Num(); ++b)
+			{
+				UNiagaraComponent* NC = Tier->NiagaraComponents[b];
+				if (!NC || b >= Tier->Buffers.Num()) continue;
+				const TArray<FVector>& RelPos = Tier->Buffers[b][FrontIdx].MakeRelativePositions(VirtualTraversal);
+				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NC, NiagaraBufferParams::Positions, RelPos);
+			}
 		}
+		LastPushedVirtualTraversal = VirtualTraversal;
 	}
 }
 #pragma endregion

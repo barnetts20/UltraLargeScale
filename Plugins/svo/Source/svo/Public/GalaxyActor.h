@@ -41,6 +41,12 @@ public:
 	// approaches � giving full floating-point precision when nearby.
 	// Used identically to AUniverseActor::VirtualTraversal.
 	FVector VirtualTraversal = FVector::ZeroVector;
+
+	/** VirtualTraversal value at the last Niagara position push. */
+	FVector LastPushedVirtualTraversal = FVector::ZeroVector;
+
+	/** Minimum VT delta before re-pushing positions to Niagara. */
+	double ParallaxPushThreshold = 0.5;
 #pragma endregion
 
 #pragma region Pooled Spawn/Despawn Hooks

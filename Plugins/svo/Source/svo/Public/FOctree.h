@@ -292,6 +292,18 @@ public:
 	void CollectLeafNodes(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
 		if (!InNode.IsValid()) return;
 
+		// At or past max depth — this node is effectively a leaf for this query.
+		// Don't recurse into children; fall through to the filter test below.
+		if (InMaxDepth >= 0 && InNode->Depth >= InMaxDepth) {
+			bool bPassesFilter = true;
+			if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
+			if (InNode->Depth > InMaxDepth) bPassesFilter = false;
+			if (InTypeIdFilter == -1) { if (InNode->Data.TypeId < 0) bPassesFilter = false; }
+			else { if (InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false; }
+			if (bPassesFilter) OutNodes.Add(InNode);
+			return;
+		}
+
 		bool bIsLeaf = true;
 		for (const TSharedPtr<FOctreeNode>& Child : InNode->Children) {
 			if (Child.IsValid()) {
@@ -302,7 +314,6 @@ public:
 
 		bool bPassesFilter = true;
 		if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
-		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) bPassesFilter = false;
 		if (InTypeIdFilter == -1) { if (InNode->Data.TypeId < 0) bPassesFilter = false; }
 		else { if (InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false; }
 
@@ -377,6 +388,7 @@ public:
 
 	void CollectPopulatedNodes(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
 		if (!InNode.IsValid()) return;
+		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) return;
 		for (const TSharedPtr<FOctreeNode>& Child : InNode->Children) {
 			if (Child.IsValid()) {
 				CollectPopulatedNodes(Child, OutNodes, InMinDepth, InMaxDepth, InTypeIdFilter);
@@ -413,6 +425,7 @@ public:
 
 	void CollectNodesInRange(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, const FVector& InCenter, const double InExtent, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
 		if (!InNode.IsValid()) return;
+		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) return;
 
 		const FVector QueryMin = InCenter - FVector(InExtent, InExtent, InExtent);
 		const FVector QueryMax = InCenter + FVector(InExtent, InExtent, InExtent);
@@ -453,6 +466,7 @@ public:
 
 	void CollectNodesByScreenSpace(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, const FVector& InCenter, double ScreenSpaceThresholdSq, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
 		if (!InNode.IsValid()) return;
+		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) return;
 
 		const double DistSq = FVector::DistSquared(InNode->Center, InCenter);
 		const double ExtentSq = InNode->Extent * InNode->Extent;

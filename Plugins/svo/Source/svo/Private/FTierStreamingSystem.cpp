@@ -272,7 +272,7 @@ void FTierStreamingSystem::UpdateTier(
 			// Generate entering cells.
 			int32 CacheHitCount = 0;
 			TArray<TPair<FIntVector, int32>> ToGenerate;
-			TArray<int32> AllEnteringSlots;
+			TArray<TPair<FIntVector, int32>> AllEnteringSlots;
 			ToGenerate.Reserve(EnteringNodes.Num());
 			AllEnteringSlots.Reserve(EnteringNodes.Num());
 
@@ -289,7 +289,7 @@ void FTierStreamingSystem::UpdateTier(
 				const int32 SlotIndex = State.FreeSlots.Pop();
 				FSlotEntry& Entry = State.ActiveSlots.Add(Coord);
 				Entry.SlotIndex = SlotIndex;
-				AllEnteringSlots.Add(SlotIndex);
+				AllEnteringSlots.Emplace(Coord, SlotIndex);
 
 				// Optional volume-culling: skip cells entirely outside the
 				// actor's bounded region (e.g. galaxy volume).
@@ -361,8 +361,8 @@ void FTierStreamingSystem::UpdateTier(
 			InsertCtx.Octree = CtxOctree;
 
 			// Incremental octree insert for all entering cells.
-			for (int32 Slot : AllEnteringSlots)
-				InsertSlotIntoOctree(InsertCtx, Config, State, Slot, BackIdx);
+			for (const auto& EnteringPair : AllEnteringSlots)
+				InsertSlotIntoOctree(InsertCtx, Config, State, EnteringPair.Key, EnteringPair.Value, BackIdx);
 
 			// Swap and signal.
 			State.FrontIdx.store(BackIdx);
@@ -386,12 +386,22 @@ void FTierStreamingSystem::PushTierToNiagara(
 	FParticleTierState& State)
 {
 	const int32 FrontIdx = State.FrontIdx.load();
-	const FBox Bounds = Config.ComputeBounds();
+	const FBox BaseBounds = Config.ComputeBounds();
 	for (int32 b = 0; b < Config.NiagaraAssets.Num(); ++b)
 	{
 		UNiagaraComponent* NC = State.NiagaraComponents[b];
-		if (NC) NC->SetSystemFixedBounds(Bounds);
-		State.Buffers[b][FrontIdx].PushToNiagara(NC, Ctx.VirtualTraversal);
+		if (!NC) continue;
+
+		// Compute per-buffer bounds: expand the base bounds by the largest
+		// particle extent in this buffer so sprites near the edge aren't culled.
+		const auto& Buf = State.Buffers[b][FrontIdx];
+		float MaxParticleExtent = 0.f;
+		for (int32 i = 0; i < Buf.Extents.Num(); ++i)
+			MaxParticleExtent = FMath::Max(MaxParticleExtent, Buf.Extents[i]);
+
+		const FBox BufferBounds = BaseBounds.ExpandBy(static_cast<double>(MaxParticleExtent));
+		NC->SetSystemFixedBounds(BufferBounds);
+		Buf.PushToNiagara(NC, Ctx.VirtualTraversal);
 	}
 }
 
@@ -430,17 +440,12 @@ void FTierStreamingSystem::InsertSlotIntoOctree(
 	const FTierStreamingContext& Ctx,
 	const FParticleTierConfig& Config,
 	FParticleTierState& State,
-	int32 SlotIndex, int32 BufferIdx)
+	const FIntVector& Coord, int32 SlotIndex, int32 BufferIdx)
 {
 	if (Config.OctreeInsertBufferIndex < 0 || !Ctx.Octree.IsValid()) return;
 
-	// Find the slot entry that owns this slot index.
-	FSlotEntry* Entry = nullptr;
-	for (auto& Pair : State.ActiveSlots)
-	{
-		if (Pair.Value.SlotIndex == SlotIndex) { Entry = &Pair.Value; break; }
-	}
-	if (!Entry) return;
+	FSlotEntry* Entry = State.ActiveSlots.Find(Coord);
+	if (!Entry || Entry->SlotIndex != SlotIndex) return;
 
 	const FNiagaraParticleBuffer& InsertBuffer = State.Buffers[Config.OctreeInsertBufferIndex][BufferIdx];
 	const double TreeExtent = Ctx.Octree->Extent;

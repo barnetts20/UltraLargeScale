@@ -77,13 +77,6 @@ public:
 #pragma endregion
 
 #pragma region Shared Niagara
-    TArray<FVector> Positions;
-    TArray<float> Extents;
-    TArray<FLinearColor> Colors;
-
-    UPROPERTY()
-    UNiagaraSystem* ProximityCloud;
-
     UPROPERTY()
     UNiagaraComponent* NiagaraComponent;
 #pragma endregion

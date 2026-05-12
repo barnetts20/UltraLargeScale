@@ -83,6 +83,7 @@ void AGalaxyActor::ResetForSpawn()
 {
 	Super::ResetForSpawn();
 	VirtualTraversal = FVector::ZeroVector;
+	LastPushedVirtualTraversal = FVector::ZeroVector;
 	LastFrameOfReferenceLocation = FVector::ZeroVector;
 	CurrentFrameOfReferenceLocation = FVector::ZeroVector;
 }
@@ -342,10 +343,12 @@ void AGalaxyActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
 	if (VolumetricComponent)
 		VolumetricComponent->SetWorldLocation(InPlayerPos - VirtualTraversal);
 
-	// Peg Niagara components to the player and push camera-relative positions.
-	// MakeRelativePositions(VT) produces (pos - VT) so:
-	//   rendered = ComponentLoc + (pos - VT) = PlayerPos + pos - VT
-	//            = PlayerPos + pos - (PlayerPos - GalaxyOrigin) = GalaxyOrigin + pos ✓
+	// Peg Niagara components to the player. SetWorldLocation must happen every
+	// tick since the actor is pegged to the moving player. The position array
+	// push (the expensive part) is gated by the same sub-pixel threshold as
+	// UniverseActor to avoid redundant full-array copies.
+	const double DeltaSq = FVector::DistSquared(VirtualTraversal, LastPushedVirtualTraversal);
+	const bool bNeedsPush = (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold);
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 	{
 		const int32 FrontIdx = Tier->FrontIdx.load();
@@ -354,10 +357,14 @@ void AGalaxyActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
 			UNiagaraComponent* NC = Tier->NiagaraComponents[b];
 			if (!NC || b >= Tier->Buffers.Num()) continue;
 			NC->SetWorldLocation(InPlayerPos);
-			const TArray<FVector>& RelPos = Tier->Buffers[b][FrontIdx].MakeRelativePositions(VirtualTraversal);
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NC, NiagaraBufferParams::Positions, RelPos);
+			if (bNeedsPush)
+			{
+				const TArray<FVector>& RelPos = Tier->Buffers[b][FrontIdx].MakeRelativePositions(VirtualTraversal);
+				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NC, NiagaraBufferParams::Positions, RelPos);
+			}
 		}
 	}
+	if (bNeedsPush) LastPushedVirtualTraversal = VirtualTraversal;
 
 	// --- Tier streaming ---
 	const FTierStreamingContext Ctx = BuildStreamingContext();

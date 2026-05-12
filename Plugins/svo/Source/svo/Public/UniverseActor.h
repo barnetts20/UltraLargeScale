@@ -571,6 +571,17 @@ protected:
 	 */
 	FVector VirtualTraversal = FVector::ZeroVector;
 
+	/** VirtualTraversal value at the last Niagara position push. Used to skip
+	 *  redundant pushes when the delta is sub-pixel. */
+	FVector LastPushedVirtualTraversal = FVector::ZeroVector;
+
+	/** Minimum VirtualTraversal delta (in octree units) before re-pushing
+	 *  camera-relative positions to Niagara. Sub-pixel changes are invisible,
+	 *  so skipping them avoids the full array copy+push cost per tier per tick.
+	 *  Tune via console: r.ParallaxPushThreshold */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parallax Properties")
+	double ParallaxPushThreshold = 0.5;
+
 	/**
 	 * Per-frame parallax update. Pegs the actor to the current player position,
 	 * advances VirtualTraversal, and re-pushes camera-relative positions to all

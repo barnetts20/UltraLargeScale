@@ -51,6 +51,15 @@ protected:
 	StarSystemDataGenerator SystemGenerator;
 #pragma endregion
 
+#pragma region Niagara Data
+	TArray<FVector> Positions;
+	TArray<float> Extents;
+	TArray<FLinearColor> Colors;
+
+	UPROPERTY()
+	UNiagaraSystem* ProximityCloud;
+#pragma endregion
+
 #pragma region Niagara (star system-specific)
 	FString NiagaraPath = FString("/svo/NG_StarSystemCloud.NG_StarSystemCloud");
 	// Positions, Extents, Colors, SectorGalaxyCloud, NiagaraComponent inherited from base

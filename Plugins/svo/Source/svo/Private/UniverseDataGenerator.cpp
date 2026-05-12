@@ -93,7 +93,6 @@ void UniverseDataGenerator::GenerateLargeTierNode(const FIntVector& InCoord, int
 	const int32 NodeSeed = HashCombine(Params.Seed, CoordHash);
 	FRandomStream Stream(NodeSeed);
 
-	const float ExtentRange = Params.GasMaxExtent - Params.GasMinExtent;
 	const int32 NumCandidates = InClusterBuffer.SlotCapacity;
 	const double InvExtent = 1.0 / (double)Params.Extent;
 
@@ -160,7 +159,8 @@ void UniverseDataGenerator::GenerateLargeTierNode(const FIntVector& InCoord, int
 
 		const FVector CompVec = Stream.GetUnitVector();
 		const FVector NodeRotation = Stream.GetUnitVector();
-		const float GasExtent = Params.GasMinExtent + ExtentRange * Density;
+		const float GasMultiplier = FMath::Lerp(Params.GasExtentMinMultiplier, Params.GasExtentMaxMultiplier, Density);
+		const float GasExtent = ClusterExtent * GasMultiplier;
 		const FVector LocalPos = CandidatePositions[i] + InNodeCenter;
 
 		const int32 Idx = BufferStart + ActualCount;
@@ -236,11 +236,11 @@ void UniverseDataGenerator::GenerateMidTierNode(
 		NoiseOut.GetData(), NumCandidates,
 		NoiseX.GetData(), NoiseY.GetData(), NoiseZ.GetData(),
 		0.0f, 0.0f, 0.0f, Params.Seed);
-	
+
 	NoiseX.Empty();
 	NoiseY.Empty();
 	NoiseZ.Empty();
-	
+
 	int32 ActualCount = 0;
 	auto dCurve = Params.MidTier.DensityResponse.GetRichCurveConst();
 	for (int32 i = 0; i < NumCandidates; ++i)
