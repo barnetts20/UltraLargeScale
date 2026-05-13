@@ -55,11 +55,11 @@ struct SVO_API FGalaxyParams : public FBaseParams
 
 	/// Min particle count for the large tier (smallest galaxy scale).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Large Tier")
-	int32 MinLargeParticles = 10000;
+	int32 MinLargeParticles = 1000;
 
 	/// Max particle count for the large tier (largest galaxy scale).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Large Tier")
-	int32 MaxLargeParticles = 10000;
+	int32 MaxLargeParticles = 4000;
 
 	/// Per-instance count variance fraction [0, 1]. Applied as a +/- offset
 	/// on the lerped particle count for visual variety across galaxies.
@@ -168,7 +168,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 
 	/// Radial falloff exponent for the disc. Higher = sharper edge.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
-	float DiscRadialFalloff = 1.0f;
+	float DiscRadialFalloff = 3.0f;
 
 	// --- Arms (SDF-based) ---
 	// The arm density is derived from a signed distance field.
@@ -195,44 +195,35 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
 	float ArmCoreTwistRadius = 0.1f;
 
-	/// Arm half-thickness at the inner edge (near bulge), in normalized space.
-	/// This is the distance from arm centerline to the zero-crossing of the SDF.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmThicknessInner = .5f;
-
-	/// Arm half-thickness at the outer edge (disc rim), in normalized space.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmThicknessOuter = 0.25f;
-
-	/// Vertical half-thickness of the arm tube, in normalized space.
-	/// Controls how tall/flat the arm cross-section is.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmVerticalThickness = 0.03f;
-
 	/// Radial start of the arms, as a fraction of DiscRadius.
 	/// Below this radius, arms fade out (merge into bulge).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
 	float ArmStartRadius = 0.01f;
 
 	// --- SDF → Density Remapping ---
-	// These control how the signed distance is converted to density.
-	// Points where SDF > 0 (inside) get mapped to density based on how
-	// far inside they are. The falloff band controls the soft edge.
+	// The arm SDF returns distance from the arm centerline (positive = inside
+	// arm cross-section, but we remap based on absolute distance).
+	// Two thresholds control the density profile:
+	//
+	//   ArmCoreThickness: distance within which density = peak (solid arm)
+	//   ArmEnvelopeThickness: distance at which density = 0 (outer bound)
+	//
+	// Between core and envelope, density fades smoothly.
+	// Beyond envelope, density is zero and cells can be culled entirely.
 
-	/// Offset added to the SDF before remapping. Expands (positive) or
-	/// contracts (negative) the effective surface. Use this to fatten up
-	/// the arms beyond their geometric thickness without changing the
-	/// SDF shape itself.
+	/// Distance from arm centerline within which density is at peak.
+	/// This defines the solid core of the arm. In normalized space.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Remap")
-	float SDFSurfaceOffset = 0.0f;
+	float ArmCoreThickness = 0.1f;
 
-	/// Width of the falloff band outside the surface, in normalized space.
-	/// Controls how soft/hard the arm edges are. At 0 the edge is a hard
-	/// step function. At 0.05 there's a smooth gradient over 5% of extent.
+	/// Distance from arm centerline at which density reaches zero.
+	/// Must be >= ArmCoreThickness. The zone between core and envelope
+	/// is the falloff gradient. Also used for cell culling: cells whose
+	/// nearest possible SDF distance exceeds this are skipped entirely.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Remap")
-	float SDFFalloffBand = 0.03f;
+	float ArmEnvelopeThickness = 0.8f;
 
-	/// Peak density at the arm core (deep inside the SDF).
+	/// Peak density at the arm core.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Remap")
 	float SDFPeakDensity = 0.9f;
 
@@ -339,12 +330,10 @@ public:
 	// normalized space. Positive = inside, negative = outside.
 	// SampleDensity calls these and remaps to [0, 1].
 
-	/// Signed distance to the nearest arm centerline, accounting for arm
-	/// thickness and vertical extent. Positive inside the arm tube.
+	/// Unsigned distance from the nearest arm centerline.
 	/// @param InNormPos  Position in [-1, 1] normalized galaxy space.
-	/// @param rXY        Pre-computed cylindrical radius (avoids recompute).
-	/// @param absZ       Pre-computed |z|.
-	float SampleArmSDF(const FVector& InNormPos, double rXY, double absZ) const;
+	/// @param rXY        Pre-computed cylindrical radius.
+	float SampleArmSDF(const FVector& InNormPos, double rXY) const;
 
 	/// Signed distance to the bulge ellipsoid. Positive inside.
 	float SampleBulgeSDF(const FVector& InNormPos) const;
@@ -356,8 +345,8 @@ public:
 	// Density Sampling
 	// -----------------------------------------------------------------------
 	// Evaluates the component SDFs, composites them (max = union),
-	// applies SDFSurfaceOffset, then remaps through the falloff band
-	// to produce a [0, 1] density value.
+	// Evaluates the component SDFs, remaps through ArmCoreThickness /
+	// ArmEnvelopeThickness to produce a [0, 1] density value.
 
 	/// Sample density at a single normalized position.
 	/// InNormPos is in [-1, 1] noise space (position / Extent).

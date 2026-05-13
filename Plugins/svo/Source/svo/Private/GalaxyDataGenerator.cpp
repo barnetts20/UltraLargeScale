@@ -7,19 +7,21 @@
 
 #pragma region Signed Distance Fields
 
-float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY, double absZ) const
+float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY) const
 {
 	// =====================================================================
-	// Arm SDF: signed distance to the nearest spiral arm tube.
+	// Arm SDF: distance from the nearest spiral arm centerline.
 	//
-	// The arm centerline is defined by the un-twist operation: at each
-	// radius, the arms are straight lines in un-twisted space, evenly
-	// spaced at 2π/N. We measure angular distance to the nearest arm,
-	// convert to arc-length (tangential distance), then combine with
-	// vertical distance to get a 2D cross-section distance to the arm
-	// tube. The arm tube has separate horizontal and vertical thickness.
+	// Returns unsigned distance. The density remap (core/envelope
+	// thresholds) is applied in SampleDensity.
 	//
-	// Convention: positive = inside the arm, negative = outside.
+	// To get a true perpendicular distance to the arm curve:
+	//   1. Un-twist to find angular distance to nearest straight arm.
+	//   2. Compute the closest point on the arm in polar coords.
+	//   3. Get Euclidean 3D distance from query point to that closest point.
+	//
+	// This avoids the arc-length-at-radius approach which distorts
+	// the distance metric at different radii.
 	// =====================================================================
 
 	const double discR = (double)Params.DiscRadius;
@@ -27,12 +29,12 @@ float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY, do
 	const int32 N = FMath::Max(Params.ArmCount, 1);
 
 	if (rXY < 1e-6 || N <= 0)
-	{
-		// At the exact center or no arms — return large negative (outside)
-		return -1.0f;
-	}
+		return 10.0f;
 
-	// --- Un-twist ---
+	if (rXY > discR)
+		return static_cast<float>(rXY - discR + 1.0);
+
+	// --- Un-twist to find angular offset from nearest arm ---
 	const double normalizedR = rXY / discR;
 	const double baseTwist = (double)Params.ArmTwistStrength * normalizedR;
 	const double coreBoost = (double)Params.ArmCoreTwistStrength *
@@ -43,62 +45,44 @@ float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY, do
 	const double theta = FMath::Atan2(InNormPos.Y, InNormPos.X);
 	const double untwistedTheta = theta - twistAngle;
 
-	// --- Angular distance to nearest arm ---
+	// Angular distance to nearest arm
 	const double armSpacing = 2.0 * PI / N;
 	double angDist = FMath::Fmod(untwistedTheta, armSpacing);
 	if (angDist < 0.0) angDist += armSpacing;
 	if (angDist > armSpacing * 0.5) angDist -= armSpacing;
 
-	// Convert angular distance to arc-length at this radius.
-	// This gives us actual spatial distance in normalized space.
-	const double tangentialDist = FMath::Abs(angDist) * rXY;
+	// --- Find the closest point ON the arm curve ---
+	// The nearest arm in un-twisted space is at angle 0 (by construction
+	// of angDist). In twisted space at this radius, that arm passes through
+	// angle (theta - angDist). The closest point on the arm at this radius
+	// is at (rXY, theta - angDist, z=0) in cylindrical coords.
+	//
+	// Convert both the query point and the arm point to Cartesian and
+	// compute Euclidean distance. This gives a true perpendicular-ish
+	// distance that is consistent in all directions.
+	const double armTheta = theta - angDist; // angle where the arm actually is
+	const double armX = rXY * FMath::Cos(armTheta);
+	const double armY = rXY * FMath::Sin(armTheta);
+	// Arm centerline is in the z=0 plane
+	const double dx = InNormPos.X - armX;
+	const double dy = InNormPos.Y - armY;
+	const double dz = InNormPos.Z; // arm is at z=0
 
-	// --- Arm thickness varies with radius ---
-	const double tRadius = FMath::Clamp(
-		(rXY - armStart) / FMath::Max(discR - armStart, 1e-6), 0.0, 1.0);
-	const double armThickness = FMath::Lerp(
-		(double)Params.ArmThicknessInner, (double)Params.ArmThicknessOuter, tRadius);
-	const double vertThickness = (double)Params.ArmVerticalThickness;
+	double dist = FMath::Sqrt(dx * dx + dy * dy + dz * dz);
 
-	// --- 2D cross-section distance (elliptical tube) ---
-	// Normalize each axis by its thickness to get a unit-circle distance,
-	// then convert back. This gives an elliptical cross-section.
-	const double normTangential = tangentialDist / FMath::Max(armThickness, 1e-6);
-	const double normVertical = absZ / FMath::Max(vertThickness, 1e-6);
-	const double crossSectionDist = FMath::Sqrt(normTangential * normTangential + normVertical * normVertical);
-
-	// SDF: distance from the unit-circle surface in normalized cross-section space,
-	// scaled back to world-ish distance using the average thickness.
-	// Inside the tube: positive. Outside: negative.
-	const double avgThickness = (armThickness + vertThickness) * 0.5;
-	double sdf = (1.0 - crossSectionDist) * avgThickness;
-
-	// --- Radial bounds ---
-	// Fade out at arm start (merge into bulge region)
+	// Fade in from arm start radius
 	if (rXY < armStart)
 	{
-		sdf = -FMath::Abs(rXY - armStart); // outside
+		dist += (armStart - rXY);
 	}
 	else if (rXY < armStart + 0.05)
 	{
 		const double blend = (rXY - armStart) / 0.05;
-		const double smoothBlend = blend * blend * (3.0 - 2.0 * blend);
-		sdf = FMath::Lerp(-0.05, sdf, smoothBlend);
+		const double smooth = blend * blend * (3.0 - 2.0 * blend);
+		dist = FMath::Lerp(dist + 0.05, dist, smooth);
 	}
 
-	// Fade out at disc edge
-	if (rXY > discR)
-	{
-		sdf = -(rXY - discR); // outside, distance grows past edge
-	}
-	else if (rXY > discR - 0.05)
-	{
-		const double blend = (discR - rXY) / 0.05;
-		const double smoothBlend = blend * blend * (3.0 - 2.0 * blend);
-		sdf = FMath::Lerp(-(0.05 - (discR - rXY)), sdf, smoothBlend);
-	}
-
-	return static_cast<float>(sdf);
+	return static_cast<float>(dist);
 }
 
 float GalaxyDataGenerator::SampleBulgeSDF(const FVector& InNormPos) const
@@ -149,13 +133,13 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 	// =====================================================================
 	// SDF-based density evaluation.
 	//
-	// 1. Evaluate each component SDF (arms, bulge, disc).
-	// 2. Composite via max (union).
-	// 3. Apply SDFSurfaceOffset to expand/contract the envelope.
-	// 4. Remap through the falloff band to [0, 1] density.
-	//
-	// Currently only arms are active (bulge/disc/background zeroed for
-	// iteration). Restore by setting their density params > 0.
+	// 1. Evaluate arm SDF (unsigned distance from arm centerline).
+	// 2. Remap through core/envelope thresholds to [0, 1] density:
+	//      dist <= ArmCoreThickness       → peak density
+	//      dist in [core, envelope]       → smoothstep falloff
+	//      dist > ArmEnvelopeThickness    → zero
+	// 3. (Future) Composite with bulge/disc SDFs via max.
+	// 4. Add background halo.
 	// =====================================================================
 
 	const double px = InNormPos.X;
@@ -164,43 +148,30 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 	const double rXY = FMath::Sqrt(px * px + py * py);
 	const double absZ = FMath::Abs(pz);
 
-	// --- Evaluate component SDFs ---
-	const float ArmSDF = SampleArmSDF(InNormPos, rXY, absZ);
+	// --- Arm density from unsigned distance ---
+	const float ArmDist = SampleArmSDF(InNormPos, rXY);
 
-	// For now, bulge and disc SDFs feed into density only when their
-	// respective density params are non-zero. We can composite them
-	// into the SDF union later.
-	// const float BulgeSDF = SampleBulgeSDF(InNormPos);
-	// const float DiscSDF = SampleDiscSDF(InNormPos, rXY, absZ);
+	const double core = FMath::Max((double)Params.ArmCoreThickness, 0.0);
+	const double envelope = FMath::Max((double)Params.ArmEnvelopeThickness, core + 1e-6);
 
-	// --- Composite SDF (just arms for now) ---
-	float CompositeSDF = ArmSDF;
-
-	// --- Apply surface offset (expand/contract) ---
-	CompositeSDF += Params.SDFSurfaceOffset;
-
-	// --- Remap SDF to density ---
-	// CompositeSDF > 0: inside → density approaches peak
-	// CompositeSDF == 0: on the surface → density at midpoint of falloff
-	// CompositeSDF < 0: outside → density falls off to zero
-	const double falloff = FMath::Max((double)Params.SDFFalloffBand, 1e-6);
-
-	double Density = 0.0;
-	if (CompositeSDF > falloff)
+	double ArmDensity = 0.0;
+	if (ArmDist <= core)
 	{
-		// Deep inside — full density
-		Density = (double)Params.SDFPeakDensity;
+		// Inside the core — full peak density
+		ArmDensity = (double)Params.SDFPeakDensity;
 	}
-	else if (CompositeSDF > -falloff)
+	else if (ArmDist < envelope)
 	{
-		// In the falloff band — smoothstep
-		const double t = (CompositeSDF + falloff) / (2.0 * falloff);
-		const double smooth = t * t * (3.0 - 2.0 * t);
-		Density = (double)Params.SDFPeakDensity * smooth;
+		// In the falloff zone — smoothstep from peak to zero
+		const double t = (ArmDist - core) / (envelope - core);
+		const double smooth = t * t * (3.0 - 2.0 * t); // smoothstep 0→1
+		ArmDensity = (double)Params.SDFPeakDensity * (1.0 - smooth);
 	}
-	// else: outside the band — density stays 0
+	// else: beyond envelope — density stays 0
 
-	// --- Add background (not SDF-based, just a soft halo) ---
+	double Density = ArmDensity;
+
+	// --- Background halo (not SDF-based) ---
 	if (Params.BackgroundDensity > 0.0f)
 	{
 		const double squashedZ = pz / FMath::Max((double)Params.BackgroundVerticalSquash, 0.01);
