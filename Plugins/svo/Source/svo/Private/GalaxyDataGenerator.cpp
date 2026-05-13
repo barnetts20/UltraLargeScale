@@ -5,55 +5,183 @@
 
 #include "GalaxyDataGenerator.h"
 
-#pragma region Density Sampling - C++ Prototype
+#pragma region Density Sampling - Analytic Spiral
 
-float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos)
+float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 {
-	// -----------------------------------------------------------------------
-	// Hernquist-like radial density profile with spherical cutoff.
+	// =====================================================================
+	// Analytic spiral galaxy density field.
 	//
-	// The Hernquist profile is: rho(r) = M / (2*pi) * a / (r * (r+a)^3)
-	// We use a simplified normalized form that maps nicely to [0, 1]:
+	// Four additive layers:
+	//   1. BULGE  — Hernquist profile with vertical squash and radial cutoff.
+	//   2. DISC   — Radial exponential with vertical sech² falloff.
+	//   3. ARMS   — Un-twist the query point, measure angular distance to the
+	//               nearest straight arm, convert to a Gaussian-like density.
+	//               Modulates the disc density.
+	//   4. BACKGROUND — Gentle spheroidal halo with smoothstep cutoff.
 	//
-	//   density = (1 / (1 + r/a)^2)
-	//
-	// where r = distance from origin in normalized space, a = scale radius.
-	// At r=0 density=1, at r=a density=0.25, falls off as ~1/r^2 at large r.
-	//
-	// a controls concentration: smaller a = sharper core, larger a = diffuse.
-	// We use a = 0.3 which gives a nice concentrated-but-not-too-sharp profile
-	// in the [-1, 1] normalized space.
-	//
-	// A smooth spherical cutoff is applied so density reaches exactly zero
-	// at r = CutoffRadius, preventing the cube-shaped octree bounds from
-	// being visible. The cutoff uses a smoothstep fade starting at
-	// FadeStart * CutoffRadius.
-	// -----------------------------------------------------------------------
+	// All inputs are in normalized [-1, 1] space.
+	// =====================================================================
 
-	const double a = 0.3;              // Scale radius in normalized space
-	const double CutoffRadius = 1.0;   // Hard zero at normalized radius 1.0
-	const double FadeStart = 0.7;      // Fade begins at 70% of cutoff radius
+	const double px = InNormPos.X;
+	const double py = InNormPos.Y;
+	const double pz = InNormPos.Z;
 
-	const double r = InNormPos.Size();
+	// --- Cylindrical coords ---
+	const double rXY = FMath::Sqrt(px * px + py * py);
+	const double absZ = FMath::Abs(pz);
 
-	// Hard cutoff � nothing beyond the sphere
-	if (r >= CutoffRadius) return 0.0f;
-
-	// Hernquist profile: density = 1 / (1 + r/a)^2
-	const double ra = r / a;
-	const double Density = 1.0 / ((1.0 + ra) * (1.0 + ra));
-
-	// Smooth fade to zero approaching the cutoff radius
-	double Fade = 1.0;
-	const double FadeRadius = FadeStart * CutoffRadius;
-	if (r > FadeRadius)
+	// =====================================================================
+	// 1. BULGE — Hernquist with vertical squash
+	// =====================================================================
+	double Bulge = 0.0;
 	{
-		// smoothstep: maps [FadeRadius, CutoffRadius] -> [1, 0]
-		const double t = (r - FadeRadius) / (CutoffRadius - FadeRadius);
-		Fade = 1.0 - t * t * (3.0 - 2.0 * t);
+		const double squashedZ = pz / FMath::Max((double)Params.BulgeVerticalSquash, 0.01);
+		const double rBulge = FMath::Sqrt(px * px + py * py + squashedZ * squashedZ);
+
+		if (rBulge < (double)Params.BulgeCutoffRadius)
+		{
+			const double a = (double)Params.BulgeScaleRadius;
+			const double ra = rBulge / FMath::Max(a, 1e-6);
+			const double Profile = 1.0 / ((1.0 + ra) * (1.0 + ra));
+
+			// Smooth fade approaching the cutoff
+			double Fade = 1.0;
+			const double FadeStart = 0.7 * (double)Params.BulgeCutoffRadius;
+			if (rBulge > FadeStart)
+			{
+				const double t = (rBulge - FadeStart) / ((double)Params.BulgeCutoffRadius - FadeStart);
+				Fade = 1.0 - t * t * (3.0 - 2.0 * t);
+			}
+
+			Bulge = (double)Params.BulgePeakDensity * Profile * Fade;
+		}
 	}
 
-	return FMath::Clamp(static_cast<float>(Density * Fade), 0.0f, 1.0f);
+	// =====================================================================
+	// 2. DISC — Radial exponential + vertical sech² falloff
+	// =====================================================================
+	double Disc = 0.0;
+	{
+		const double discR = (double)Params.DiscRadius;
+		const double h = FMath::Max(discR * (double)Params.DiscHeightRatio, 1e-6);
+
+		if (rXY < discR && absZ < h * 5.0)
+		{
+			// Radial: smooth falloff from center to disc edge
+			const double rNorm = rXY / discR;
+			const double Radial = FMath::Pow(FMath::Max(1.0 - rNorm, 0.0), (double)Params.DiscRadialFalloff);
+
+			// Vertical: sech²(z/h) — classic thin disc profile
+			const double zh = absZ / h;
+			const double sech = 2.0 / (FMath::Exp(zh) + FMath::Exp(-zh));
+			const double Vertical = sech * sech;
+
+			Disc = (double)Params.DiscBaseDensity * Radial * Vertical;
+		}
+	}
+
+	// =====================================================================
+	// 3. ARMS — Un-twist, measure angular distance to nearest arm
+	// =====================================================================
+	// Arms produce their own density value (not a modulator). They have a
+	// built-in vertical envelope (same sech² as the disc) so they render
+	// as thin spiral structures even when disc density is zero.
+	double Arms = 0.0;
+	{
+		const double discR = (double)Params.DiscRadius;
+		const double armStart = (double)Params.ArmStartRadius * discR;
+		const double h = FMath::Max(discR * (double)Params.DiscHeightRatio, 1e-6);
+		const int32 N = FMath::Max(Params.ArmCount, 1);
+
+		if (rXY > 1e-6 && rXY < discR && absZ < h * 5.0 && N > 0)
+		{
+			// Compute the twist angle at this radius.
+			// Reverses legacy ApplyTwist: deltaTheta = TwistStrength * r + coreBoost
+			const double normalizedR = rXY / discR;
+			const double baseTwist = (double)Params.ArmTwistStrength * normalizedR;
+			const double coreBoost = (double)Params.ArmCoreTwistStrength *
+				-FMath::Exp((double)Params.ArmCoreTwistRadius /
+					FMath::Max(normalizedR, 1e-4));
+			const double twistAngle = baseTwist + coreBoost;
+
+			// Un-twist: subtract the twist to get back to straight-arm space
+			const double theta = FMath::Atan2(py, px);
+			const double untwistedTheta = theta - twistAngle;
+
+			// Angular distance to nearest arm (arms are evenly spaced)
+			const double armSpacing = 2.0 * PI / N;
+			double angDist = FMath::Fmod(untwistedTheta, armSpacing);
+			if (angDist < 0.0) angDist += armSpacing;
+			if (angDist > armSpacing * 0.5) angDist -= armSpacing;
+
+			// Arm width varies linearly from inner to outer edge
+			const double tRadius = FMath::Clamp(
+				(rXY - armStart) / FMath::Max(discR - armStart, 1e-6), 0.0, 1.0);
+			const double armWidth = FMath::Lerp(
+				(double)Params.ArmWidthInner, (double)Params.ArmWidthOuter, tRadius);
+
+			// Generalized Gaussian: exp(-(|d|/w)^p)
+			const double normalizedDist = FMath::Abs(angDist) / FMath::Max(armWidth, 1e-6);
+			const double ArmProfile = FMath::Exp(
+				-FMath::Pow(normalizedDist, (double)Params.ArmFalloffExponent));
+
+			// Vertical envelope: sech²(z/h) — arms live in the disc plane
+			const double zh = absZ / h;
+			const double sech = 2.0 / (FMath::Exp(zh) + FMath::Exp(-zh));
+			const double Vertical = sech * sech;
+
+			// Radial envelope: fade to zero at disc edge
+			const double Radial = FMath::Pow(FMath::Max(1.0 - rXY / discR, 0.0), (double)Params.DiscRadialFalloff);
+
+			Arms = (double)Params.ArmPeakDensity * ArmProfile * Vertical * Radial;
+
+			// Fade arms in from the bulge boundary
+			if (rXY < armStart)
+			{
+				Arms = 0.0;
+			}
+			else if (rXY < armStart + 0.05)
+			{
+				const double blend = (rXY - armStart) / 0.05;
+				Arms *= blend * blend * (3.0 - 2.0 * blend);
+			}
+		}
+	}
+
+	// =====================================================================
+	// 4. BACKGROUND — Spheroidal halo
+	// =====================================================================
+	double Background = 0.0;
+	{
+		const double squashedZ = pz / FMath::Max((double)Params.BackgroundVerticalSquash, 0.01);
+		const double rBg = FMath::Sqrt(px * px + py * py + squashedZ * squashedZ);
+		const double cutoff = (double)Params.BackgroundCutoffRadius;
+
+		if (rBg < cutoff)
+		{
+			const double fadeStart = (double)Params.BackgroundFadeStart * cutoff;
+			double Fade = 1.0;
+			if (rBg > fadeStart)
+			{
+				const double t = (rBg - fadeStart) / (cutoff - fadeStart);
+				Fade = 1.0 - t * t * (3.0 - 2.0 * t);
+			}
+			Background = (double)Params.BackgroundDensity * Fade;
+		}
+	}
+
+	// =====================================================================
+	// Composite: max(bulge, arms) + disc + background
+	// =====================================================================
+	// Each layer is independent and produces its own density:
+	//   Bulge — isotropic core, unaffected by spiral structure
+	//   Arms  — spiral density with built-in vertical + radial envelope
+	//   Disc  — uniform inter-arm fill (when DiscBaseDensity > 0)
+	//   Background — spheroidal halo
+	const double Combined = FMath::Max(Bulge, Arms) + Disc + Background;
+
+	return FMath::Clamp(static_cast<float>(Combined), 0.0f, 1.0f);
 }
 
 void GalaxyDataGenerator::SampleDensityBatch(
@@ -61,7 +189,7 @@ void GalaxyDataGenerator::SampleDensityBatch(
 	int32 InCount,
 	const float* InX,
 	const float* InY,
-	const float* InZ)
+	const float* InZ) const
 {
 	for (int32 i = 0; i < InCount; ++i)
 	{
