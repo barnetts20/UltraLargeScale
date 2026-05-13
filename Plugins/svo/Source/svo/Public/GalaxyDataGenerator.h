@@ -28,7 +28,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 
 	/// Voxel resolution per axis for the density pseudo-volume texture.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density Volume")
-	int32 DensityVolumeResolution = 128;
+	int32 DensityVolumeResolution = 256;
 
 	// --- Tier scale derivation ---
 
@@ -168,6 +168,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
 	float DiscRadialFalloff = 2.0f;
 
+#pragma region Arm Params
 	// --- Arms (SDF-based) ---
 	// The arm density is derived from a signed distance field.
 	// Positive = inside the arm, negative = outside.
@@ -176,7 +177,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 
 	/// Number of spiral arms. Maps to legacy ArmNumArms.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	int32 ArmCount = 4;
+	int32 ArmCount = 2;
 
 	/// Twist strength in radians at the disc edge (r = DiscRadius).
 	/// Higher = more wound spirals. Maps to legacy TwistStrength.
@@ -191,12 +192,12 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Core twist radius — controls how quickly the core boost decays.
 	/// Maps to legacy TwistCoreRadius. Smaller = tighter core winding.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmCoreTwistRadius = 0.1f;
+	float ArmCoreTwistRadius = 0.05f;
 
 	/// Radial start of the arms, as a fraction of DiscRadius.
 	/// Below this radius, arms fade out (merge into bulge).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmStartRadius = 0.2f;
+	float ArmStartRadius = 0.1f;
 
 	/// Vertical squash coefficient for the arm distance calculation.
 	/// Multiplied into Z before computing distance from the arm centerline.
@@ -219,7 +220,15 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// At the inner edge, thicknesses are as specified. At the outer edge,
 	/// they are multiplied by this value. 1.0 = no growth, 3.0 = 3x wider.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmRadialGrowth = 4.0f;
+	float ArmRadialGrowth = 3.0f;
+
+	/// Controls how aggressively peak density drops as the arm widens.
+	/// Peak density = SDFPeakDensity / pow(growthFactor, this exponent).
+	/// 1.0 = full inverse (3x wider = 1/3 density, 3D volume conservation)
+	/// 0.5 = square root (3x wider = ~0.58 density, 2D area conservation)
+	/// 0.0 = no density drop at all (constant peak everywhere)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
+	float ArmDensityFalloffExponent = 0.5f;
 
 	/// Vertical squash at the OUTER edge (disc rim). Lerped from
 	/// ArmVerticalSquash at the inner edge to this value at the outer edge.
@@ -242,18 +251,19 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Distance from arm centerline within which density is at peak.
 	/// This defines the solid core of the arm. In normalized space.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Remap")
-	float ArmCoreThickness = 0.1f;
+	float ArmCoreThickness = 0.000f;
 
 	/// Distance from arm centerline at which density reaches zero.
 	/// Must be >= ArmCoreThickness. The zone between core and envelope
 	/// is the falloff gradient. Also used for cell culling: cells whose
 	/// nearest possible SDF distance exceeds this are skipped entirely.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Remap")
-	float ArmEnvelopeThickness = 0.5f;
+	float ArmEnvelopeThickness = 0.8f;
 
 	/// Peak density at the arm core.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Remap")
 	float SDFPeakDensity = 0.9f;
+#pragma endregion
 
 	// --- Background / Halo ---
 
