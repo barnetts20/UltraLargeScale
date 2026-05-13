@@ -5,154 +5,203 @@
 
 #include "GalaxyDataGenerator.h"
 
-#pragma region Density Sampling - Analytic Spiral
+#pragma region Signed Distance Fields
+
+float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY, double absZ) const
+{
+	// =====================================================================
+	// Arm SDF: signed distance to the nearest spiral arm tube.
+	//
+	// The arm centerline is defined by the un-twist operation: at each
+	// radius, the arms are straight lines in un-twisted space, evenly
+	// spaced at 2π/N. We measure angular distance to the nearest arm,
+	// convert to arc-length (tangential distance), then combine with
+	// vertical distance to get a 2D cross-section distance to the arm
+	// tube. The arm tube has separate horizontal and vertical thickness.
+	//
+	// Convention: positive = inside the arm, negative = outside.
+	// =====================================================================
+
+	const double discR = (double)Params.DiscRadius;
+	const double armStart = (double)Params.ArmStartRadius * discR;
+	const int32 N = FMath::Max(Params.ArmCount, 1);
+
+	if (rXY < 1e-6 || N <= 0)
+	{
+		// At the exact center or no arms — return large negative (outside)
+		return -1.0f;
+	}
+
+	// --- Un-twist ---
+	const double normalizedR = rXY / discR;
+	const double baseTwist = (double)Params.ArmTwistStrength * normalizedR;
+	const double coreBoost = (double)Params.ArmCoreTwistStrength *
+		-FMath::Exp((double)Params.ArmCoreTwistRadius /
+			FMath::Max(normalizedR, 1e-4));
+	const double twistAngle = baseTwist + coreBoost;
+
+	const double theta = FMath::Atan2(InNormPos.Y, InNormPos.X);
+	const double untwistedTheta = theta - twistAngle;
+
+	// --- Angular distance to nearest arm ---
+	const double armSpacing = 2.0 * PI / N;
+	double angDist = FMath::Fmod(untwistedTheta, armSpacing);
+	if (angDist < 0.0) angDist += armSpacing;
+	if (angDist > armSpacing * 0.5) angDist -= armSpacing;
+
+	// Convert angular distance to arc-length at this radius.
+	// This gives us actual spatial distance in normalized space.
+	const double tangentialDist = FMath::Abs(angDist) * rXY;
+
+	// --- Arm thickness varies with radius ---
+	const double tRadius = FMath::Clamp(
+		(rXY - armStart) / FMath::Max(discR - armStart, 1e-6), 0.0, 1.0);
+	const double armThickness = FMath::Lerp(
+		(double)Params.ArmThicknessInner, (double)Params.ArmThicknessOuter, tRadius);
+	const double vertThickness = (double)Params.ArmVerticalThickness;
+
+	// --- 2D cross-section distance (elliptical tube) ---
+	// Normalize each axis by its thickness to get a unit-circle distance,
+	// then convert back. This gives an elliptical cross-section.
+	const double normTangential = tangentialDist / FMath::Max(armThickness, 1e-6);
+	const double normVertical = absZ / FMath::Max(vertThickness, 1e-6);
+	const double crossSectionDist = FMath::Sqrt(normTangential * normTangential + normVertical * normVertical);
+
+	// SDF: distance from the unit-circle surface in normalized cross-section space,
+	// scaled back to world-ish distance using the average thickness.
+	// Inside the tube: positive. Outside: negative.
+	const double avgThickness = (armThickness + vertThickness) * 0.5;
+	double sdf = (1.0 - crossSectionDist) * avgThickness;
+
+	// --- Radial bounds ---
+	// Fade out at arm start (merge into bulge region)
+	if (rXY < armStart)
+	{
+		sdf = -FMath::Abs(rXY - armStart); // outside
+	}
+	else if (rXY < armStart + 0.05)
+	{
+		const double blend = (rXY - armStart) / 0.05;
+		const double smoothBlend = blend * blend * (3.0 - 2.0 * blend);
+		sdf = FMath::Lerp(-0.05, sdf, smoothBlend);
+	}
+
+	// Fade out at disc edge
+	if (rXY > discR)
+	{
+		sdf = -(rXY - discR); // outside, distance grows past edge
+	}
+	else if (rXY > discR - 0.05)
+	{
+		const double blend = (discR - rXY) / 0.05;
+		const double smoothBlend = blend * blend * (3.0 - 2.0 * blend);
+		sdf = FMath::Lerp(-(0.05 - (discR - rXY)), sdf, smoothBlend);
+	}
+
+	return static_cast<float>(sdf);
+}
+
+float GalaxyDataGenerator::SampleBulgeSDF(const FVector& InNormPos) const
+{
+	// Signed distance to the bulge ellipsoid. Positive inside.
+	const double squashedZ = InNormPos.Z / FMath::Max((double)Params.BulgeVerticalSquash, 0.01);
+	const double rBulge = FMath::Sqrt(
+		InNormPos.X * InNormPos.X +
+		InNormPos.Y * InNormPos.Y +
+		squashedZ * squashedZ);
+
+	return static_cast<float>((double)Params.BulgeCutoffRadius - rBulge);
+}
+
+float GalaxyDataGenerator::SampleDiscSDF(const FVector& InNormPos, double rXY, double absZ) const
+{
+	// Signed distance to the disc volume (flat cylinder). Positive inside.
+	const double discR = (double)Params.DiscRadius;
+	const double h = FMath::Max(discR * (double)Params.DiscHeightRatio, 1e-6);
+
+	// Distance to the radial boundary
+	const double radialDist = discR - rXY;
+	// Distance to the vertical boundary
+	const double verticalDist = h - absZ;
+
+	// For a box/cylinder SDF: inside = min of all boundary distances,
+	// outside = distance to nearest edge
+	if (radialDist > 0.0 && verticalDist > 0.0)
+	{
+		// Inside: positive, distance to nearest wall
+		return static_cast<float>(FMath::Min(radialDist, verticalDist));
+	}
+	else
+	{
+		// Outside: negative, distance to nearest edge
+		const double rOut = FMath::Max(-radialDist, 0.0);
+		const double vOut = FMath::Max(-verticalDist, 0.0);
+		return static_cast<float>(-FMath::Sqrt(rOut * rOut + vOut * vOut));
+	}
+}
+
+#pragma endregion
+
+#pragma region Density Sampling
 
 float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 {
 	// =====================================================================
-	// Analytic spiral galaxy density field.
+	// SDF-based density evaluation.
 	//
-	// Four additive layers:
-	//   1. BULGE  — Hernquist profile with vertical squash and radial cutoff.
-	//   2. DISC   — Radial exponential with vertical sech² falloff.
-	//   3. ARMS   — Un-twist the query point, measure angular distance to the
-	//               nearest straight arm, convert to a Gaussian-like density.
-	//               Modulates the disc density.
-	//   4. BACKGROUND — Gentle spheroidal halo with smoothstep cutoff.
+	// 1. Evaluate each component SDF (arms, bulge, disc).
+	// 2. Composite via max (union).
+	// 3. Apply SDFSurfaceOffset to expand/contract the envelope.
+	// 4. Remap through the falloff band to [0, 1] density.
 	//
-	// All inputs are in normalized [-1, 1] space.
+	// Currently only arms are active (bulge/disc/background zeroed for
+	// iteration). Restore by setting their density params > 0.
 	// =====================================================================
 
 	const double px = InNormPos.X;
 	const double py = InNormPos.Y;
 	const double pz = InNormPos.Z;
-
-	// --- Cylindrical coords ---
 	const double rXY = FMath::Sqrt(px * px + py * py);
 	const double absZ = FMath::Abs(pz);
 
-	// =====================================================================
-	// 1. BULGE — Hernquist with vertical squash
-	// =====================================================================
-	double Bulge = 0.0;
+	// --- Evaluate component SDFs ---
+	const float ArmSDF = SampleArmSDF(InNormPos, rXY, absZ);
+
+	// For now, bulge and disc SDFs feed into density only when their
+	// respective density params are non-zero. We can composite them
+	// into the SDF union later.
+	// const float BulgeSDF = SampleBulgeSDF(InNormPos);
+	// const float DiscSDF = SampleDiscSDF(InNormPos, rXY, absZ);
+
+	// --- Composite SDF (just arms for now) ---
+	float CompositeSDF = ArmSDF;
+
+	// --- Apply surface offset (expand/contract) ---
+	CompositeSDF += Params.SDFSurfaceOffset;
+
+	// --- Remap SDF to density ---
+	// CompositeSDF > 0: inside → density approaches peak
+	// CompositeSDF == 0: on the surface → density at midpoint of falloff
+	// CompositeSDF < 0: outside → density falls off to zero
+	const double falloff = FMath::Max((double)Params.SDFFalloffBand, 1e-6);
+
+	double Density = 0.0;
+	if (CompositeSDF > falloff)
 	{
-		const double squashedZ = pz / FMath::Max((double)Params.BulgeVerticalSquash, 0.01);
-		const double rBulge = FMath::Sqrt(px * px + py * py + squashedZ * squashedZ);
-
-		if (rBulge < (double)Params.BulgeCutoffRadius)
-		{
-			const double a = (double)Params.BulgeScaleRadius;
-			const double ra = rBulge / FMath::Max(a, 1e-6);
-			const double Profile = 1.0 / ((1.0 + ra) * (1.0 + ra));
-
-			// Smooth fade approaching the cutoff
-			double Fade = 1.0;
-			const double FadeStart = 0.7 * (double)Params.BulgeCutoffRadius;
-			if (rBulge > FadeStart)
-			{
-				const double t = (rBulge - FadeStart) / ((double)Params.BulgeCutoffRadius - FadeStart);
-				Fade = 1.0 - t * t * (3.0 - 2.0 * t);
-			}
-
-			Bulge = (double)Params.BulgePeakDensity * Profile * Fade;
-		}
+		// Deep inside — full density
+		Density = (double)Params.SDFPeakDensity;
 	}
-
-	// =====================================================================
-	// 2. DISC — Radial exponential + vertical sech² falloff
-	// =====================================================================
-	double Disc = 0.0;
+	else if (CompositeSDF > -falloff)
 	{
-		const double discR = (double)Params.DiscRadius;
-		const double h = FMath::Max(discR * (double)Params.DiscHeightRatio, 1e-6);
-
-		if (rXY < discR && absZ < h * 5.0)
-		{
-			// Radial: smooth falloff from center to disc edge
-			const double rNorm = rXY / discR;
-			const double Radial = FMath::Pow(FMath::Max(1.0 - rNorm, 0.0), (double)Params.DiscRadialFalloff);
-
-			// Vertical: sech²(z/h) — classic thin disc profile
-			const double zh = absZ / h;
-			const double sech = 2.0 / (FMath::Exp(zh) + FMath::Exp(-zh));
-			const double Vertical = sech * sech;
-
-			Disc = (double)Params.DiscBaseDensity * Radial * Vertical;
-		}
+		// In the falloff band — smoothstep
+		const double t = (CompositeSDF + falloff) / (2.0 * falloff);
+		const double smooth = t * t * (3.0 - 2.0 * t);
+		Density = (double)Params.SDFPeakDensity * smooth;
 	}
+	// else: outside the band — density stays 0
 
-	// =====================================================================
-	// 3. ARMS — Un-twist, measure angular distance to nearest arm
-	// =====================================================================
-	// Arms produce their own density value (not a modulator). They have a
-	// built-in vertical envelope (same sech² as the disc) so they render
-	// as thin spiral structures even when disc density is zero.
-	double Arms = 0.0;
-	{
-		const double discR = (double)Params.DiscRadius;
-		const double armStart = (double)Params.ArmStartRadius * discR;
-		const double h = FMath::Max(discR * (double)Params.DiscHeightRatio, 1e-6);
-		const int32 N = FMath::Max(Params.ArmCount, 1);
-
-		if (rXY > 1e-6 && rXY < discR && absZ < h * 5.0 && N > 0)
-		{
-			// Compute the twist angle at this radius.
-			// Reverses legacy ApplyTwist: deltaTheta = TwistStrength * r + coreBoost
-			const double normalizedR = rXY / discR;
-			const double baseTwist = (double)Params.ArmTwistStrength * normalizedR;
-			const double coreBoost = (double)Params.ArmCoreTwistStrength *
-				-FMath::Exp((double)Params.ArmCoreTwistRadius /
-					FMath::Max(normalizedR, 1e-4));
-			const double twistAngle = baseTwist + coreBoost;
-
-			// Un-twist: subtract the twist to get back to straight-arm space
-			const double theta = FMath::Atan2(py, px);
-			const double untwistedTheta = theta - twistAngle;
-
-			// Angular distance to nearest arm (arms are evenly spaced)
-			const double armSpacing = 2.0 * PI / N;
-			double angDist = FMath::Fmod(untwistedTheta, armSpacing);
-			if (angDist < 0.0) angDist += armSpacing;
-			if (angDist > armSpacing * 0.5) angDist -= armSpacing;
-
-			// Arm width varies linearly from inner to outer edge
-			const double tRadius = FMath::Clamp(
-				(rXY - armStart) / FMath::Max(discR - armStart, 1e-6), 0.0, 1.0);
-			const double armWidth = FMath::Lerp(
-				(double)Params.ArmWidthInner, (double)Params.ArmWidthOuter, tRadius);
-
-			// Generalized Gaussian: exp(-(|d|/w)^p)
-			const double normalizedDist = FMath::Abs(angDist) / FMath::Max(armWidth, 1e-6);
-			const double ArmProfile = FMath::Exp(
-				-FMath::Pow(normalizedDist, (double)Params.ArmFalloffExponent));
-
-			// Vertical envelope: sech²(z/h) — arms live in the disc plane
-			const double zh = absZ / h;
-			const double sech = 2.0 / (FMath::Exp(zh) + FMath::Exp(-zh));
-			const double Vertical = sech * sech;
-
-			// Radial envelope: fade to zero at disc edge
-			const double Radial = FMath::Pow(FMath::Max(1.0 - rXY / discR, 0.0), (double)Params.DiscRadialFalloff);
-
-			Arms = (double)Params.ArmPeakDensity * ArmProfile * Vertical * Radial;
-
-			// Fade arms in from the bulge boundary
-			if (rXY < armStart)
-			{
-				Arms = 0.0;
-			}
-			else if (rXY < armStart + 0.05)
-			{
-				const double blend = (rXY - armStart) / 0.05;
-				Arms *= blend * blend * (3.0 - 2.0 * blend);
-			}
-		}
-	}
-
-	// =====================================================================
-	// 4. BACKGROUND — Spheroidal halo
-	// =====================================================================
-	double Background = 0.0;
+	// --- Add background (not SDF-based, just a soft halo) ---
+	if (Params.BackgroundDensity > 0.0f)
 	{
 		const double squashedZ = pz / FMath::Max((double)Params.BackgroundVerticalSquash, 0.01);
 		const double rBg = FMath::Sqrt(px * px + py * py + squashedZ * squashedZ);
@@ -164,24 +213,14 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 			double Fade = 1.0;
 			if (rBg > fadeStart)
 			{
-				const double t = (rBg - fadeStart) / (cutoff - fadeStart);
-				Fade = 1.0 - t * t * (3.0 - 2.0 * t);
+				const double t2 = (rBg - fadeStart) / (cutoff - fadeStart);
+				Fade = 1.0 - t2 * t2 * (3.0 - 2.0 * t2);
 			}
-			Background = (double)Params.BackgroundDensity * Fade;
+			Density += (double)Params.BackgroundDensity * Fade;
 		}
 	}
 
-	// =====================================================================
-	// Composite: max(bulge, arms) + disc + background
-	// =====================================================================
-	// Each layer is independent and produces its own density:
-	//   Bulge — isotropic core, unaffected by spiral structure
-	//   Arms  — spiral density with built-in vertical + radial envelope
-	//   Disc  — uniform inter-arm fill (when DiscBaseDensity > 0)
-	//   Background — spheroidal halo
-	const double Combined = FMath::Max(Bulge, Arms) + Disc + Background;
-
-	return FMath::Clamp(static_cast<float>(Combined), 0.0f, 1.0f);
+	return FMath::Clamp(static_cast<float>(Density), 0.0f, 1.0f);
 }
 
 void GalaxyDataGenerator::SampleDensityBatch(
