@@ -307,8 +307,8 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 	// --- Bulge density ---
 	// Max-blend: concentrated central mass, fades before the disc/arm region.
 	const double BulgeDensity = (double)SampleBulgeDensity(InNormPos);
-	double BlendSharpness = 6; //TODO: LIFT THIS OUT INTO CONFIG
-	double Density = SmoothMax(ArmDensity, DiscDensity, BulgeDensity, BlendSharpness);// FMath::Max(ArmDensity, FMath::Max(DiscDensity, BulgeDensity));
+
+	double Density = SmoothMax(BulgeDensity, DiscDensity, ArmDensity, 6);
 
 	// --- Background halo (not SDF-based) ---
 	if (Params.BackgroundDensity > 0.0f)
@@ -640,18 +640,20 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 {
 	// -----------------------------------------------------------------------
 	// Collect SDF-active cells, then distribute the slot's candidate budget
-	// across them. Each active cell is assigned:
+	// proportionally to each cell's mean corner density. Dense arm-core cells
+	// receive more candidates than cells that merely clip the envelope edge,
+	// so the final particle distribution mirrors the density field rather than
+	// treating all active cells equally.
 	//
-	//   CandidatesPerCell = ceil(SlotCapacity / ActiveCellCount)
+	// Budget allocation:
+	//   CellWeight[i]  = mean SampleDensity of the cell's 8 corners
+	//   CellCandidates[i] = round( SlotCapacity * CellWeight[i] / TotalWeight )
 	//
-	// so all cells get equal sampling density. The total is capped at
-	// SlotCapacity to prevent overrun. Cells use distinct seed streams
-	// derived from their grid coordinate so results are stable regardless
-	// of active-cell ordering.
+	// with a minimum of 1 candidate per active cell so no cell is silently
+	// skipped, and a final clamp so the sum never exceeds SlotCapacity.
 	//
-	// Writing is sequential into the slot region: each cell appends to the
-	// running write cursor (BufferStart + TotalAccepted), stopping when the
-	// slot is full. Dead padding is applied once at the end.
+	// Writing is sequential into the slot region. Dead padding applied once
+	// at the end.
 	// -----------------------------------------------------------------------
 
 	const TArray<FActiveLargeTierCell> ActiveCells = CollectActiveLargeTierCells();
@@ -668,34 +670,74 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 		return;
 	}
 
-	// Candidates per cell: divide budget evenly, rounding up so we don't
-	// under-fill when ActiveCellCount doesn't divide evenly. The cap at
-	// SlotCapacity ensures we never overrun even with rounding.
-	const int32 CandPerCell = FMath::Max(1,
-		FMath::DivideAndRoundUp(SlotCapacity, ActiveCells.Num()));
-
+	// --- Compute per-cell mean corner density and total weight ---
 	const double InvExtent = 1.0 / static_cast<double>(Params.Extent);
-	auto dCurve = Params.LargeTier.DensityResponse.GetRichCurveConst();
+	static const FVector CornerOffsets[8] =
+	{
+		FVector(-1,-1,-1), FVector(1,-1,-1),
+		FVector(-1, 1,-1), FVector(1, 1,-1),
+		FVector(-1,-1, 1), FVector(1,-1, 1),
+		FVector(-1, 1, 1), FVector(1, 1, 1),
+	};
 
+	TArray<float> CellWeights;
+	CellWeights.SetNumUninitialized(ActiveCells.Num());
+	float TotalWeight = 0.0f;
+
+	for (int32 ci = 0; ci < ActiveCells.Num(); ++ci)
+	{
+		const FActiveLargeTierCell& Cell = ActiveCells[ci];
+		float CornerSum = 0.0f;
+		for (int32 c = 0; c < 8; ++c)
+		{
+			const FVector CornerNorm = (Cell.Center + CornerOffsets[c] * Cell.HalfExt) * InvExtent;
+			if (FMath::Abs(CornerNorm.X) <= 1.0 &&
+				FMath::Abs(CornerNorm.Y) <= 1.0 &&
+				FMath::Abs(CornerNorm.Z) <= 1.0)
+			{
+				CornerSum += SampleDensity(CornerNorm);
+			}
+		}
+		CellWeights[ci] = FMath::Max(CornerSum / 8.0f, 1e-6f); // minimum weight so cell isn't starved
+		TotalWeight += CellWeights[ci];
+	}
+
+	// --- Allocate candidate counts proportional to weight ---
+	TArray<int32> CandidateCounts;
+	CandidateCounts.SetNumZeroed(ActiveCells.Num());
+	int32 TotalAllocated = 0;
+
+	for (int32 ci = 0; ci < ActiveCells.Num(); ++ci)
+	{
+		const int32 Count = FMath::Max(1,
+			FMath::RoundToInt(static_cast<float>(SlotCapacity) * CellWeights[ci] / TotalWeight));
+		CandidateCounts[ci] = Count;
+		TotalAllocated += Count;
+	}
+
+	// Trim or top-up the last cell to hit exactly SlotCapacity.
+	// Rounding errors are typically ±1 per cell so the delta is small.
+	const int32 Delta = SlotCapacity - TotalAllocated;
+	CandidateCounts.Last() = FMath::Max(1, CandidateCounts.Last() + Delta);
+
+	// --- Generate per cell ---
+	auto dCurve = Params.LargeTier.DensityResponse.GetRichCurveConst();
 	int32 TotalAccepted = 0;
 
-	for (const FActiveLargeTierCell& Cell : ActiveCells)
+	for (int32 ci = 0; ci < ActiveCells.Num(); ++ci)
 	{
 		if (TotalAccepted >= SlotCapacity) break;
 
-		// Clamp candidates for this cell so we never exceed the remaining budget.
-		const int32 NumCandidates = FMath::Min(CandPerCell, SlotCapacity - TotalAccepted);
+		const FActiveLargeTierCell& Cell = ActiveCells[ci];
+		const int32 NumCandidates = FMath::Min(CandidateCounts[ci], SlotCapacity - TotalAccepted);
 
-		// Stable seed: hash the grid coordinate so each cell's stream is
-		// independent of the active-cell ordering and of InSlotIndex.
+		// Stable per-cell seed derived from grid coordinate.
 		const int32 CoordHash = HashCombine(
 			HashCombine(GetTypeHash(Cell.GridCoord.X), GetTypeHash(Cell.GridCoord.Y)),
 			GetTypeHash(Cell.GridCoord.Z));
-		// Seed offset 0 matches the existing large tier convention.
-		const int32 CellSeed = HashCombine(Params.Seed, CoordHash);
-		FRandomStream Stream(CellSeed);
+		FRandomStream Stream(HashCombine(Params.Seed, CoordHash));
 
-		// --- Phase 1: generate candidates ---
+		// --- Phase 1: candidates ---
 		TArray<FVector> CandidatePositions;
 		TArray<float> NoiseX, NoiseY, NoiseZ;
 		CandidatePositions.SetNumUninitialized(NumCandidates);
@@ -715,7 +757,7 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 			NoiseZ[i] = static_cast<float>(Candidate.Z * InvExtent);
 		}
 
-		// --- Phase 2: batch density evaluation ---
+		// --- Phase 2: batch density eval ---
 		TArray<float> NoiseOut;
 		NoiseOut.SetNumUninitialized(NumCandidates);
 		SampleDensityBatch(NoiseOut.GetData(), NumCandidates,

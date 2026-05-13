@@ -77,7 +77,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Values of 2–4 are recommended; 5+ rarely improves acceptance rate
 	/// enough to justify the overhead.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Large Tier")
-	int32 LargeTierCullDepth = 3;
+	int32 LargeTierCullDepth = 2;
 
 	// --- Volume material params (carried over from legacy for volumetric setup) ---
 
