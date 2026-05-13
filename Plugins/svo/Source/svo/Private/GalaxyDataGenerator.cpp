@@ -15,13 +15,10 @@ float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY) co
 	// Returns unsigned distance. The density remap (core/envelope
 	// thresholds) is applied in SampleDensity.
 	//
-	// To get a true perpendicular distance to the arm curve:
-	//   1. Un-twist to find angular distance to nearest straight arm.
-	//   2. Compute the closest point on the arm in polar coords.
-	//   3. Get Euclidean 3D distance from query point to that closest point.
-	//
-	// This avoids the arc-length-at-radius approach which distorts
-	// the distance metric at different radii.
+	// Finds the closest arm point AT THE SAME RADIUS as the query point
+	// (preserves spiral structure). Vertical distance is scaled by
+	// DiscHeightRatio so the arm tube matches the disc's aspect ratio
+	// and the falloff is isotropic in the arm's local frame.
 	// =====================================================================
 
 	const double discR = (double)Params.DiscRadius;
@@ -51,24 +48,22 @@ float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY) co
 	if (angDist < 0.0) angDist += armSpacing;
 	if (angDist > armSpacing * 0.5) angDist -= armSpacing;
 
-	// --- Find the closest point ON the arm curve ---
-	// The nearest arm in un-twisted space is at angle 0 (by construction
-	// of angDist). In twisted space at this radius, that arm passes through
-	// angle (theta - angDist). The closest point on the arm at this radius
-	// is at (rXY, theta - angDist, z=0) in cylindrical coords.
-	//
-	// Convert both the query point and the arm point to Cartesian and
-	// compute Euclidean distance. This gives a true perpendicular-ish
-	// distance that is consistent in all directions.
-	const double armTheta = theta - angDist; // angle where the arm actually is
+	// --- Find the closest point on the arm at this radius ---
+	const double armTheta = theta - angDist;
 	const double armX = rXY * FMath::Cos(armTheta);
 	const double armY = rXY * FMath::Sin(armTheta);
-	// Arm centerline is in the z=0 plane
+
 	const double dx = InNormPos.X - armX;
 	const double dy = InNormPos.Y - armY;
-	const double dz = InNormPos.Z; // arm is at z=0
 
-	double dist = FMath::Sqrt(dx * dx + dy * dy + dz * dz);
+	// In-plane distance (XY chord to nearest arm point at same radius)
+	const double xyDist = FMath::Sqrt(dx * dx + dy * dy);
+
+	// Vertical distance, scaled so the arm tube cross-section is round.
+	// ArmVerticalSquash > 1 compresses the arms vertically (thinner disc).
+	const double scaledZ = InNormPos.Z / (double)Params.ArmVerticalSquash;
+
+	double dist = FMath::Sqrt(xyDist * xyDist + scaledZ * scaledZ);
 
 	// Fade in from arm start radius
 	if (rXY < armStart)
@@ -145,11 +140,11 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 	const double px = InNormPos.X;
 	const double py = InNormPos.Y;
 	const double pz = InNormPos.Z;
-	const double rXY = FMath::Sqrt(px * px + py * py);
+	const double rXYZ = FMath::Sqrt(px * px + py * py + pz * pz);
 	const double absZ = FMath::Abs(pz);
 
 	// --- Arm density from unsigned distance ---
-	const float ArmDist = SampleArmSDF(InNormPos, rXY);
+	const float ArmDist = SampleArmSDF(InNormPos, rXYZ);
 
 	const double core = FMath::Max((double)Params.ArmCoreThickness, 0.0);
 	const double envelope = FMath::Max((double)Params.ArmEnvelopeThickness, core + 1e-6);

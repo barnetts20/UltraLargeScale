@@ -183,12 +183,12 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Twist strength in radians at the disc edge (r = DiscRadius).
 	/// Higher = more wound spirals. Maps to legacy TwistStrength.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmTwistStrength = 8.0f;
+	float ArmTwistStrength = 4.0f;
 
 	/// Core twist boost — extra winding near the center that falls off
 	/// exponentially. Maps to legacy TwistCoreStrength. Set to 0 to disable.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmCoreTwistStrength = 16.0f;
+	float ArmCoreTwistStrength = 8.0f;
 
 	/// Core twist radius — controls how quickly the core boost decays.
 	/// Maps to legacy TwistCoreRadius. Smaller = tighter core winding.
@@ -198,7 +198,14 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Radial start of the arms, as a fraction of DiscRadius.
 	/// Below this radius, arms fade out (merge into bulge).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmStartRadius = 0.01f;
+	float ArmStartRadius = 0.025f;
+
+	/// Vertical squash coefficient for the arm distance calculation.
+	/// Multiplied into Z before computing distance from the arm centerline.
+	/// Values > 1 compress the arm vertically (thinner), < 1 expand it.
+	/// Tune to make the arm cross-section appear round when viewed edge-on.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
+	float ArmVerticalSquash = .2f;
 
 	// --- SDF → Density Remapping ---
 	// The arm SDF returns distance from the arm centerline (positive = inside
@@ -214,7 +221,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Distance from arm centerline within which density is at peak.
 	/// This defines the solid core of the arm. In normalized space.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Remap")
-	float ArmCoreThickness = 0.1f;
+	float ArmCoreThickness = 0.02f;
 
 	/// Distance from arm centerline at which density reaches zero.
 	/// Must be >= ArmCoreThickness. The zone between core and envelope
@@ -330,7 +337,7 @@ public:
 	// normalized space. Positive = inside, negative = outside.
 	// SampleDensity calls these and remaps to [0, 1].
 
-	/// Unsigned distance from the nearest arm centerline.
+	/// Unsigned distance from the nearest arm centerline at the query radius.
 	/// @param InNormPos  Position in [-1, 1] normalized galaxy space.
 	/// @param rXY        Pre-computed cylindrical radius.
 	float SampleArmSDF(const FVector& InNormPos, double rXY) const;
