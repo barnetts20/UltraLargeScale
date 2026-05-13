@@ -1,7 +1,5 @@
 ﻿// GalaxyDataGenerator.cpp
-// Refactored to mirror UniverseDataGenerator architecture.
-// Legacy code (GalaxyParamFactory, old GalaxyDataGenerator) is preserved
-// in a disabled #if 0 block at the bottom of this file.
+// Spiral density field, SDF evaluation, and tier generation callbacks.
 
 #include "GalaxyDataGenerator.h"
 
@@ -59,9 +57,14 @@ float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY) co
 	// In-plane distance (XY chord to nearest arm point at same radius)
 	const double xyDist = FMath::Sqrt(dx * dx + dy * dy);
 
-	// Vertical distance, scaled so the arm tube cross-section is round.
-	// ArmVerticalSquash > 1 compresses the arms vertically (thinner disc).
-	const double scaledZ = InNormPos.Z / (double)Params.ArmVerticalSquash;
+	// Radial progress along the arm: 0 at inner edge, 1 at disc rim
+	const double tRadial = FMath::Clamp(
+		(rXY - armStart) / FMath::Max(discR - armStart, 1e-6), 0.0, 1.0);
+
+	// Vertical squash lerps from inner to outer value along the arm
+	const double squash = FMath::Lerp(
+		(double)Params.ArmVerticalSquash, (double)Params.ArmVerticalSquashOuter, tRadial);
+	const double scaledZ = InNormPos.Z * squash;
 
 	double dist = FMath::Sqrt(xyDist * xyDist + scaledZ * scaledZ);
 
@@ -140,27 +143,39 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 	const double px = InNormPos.X;
 	const double py = InNormPos.Y;
 	const double pz = InNormPos.Z;
-	const double rXYZ = FMath::Sqrt(px * px + py * py + pz * pz);
+	const double rXY = FMath::Sqrt(px * px + py * py);
 	const double absZ = FMath::Abs(pz);
 
 	// --- Arm density from unsigned distance ---
-	const float ArmDist = SampleArmSDF(InNormPos, rXYZ);
+	const float ArmDist = SampleArmSDF(InNormPos, rXY);
 
-	const double core = FMath::Max((double)Params.ArmCoreThickness, 0.0);
-	const double envelope = FMath::Max((double)Params.ArmEnvelopeThickness, core + 1e-6);
+	// Radial progress along the arm (same t as in SampleArmSDF)
+	const double discR = (double)Params.DiscRadius;
+	const double armStart = (double)Params.ArmStartRadius * discR;
+	const double tRadial = FMath::Clamp(
+		(rXY - armStart) / FMath::Max(discR - armStart, 1e-6), 0.0, 1.0);
+
+	// Radial growth factor: envelope/core widen as the arm extends outward
+	const double growthFactor = FMath::Lerp(1.0, (double)Params.ArmRadialGrowth, tRadial);
+
+	// Scale core and envelope by growth
+	const double core = FMath::Max((double)Params.ArmCoreThickness * growthFactor, 0.0);
+	const double envelope = FMath::Max((double)Params.ArmEnvelopeThickness * growthFactor, core + 1e-6);
+
+	// Peak density drops inversely with growth (mass conservation:
+	// same amount of stuff spread over a larger cross-section)
+	const double peakDensity = (double)Params.SDFPeakDensity / FMath::Max(growthFactor, 1e-6);
 
 	double ArmDensity = 0.0;
 	if (ArmDist <= core)
 	{
-		// Inside the core — full peak density
-		ArmDensity = (double)Params.SDFPeakDensity;
+		ArmDensity = peakDensity;
 	}
 	else if (ArmDist < envelope)
 	{
-		// In the falloff zone — smoothstep from peak to zero
 		const double t = (ArmDist - core) / (envelope - core);
-		const double smooth = t * t * (3.0 - 2.0 * t); // smoothstep 0→1
-		ArmDensity = (double)Params.SDFPeakDensity * (1.0 - smooth);
+		const double smooth = t * t * (3.0 - 2.0 * t);
+		ArmDensity = peakDensity * (1.0 - smooth);
 	}
 	// else: beyond envelope — density stays 0
 
@@ -184,6 +199,21 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 			}
 			Density += (double)Params.BackgroundDensity * Fade;
 		}
+	}
+
+	// --- Bounds fade — prevent hard transitions at volume edges ---
+	// Spherical distance for a natural round falloff. Hard zero beyond r=1.0
+	// to prevent density leaking into the cube corners.
+	const double rBounds = FMath::Sqrt(px * px + py * py + pz * pz);
+	if (rBounds >= 1.0)
+		return 0.0f;
+
+	const double fadeStart = (double)Params.BoundsFadeStart;
+	if (rBounds > fadeStart)
+	{
+		const double t = (rBounds - fadeStart) / (1.0 - fadeStart);
+		const double fade = 1.0 - t * t * (3.0 - 2.0 * t);
+		Density *= fade;
 	}
 
 	return FMath::Clamp(static_cast<float>(Density), 0.0f, 1.0f);
@@ -381,335 +411,3 @@ void GalaxyDataGenerator::GenerateTierNode(
 }
 
 #pragma endregion
-
-
-// ============================================================================
-// LEGACY CODE � preserved for Phase E spiral density field reference
-// ============================================================================
-// The code below is the original galaxy generation system. It is compiled
-// out via #if 0 but kept in this file so that the arm, twist, bulge, disc,
-// cluster, and background generation logic is easily accessible when
-// implementing the spiral density field in Phase E.
-//
-// To re-enable for reference/testing, change #if 0 to #if 1.
-// ============================================================================
-
-#if 0 // ---- BEGIN LEGACY CODE (disabled, preserved for reference) ----
-
-#include "PointCloudGenerator.h"
-
-#pragma region LegacyGalaxyParamFactory
-LegacyGalaxyParamFactory::LegacyGalaxyParamFactory() {
-#pragma region VolumeMaterialBounds
-	Volume_Min.VolumeAmbientColor = FLinearColor(.1, .1, .1);
-	Volume_Max.VolumeAmbientColor = FLinearColor(1.2, 1.2, 1.2);
-	Volume_Min.VolumeCoolShift = FLinearColor(1, 1, 1);
-	Volume_Max.VolumeCoolShift = FLinearColor(20, 20, 20);
-	Volume_Min.VolumeDensity = .1;
-	Volume_Max.VolumeDensity = .5;
-	Volume_Min.VolumeHotShift = FLinearColor(.5, .25, .01);
-	Volume_Max.VolumeHotShift = FLinearColor(1, .7, .3);
-	Volume_Min.VolumeHueVariance = .01;
-	Volume_Max.VolumeHueVariance = .25;
-	Volume_Min.VolumeHueVarianceScale = .25;
-	Volume_Max.VolumeHueVarianceScale = 1.75;
-	Volume_Min.VolumeSaturationVariance = 0;
-	Volume_Max.VolumeSaturationVariance = .9;
-	Volume_Min.VolumeTemperatureScale = 3;
-	Volume_Max.VolumeTemperatureScale = 10;
-	Volume_Min.VolumeTemperatureInfluence = 8;
-	Volume_Max.VolumeTemperatureInfluence = 48;
-	Volume_Min.VolumeWarpAmount = .03;
-	Volume_Max.VolumeWarpAmount = .1;
-	Volume_Min.VolumeWarpScale = .1;
-	Volume_Max.VolumeWarpScale = .5;
-#pragma endregion
-
-	// --- All archetype definitions (E0, E3, E5, E7, S0, Sa, Sb, Sc, SBa, SBb, SBc, Irr) ---
-	// --- and their min/max bounds would go here ---
-	// --- See original GalaxyDataGenerator.cpp for full archetype definitions ---
-	// [ARCHETYPE DEFINITIONS OMITTED FOR BREVITY � full original preserved in git history]
-};
-
-FLegacyGalaxyParams LegacyGalaxyParamFactory::GenerateParams()
-{
-	int TypeIndex = SelectGalaxyTypeIndex();
-	FLegacyGalaxyParams Params;
-	// [Switch statement over all archetypes � see original]
-	return Params;
-}
-
-FLegacyGalaxyParams LegacyGalaxyParamFactory::BoundedRandomizeParams(FLegacyGalaxyParams MinParams, FLegacyGalaxyParams MaxParams)
-{
-	FRandomStream Stream(Seed);
-	FLegacyGalaxyParams Params;
-	// [Full bounded randomization � see original]
-	return Params;
-}
-
-int LegacyGalaxyParamFactory::SelectGalaxyTypeIndex()
-{
-	FRandomStream Stream(Seed + 69);
-	float RandomValue = Stream.FRand();
-	float CumulativeWeight = 0.0f;
-	for (int i = 0; i < GalaxyWeights.Num(); i++)
-	{
-		CumulativeWeight += GalaxyWeights[i].Key;
-		if (RandomValue <= CumulativeWeight) return i;
-	}
-	return 7;
-}
-#pragma endregion
-
-#pragma region LegacyGalaxyDataGenerator
-void LegacyGalaxyDataGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
-{
-	GeneratedData.SetNum(0);
-	Params.GalaxyRadius = Params.Extent * Params.GalaxyRatio;
-	Params.BulgeRadius = Params.Extent * Params.BulgeRatio;
-	Params.VoidRadius = Params.BulgeRadius * Params.VoidRatio;
-
-	GenerateArms();
-	ApplyTwist();
-	GenerateClusters();
-	GenerateBulge();
-	GenerateDisc();
-	GenerateBackground();
-	ApplyRotation();
-
-	const float VoidRadiusSquared = Params.VoidRadius * Params.VoidRadius;
-	FPointData BlackHole;
-	BlackHole.SetPosition(FVector::ZeroVector);
-	BlackHole.Data.ObjectId = INT32_MAX;
-	BlackHole.Data.TypeId = 1;
-
-	FCriticalSection BlackHoleMutex;
-	ParallelFor(GeneratedData.Num(), [this, InOctree, &BlackHole, &BlackHoleMutex, VoidRadiusSquared](int32 i) {
-		FPointData InsertData = GeneratedData[i];
-		if (InsertData.GetPosition().SizeSquared() < VoidRadiusSquared)
-		{
-			FScopeLock Lock(&BlackHoleMutex);
-			GeneratedData[i].Data.TypeId = -1;
-			GeneratedData[i].SetPosition(FVector::ZeroVector);
-			double DensityWeight = FMath::Pow(2.0, InOctree->MaxDepth - InsertData.InsertDepth);
-			BlackHole.Data.ScaleFactor += InsertData.Data.ScaleFactor;
-			BlackHole.Data.Density += InsertData.Data.Density * DensityWeight;
-			BlackHole.Data.Composition += InsertData.Data.Composition * BlackHole.Data.Density;
-		}
-		});
-
-	BlackHole.InsertDepth = MinInsertionDepth - 3;
-	BlackHole.Data.ScaleFactor = 1;
-	BlackHole.Data.Density = 1;
-}
-
-void LegacyGalaxyDataGenerator::GenerateBulge()
-{
-	double StartTime = FPlatformTime::Seconds();
-	const int32 NumPoints = Params.BulgeNumPoints;
-	GeneratedData.Reserve(GeneratedData.Num() + NumPoints);
-	const int32 StartIndex = GeneratedData.Num();
-	GeneratedData.AddUninitialized(NumPoints);
-
-	const FVector AxisBounds = Params.BulgeAxisScale * Params.BulgeRadius;
-	const double a = Params.BulgeRadius * Params.BulgeRadiusScale;
-	const double SoftTruncationRadius = Params.BulgeRadius * Params.BulgeTruncationScale;
-	const double TruncationZone = Params.Extent - SoftTruncationRadius;
-	const FVector AxisScale = AxisBounds / Params.BulgeRadius;
-
-	ParallelFor(NumPoints, [&](int32 i)
-		{
-			FRandomStream Stream(Seed + 99 + i * 997);
-			FPointData& InsertData = GeneratedData[StartIndex + i];
-			InsertData.Data.ObjectId = i;
-			InsertData.Data.TypeId = 1;
-
-			bool PointInserted = false;
-			while (!PointInserted) {
-				double u = Stream.FRand();
-				double f = u * (1.0 + u * (0.5 + u * (0.333 + u * 0.25)));
-				double r = a * f;
-
-				if (r > SoftTruncationRadius)
-				{
-					if (r > Params.Extent) continue;
-					double acceptanceProbability = FMath::Exp(-3.0 * FMath::Pow(((r - SoftTruncationRadius) / TruncationZone), Params.BulgeAcceptanceExponent));
-					if (Stream.FRand() > acceptanceProbability) continue;
-				}
-
-				double scale = FPointData::SampleScaleFromDistribution(Params.MinStarSystemScale, Params.MaxStarSystemScale, Stream.FRand(), Params.ScaleDistributionCurve);
-				FPointData idata = FPointData::MakePointDataFromWorldScale(scale, Params.UnitScale, Params.Extent);
-
-				InsertData.Data.ScaleFactor = idata.Data.ScaleFactor;
-				InsertData.Data.Density = Stream.FRandRange(0.5f, 1.5f) * Params.BulgeBaseDensity;
-				InsertData.Data.Composition = Stream.GetUnitVector();
-				InsertData.InsertDepth = idata.InsertDepth;
-				InsertData.SetPosition(Stream.GetUnitVector() * r * AxisScale + (Stream.GetUnitVector() * Stream.FRand() * Params.BulgeRadius * Params.BulgeJitter));
-				PointInserted = true;
-			}
-		});
-
-	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("LegacyGalaxyGenerator::Generate Bulge duration: %.3f seconds "), TotalDuration);
-}
-
-void LegacyGalaxyDataGenerator::GenerateClusters()
-{
-	double StartTime = FPlatformTime::Seconds();
-	if (Params.ClusterNumClusters <= 0 || Params.ClusterNumPoints <= 0) return;
-	const int PointsPerCluster = Params.ClusterNumPoints / Params.ClusterNumClusters;
-	if (PointsPerCluster <= 0) return;
-
-	FRandomStream Stream(Seed + 2024);
-	for (int i = 0; i < Params.ClusterNumClusters; i++)
-	{
-		const double u = Stream.FRand();
-		const double Dist = Params.GalaxyRadius * FMath::Pow(u, 1.0 / 3.0);
-		const double z = Stream.FRandRange(-1.0, 1.0);
-		const double phi = Stream.FRandRange(0.0, 2.0 * PI);
-		const double xy = FMath::Sqrt(1.0 - z * z);
-		const FVector Dir(xy * FMath::Cos(phi), xy * FMath::Sin(phi), z);
-		FVector Center = Dir * Dist;
-		Center.X *= Params.ClusterAxisScale.X;
-		Center.Y *= Params.ClusterAxisScale.Y;
-		Center.Z *= Params.ClusterAxisScale.Z;
-
-		const double DistFromOrigin = Center.Length();
-		const double NormalizedDist = FMath::Clamp(DistFromOrigin / Params.GalaxyRadius, 0.0, 1.0);
-		const double BaseRadiusScale = FMath::Lerp(Params.ClusterMinScale, Params.ClusterMaxScale, NormalizedDist);
-		const double ClusterRadiusVal = Params.GalaxyRadius * BaseRadiusScale;
-		FVector Radius(ClusterRadiusVal * Params.ClusterSpreadFactor, ClusterRadiusVal * Params.ClusterSpreadFactor, ClusterRadiusVal * Params.ClusterSpreadFactor);
-
-		const FVector Jitter(
-			Stream.FRandRange(-Radius.X, Radius.X) * Params.ClusterIncoherence,
-			Stream.FRandRange(-Radius.Y, Radius.Y) * Params.ClusterIncoherence,
-			Stream.FRandRange(-Radius.Z, Radius.Z) * Params.ClusterIncoherence);
-		Center += Jitter;
-
-		GenerateCluster(i + 987654, Center, Radius, PointsPerCluster, Params.ClusterBaseDensity, Params.ClusterDepthBias);
-	}
-
-	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("LegacyGalaxyGenerator::Generate Clusters duration: %.3f seconds "), TotalDuration);
-}
-
-void LegacyGalaxyDataGenerator::GenerateArms()
-{
-	double StartTime = FPlatformTime::Seconds();
-	int StarsPerCluster = (Params.ArmNumPoints / Params.ArmNumArms) / Params.ArmClusters;
-	double MinScale = Params.GalaxyRadius * Params.ArmClusterRadiusMin;
-	double MaxScale = Params.GalaxyRadius * Params.ArmClusterRadiusMax;
-	double MinJitter = Params.GalaxyRadius * Params.ArmSpreadMin;
-	double MaxJitter = Params.GalaxyRadius * Params.ArmSpreadMax;
-	double MinScaleVariance = .5;
-	double MaxScaleVariance = 1.5;
-	double MinJitterVariance = .5;
-	double MaxJitterVariance = 1.5;
-	double ProgressExponent = Params.ArmProgressExponent;
-
-	FRandomStream Stream(Seed + 1337);
-	for (int ArmIndex = 0; ArmIndex < Params.ArmNumArms; ArmIndex++)
-	{
-		double BaseAngle = (2.0 * PI * ArmIndex) / Params.ArmNumArms;
-		FVector ArmDir(FMath::Cos(BaseAngle), FMath::Sin(BaseAngle), 0);
-		for (int c = 0; c < Params.ArmClusters; c++)
-		{
-			double Dist = FMath::Lerp(FMath::Max(0, Params.BulgeRadius * Params.ArmStartRatio), Params.GalaxyRadius, -FMath::Loge(1.0 - Stream.FRand()));
-			double Progress = Dist / Params.GalaxyRadius;
-			double ExpProgress = FMath::Pow(Progress, ProgressExponent);
-			FVector Center = ArmDir * Dist + FMath::Lerp(MinJitter, MaxJitter, ExpProgress) * Stream.GetUnitVector() * Stream.FRandRange(MinJitterVariance, MaxJitterVariance);
-			double ArmWidth = FMath::Lerp(MinScale, MaxScale, ExpProgress) * Stream.FRandRange(MinScaleVariance, MaxScaleVariance);
-			FVector Radius(ArmWidth, ArmWidth, ArmWidth * Params.ArmHeightRatio);
-			double DensityCoef = FMath::Lerp(Params.ArmRadialDensityMin, Params.ArmRadialDensityMax, FMath::Pow(Progress, Params.ArmRadialDensityExponent));
-			GenerateCluster(ArmIndex + c + 123, Center, Radius, StarsPerCluster, Params.ArmBaseDensity * DensityCoef, Params.ArmDepthBias);
-		}
-	}
-	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("LegacyGalaxyGenerator::Generate Arms duration: %.3f seconds "), TotalDuration);
-}
-
-void LegacyGalaxyDataGenerator::ApplyTwist()
-{
-	double StartTime = FPlatformTime::Seconds();
-	ParallelFor(GeneratedData.Num(), [&](int32 i)
-		{
-			FVector P = GeneratedData[i].GetPosition();
-			double rXY = P.Length();
-			if (rXY < KINDA_SMALL_NUMBER) return;
-			double theta = FMath::Atan2(P.Y, P.X);
-			double normalizedRadius = FMath::Clamp(rXY / Params.Extent, 0.0, 1.0);
-			double baseDelta = Params.TwistStrength * normalizedRadius;
-			double coreBoost = Params.TwistCoreStrength * -FMath::Exp((Params.TwistCoreRadius / FMath::Max(FMath::Pow(normalizedRadius, Params.TwistCoreTwistExponent), 1e-4)));
-			double deltaTheta = baseDelta + coreBoost;
-			double newTheta = theta + deltaTheta;
-			GeneratedData[i].SetPosition(FVector(rXY * FMath::Cos(newTheta), rXY * FMath::Sin(newTheta), GeneratedData[i].GetPosition().Z));
-		}, EParallelForFlags::BackgroundPriority);
-	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("LegacyGalaxyGenerator::Apply Twist duration: %.3f seconds "), TotalDuration);
-}
-
-void LegacyGalaxyDataGenerator::GenerateDisc()
-{
-	double StartTime = FPlatformTime::Seconds();
-	GenerateCluster(Seed + 999, FVector::ZeroVector, FVector(Params.GalaxyRadius, Params.GalaxyRadius, Params.GalaxyRadius * Params.DiscHeightRatio), Params.DiscNumPoints, Params.DiscBaseDensity, Params.DiscDepthBias);
-	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("LegacyGalaxyGenerator::Generate Disc duration: %.3f seconds "), TotalDuration);
-}
-
-void LegacyGalaxyDataGenerator::GenerateBackground()
-{
-	double StartTime = FPlatformTime::Seconds();
-	GenerateCluster(Seed + 123456789, FVector::ZeroVector, FVector(Params.Extent, Params.Extent, Params.Extent * Params.BackgroundHeightRatio), Params.BackgroundNumPoints, Params.BackgroundBaseDensity, Params.BackgroundDepthBias);
-	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("LegacyGalaxyGenerator::Generate Background duration: %.3f seconds "), TotalDuration);
-}
-
-void LegacyGalaxyDataGenerator::ApplyRotation()
-{
-	double StartTime = FPlatformTime::Seconds();
-	ParallelFor(GeneratedData.Num(), [&](int32 i)
-		{
-			GeneratedData[i].SetPosition(RotateCoordinate(GeneratedData[i].GetPosition(), Params.Rotation));
-		});
-	double TotalDuration = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Log, TEXT("LegacyGalaxyGenerator::Apply Rotation duration: %.3f seconds "), TotalDuration);
-}
-
-void LegacyGalaxyDataGenerator::GenerateCluster(int InSeed, FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity, double InDepthBias)
-{
-	int32 StartIndex = GeneratedData.Num();
-	GeneratedData.AddUninitialized(InCount);
-
-	ParallelFor(InCount, [&](int32 i)
-		{
-			FRandomStream Stream(InSeed ^ (StartIndex + i));
-			auto Gaussian = [&](FRandomStream& Rand)
-				{
-					double U1 = FMath::Max(Rand.FRand(), KINDA_SMALL_NUMBER);
-					double U2 = Rand.FRand();
-					double R = FMath::Sqrt(-2.0 * FMath::Loge(U1));
-					double Theta = 2.0 * PI * U2;
-					return R * FMath::Cos(Theta);
-				};
-
-			FVector Offset(
-				Gaussian(Stream) * InClusterRadius.X,
-				Gaussian(Stream) * InClusterRadius.Y,
-				Gaussian(Stream) * InClusterRadius.Z);
-
-			FVector P = InClusterCenter + Offset;
-			double size = P.Length();
-
-			double scale = FPointData::SampleScaleFromDistribution(Params.MinStarSystemScale, Params.MaxStarSystemScale, Stream.FRand(), Params.ScaleDistributionCurve);
-			FPointData InsertData = FPointData::MakePointDataFromWorldScale(scale, Params.UnitScale, Params.Extent);
-			InsertData.SetPosition(size < Params.Extent ? P : FVector::ZeroVector);
-			InsertData.Data.Density = InBaseDensity * Stream.FRandRange(.5, 1.5);
-			InsertData.Data.Composition = Stream.GetUnitVector();
-			InsertData.Data.ObjectId = i + StartIndex;
-			InsertData.Data.TypeId = 1;
-			GeneratedData[StartIndex + i] = InsertData;
-		}, EParallelForFlags::BackgroundPriority);
-}
-#pragma endregion
-
-#endif // ---- END LEGACY CODE ----

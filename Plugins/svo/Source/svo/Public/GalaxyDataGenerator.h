@@ -1,8 +1,6 @@
 ﻿// GalaxyDataGenerator.h
-// Refactored to mirror UniverseDataGenerator architecture.
-// Legacy galaxy generation code (FLegacyGalaxyParams, GalaxyParamFactory,
-// LegacyGalaxyDataGenerator) is preserved at the bottom of this file
-// for future reference during Phase E spiral density field work.
+// Galaxy density field (spiral SDF + bulge/disc/background), tier generation,
+// and volume texture sampling.
 
 #pragma once
 
@@ -155,7 +153,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Radial scale of the disc, in normalized space. 1.0 = extends to Extent.
 	/// Maps to legacy GalaxyRatio (was 0.3 * Extent).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
-	float DiscRadius = 0.85f;
+	float DiscRadius = 1.0f;
 
 	/// Vertical scale height of the disc, as a fraction of DiscRadius.
 	/// Controls how thin the disc is. Maps to legacy DiscHeightRatio.
@@ -168,7 +166,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 
 	/// Radial falloff exponent for the disc. Higher = sharper edge.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
-	float DiscRadialFalloff = 3.0f;
+	float DiscRadialFalloff = 2.0f;
 
 	// --- Arms (SDF-based) ---
 	// The arm density is derived from a signed distance field.
@@ -198,14 +196,37 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Radial start of the arms, as a fraction of DiscRadius.
 	/// Below this radius, arms fade out (merge into bulge).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmStartRadius = 0.025f;
+	float ArmStartRadius = 0.2f;
 
 	/// Vertical squash coefficient for the arm distance calculation.
 	/// Multiplied into Z before computing distance from the arm centerline.
+	/// This is the squash at the INNER edge (ArmStartRadius).
 	/// Values > 1 compress the arm vertically (thinner), < 1 expand it.
-	/// Tune to make the arm cross-section appear round when viewed edge-on.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmVerticalSquash = .2f;
+	float ArmVerticalSquash = 6.0f;
+
+	// --- Radial Growth ---
+	// As distance along the arm increases (inner → outer edge), three
+	// properties evolve together:
+	//   1. Envelope grows (arm widens) by ArmRadialGrowth factor
+	//   2. Peak density drops inversely proportional to growth (mass conservation)
+	//   3. Vertical squash relaxes toward ArmVerticalSquashOuter
+	//
+	// All three are parameterized by t = (rXY - armStart) / (discR - armStart)
+	// which goes from 0 at the inner edge to 1 at the disc rim.
+
+	/// Factor by which core/envelope thickness grows from inner to outer edge.
+	/// At the inner edge, thicknesses are as specified. At the outer edge,
+	/// they are multiplied by this value. 1.0 = no growth, 3.0 = 3x wider.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
+	float ArmRadialGrowth = 4.0f;
+
+	/// Vertical squash at the OUTER edge (disc rim). Lerped from
+	/// ArmVerticalSquash at the inner edge to this value at the outer edge.
+	/// Should typically be less than ArmVerticalSquash (arms get vertically
+	/// thicker as they widen outward).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
+	float ArmVerticalSquashOuter = 2.0f;
 
 	// --- SDF → Density Remapping ---
 	// The arm SDF returns distance from the arm centerline (positive = inside
@@ -221,14 +242,14 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Distance from arm centerline within which density is at peak.
 	/// This defines the solid core of the arm. In normalized space.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Remap")
-	float ArmCoreThickness = 0.02f;
+	float ArmCoreThickness = 0.1f;
 
 	/// Distance from arm centerline at which density reaches zero.
 	/// Must be >= ArmCoreThickness. The zone between core and envelope
 	/// is the falloff gradient. Also used for cell culling: cells whose
 	/// nearest possible SDF distance exceeds this are skipped entirely.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Remap")
-	float ArmEnvelopeThickness = 0.8f;
+	float ArmEnvelopeThickness = 0.5f;
 
 	/// Peak density at the arm core.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Remap")
@@ -254,6 +275,18 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// as a fraction of BackgroundCutoffRadius.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Background")
 	float BackgroundFadeStart = 0.7f;
+
+	// --- Bounds Fade ---
+	// A global multiplier applied to the entire composite density to prevent
+	// hard transitions at the volume bounds. The fade is spherical, applied
+	// in normalized space based on distance from the origin.
+
+	/// Fraction of the normalized extent [0, 1] at which the bounds fade begins.
+	/// Below this distance, density is unmodified. Above it, density fades
+	/// to zero via smoothstep reaching zero at the cube edge (distance = 1).
+	/// 0.67 = fade starts at 2/3 of the way from center to edge.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bounds")
+	float BoundsFadeStart = 0.67f;
 
 	/// Derive MinScale/MaxScale for each tier from MaxEntityScale and the
 	/// depth sequence. Mirrors FUniverseParams::DeriveScaleRanges() exactly.
@@ -427,184 +460,3 @@ public:
 		int32& OutSlotCount) const;
 
 };
-
-
-// ============================================================================
-// LEGACY CODE � preserved for Phase E spiral density field reference
-// ============================================================================
-// The structures and classes below are the original galaxy generation system.
-// They use a fundamentally different approach (explicit point generation via
-// cluster/arm/bulge/disc/background passes + twist) rather than the noise
-// field rejection sampling used by the new architecture.
-//
-// DO NOT USE for new code. These exist solely as reference material for
-// implementing the spiral density field generator in Phase E.
-// ============================================================================
-
-#if 0  // ---- BEGIN LEGACY CODE (disabled, preserved for reference) ----
-
-#include "PointCloudGenerator.h"
-
-/// LEGACY GALAXY GENERATION PARAM STRUCT � original implementation
-USTRUCT(BlueprintType)
-struct SVO_API FLegacyGalaxyParams {
-	GENERATED_BODY()
-	// Generation parameters (affect WHAT is generated)
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	int Seed = 666;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	double Extent = 2147483648;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Generation")
-	double UnitScale = 1e11;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	double MinStarSystemScale = 1.496e12;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	double MaxStarSystemScale = 1.496e16;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	FRotator Rotation = FRotator::ZeroRotator;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	FRuntimeFloatCurve ScaleDistributionCurve;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-	FLinearColor ParentColor = FLinearColor(1, 1, 1, 0);
-
-	//Base Params - control overall sizes
-	double GalaxyRatio = .30;
-	double BulgeRatio = .75;
-	double VoidRatio = .033;
-
-	//Twist Params - Alters the behavior of the twist pass
-	double TwistStrength = 4;
-	double TwistCoreRadius = .01;
-	double TwistCoreTwistExponent = 1;
-	double TwistCoreStrength = 4;
-
-	//Arm Params - changes arm appearance
-	int ArmNumPoints = 75000;
-	int ArmNumArms = 4;
-	int ArmClusters = 124;
-	double ArmDepthBias = .5;
-	double ArmBaseDensity = 3;
-	double ArmClusterRadiusMin = .05;
-	double ArmClusterRadiusMax = .3;
-	double ArmSpreadMin = .05;
-	double ArmSpreadMax = .3;
-	double ArmStartRatio = .5;
-	double ArmHeightRatio = .5;
-	double ArmProgressExponent = 1;
-	double ArmRadialDensityExponent = 2;
-	double ArmRadialDensityMax = 8;
-	double ArmRadialDensityMin = .5;
-
-	//Bulge Params - Controls the galactic bulge
-	int BulgeNumPoints = 75000;
-	double BulgeBaseDensity = 2;
-	double BulgeDepthBias = .75;
-	double BulgeRadiusScale = .33;
-	double BulgeTruncationScale = 1;
-	double BulgeAcceptanceExponent = 2;
-	double BulgeJitter = .2;
-	FVector BulgeAxisScale = FVector(1, 1, .6);
-
-	//Cluster Params
-	int ClusterNumPoints = 50000;
-	int ClusterNumClusters = 128;
-	FVector ClusterAxisScale = FVector(1, 1, 1);
-	double ClusterSpreadFactor = .35;
-	double ClusterMinScale = .3;
-	double ClusterMaxScale = .7;
-	double ClusterIncoherence = 3;
-	double ClusterBaseDensity = 1;
-	double ClusterDepthBias = 1;
-
-	//Disc Params
-	int DiscNumPoints = 50000;
-	double DiscBaseDensity = 1;
-	double DiscDepthBias = 1;
-	double DiscHeightRatio = .1;
-
-	//Background Params
-	int BackgroundNumPoints = 50000;
-	double BackgroundBaseDensity = 10;
-	double BackgroundDepthBias = 1;
-	double BackgroundHeightRatio = .8;
-
-	//Volume Material Params
-	FLinearColor VolumeAmbientColor = FLinearColor(1, 1, 1, 1);
-	FLinearColor VolumeCoolShift = FLinearColor(.2, .5, .8);
-	FLinearColor VolumeHotShift = FLinearColor(.5, 1.5, 3);
-	double VolumeHueVariance = .1;
-	double VolumeHueVarianceScale = .5;
-	double VolumeSaturationVariance = .1;
-	double VolumeTemperatureInfluence = 32;
-	double VolumeTemperatureScale = 1;
-	double VolumeDensity = .5;
-	double VolumeWarpAmount = .05;
-	double VolumeWarpScale = .33;
-	FString VolumeNoise = "/svo/VolumeTextures/VT_PerlinWorley_Balanced";
-
-	double GalaxyRadius;
-	double BulgeRadius;
-	double VoidRadius;
-
-	FLegacyGalaxyParams() {
-		ScaleDistributionCurve.GetRichCurve()->AddKey(0.0f, 0.0f);
-		ScaleDistributionCurve.GetRichCurve()->AddKey(0.25f, 0.001f);
-		ScaleDistributionCurve.GetRichCurve()->AddKey(0.75f, 0.005f);
-		ScaleDistributionCurve.GetRichCurve()->AddKey(0.9375f, 0.01f);
-		ScaleDistributionCurve.GetRichCurve()->AddKey(0.984375f, 0.05f);
-		ScaleDistributionCurve.GetRichCurve()->AddKey(0.996f, 0.1f);
-		ScaleDistributionCurve.GetRichCurve()->AddKey(0.999f, 0.4f);
-		ScaleDistributionCurve.GetRichCurve()->AddKey(1.0f, 1.0f);
-	}
-};
-
-/// LEGACY GALAXY PARAM FACTORY � defines randomization ranges and archetypes
-/// (E0, E3, E5, E7, S0, Sa, Sb, Sc, SBa, SBb, SBc, Irr)
-class SVO_API LegacyGalaxyParamFactory {
-public:
-	int Seed = 666;
-	FLegacyGalaxyParams E0, E3, E5, E7, S0, Sa, Sb, Sc, SBa, SBb, SBc, Irr;
-	FLegacyGalaxyParams E0_Min, E0_Max, E3_Min, E3_Max, E5_Min, E5_Max, E7_Min, E7_Max;
-	FLegacyGalaxyParams S0_Min, S0_Max, Sa_Min, Sa_Max, Sb_Min, Sb_Max, Sc_Min, Sc_Max;
-	FLegacyGalaxyParams SBa_Min, SBa_Max, SBb_Min, SBb_Max, SBc_Min, SBc_Max;
-	FLegacyGalaxyParams Irr_Min, Irr_Max;
-	FLegacyGalaxyParams Volume_Min, Volume_Max;
-
-	TArray<TPair<float, FLegacyGalaxyParams*>> GalaxyWeights;
-	TArray<const char*> NoisePaths;
-
-	LegacyGalaxyParamFactory();
-	FLegacyGalaxyParams GenerateParams();
-	FLegacyGalaxyParams BoundedRandomizeParams(FLegacyGalaxyParams MinParams, FLegacyGalaxyParams MaxParams);
-	int SelectGalaxyTypeIndex();
-};
-
-/// LEGACY GALAXY GENERATOR � explicit point generation with arms/bulge/twist
-class SVO_API LegacyGalaxyDataGenerator : public PointCloudGenerator {
-public:
-	LegacyGalaxyDataGenerator() : PointCloudGenerator(69) {};
-	LegacyGalaxyDataGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
-
-	FLegacyGalaxyParams Params;
-	TArray<FPointData> GeneratedData;
-
-	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
-
-	void GenerateArms();
-	void ApplyTwist();
-	void GenerateBulge();
-	void GenerateClusters();
-	void GenerateDisc();
-	void GenerateBackground();
-	void ApplyRotation();
-	void GenerateCluster(int InSeed, FVector InClusterCenter, FVector InClusterRadius, int InCount, double InBaseDensity = 1, double InDepthBias = 1);
-};
-
-#endif // ---- END LEGACY CODE ----
