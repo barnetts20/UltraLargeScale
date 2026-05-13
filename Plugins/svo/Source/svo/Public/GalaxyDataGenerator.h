@@ -127,46 +127,73 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	// =====================================================================
 
 	// --- Bulge ---
+	// The bulge uses a Hernquist density profile evaluated in oblate
+	// (vertically squashed) coordinates. No SDF remap needed — spherical
+	// symmetry means the profile IS the density directly, identical
+	// reasoning to the disc.
+	//
+	// Hernquist: density(r) proportional to a / (r * (1 + r/a)^3)
+	//   - 1/r cusp at center, 1/r^4 tail (very concentrated)
+	//   - a = BulgeScaleRadius controls how quickly density falls off
+	//   - Hard cut at BulgeCutoffRadius prevents the long tail from
+	//     polluting the disc/arm region
 
 	/// Scale radius for the Hernquist profile, in normalized [0,1] space.
 	/// Smaller = sharper core concentration. 0.1 = tight core, 0.3 = diffuse.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bulge")
 	float BulgeScaleRadius = 0.15f;
 
-	/// Peak density of the bulge at the center [0, 1].
+	/// Peak density of the bulge at the center (r approaching 0) [0, 1].
+	/// Zeroed for arm/disc iteration — set to 0.8-1.0 when compositing.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bulge")
-	float BulgePeakDensity = 0.0f;  // Zeroed for spiral iteration — restore to 1.0 when happy with arms
+	float BulgePeakDensity = 0.0f;
 
-	/// Vertical squash factor for the bulge. 1.0 = sphere, 0.5 = oblate.
+	/// Vertical squash factor for the bulge. 1.0 = sphere, < 1.0 = oblate.
+	/// Applied to Z before computing the Hernquist radius.
 	/// Maps to legacy BulgeAxisScale.Z.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bulge")
 	float BulgeVerticalSquash = 0.6f;
 
-	/// Radial cutoff for the bulge, in normalized space. Beyond this the
-	/// bulge contributes zero. Prevents the Hernquist tail from polluting
-	/// the disc/arm region.
+	/// Hard radial cutoff for the bulge, in normalized space.
+	/// Beyond this the bulge contributes zero density. Prevents the
+	/// Hernquist 1/r^4 tail from polluting the disc/arm region.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bulge")
 	float BulgeCutoffRadius = 0.35f;
 
 	// --- Disc ---
+	// The disc uses a separable analytic profile: exponential radial decay
+	// multiplied by an exp(-|z/h|^falloff) vertical profile. No SDF remap
+	// needed — rotational symmetry means there is no "nearest surface" to
+	// measure distance to; the profile IS the density directly.
 
 	/// Radial scale of the disc, in normalized space. 1.0 = extends to Extent.
+	/// Also used as the hard radial cutoff for the disc cylinder.
 	/// Maps to legacy GalaxyRatio (was 0.3 * Extent).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
 	float DiscRadius = 1.0f;
 
 	/// Vertical scale height of the disc, as a fraction of DiscRadius.
-	/// Controls how thin the disc is. Maps to legacy DiscHeightRatio.
+	/// Acts as the sech²/exp scale height: ~76% of disc mass lies within
+	/// 1× this height above/below the plane. Maps to legacy DiscHeightRatio.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
 	float DiscHeightRatio = 0.08f;
 
-	/// Base density of the disc (before arm modulation) [0, 1].
+	/// Peak density of the disc at the center (r=0, z=0) [0, 1].
+	/// Zeroed for arm iteration — set to 0.3–0.5 when compositing.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
-	float DiscBaseDensity = 0.0f;  // Zeroed for spiral iteration — restore to 0.15 when compositing
+	float DiscBaseDensity = 0.0f;
 
-	/// Radial falloff exponent for the disc. Higher = sharper edge.
+	/// Exponential radial scale length, as a fraction of DiscRadius.
+	/// Controls how quickly density drops with radius.
+	/// 0.2 = tight nucleus-concentrated disc, 0.5 = very diffuse.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
-	float DiscRadialFalloff = 2.0f;
+	float DiscRadialScaleLength = 0.35f;
+
+	/// Vertical profile exponent. Applied as exp(-(|z|/h)^DiscVerticalFalloff).
+	/// 1.0 = exponential / isothermal sheet (sharp equatorial peak).
+	/// 2.0 = Gaussian (softer, better for a thick stellar disc).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
+	float DiscVerticalFalloff = 1.0f;
 
 #pragma region Arm Params
 	// --- Arms (SDF-based) ---
@@ -379,11 +406,12 @@ public:
 	FastNoise::SmartNode<> DensityNoise;
 
 	// -----------------------------------------------------------------------
-	// Signed Distance Fields
+	// Signed Distance Fields + Analytic Density Helpers
 	// -----------------------------------------------------------------------
-	// Each galaxy component has its own SDF returning signed distance in
-	// normalized space. Positive = inside, negative = outside.
-	// SampleDensity calls these and remaps to [0, 1].
+	// Arms use a two-phase approach: SampleArmSDF returns unsigned distance
+	// from the centerline, then SampleDensity remaps through core/envelope
+	// thresholds. The disc and bulge are rotationally symmetric so they use
+	// direct analytic profiles instead of SDF remapping.
 
 	/// Unsigned distance from the nearest arm centerline at the query radius.
 	/// @param InNormPos  Position in [-1, 1] normalized galaxy space.
@@ -391,17 +419,31 @@ public:
 	float SampleArmSDF(const FVector& InNormPos, double rXY) const;
 
 	/// Signed distance to the bulge ellipsoid. Positive inside.
+	/// Used as a hard boundary guard; actual bulge density uses a Hernquist profile.
 	float SampleBulgeSDF(const FVector& InNormPos) const;
 
-	/// Signed distance to the disc volume. Positive inside.
+	/// Analytic bulge density using a Hernquist profile in oblate coordinates.
+	/// Returns density in [0, 1]; hard zero outside BulgeCutoffRadius.
+	float SampleBulgeDensity(const FVector& InNormPos) const;
+
+	/// Signed distance to the disc cylinder. Positive inside.
+	/// Used as a hard boundary guard in SampleDiscDensity.
 	float SampleDiscSDF(const FVector& InNormPos, double rXY, double absZ) const;
+
+	/// Analytic disc density at the given cylindrical coordinates.
+	/// Separable exponential radial × exp(-|z/h|^falloff) vertical profile.
+	/// Returns density in [0, 1]; hard zero outside the disc cylinder.
+	float SampleDiscDensity(double rXY, double absZ) const;
 
 	// -----------------------------------------------------------------------
 	// Density Sampling
 	// -----------------------------------------------------------------------
-	// Evaluates the component SDFs, composites them (max = union),
-	// Evaluates the component SDFs, remaps through ArmCoreThickness /
-	// ArmEnvelopeThickness to produce a [0, 1] density value.
+	// Composites all active layers into a single [0, 1] density value.
+	// Arms, disc, and bulge are max-blended (union). Background is additive.
+	//   Arms:  SDF-based, core/envelope remap + radial growth.
+	//   Disc:  Analytic exponential radial x vertical profile.
+	//   Bulge: Hernquist profile in oblate coordinates.
+	//   BG:    Additive halo (zeroed until compositing phase).
 
 	/// Sample density at a single normalized position.
 	/// InNormPos is in [-1, 1] noise space (position / Extent).

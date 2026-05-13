@@ -96,6 +96,73 @@ float GalaxyDataGenerator::SampleBulgeSDF(const FVector& InNormPos) const
 	return static_cast<float>((double)Params.BulgeCutoffRadius - rBulge);
 }
 
+float GalaxyDataGenerator::SampleBulgeDensity(const FVector& InNormPos) const
+{
+	// =====================================================================
+	// Hernquist bulge density in oblate (vertically squashed) coordinates.
+	//
+	// Profile: density(r) = BulgePeakDensity * (a / r_cutoff) *
+	//                       (a / r) / (1 + r/a)^3
+	//
+	// Normalised so that density(r = BulgeScaleRadius) = BulgePeakDensity
+	// by evaluating the Hernquist formula at r = a and using that as the
+	// reference peak. This gives stable [0, 1] output regardless of how
+	// BulgeScaleRadius is tuned.
+	//
+	// Vertical squash: Z is divided by BulgeVerticalSquash before computing
+	// the ellipsoidal radius, producing an oblate shape without distorting
+	// the radial profile shape.
+	//
+	// Hard cutoff at BulgeCutoffRadius prevents the 1/r^4 Hernquist tail
+	// from leaking density into the disc and arm regions.
+	// =====================================================================
+
+	if (Params.BulgePeakDensity <= 0.0f)
+		return 0.0f;
+
+	const double a = FMath::Max((double)Params.BulgeScaleRadius, 1e-6);
+	const double cutoff = FMath::Max((double)Params.BulgeCutoffRadius, a);
+
+	// Oblate radius
+	const double squashedZ = InNormPos.Z / FMath::Max((double)Params.BulgeVerticalSquash, 1e-4);
+	const double r = FMath::Sqrt(
+		InNormPos.X * InNormPos.X +
+		InNormPos.Y * InNormPos.Y +
+		squashedZ * squashedZ);
+
+	// Hard cutoff
+	if (r >= cutoff)
+		return 0.0f;
+
+	// Hernquist profile: rho(r) = 1 / (r/a * (1 + r/a)^3)
+	// Evaluated at r = a to get the reference value for normalisation:
+	//   rho(a) = 1 / (1 * 2^3) = 1/8
+	// So: normalised_density = 8 * rho(r) / rho_max, where rho_max = rho(r_min)
+	// Rather than deal with the singularity at r=0, we clamp r to a small
+	// fraction of a and let BulgePeakDensity scale the output.
+	const double rClamped = FMath::Max(r, a * 0.01);
+	const double rOverA = rClamped / a;
+	const double hernquist = 1.0 / (rOverA * FMath::Pow(1.0 + rOverA, 3.0));
+
+	// Normalise: hernquist(a) = 1/8, so multiply by 8 to get 1.0 at r = a.
+	// Beyond r = a density is < 1, at r < a it rises above 1 — clamp at the end.
+	const double normalised = hernquist * 8.0;
+
+	// Smooth fade to zero approaching the cutoff radius (avoids a hard density
+	// cliff at BulgeCutoffRadius when compositing with disc/arms).
+	const double fadeStart = cutoff * 0.75;
+	double fade = 1.0;
+	if (r > fadeStart)
+	{
+		const double t = (r - fadeStart) / (cutoff - fadeStart);
+		fade = 1.0 - t * t * (3.0 - 2.0 * t);
+	}
+
+	return FMath::Clamp(
+		static_cast<float>((double)Params.BulgePeakDensity * normalised * fade),
+		0.0f, 1.0f);
+}
+
 float GalaxyDataGenerator::SampleDiscSDF(const FVector& InNormPos, double rXY, double absZ) const
 {
 	// Signed distance to the disc volume (flat cylinder). Positive inside.
@@ -123,6 +190,48 @@ float GalaxyDataGenerator::SampleDiscSDF(const FVector& InNormPos, double rXY, d
 	}
 }
 
+float GalaxyDataGenerator::SampleDiscDensity(double rXY, double absZ) const
+{
+	// =====================================================================
+	// Analytic disc density — separable exponential profile.
+	//
+	// Radial:   exp(-rXY / scaleLength)
+	//   scaleLength = DiscRadius * DiscRadialScaleLength
+	//   Smaller DiscRadialScaleLength = tighter, nucleus-concentrated disc.
+	//   Larger  DiscRadialScaleLength = more diffuse, extended disc.
+	//
+	// Vertical: exp(-(|z| / h)^DiscVerticalFalloff)
+	//   h = DiscRadius * DiscHeightRatio
+	//   DiscVerticalFalloff = 1.0 → exponential / isothermal sheet
+	//   DiscVerticalFalloff = 2.0 → Gaussian (softer for thick disc)
+	//
+	// Hard cutoff at the disc cylinder boundary (rXY > DiscRadius or
+	// absZ > h) prevents leakage into the arm/bulge regions above/below.
+	// =====================================================================
+
+	if (Params.DiscBaseDensity <= 0.0f)
+		return 0.0f;
+
+	const double discR = (double)Params.DiscRadius;
+	const double h = discR * FMath::Max((double)Params.DiscHeightRatio, 1e-6);
+	const double scaleL = discR * FMath::Max((double)Params.DiscRadialScaleLength, 1e-6);
+
+	// Hard boundary — outside cylinder contributes nothing
+	if (rXY >= discR || absZ >= h)
+		return 0.0f;
+
+	// Radial: exponential decay from center
+	const double radialProfile = FMath::Exp(-rXY / scaleL);
+
+	// Vertical: exp(-(|z|/h)^falloff)
+	// Clamp zNorm to [0,1] — absZ < h is guaranteed above, but float precision guard
+	const double zNorm = FMath::Min(absZ / h, 1.0);
+	const double vExp = FMath::Max((double)Params.DiscVerticalFalloff, 0.1);
+	const double verticalProfile = FMath::Exp(-FMath::Pow(zNorm, vExp));
+
+	return static_cast<float>((double)Params.DiscBaseDensity * radialProfile * verticalProfile);
+}
+
 #pragma endregion
 
 #pragma region Density Sampling
@@ -130,15 +239,17 @@ float GalaxyDataGenerator::SampleDiscSDF(const FVector& InNormPos, double rXY, d
 float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 {
 	// =====================================================================
-	// SDF-based density evaluation.
+	// Composite density evaluation.
 	//
-	// 1. Evaluate arm SDF (unsigned distance from arm centerline).
-	// 2. Remap through core/envelope thresholds to [0, 1] density:
-	//      dist <= ArmCoreThickness       → peak density
-	//      dist in [core, envelope]       → smoothstep falloff
-	//      dist > ArmEnvelopeThickness    → zero
-	// 3. (Future) Composite with bulge/disc SDFs via max.
-	// 4. Add background halo.
+	// Active layers (max-blended — each fills space the others don't):
+	//   1. Arms  — SDF distance -> core/envelope remap -> scaled peak density
+	//   2. Disc  — Analytic exponential radial x vertical profile
+	//   3. Bulge — Hernquist profile in oblate coordinates
+	//
+	// Zeroed layers (re-enable during compositing phase):
+	//   4. BG    — Additive halo (BackgroundDensity = 0)
+	//
+	// Global bounds fade: spherical smoothstep to zero at r = 1.0.
 	// =====================================================================
 
 	const double px = InNormPos.X;
@@ -188,7 +299,16 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 	}
 	// else: beyond envelope — density stays 0
 
-	double Density = ArmDensity;
+	// --- Disc density ---
+	// Max-blend: disc fills the inter-arm gaps without amplifying density
+	// where the arms are already strong.
+	const double DiscDensity = (double)SampleDiscDensity(rXY, absZ);
+
+	// --- Bulge density ---
+	// Max-blend: concentrated central mass, fades before the disc/arm region.
+	const double BulgeDensity = (double)SampleBulgeDensity(InNormPos);
+
+	double Density = FMath::Max(ArmDensity, FMath::Max(DiscDensity, BulgeDensity));
 
 	// --- Background halo (not SDF-based) ---
 	if (Params.BackgroundDensity > 0.0f)
