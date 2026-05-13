@@ -8,15 +8,15 @@
 float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY) const
 {
 	// =====================================================================
-	// Arm SDF: distance from the nearest spiral arm centerline.
+	// Arm SDF: unsigned distance from the nearest spiral arm centerline.
 	//
 	// Returns unsigned distance. The density remap (core/envelope
 	// thresholds) is applied in SampleDensity.
 	//
 	// Finds the closest arm point AT THE SAME RADIUS as the query point
 	// (preserves spiral structure). Vertical distance is scaled by
-	// DiscHeightRatio so the arm tube matches the disc's aspect ratio
-	// and the falloff is isotropic in the arm's local frame.
+	// ArmVerticalSquash (lerped from inner to outer along the arm) so
+	// the arm tube cross-section appears round when viewed edge-on.
 	// =====================================================================
 
 	const double discR = (double)Params.DiscRadius;
@@ -69,15 +69,16 @@ float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY) co
 	double dist = FMath::Sqrt(xyDist * xyDist + scaledZ * scaledZ);
 
 	// Fade in from arm start radius
+	const double blendWidth = FMath::Max((double)Params.ArmStartBlendWidth, 1e-6);
 	if (rXY < armStart)
 	{
 		dist += (armStart - rXY);
 	}
-	else if (rXY < armStart + 0.05)
+	else if (rXY < armStart + blendWidth)
 	{
-		const double blend = (rXY - armStart) / 0.05;
+		const double blend = (rXY - armStart) / blendWidth;
 		const double smooth = blend * blend * (3.0 - 2.0 * blend);
-		dist = FMath::Lerp(dist + 0.05, dist, smooth);
+		dist = FMath::Lerp(dist + blendWidth, dist, smooth);
 	}
 
 	return static_cast<float>(dist);
@@ -143,6 +144,13 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 	const double px = InNormPos.X;
 	const double py = InNormPos.Y;
 	const double pz = InNormPos.Z;
+
+	// --- Bounds check (early out) ---
+	// Hard zero beyond unit sphere — saves all SDF work for cube corners.
+	const double rBounds = FMath::Sqrt(px * px + py * py + pz * pz);
+	if (rBounds >= 1.0)
+		return 0.0f;
+
 	const double rXY = FMath::Sqrt(px * px + py * py);
 	const double absZ = FMath::Abs(pz);
 
@@ -202,13 +210,7 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 		}
 	}
 
-	// --- Bounds fade — prevent hard transitions at volume edges ---
-	// Spherical distance for a natural round falloff. Hard zero beyond r=1.0
-	// to prevent density leaking into the cube corners.
-	const double rBounds = FMath::Sqrt(px * px + py * py + pz * pz);
-	if (rBounds >= 1.0)
-		return 0.0f;
-
+	// --- Bounds fade — spherical smoothstep to zero approaching r=1.0 ---
 	const double fadeStart = (double)Params.BoundsFadeStart;
 	if (rBounds > fadeStart)
 	{

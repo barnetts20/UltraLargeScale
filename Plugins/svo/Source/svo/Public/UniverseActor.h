@@ -4,6 +4,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "UniverseDataGenerator.h"
+#include "GalaxyDataGenerator.h"    // FGalaxyParams — exposed at universe level for editor tuning
 #include "NiagaraSystem.h"
 #include "NiagaraComponent.h"
 #include "FOctree.h"
@@ -14,7 +15,6 @@
 #include "UniverseActor.generated.h"
 class AGalaxyActor;
 #pragma endregion
-
 
 
 #pragma region AUniverseActor
@@ -47,6 +47,14 @@ public:
 	 *  Details panel; changes take effect on the next Initialize() call. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
 	FUniverseParams Params;
+
+	/** Galaxy generation parameters. Owned at the universe level so the
+	 *  spiral density field, tier configs, and volume material settings can
+	 *  be tuned in-editor without rebuilding. Passed to each galaxy on spawn.
+	 *  Will eventually become a proceduralization bounds struct randomized
+	 *  per galaxy instance. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy Properties")
+	FGalaxyParams GalaxyParams;
 
 	/** Parallax speed multiplier. Per-tier virtual traversal ratio =
 	 *  SpeedScale / Params.UnitScale. Higher values make the sector appear

@@ -171,9 +171,9 @@ struct SVO_API FGalaxyParams : public FBaseParams
 #pragma region Arm Params
 	// --- Arms (SDF-based) ---
 	// The arm density is derived from a signed distance field.
-	// Positive = inside the arm, negative = outside.
-	// SampleArmSDF returns distance in normalized space, then
-	// SampleDensity remaps it to [0, 1] via the surface/falloff params.
+	// SampleArmSDF returns unsigned distance from the arm centerline in
+	// normalized space. SampleDensity remaps it to [0, 1] via the
+	// core/envelope thresholds.
 
 	/// Number of spiral arms. Maps to legacy ArmNumArms.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
@@ -197,7 +197,12 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Radial start of the arms, as a fraction of DiscRadius.
 	/// Below this radius, arms fade out (merge into bulge).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmStartRadius = 0.1f;
+	float ArmStartRadius = 0.025f;
+
+	/// Width of the blend zone where arms fade in from ArmStartRadius,
+	/// in normalized space. Controls how sharp the inner arm boundary is.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
+	float ArmStartBlendWidth = 0.05f;
 
 	/// Vertical squash coefficient for the arm distance calculation.
 	/// Multiplied into Z before computing distance from the arm centerline.
@@ -251,7 +256,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Distance from arm centerline within which density is at peak.
 	/// This defines the solid core of the arm. In normalized space.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Remap")
-	float ArmCoreThickness = 0.000f;
+	float ArmCoreThickness = 0.0f;
 
 	/// Distance from arm centerline at which density reaches zero.
 	/// Must be >= ArmCoreThickness. The zone between core and envelope
