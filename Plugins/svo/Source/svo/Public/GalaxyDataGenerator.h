@@ -64,6 +64,21 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Large Tier")
 	float ParticleCountVariance = 0.15f;
 
+	// --- Large tier SDF culling grid ---
+
+	/// Grid depth used to subdivide the galaxy volume for SDF-based cell
+	/// culling during large tier generation. Cells whose every corner has
+	/// zero composite density are skipped entirely, concentrating candidate
+	/// sampling on arms/disc/bulge.
+	///
+	/// Depth N produces (2^N)^3 cells over the GridExtentMultiplier-scaled
+	/// volume. Depth 3 = 8^3 = 512 cells. Higher values give finer culling
+	/// at the cost of more corner evaluations (8 * CellCount SDF samples).
+	/// Values of 2–4 are recommended; 5+ rarely improves acceptance rate
+	/// enough to justify the overhead.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Large Tier")
+	int32 LargeTierCullDepth = 3;
+
 	// --- Volume material params (carried over from legacy for volumetric setup) ---
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
@@ -406,6 +421,33 @@ public:
 	FastNoise::SmartNode<> DensityNoise;
 
 	// -----------------------------------------------------------------------
+	// Math Helpers
+	// -----------------------------------------------------------------------
+
+	/// Smooth maximum of three values using the log-sum-exp (LSE) formulation.
+	///
+	/// SmoothMax(a, b, c, k) ≈ max(a, b, c) with a differentiable blend
+	/// zone of radius ~1/k around each crossing. Higher k = sharper
+	/// (approaches hard max); lower k = softer blend.
+	///
+	/// LSE form:  (1/k) * log( exp(k*a) + exp(k*b) + exp(k*c) )
+	///
+	/// Numerically stabilized by subtracting the running max before
+	/// exponentiation so the result never overflows regardless of k.
+	///
+	/// @param A, B, C  Input values (any range).
+	/// @param K        Sharpness (k > 0). Typical range 2–16.
+	/// @return         Smooth maximum of the three inputs.
+	static FORCEINLINE float SmoothMax(float A, float B, float C, float K = 8.0f)
+	{
+		const float M = FMath::Max3(A, B, C);
+		const float ExpA = FMath::Exp(K * (A - M));
+		const float ExpB = FMath::Exp(K * (B - M));
+		const float ExpC = FMath::Exp(K * (C - M));
+		return M + FMath::Loge(ExpA + ExpB + ExpC) / K;
+	}
+
+	// -----------------------------------------------------------------------
 	// Signed Distance Fields + Analytic Density Helpers
 	// -----------------------------------------------------------------------
 	// Arms use a two-phase approach: SampleArmSDF returns unsigned distance
@@ -514,6 +556,40 @@ public:
 		double InCellExtent,
 		const FTierParams& InTierParams,
 		int32 InSeedOffset,
+		int32& OutSlotCount) const;
+
+	// -----------------------------------------------------------------------
+	// Large Tier — SDF-culled grid generation
+	// -----------------------------------------------------------------------
+
+	/// One active cell in the large tier culling grid.
+	struct FActiveLargeTierCell
+	{
+		FVector    Center;    // Galaxy-local center (not normalized)
+		double     HalfExt;  // Half-extent of the cell (same on all axes)
+		FIntVector GridCoord; // Integer grid coordinate at LargeTierCullDepth
+	};
+
+	/// Subdivide the galaxy volume into a uniform grid at Params.LargeTierCullDepth
+	/// and return only cells where at least one corner has non-zero composite
+	/// density. Cells whose all 8 corners evaluate to SampleDensity == 0 are
+	/// entirely outside all SDF envelopes and can never produce accepted candidates.
+	///
+	/// Grid covers [-Extent, +Extent] on each axis (galaxy-local). Corner
+	/// positions are converted to normalized [-1, 1] space before testing.
+	TArray<FActiveLargeTierCell> CollectActiveLargeTierCells() const;
+
+	/// Generate the full large tier slot by iterating over SDF-active cells.
+	/// Candidates are distributed proportionally: each active cell receives
+	/// ceil(SlotCapacity / ActiveCellCount) candidates, capped at SlotCapacity
+	/// total. This concentrates sampling on arms/disc/bulge and avoids wasting
+	/// rejection attempts on empty inter-arm space.
+	///
+	/// Writes into InBuffer at the slot region for InSlotIndex. Pads remaining
+	/// entries dead. Sets OutSlotCount to the accepted particle count.
+	void GenerateLargeTierSlot(
+		int32 InSlotIndex,
+		FNiagaraParticleBuffer& InBuffer,
 		int32& OutSlotCount) const;
 
 };

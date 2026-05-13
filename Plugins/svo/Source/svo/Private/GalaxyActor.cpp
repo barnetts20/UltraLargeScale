@@ -232,10 +232,13 @@ void AGalaxyActor::BuildTierConfigs()
 	LargeTierConfig.OctreeInsertBufferIndex = 0;
 	LargeTierConfig.TierIndex = 0;
 	LargeTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
-		// Large tier covers the full galaxy volume in a single cell.
-		// Candidates are distributed around the galaxy origin, not the grid cell center.
-		GalaxyGenerator.GenerateTierNode(Coord, SlotIndex, *Buffers[0], FVector::ZeroVector,
-			static_cast<double>(Params.Extent), Params.LargeTier, 0, LargeTierState.SlotCounts[SlotIndex]);
+		// Large tier uses SDF-culled grid generation: the galaxy extent is
+		// subdivided at Params.LargeTierCullDepth, empty cells (all corners
+		// outside all SDF envelopes) are skipped, and candidates are
+		// distributed across the remaining active cells. This concentrates
+		// sampling on arms/disc/bulge rather than wastefully covering the
+		// full galaxy volume uniformly.
+		GalaxyGenerator.GenerateLargeTierSlot(SlotIndex, *Buffers[0], LargeTierState.SlotCounts[SlotIndex]);
 		};
 
 	// --- Mid tier: neighborhood streaming ---

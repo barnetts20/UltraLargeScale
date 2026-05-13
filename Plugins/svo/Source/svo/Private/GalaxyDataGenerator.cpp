@@ -307,8 +307,8 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 	// --- Bulge density ---
 	// Max-blend: concentrated central mass, fades before the disc/arm region.
 	const double BulgeDensity = (double)SampleBulgeDensity(InNormPos);
-
-	double Density = FMath::Max(ArmDensity, FMath::Max(DiscDensity, BulgeDensity));
+	double BlendSharpness = 6; //TODO: LIFT THIS OUT INTO CONFIG
+	double Density = SmoothMax(ArmDensity, DiscDensity, BulgeDensity, BlendSharpness);// FMath::Max(ArmDensity, FMath::Max(DiscDensity, BulgeDensity));
 
 	// --- Background halo (not SDF-based) ---
 	if (Params.BackgroundDensity > 0.0f)
@@ -531,6 +531,234 @@ void GalaxyDataGenerator::GenerateTierNode(
 	const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
 	InBuffer.PadSlotDead(InSlotIndex, ActualCount, DeadPos);
 	OutSlotCount = ActualCount;
+}
+
+// ============================================================================
+//  Large Tier — SDF-culled grid generation
+// ============================================================================
+
+TArray<GalaxyDataGenerator::FActiveLargeTierCell> GalaxyDataGenerator::CollectActiveLargeTierCells() const
+{
+	// -----------------------------------------------------------------------
+	// Subdivide [-Extent, +Extent]^3 into a uniform grid at LargeTierCullDepth.
+	// For each cell, evaluate SampleDensity at all 8 corners (in normalized
+	// [-1, 1] space). If every corner returns zero, the cell is entirely
+	// outside all SDF envelopes (arms, disc, bulge, background) and is
+	// skipped. Any cell with at least one corner > 0 is kept.
+	//
+	// We intentionally test corners rather than the cell center so that cells
+	// straddling an envelope boundary are never wrongly discarded. A cell
+	// whose center happens to fall in the gap between two arms but whose
+	// corner clips an arm edge will still be included — candidates generated
+	// inside it will simply fail the per-candidate density rejection gate as
+	// normal, at very low cost.
+	// -----------------------------------------------------------------------
+
+	const int32 CullDepth = FMath::Max(Params.LargeTierCullDepth, 1);
+	const int32 GridSide = 1 << CullDepth;          // cells per axis
+	const double FullExtent = static_cast<double>(Params.Extent);
+	const double CellFull = (2.0 * FullExtent) / static_cast<double>(GridSide);
+	const double HalfCell = CellFull * 0.5;
+	const double InvExtent = 1.0 / FullExtent;
+
+	// 8 corner offsets in cell-local space (±HalfCell on each axis)
+	static const FVector CornerOffsets[8] =
+	{
+		FVector(-1, -1, -1), FVector(1, -1, -1),
+		FVector(-1,  1, -1), FVector(1,  1, -1),
+		FVector(-1, -1,  1), FVector(1, -1,  1),
+		FVector(-1,  1,  1), FVector(1,  1,  1),
+	};
+
+	const int32 TotalCells = GridSide * GridSide * GridSide;
+	TArray<FActiveLargeTierCell> ActiveCells;
+	ActiveCells.Reserve(TotalCells / 4); // rough estimate; arms ~ 25% fill
+
+	for (int32 iz = 0; iz < GridSide; ++iz)
+	{
+		for (int32 iy = 0; iy < GridSide; ++iy)
+		{
+			for (int32 ix = 0; ix < GridSide; ++ix)
+			{
+				// Cell center in galaxy-local space
+				const FVector Center(
+					-FullExtent + HalfCell + static_cast<double>(ix) * CellFull,
+					-FullExtent + HalfCell + static_cast<double>(iy) * CellFull,
+					-FullExtent + HalfCell + static_cast<double>(iz) * CellFull);
+
+				// Test all 8 corners in normalized space.
+				// Early-out as soon as any corner has non-zero density —
+				// the cell is active and we don't need to check the rest.
+				bool bAnyActive = false;
+				for (int32 c = 0; c < 8; ++c)
+				{
+					const FVector CornerWorld = Center + CornerOffsets[c] * HalfCell;
+					const FVector CornerNorm = CornerWorld * InvExtent;
+
+					// Hard bounds check: SampleDensity already returns 0
+					// beyond the unit sphere, but an explicit check here
+					// lets us skip the full SDF evaluation for corners
+					// that are clearly outside the disc extents.
+					if (FMath::Abs(CornerNorm.X) > 1.0 ||
+						FMath::Abs(CornerNorm.Y) > 1.0 ||
+						FMath::Abs(CornerNorm.Z) > 1.0)
+					{
+						continue; // This corner is outside — try next
+					}
+
+					if (SampleDensity(CornerNorm) > 0.0f)
+					{
+						bAnyActive = true;
+						break;
+					}
+				}
+
+				if (bAnyActive)
+				{
+					FActiveLargeTierCell Cell;
+					Cell.Center = Center;
+					Cell.HalfExt = HalfCell;
+					Cell.GridCoord = FIntVector(ix, iy, iz);
+					ActiveCells.Add(Cell);
+				}
+			}
+		}
+	}
+
+	UE_LOG(LogTemp, Verbose,
+		TEXT("GalaxyDataGenerator::CollectActiveLargeTierCells — depth=%d grid=%d^3 total=%d active=%d (%.1f%%)"),
+		CullDepth, GridSide, TotalCells, ActiveCells.Num(),
+		TotalCells > 0 ? 100.0f * static_cast<float>(ActiveCells.Num()) / static_cast<float>(TotalCells) : 0.0f);
+
+	return ActiveCells;
+}
+
+void GalaxyDataGenerator::GenerateLargeTierSlot(
+	int32 InSlotIndex,
+	FNiagaraParticleBuffer& InBuffer,
+	int32& OutSlotCount) const
+{
+	// -----------------------------------------------------------------------
+	// Collect SDF-active cells, then distribute the slot's candidate budget
+	// across them. Each active cell is assigned:
+	//
+	//   CandidatesPerCell = ceil(SlotCapacity / ActiveCellCount)
+	//
+	// so all cells get equal sampling density. The total is capped at
+	// SlotCapacity to prevent overrun. Cells use distinct seed streams
+	// derived from their grid coordinate so results are stable regardless
+	// of active-cell ordering.
+	//
+	// Writing is sequential into the slot region: each cell appends to the
+	// running write cursor (BufferStart + TotalAccepted), stopping when the
+	// slot is full. Dead padding is applied once at the end.
+	// -----------------------------------------------------------------------
+
+	const TArray<FActiveLargeTierCell> ActiveCells = CollectActiveLargeTierCells();
+
+	const int32 SlotCapacity = InBuffer.SlotCapacity;
+	const int32 BufferStart = InSlotIndex * SlotCapacity;
+	const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
+
+	if (ActiveCells.Num() == 0)
+	{
+		InBuffer.PadSlotDead(InSlotIndex, 0, DeadPos);
+		OutSlotCount = 0;
+		UE_LOG(LogTemp, Warning, TEXT("GalaxyDataGenerator::GenerateLargeTierSlot — no active cells found (check SDF params)"));
+		return;
+	}
+
+	// Candidates per cell: divide budget evenly, rounding up so we don't
+	// under-fill when ActiveCellCount doesn't divide evenly. The cap at
+	// SlotCapacity ensures we never overrun even with rounding.
+	const int32 CandPerCell = FMath::Max(1,
+		FMath::DivideAndRoundUp(SlotCapacity, ActiveCells.Num()));
+
+	const double InvExtent = 1.0 / static_cast<double>(Params.Extent);
+	auto dCurve = Params.LargeTier.DensityResponse.GetRichCurveConst();
+
+	int32 TotalAccepted = 0;
+
+	for (const FActiveLargeTierCell& Cell : ActiveCells)
+	{
+		if (TotalAccepted >= SlotCapacity) break;
+
+		// Clamp candidates for this cell so we never exceed the remaining budget.
+		const int32 NumCandidates = FMath::Min(CandPerCell, SlotCapacity - TotalAccepted);
+
+		// Stable seed: hash the grid coordinate so each cell's stream is
+		// independent of the active-cell ordering and of InSlotIndex.
+		const int32 CoordHash = HashCombine(
+			HashCombine(GetTypeHash(Cell.GridCoord.X), GetTypeHash(Cell.GridCoord.Y)),
+			GetTypeHash(Cell.GridCoord.Z));
+		// Seed offset 0 matches the existing large tier convention.
+		const int32 CellSeed = HashCombine(Params.Seed, CoordHash);
+		FRandomStream Stream(CellSeed);
+
+		// --- Phase 1: generate candidates ---
+		TArray<FVector> CandidatePositions;
+		TArray<float> NoiseX, NoiseY, NoiseZ;
+		CandidatePositions.SetNumUninitialized(NumCandidates);
+		NoiseX.SetNumUninitialized(NumCandidates);
+		NoiseY.SetNumUninitialized(NumCandidates);
+		NoiseZ.SetNumUninitialized(NumCandidates);
+
+		for (int32 i = 0; i < NumCandidates; ++i)
+		{
+			const FVector Candidate(
+				Cell.Center.X + Stream.FRandRange(-Cell.HalfExt, Cell.HalfExt),
+				Cell.Center.Y + Stream.FRandRange(-Cell.HalfExt, Cell.HalfExt),
+				Cell.Center.Z + Stream.FRandRange(-Cell.HalfExt, Cell.HalfExt));
+			CandidatePositions[i] = Candidate;
+			NoiseX[i] = static_cast<float>(Candidate.X * InvExtent);
+			NoiseY[i] = static_cast<float>(Candidate.Y * InvExtent);
+			NoiseZ[i] = static_cast<float>(Candidate.Z * InvExtent);
+		}
+
+		// --- Phase 2: batch density evaluation ---
+		TArray<float> NoiseOut;
+		NoiseOut.SetNumUninitialized(NumCandidates);
+		SampleDensityBatch(NoiseOut.GetData(), NumCandidates,
+			NoiseX.GetData(), NoiseY.GetData(), NoiseZ.GetData());
+
+		// --- Phase 3: accept/reject + write ---
+		for (int32 i = 0; i < NumCandidates; ++i)
+		{
+			if (TotalAccepted >= SlotCapacity) break;
+
+			const float RawDensity = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
+			const float Density = FMath::Clamp(dCurve->Eval(RawDensity), 0.0f, 1.0f);
+			if (Stream.FRand() > Density) continue;
+
+			const float ScaleSample = Stream.FRand();
+			const double Scale = FPointData::SampleScaleFromDistribution(
+				Params.LargeTier.MinScale, Params.LargeTier.MaxScale,
+				ScaleSample, Params.LargeTier.ScaleDistribution);
+			FPointData PointData = FPointData::MakePointDataFromWorldScale(
+				Scale, Params.UnitScale, Params.Extent);
+			const double ExtentAtDepth = static_cast<double>(Params.Extent)
+				/ static_cast<double>(1 << PointData.InsertDepth);
+			const float FinalExtent = static_cast<float>(
+				ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
+
+			const FVector CompVec = Stream.GetUnitVector();
+
+			const int32 Idx = BufferStart + TotalAccepted;
+			InBuffer.Positions[Idx] = CandidatePositions[i];
+			InBuffer.Extents[Idx] = FinalExtent;
+			InBuffer.Colors[Idx] = FLinearColor(
+				FMath::Abs(CompVec.X), FMath::Abs(CompVec.Y), FMath::Abs(CompVec.Z));
+
+			++TotalAccepted;
+		}
+	}
+
+	InBuffer.PadSlotDead(InSlotIndex, TotalAccepted, DeadPos);
+	OutSlotCount = TotalAccepted;
+
+	UE_LOG(LogTemp, Log,
+		TEXT("GalaxyDataGenerator::GenerateLargeTierSlot — %d active cells, %d/%d particles accepted"),
+		ActiveCells.Num(), TotalAccepted, SlotCapacity);
 }
 
 #pragma endregion
