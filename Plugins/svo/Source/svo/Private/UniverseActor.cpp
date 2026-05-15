@@ -60,10 +60,9 @@ void AUniverseActor::Initialize()
 
 			Self->InitializationState = ELifecycleState::Ready;
 
-			double TotalDuration = FPlatformTime::Seconds() - StartTime;
-			UE_LOG(LogTemp, Log, TEXT("%s::Initialize total duration: %.3f seconds"), *Self->GetClass()->GetName(), TotalDuration);
+			UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Initialize total duration: %.3f seconds"),
+				FPlatformTime::Seconds() - StartTime);
 
-			// TimerManager must be touched on the game thread.
 			AsyncTask(ENamedThreads::GameThread, [WeakThis]()
 				{
 					if (AUniverseActor* InnerSelf = WeakThis.Get())
@@ -337,10 +336,26 @@ void AUniverseActor::Tick(float DeltaTime)
 	// Drive all active galaxies with the already-resolved player position.
 	// Galaxies have UE tick disabled; this is their only per-frame entry point.
 	// Each galaxy cascades down to its own star systems via TickFromParent.
+	//
+	// Deferred placement: galaxies spawned by SpawnGalaxyFromPool start hidden
+	// with bPendingPlacement = true. On the first frame after async init
+	// completes (InitializationState == Ready), FinalizeGalaxyPlacement
+	// computes the spawn position using THIS frame's parallax state, sets
+	// VirtualTraversal, makes it visible, and clears the flag. The first
+	// TickFromParent runs immediately after in the same frame — zero drift.
 	for (auto& Pair : SpawnedGalaxies)
 	{
-		if (AGalaxyActor* Galaxy = Pair.Value.Get())
+		AGalaxyActor* Galaxy = Pair.Value.Get();
+		if (!Galaxy) continue;
+
+		if (Galaxy->InitializationState == ELifecycleState::Ready)
+		{
+			if (Galaxy->bPendingPlacement)
+			{
+				FinalizeGalaxyPlacement(Galaxy);
+			}
 			Galaxy->TickFromParent(DeltaTime, CurrentFrameOfReferenceLocation);
+		}
 	}
 
 	const FTierStreamingContext Ctx = BuildStreamingContext();
@@ -457,8 +472,48 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	FRandomStream RandStream(InNode->Data.ObjectId);
 	Galaxy->Params.Rotation = RandStream.GetUnitVector().Rotation();
 
-	// Place galaxy to match the particle sprite, not the node bounds.
-	const FVector SpawnLoc = ComputeChildSpawnLocation(ParticlePos, Galaxy->Params.UnitScale);
+	// --- Deferred placement ---
+	// Do NOT compute spawn location or set VirtualTraversal here. Parallax
+	// will accumulate at the universe level during the N frames it takes for
+	// async init to complete. FinalizeGalaxyPlacement (called from Tick on
+	// the first frame after Ready) will compute the spawn position using that
+	// frame's resolved VirtualTraversal and player position, ensuring zero
+	// drift between the particle sprite and the galaxy actor.
+	//
+	// Cache the particle position so FinalizeGalaxyPlacement can re-derive
+	// the spawn location later.
+	Galaxy->PendingNodeCenter = ParticlePos;
+	Galaxy->bPendingPlacement = true;
+
+	// Keep the galaxy hidden until placement finalizes.
+	// (Pool pre-warms with SetActorHiddenInGame(true) already.)
+
+	UE_LOG(LogTemp, Warning, TEXT("=== SpawnGalaxyFromPool (deferred placement) ==="));
+	UE_LOG(LogTemp, Warning, TEXT("  Node: center=(%.1f, %.1f, %.1f) extent=%.2f objId=%d tier=%s"),
+		InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Data.ObjectId, *MatchedConfig.TierName);
+	UE_LOG(LogTemp, Warning, TEXT("  Particle: pos=(%.1f, %.1f, %.1f) extent=%.2f"),
+		ParticlePos.X, ParticlePos.Y, ParticlePos.Z, ParticleExtent);
+	UE_LOG(LogTemp, Warning, TEXT("  Galaxy: unitScale=%.2e extent=%.0f sizeRatio=%.2f seed=%d (placement deferred)"),
+		Galaxy->Params.UnitScale, Galaxy->Params.Extent,
+		Params.UnitScale / Galaxy->Params.UnitScale,
+		Galaxy->Params.Seed);
+
+	Galaxy->Initialize();
+}
+
+void AUniverseActor::FinalizeGalaxyPlacement(AGalaxyActor* Galaxy)
+{
+	// Called from Tick on the first frame after the galaxy's async init
+	// completes. At this point:
+	//   - ApplyParallaxOffset has already run, so VirtualTraversal and
+	//     CurrentFrameOfReferenceLocation are resolved for this frame.
+	//   - The galaxy has not been ticked yet, so no stale VT has accumulated.
+	//
+	// We compute the spawn position exactly as SpawnGalaxyFromPool used to,
+	// but using the current frame's parallax state instead of the stale
+	// state from N frames ago when the spawn was initiated.
+
+	const FVector SpawnLoc = ComputeChildSpawnLocation(Galaxy->PendingNodeCenter, Galaxy->Params.UnitScale);
 	Galaxy->SetActorLocation(SpawnLoc);
 	Galaxy->LastFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
 	Galaxy->CurrentFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
@@ -470,27 +525,17 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	// Rendered position = PlayerPos + (LocalPos - VT).
 	// We want:           PlayerPos + (LocalPos - VT) = SpawnLoc + LocalPos
 	// Solving:           VT_initial = PlayerPos - SpawnLoc
-	//
-	// As the player flies toward the galaxy, VT accumulates at rate
-	// (SpeedScale / UnitScale).  UnitScale grows smaller as the galaxy actor
-	// is reconfigured for closer approach, so VT shrinks toward zero —
-	// yielding maximum floating-point precision exactly when the player is
-	// inside the galaxy.
 	Galaxy->VirtualTraversal = CurrentFrameOfReferenceLocation - SpawnLoc;
 
-	UE_LOG(LogTemp, Warning, TEXT("=== SpawnGalaxyFromPool ==="));
-	UE_LOG(LogTemp, Warning, TEXT("  Node: center=(%.1f, %.1f, %.1f) extent=%.2f objId=%d tier=%s"),
-		InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Data.ObjectId, *MatchedConfig.TierName);
-	UE_LOG(LogTemp, Warning, TEXT("  Particle: pos=(%.1f, %.1f, %.1f) extent=%.2f"),
-		ParticlePos.X, ParticlePos.Y, ParticlePos.Z, ParticleExtent);
-	UE_LOG(LogTemp, Warning, TEXT("  Galaxy: spawnLoc=(%.1f, %.1f, %.1f) unitScale=%.2e extent=%.0f sizeRatio=%.2f seed=%d"),
-		SpawnLoc.X, SpawnLoc.Y, SpawnLoc.Z,
-		Galaxy->Params.UnitScale, Galaxy->Params.Extent,
-		Params.UnitScale / Galaxy->Params.UnitScale,
-		Galaxy->Params.Seed);
-
-	Galaxy->Initialize();
+	// Make visible and clear the pending flag.
 	Galaxy->SetActorHiddenInGame(false);
+	Galaxy->bPendingPlacement = false;
+
+	UE_LOG(LogTemp, Warning, TEXT("=== FinalizeGalaxyPlacement ==="));
+	UE_LOG(LogTemp, Warning, TEXT("  Galaxy: spawnLoc=(%.1f, %.1f, %.1f) VT=(%.1f, %.1f, %.1f) playerPos=(%.1f, %.1f, %.1f)"),
+		SpawnLoc.X, SpawnLoc.Y, SpawnLoc.Z,
+		Galaxy->VirtualTraversal.X, Galaxy->VirtualTraversal.Y, Galaxy->VirtualTraversal.Z,
+		CurrentFrameOfReferenceLocation.X, CurrentFrameOfReferenceLocation.Y, CurrentFrameOfReferenceLocation.Z);
 }
 
 void AUniverseActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)

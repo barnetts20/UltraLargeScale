@@ -55,6 +55,8 @@ void AProceduralSpaceActor::ResetForSpawn()
 {
     SetActorTickEnabled(true);
     InitializationState = ELifecycleState::Uninitialized;
+    bPendingPlacement = false;
+    PendingNodeCenter = FVector::ZeroVector;
 }
 
 void AProceduralSpaceActor::ResetForPool()
@@ -62,6 +64,8 @@ void AProceduralSpaceActor::ResetForPool()
     SetActorTickEnabled(false);
     double StartTime = FPlatformTime::Seconds();
     InitializationState = ELifecycleState::Pooling;
+    bPendingPlacement = false;
+    PendingNodeCenter = FVector::ZeroVector;
 
     if (VolumetricComponent)
     {
@@ -184,7 +188,7 @@ void AProceduralSpaceActor::TickFromParent(float DeltaTime, const FVector& InPla
 {
     // Base implementation covers StarSystemActor: apply parallax offset using
     // the already-resolved player position passed down from the parent galaxy.
-    // No controller lookup needed � InPlayerPos is authoritative for this frame.
+    // No controller lookup needed — InPlayerPos is authoritative for this frame.
     CurrentFrameOfReferenceLocation = InPlayerPos;
     const double ParallaxRatio = GetParentSpeedScale() / GetUnitScale();
     const FVector PlayerOffset = InPlayerPos - LastFrameOfReferenceLocation;

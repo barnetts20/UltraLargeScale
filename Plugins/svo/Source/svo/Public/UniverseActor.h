@@ -121,14 +121,26 @@ public:
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
 
 	/**
-	 * Pops a galaxy from the pool, configures it from InNode's data
-	 * (UnitScale, Seed, ParentColor, Rotation), positions it via
-	 * ComputeChildSpawnLocation, and calls Initialize(). No-ops if the pool
-	 * is empty or InNode is already spawned.
+	 * Pops a galaxy from the pool, configures params (UnitScale, Seed,
+	 * ParentColor, Rotation), marks it hidden with bPendingPlacement = true,
+	 * and calls Initialize(). Does NOT position the galaxy or make it visible;
+	 * that is deferred to FinalizeGalaxyPlacement once async init completes.
 	 *
 	 * @param InNode  Octree node representing the galaxy to spawn.
 	 */
 	void SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode);
+
+	/**
+	 * Called from Tick on the first frame a galaxy reaches ELifecycleState::Ready
+	 * while bPendingPlacement is still true. Computes the spawn position using
+	 * the current frame's resolved VirtualTraversal and player position,
+	 * initializes the galaxy's VirtualTraversal, makes it visible, and clears
+	 * the pending flag. The galaxy's first TickFromParent runs immediately after
+	 * in the same frame — zero frames of parallax drift.
+	 *
+	 * @param Galaxy  The galaxy actor to finalize.
+	 */
+	void FinalizeGalaxyPlacement(AGalaxyActor* Galaxy);
 
 	/**
 	 * Returns the galaxy associated with InNode to the pool. Calls

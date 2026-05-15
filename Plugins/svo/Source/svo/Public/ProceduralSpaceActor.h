@@ -51,6 +51,22 @@ public:
     double SpeedScale = 1.0;  // Runtime parameter (not in Params)
 #pragma endregion
 
+#pragma region Deferred Placement
+    /** True while this actor has been spawned from a pool but not yet placed.
+     *  The parent's tick loop checks this after InitializationState == Ready
+     *  and calls the appropriate FinalizeXxxPlacement to compute the spawn
+     *  position using the current frame's parallax state, toggle visibility,
+     *  and begin ticking — all in the same frame, with zero parallax drift.
+     *
+     *  Set true in SpawnXxxFromPool; cleared by FinalizeXxxPlacement. */
+    bool bPendingPlacement = false;
+
+    /** Octree node center (local space) cached at spawn time for the parent
+     *  to re-derive the correct world-space spawn position at placement time.
+     *  Only meaningful while bPendingPlacement is true. */
+    FVector PendingNodeCenter = FVector::ZeroVector;
+#pragma endregion
+
 #pragma region Lifecycle (overrideable)
     virtual void Initialize();      // Kicks off async init
     virtual void ResetForSpawn();   // Called before Initialize
