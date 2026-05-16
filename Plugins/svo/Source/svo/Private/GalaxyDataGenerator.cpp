@@ -516,7 +516,7 @@ void GalaxyDataGenerator::GenerateTierNode(
 			ScaleSample, InTierParams.ScaleDistribution);
 		FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
 		const double ExtentAtDepth = static_cast<double>(Params.Extent) / static_cast<double>(1 << PointData.InsertDepth);
-		const float FinalExtent = static_cast<float>(ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
+		const float FinalExtent = static_cast<float>(ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor)/* * (Params.UnitScale / Params.MaxGalaxyUnitScale)*/);
 
 		const FVector CompVec = Stream.GetUnitVector();
 

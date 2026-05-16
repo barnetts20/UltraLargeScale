@@ -462,10 +462,12 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 
 	// Start with the universe-level galaxy params (editor-tunable template),
 	// then override per-instance fields (seed, color, rotation, scale).
-	Galaxy->Params = GalaxyParams;
+	Galaxy->Params = this->GalaxyParams;
 
 	// Derive UnitScale from the particle extent instead of the node extent.
 	Galaxy->Params.UnitScale = (static_cast<double>(ParticleExtent) * this->Params.UnitScale) / Galaxy->Params.Extent;
+	Galaxy->Params.MaxEntityScale = (static_cast<double>(ParticleExtent) * this->Params.UnitScale) * .00025;
+
 	Galaxy->SpeedScale = SpeedScale;
 	Galaxy->Params.Seed = InNode->Data.ObjectId;
 	Galaxy->Params.ParentColor = FLinearColor(InNode->Data.Composition);

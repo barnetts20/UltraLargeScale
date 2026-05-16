@@ -30,6 +30,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density Volume")
 	int32 DensityVolumeResolution = 256;
 
+	double MaxGalaxyUnitScale = 1;
 	// --- Tier scale derivation ---
 
 	/// The absolute largest entity scale (world units) this galaxy supports.
