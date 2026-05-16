@@ -391,11 +391,11 @@ struct SVO_API FGalaxyParams : public FBaseParams
 		LargeTier.NeighborhoodRadius = 0;
 		LargeTier.MaxParticlesPerSlot = 8000;
 
-		MidTier.GridDepth = 4;
+		MidTier.GridDepth = 3;
 		MidTier.NeighborhoodRadius = 1;
 		MidTier.MaxParticlesPerSlot = 4000;
 
-		SmallTier.GridDepth = 7;
+		SmallTier.GridDepth = 5;
 		SmallTier.NeighborhoodRadius = 1;
 		SmallTier.MaxParticlesPerSlot = 2000;
 
