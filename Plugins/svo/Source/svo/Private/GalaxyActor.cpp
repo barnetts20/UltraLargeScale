@@ -59,6 +59,16 @@ void AGalaxyActor::BeginPlay()
 void AGalaxyActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	InitializationState = ELifecycleState::Pooling;
+
+	// Signal any in-flight star system initializations to abort, then clear tracking.
+	for (auto& Pair : SpawnedStarSystems)
+	{
+		if (AStarSystemActor* System = Pair.Value.Get())
+			System->InitializationState = ELifecycleState::Pooling;
+	}
+	SpawnedStarSystems.Empty();
+	StarSystemPool.Empty();
+
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 	{
 		for (UNiagaraComponent*& NC : Tier->NiagaraComponents)
@@ -73,6 +83,16 @@ void AGalaxyActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 	TierNiagaraComponents.Empty();
 	Super::EndPlay(EndPlayReason);
+}
+#pragma endregion
+
+#pragma region Parallax
+void AGalaxyActor::ApplyParallaxOffset()
+{
+	// Galaxy parallax (VirtualTraversal accumulation, Niagara position pushes,
+	// volumetric repositioning) is handled inline in TickFromParent. This stub
+	// satisfies the pure virtual in AProceduralSpaceActor and should never be
+	// called directly.
 }
 #pragma endregion
 
@@ -175,41 +195,49 @@ void AGalaxyActor::InitializeVolumetric()
 	double StartTime = FPlatformTime::Seconds();
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
+	TWeakObjectPtr<AGalaxyActor> WeakThis(this);
+	AsyncTask(ENamedThreads::GameThread, [WeakThis, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
-			VolumetricComponent = NewObject<UStaticMeshComponent>(this);
-			VolumetricComponent->SetVisibility(false);
-			VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));
-			VolumetricComponent->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+			AGalaxyActor* Self = WeakThis.Get();
+			if (!Self || Self->InitializationState == ELifecycleState::Pooling)
+			{
+				CompletionPromise.SetValue();
+				return;
+			}
+
+			Self->VolumetricComponent = NewObject<UStaticMeshComponent>(Self);
+			Self->VolumetricComponent->SetVisibility(false);
+			Self->VolumetricComponent->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitBoxInvertedNormals.UnitBoxInvertedNormals")));
+			Self->VolumetricComponent->AttachToComponent(Self->RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
 			// Absolute world transform: Tick sets VolumetricComponent->SetWorldLocation
 			// to (PlayerPos - VirtualTraversal) each frame so the box stays at the
 			// galaxy's virtual origin regardless of where the actor is pegged.
-			VolumetricComponent->SetAbsolute(true, false, false);
-			VolumetricComponent->TranslucencySortPriority = 1;
-			VolumetricComponent->DepthPriorityGroup = ESceneDepthPriorityGroup::SDPG_MAX;
-			VolumetricComponent->bRenderInDepthPass = false;
-			VolumetricComponent->RegisterComponent();
-			VolumetricComponent->SetWorldScale3D(FVector(2 * Params.Extent));
+			Self->VolumetricComponent->SetAbsolute(true, false, false);
+			Self->VolumetricComponent->TranslucencySortPriority = 1;
+			Self->VolumetricComponent->DepthPriorityGroup = ESceneDepthPriorityGroup::SDPG_MAX;
+			Self->VolumetricComponent->bRenderInDepthPass = false;
+			Self->VolumetricComponent->RegisterComponent();
+			Self->VolumetricComponent->SetWorldScale3D(FVector(2 * Self->Params.Extent));
 
-			VolumeMaterial = UMaterialInstanceDynamic::Create(
-				LoadObject<UMaterialInterface>(nullptr, *VolumetricMaterialPath), this);
+			Self->VolumeMaterial = UMaterialInstanceDynamic::Create(
+				LoadObject<UMaterialInterface>(nullptr, *Self->VolumetricMaterialPath), Self);
 
-			VolumeMaterial->SetTextureParameterValue(FName("VolumeTexture"), PseudoVolumeTexture);
-			VolumeMaterial->SetTextureParameterValue(FName("NoiseTexture"), LoadObject<UVolumeTexture>(nullptr, *Params.VolumeNoise));
-			VolumeMaterial->SetVectorParameterValue(FName("AmbientColor"), Params.VolumeAmbientColor);
-			VolumeMaterial->SetVectorParameterValue(FName("CoolShift"), Params.VolumeCoolShift);
-			VolumeMaterial->SetVectorParameterValue(FName("HotShift"), Params.VolumeHotShift);
-			VolumeMaterial->SetScalarParameterValue(FName("HueVariance"), Params.VolumeHueVariance);
-			VolumeMaterial->SetScalarParameterValue(FName("HueVarianceScale"), Params.VolumeHueVarianceScale);
-			VolumeMaterial->SetScalarParameterValue(FName("SaturationVariance"), Params.VolumeSaturationVariance);
-			VolumeMaterial->SetScalarParameterValue(FName("TemperatureInfluence"), Params.VolumeTemperatureInfluence);
-			VolumeMaterial->SetScalarParameterValue(FName("TemperatureScale"), Params.VolumeTemperatureScale);
-			VolumeMaterial->SetScalarParameterValue(FName("ScaleFactor"), Params.VolumeDensity);
-			VolumeMaterial->SetScalarParameterValue(FName("WarpAmount"), Params.VolumeWarpAmount);
-			VolumeMaterial->SetScalarParameterValue(FName("WarpScale"), Params.VolumeWarpScale);
+			Self->VolumeMaterial->SetTextureParameterValue(FName("VolumeTexture"), Self->PseudoVolumeTexture);
+			Self->VolumeMaterial->SetTextureParameterValue(FName("NoiseTexture"), LoadObject<UVolumeTexture>(nullptr, *Self->Params.VolumeNoise));
+			Self->VolumeMaterial->SetVectorParameterValue(FName("AmbientColor"), Self->Params.VolumeAmbientColor);
+			Self->VolumeMaterial->SetVectorParameterValue(FName("CoolShift"), Self->Params.VolumeCoolShift);
+			Self->VolumeMaterial->SetVectorParameterValue(FName("HotShift"), Self->Params.VolumeHotShift);
+			Self->VolumeMaterial->SetScalarParameterValue(FName("HueVariance"), Self->Params.VolumeHueVariance);
+			Self->VolumeMaterial->SetScalarParameterValue(FName("HueVarianceScale"), Self->Params.VolumeHueVarianceScale);
+			Self->VolumeMaterial->SetScalarParameterValue(FName("SaturationVariance"), Self->Params.VolumeSaturationVariance);
+			Self->VolumeMaterial->SetScalarParameterValue(FName("TemperatureInfluence"), Self->Params.VolumeTemperatureInfluence);
+			Self->VolumeMaterial->SetScalarParameterValue(FName("TemperatureScale"), Self->Params.VolumeTemperatureScale);
+			Self->VolumeMaterial->SetScalarParameterValue(FName("ScaleFactor"), Self->Params.VolumeDensity);
+			Self->VolumeMaterial->SetScalarParameterValue(FName("WarpAmount"), Self->Params.VolumeWarpAmount);
+			Self->VolumeMaterial->SetScalarParameterValue(FName("WarpScale"), Self->Params.VolumeWarpScale);
 
-			VolumetricComponent->SetMaterial(0, VolumeMaterial);
-			VolumetricComponent->SetVisibility(true);
+			Self->VolumetricComponent->SetMaterial(0, Self->VolumeMaterial);
+			Self->VolumetricComponent->SetVisibility(true);
 			CompletionPromise.SetValue();
 		});
 	CompletionFuture.Wait();
@@ -363,16 +391,8 @@ void AGalaxyActor::Tick(float DeltaTime)
 	AActor::Tick(DeltaTime);
 	if (InitializationState != ELifecycleState::Ready) return;
 
-	FVector CurrentPlayerPos = FVector::ZeroVector;
-	bool bHasReference = false;
-	if (const auto* World = GetWorld())
-		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-			if (APawn* Pawn = Controller->GetPawn())
-			{
-				CurrentPlayerPos = Pawn->GetActorLocation();
-				bHasReference = true;
-			}
-	if (!bHasReference) return;
+	FVector CurrentPlayerPos;
+	if (!GetPlayerLocation(GetWorld(), CurrentPlayerPos)) return;
 
 	TickFromParent(DeltaTime, CurrentPlayerPos);
 }

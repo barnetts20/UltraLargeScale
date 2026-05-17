@@ -8,19 +8,26 @@ AProceduralSpaceActor::AProceduralSpaceActor()
     SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent")));
 }
 
+bool AProceduralSpaceActor::GetPlayerLocation(const UWorld* World, FVector& OutLocation)
+{
+    if (!World) return false;
+    if (const auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
+        if (const APawn* Pawn = Controller->GetPawn())
+        {
+            OutLocation = Pawn->GetActorLocation();
+            return true;
+        }
+    return false;
+}
+
 void AProceduralSpaceActor::Initialize()
 {
     InitializationState = ELifecycleState::Initializing;
 
-    if (const auto* World = GetWorld())
+    FVector PlayerPos;
+    if (GetPlayerLocation(GetWorld(), PlayerPos))
     {
-        if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-        {
-            if (APawn* Pawn = Controller->GetPawn())
-            {
-                LastFrameOfReferenceLocation = Pawn->GetActorLocation();
-            }
-        }
+        LastFrameOfReferenceLocation = PlayerPos;
     }
 
     TWeakObjectPtr<AProceduralSpaceActor> WeakThis(this);
@@ -105,44 +112,6 @@ void AProceduralSpaceActor::InitializeChildPool()
 {
     // Default implementation does nothing
     // Universe and Galaxy will override this
-}
-
-FVector AProceduralSpaceActor::ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const
-{
-    //const double ChildParallaxRatio = GetParentSpeedScale() / ChildUnitScale;
-    //const double ParentParallaxRatio = GetParentSpeedScale() / GetUnitScale();
-    const double ParallaxRatio = GetUnitScale() / ChildUnitScale;
-    FVector NodeWorldPosition = NodeCenter + GetActorLocation();
-    FVector PlayerToNode = CurrentFrameOfReferenceLocation - NodeWorldPosition;
-    return CurrentFrameOfReferenceLocation - PlayerToNode * ParallaxRatio;
-}
-
-void AProceduralSpaceActor::ApplyParallaxOffset()
-{
-    bool bHasReference = false;
-    if (const auto* World = GetWorld())
-    {
-        if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-        {
-            if (APawn* Pawn = Controller->GetPawn())
-            {
-                CurrentFrameOfReferenceLocation = Pawn->GetActorLocation();
-                bHasReference = true;
-            }
-        }
-    }
-
-    if (!bHasReference)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("Parallax: No valid reference camera or pawn found."));
-        return;
-    }
-
-    double ParallaxRatio = GetParentSpeedScale() / GetUnitScale();
-    FVector PlayerOffset = CurrentFrameOfReferenceLocation - LastFrameOfReferenceLocation;
-    LastFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
-    FVector ParallaxOffset = PlayerOffset * (1.0 - ParallaxRatio);
-    SetActorLocation(GetActorLocation() + ParallaxOffset);
 }
 
 void AProceduralSpaceActor::DrawDebugBounds()

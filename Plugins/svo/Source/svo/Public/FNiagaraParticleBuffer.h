@@ -8,10 +8,10 @@
 // Centralized here so a rename in the material is one edit, not a grep.
 namespace NiagaraBufferParams
 {
-    static const FName Positions = TEXT("User.Positions");
-    static const FName Extents = TEXT("User.Extents");
-    static const FName Colors = TEXT("User.Colors");
-    static const FName Rotations = TEXT("User.Rotations");
+    inline const FName Positions = TEXT("User.Positions");
+    inline const FName Extents = TEXT("User.Extents");
+    inline const FName Colors = TEXT("User.Colors");
+    inline const FName Rotations = TEXT("User.Rotations");
 }
 
 // A slot-packed, double-buffer-friendly array of particle data for a single

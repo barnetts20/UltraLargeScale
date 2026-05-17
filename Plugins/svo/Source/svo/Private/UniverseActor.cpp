@@ -29,16 +29,11 @@ AUniverseActor::AUniverseActor()
 void AUniverseActor::Initialize()
 {
 	InitializationState = ELifecycleState::Initializing;
-	if (const auto* World = GetWorld())
+	FVector PlayerPos;
+	if (AProceduralSpaceActor::GetPlayerLocation(GetWorld(), PlayerPos))
 	{
-		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-		{
-			if (APawn* Pawn = Controller->GetPawn())
-			{
-				LastFrameOfReferenceLocation = Pawn->GetActorLocation();
-				CurrentFrameOfReferenceLocation = LastFrameOfReferenceLocation;
-			}
-		}
+		LastFrameOfReferenceLocation = PlayerPos;
+		CurrentFrameOfReferenceLocation = PlayerPos;
 	}
 
 	TWeakObjectPtr<AUniverseActor> WeakThis(this);
@@ -78,17 +73,6 @@ void AUniverseActor::Initialize()
 void AUniverseActor::BeginPlay()
 {
 	Super::BeginPlay();
-	if (const auto* World = GetWorld())
-	{
-		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-		{
-			if (APawn* Pawn = Controller->GetPawn())
-			{
-				LastFrameOfReferenceLocation = Pawn->GetActorLocation();
-				CurrentFrameOfReferenceLocation = LastFrameOfReferenceLocation;
-			}
-		}
-	}
 	if (bAutoInitializeOnBeginPlay) Initialize();
 }
 
@@ -288,20 +272,8 @@ void AUniverseActor::CheckOctreeBounds()
 void AUniverseActor::ApplyParallaxOffset()
 {
 	if (InitializationState != ELifecycleState::Ready) return;
-	FVector CurrentPlayerPos = FVector::ZeroVector;
-	bool bHasReference = false;
-	if (const auto* World = GetWorld())
-	{
-		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-		{
-			if (APawn* Pawn = Controller->GetPawn())
-			{
-				CurrentPlayerPos = Pawn->GetActorLocation();
-				bHasReference = true;
-			}
-		}
-	}
-	if (!bHasReference) return;
+	FVector CurrentPlayerPos;
+	if (!AProceduralSpaceActor::GetPlayerLocation(GetWorld(), CurrentPlayerPos)) return;
 	const FVector PlayerDelta = CurrentPlayerPos - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = CurrentPlayerPos;
 	CurrentFrameOfReferenceLocation = CurrentPlayerPos;
@@ -384,6 +356,16 @@ void AUniverseActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	InitializationState = ELifecycleState::Pooling;
 	StopSpawnScanTimer();
+
+	// Signal any in-flight galaxy initializations to abort, then clear tracking.
+	for (auto& Pair : SpawnedGalaxies)
+	{
+		if (AGalaxyActor* Galaxy = Pair.Value.Get())
+			Galaxy->InitializationState = ELifecycleState::Pooling;
+	}
+	SpawnedGalaxies.Empty();
+	GalaxyPool.Empty();
+
 	for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &SmallTierState })
 	{
 		for (UNiagaraComponent*& NC : Tier->NiagaraComponents)

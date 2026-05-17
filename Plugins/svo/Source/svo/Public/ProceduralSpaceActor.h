@@ -49,6 +49,11 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parallax Properties")
     double SpeedScale = 1.0;  // Runtime parameter (not in Params)
+
+    /** Utility: resolves the local player pawn's world position.
+     *  Returns true on success; OutLocation is untouched on failure.
+     *  Static so non-inheriting classes (e.g. AUniverseActor) can call it. */
+    static bool GetPlayerLocation(const UWorld* World, FVector& OutLocation);
 #pragma endregion
 
 #pragma region Deferred Placement
@@ -74,21 +79,16 @@ public:
 #pragma endregion
 
 public:
-#pragma region Initialization (pure virtual - must implement)
+#pragma region Initialization (virtual — override to implement)
     virtual void InitializeData();
     virtual void InitializeVolumetric();
     virtual void InitializeNiagara();
     virtual void InitializeChildPool();  // Optional - Universe/Galaxy override this
 #pragma endregion
 
-#pragma region Params Accessors (now with default implementations!)
-    // Children can override these if they have extended params, otherwise use base
+#pragma region Params Accessors
     virtual double GetUnitScale() const { return 1; }
     virtual double GetExtent() const { return 2147483648; }
-    virtual int GetSeed() const { return 1; }
-    virtual FRotator GetRotation() const { return FRotator::ZeroRotator; }
-    virtual FLinearColor GetParentColor() const { return FLinearColor(1, 1, 1); }
-    // Only this one truly needs override (for parent chain)
     virtual double GetParentSpeedScale() const { return 1; }
 #pragma endregion
 
@@ -113,10 +113,14 @@ public:
     FVector CurrentFrameOfReferenceLocation = FVector::ZeroVector;
 
 #pragma region Parallax Spawn Calculation
-    // Computes correct spawn position for a child actor based on parallax ratios
-    FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const;
+    // Computes correct spawn position for a child actor based on parallax ratios.
+    // Each subclass must implement this — the formula depends on whether the actor
+    // uses VirtualTraversal (Universe, Galaxy) or position-based parallax (StarSystem).
+    virtual FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const { return FVector::ZeroVector; };
 #pragma endregion
-    virtual void ApplyParallaxOffset();
+    // Each subclass must implement its own parallax model. Universe and Galaxy
+    // use VirtualTraversal accumulation; StarSystem uses position-based offset.
+    virtual void ApplyParallaxOffset() {};
     virtual void DrawDebugBounds();
     virtual void Tick(float DeltaTime) override;
 

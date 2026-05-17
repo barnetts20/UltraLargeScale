@@ -355,34 +355,11 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	float BoundsFadeStart = 0.67f;
 
 	/// Derive MinScale/MaxScale for each tier from MaxEntityScale and the
-	/// depth sequence. Mirrors FUniverseParams::DeriveScaleRanges() exactly.
+	/// depth sequence. Delegates to FTierParams::DeriveTierScaleRanges.
 	void DeriveScaleRanges()
 	{
 		FTierParams* Tiers[] = { &LargeTier, &MidTier, &SmallTier };
-		constexpr int32 NumTiers = UE_ARRAY_COUNT(Tiers);
-
-		Tiers[0]->MaxScale = MaxEntityScale;
-
-		for (int32 i = 0; i < NumTiers; ++i)
-		{
-			int32 DepthDelta;
-			if (i + 1 < NumTiers)
-			{
-				DepthDelta = Tiers[i + 1]->GridDepth - Tiers[i]->GridDepth;
-			}
-			else
-			{
-				DepthDelta = Tiers[i]->GridDepth - Tiers[i - 1]->GridDepth;
-			}
-
-			const double Ratio = static_cast<double>(1 << FMath::Clamp(DepthDelta, 1, 20));
-			Tiers[i]->MinScale = Tiers[i]->MaxScale / Ratio;
-
-			if (i + 1 < NumTiers)
-			{
-				Tiers[i + 1]->MaxScale = Tiers[i]->MinScale;
-			}
-		}
+		FTierParams::DeriveTierScaleRanges(MaxEntityScale, Tiers);
 	}
 
 	FGalaxyParams()

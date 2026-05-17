@@ -106,6 +106,47 @@ struct SVO_API FTierParams
 		DensityResponse.GetRichCurve()->AddKey(0.0f, 0.0f);
 		DensityResponse.GetRichCurve()->AddKey(1.0f, 1.0f);
 	}
+
+	/// Derive MinScale/MaxScale for an ordered array of tiers from a single
+	/// MaxEntityScale value and the depth sequence between tiers.
+	///
+	/// Tiers must be ordered shallowest-first (Large → Mid → Small).
+	/// The depth spacing between adjacent tiers determines the scale ratio:
+	///   ratio = 2 ^ (nextDepth - thisDepth)
+	/// The last tier mirrors the spacing of the previous pair.
+	///
+	/// Example with depths 1, 4, 7 and MaxEntityScale = 1e23:
+	///   Large: 1.25e22 → 1e23    (ratio 8, spacing 3)
+	///   Mid:   1.5625e21 → 1.25e22 (ratio 8, spacing 3)
+	///   Small: 1.953125e20 → 1.5625e21 (ratio 8, mirrors spacing 3)
+	static void DeriveTierScaleRanges(double MaxEntityScale, TArrayView<FTierParams*> Tiers)
+	{
+		const int32 NumTiers = Tiers.Num();
+		if (NumTiers == 0) return;
+
+		Tiers[0]->MaxScale = MaxEntityScale;
+
+		for (int32 i = 0; i < NumTiers; ++i)
+		{
+			int32 DepthDelta;
+			if (i + 1 < NumTiers)
+			{
+				DepthDelta = Tiers[i + 1]->GridDepth - Tiers[i]->GridDepth;
+			}
+			else
+			{
+				DepthDelta = Tiers[i]->GridDepth - Tiers[i - 1]->GridDepth;
+			}
+
+			const double Ratio = static_cast<double>(1 << FMath::Clamp(DepthDelta, 1, 20));
+			Tiers[i]->MinScale = Tiers[i]->MaxScale / Ratio;
+
+			if (i + 1 < NumTiers)
+			{
+				Tiers[i + 1]->MaxScale = Tiers[i]->MinScale;
+			}
+		}
+	}
 };
 
 /// UNIVERSE GENERATION PARAM STRUCT
@@ -153,44 +194,11 @@ struct SVO_API FUniverseParams : public FBaseParams {
 	static constexpr const char* EncodedTree = "EAAAAIA/GQAbABsAEwAAAEBAJAAgAAAAFwAAAAAAAACAP8UggD8AAAAADQADAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAAEXAAAAAAAAAIA/zcxMvQAAgD8kAAIAAAD//wEAAAAASEIB//8GAAAAAIA+";
 
 	/// Derive MinScale/MaxScale for each tier from MaxEntityScale and the
-	/// depth sequence. Call after setting depths and MaxEntityScale.
-	///
-	/// Tiers are ordered shallowest-first (Large → Mid → Small).
-	/// The depth spacing between adjacent tiers determines the scale ratio:
-	///   ratio = 2 ^ (nextDepth - thisDepth)
-	/// The last tier mirrors the spacing of the previous pair.
-	///
-	/// Example with depths 1, 4, 7 and MaxEntityScale = 1e23:
-	///   Large: 1.25e22 → 1e23    (ratio 8, spacing 3)
-	///   Mid:   1.5625e21 → 1.25e22 (ratio 8, spacing 3)
-	///   Small: 1.953125e20 → 1.5625e21 (ratio 8, mirrors spacing 3)
+	/// depth sequence. Delegates to FTierParams::DeriveTierScaleRanges.
 	void DeriveScaleRanges()
 	{
 		FTierParams* Tiers[] = { &LargeTier, &MidTier, &SmallTier };
-		constexpr int32 NumTiers = UE_ARRAY_COUNT(Tiers);
-
-		Tiers[0]->MaxScale = MaxEntityScale;
-
-		for (int32 i = 0; i < NumTiers; ++i)
-		{
-			int32 DepthDelta;
-			if (i + 1 < NumTiers)
-			{
-				DepthDelta = Tiers[i + 1]->GridDepth - Tiers[i]->GridDepth;
-			}
-			else
-			{
-				DepthDelta = Tiers[i]->GridDepth - Tiers[i - 1]->GridDepth;
-			}
-
-			const double Ratio = static_cast<double>(1 << FMath::Clamp(DepthDelta, 1, 20));
-			Tiers[i]->MinScale = Tiers[i]->MaxScale / Ratio;
-
-			if (i + 1 < NumTiers)
-			{
-				Tiers[i + 1]->MaxScale = Tiers[i]->MinScale;
-			}
-		}
+		FTierParams::DeriveTierScaleRanges(MaxEntityScale, Tiers);
 	}
 
 	FUniverseParams() {

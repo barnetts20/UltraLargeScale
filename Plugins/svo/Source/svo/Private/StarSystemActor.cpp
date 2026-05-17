@@ -162,6 +162,14 @@ void AStarSystemActor::InitializeNiagara()
 	double TotalDuration = FPlatformTime::Seconds() - StartTime;
 	UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::InitializeNiagara total duration: %.3f seconds"), TotalDuration);
 }
+
+FVector AStarSystemActor::ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const
+{
+	return FVector();
+}
+void AStarSystemActor::ApplyParallaxOffset()
+{
+}
 #pragma endregion
 
 #pragma region Entity Spawn Hooks

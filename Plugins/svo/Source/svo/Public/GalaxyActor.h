@@ -129,7 +129,11 @@ protected:
 
 	/// Galaxy-specific spawn location: accounts for VirtualTraversal.
 	/// Mirrors AUniverseActor::ComputeChildSpawnLocation.
-	FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const;
+	virtual FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const override;
+
+	/// Galaxy parallax is handled inline in TickFromParent (VirtualTraversal model).
+	/// This override exists to satisfy the pure virtual; it is never called directly.
+	virtual void ApplyParallaxOffset() override;
 #pragma endregion
 
 #pragma region Tick

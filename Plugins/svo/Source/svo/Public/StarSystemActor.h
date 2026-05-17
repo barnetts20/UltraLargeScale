@@ -44,6 +44,9 @@ protected:
 	virtual void InitializeData() override;
 	virtual void InitializeVolumetric() override;
 	virtual void InitializeNiagara() override;
+
+	virtual FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const override;
+	virtual void ApplyParallaxOffset() override;
 	// No InitializeChildPool() - star systems don't spawn child pools
 #pragma endregion
 
