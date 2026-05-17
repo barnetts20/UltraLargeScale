@@ -54,9 +54,12 @@ public:
 	float SpawnScanInterval = 0.1f;
 
 	/** Minimum screen-space angular size (Extent / Distance) for a node to
-	 *  trigger a spawn event. Squared internally before traversal. */
+	 *  trigger a star system spawn. Squared internally before traversal.
+	 *  Lower values = spawn/despawn from further away.
+	 *  UniverseActor default is 0.033. For star systems to load earlier
+	 *  (before you're right on top of the sprite), try 0.005–0.015. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
-	double SpawnScreenSpaceThreshold = 0.033;
+	double SpawnScreenSpaceThreshold = 0.01;
 
 	/** When true, draws a debug box around each node that passes the threshold. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")

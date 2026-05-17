@@ -594,26 +594,70 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 		return;
 	}
 
+	// --- Resolve the actual particle position from the Large tier buffer ---
+	// The octree node center is a quantized approximation; the real rendered
+	// position lives in the Niagara buffer. Mirrors UniverseActor::SpawnGalaxyFromPool.
+	// ObjectId on the node is the slot index written by InsertParticleIntoOctree.
+	const int32 TierIndex = FMath::Clamp(InNode->Data.TypeId, 0, 2);
+	FParticleTierConfig* TierConfigs[] = { &LargeTierConfig, &MidTierConfig, &SmallTierConfig };
+	FParticleTierState* TierStates[] = { &LargeTierState,  &MidTierState,  &SmallTierState };
+	FParticleTierConfig& MatchedConfig = *TierConfigs[TierIndex];
+	FParticleTierState& MatchedState = *TierStates[TierIndex];
+
+	FVector  ParticlePos = InNode->Center;  // fallback
+	float    ParticleExtent = static_cast<float>(InNode->Extent);
+
+	const int32 SlotId = InNode->Data.ObjectId;
+	const int32 FrontIdx = MatchedState.FrontIdx.load();
+	if (MatchedState.Buffers.Num() > 0 && SlotId >= 0 &&
+		SlotId < MatchedState.SlotCounts.Num())
+	{
+		const FNiagaraParticleBuffer& Front = MatchedState.Buffers[0][FrontIdx];
+		const int32 SlotStart = SlotId * MatchedConfig.SlotCapacity;
+		const int32 SlotCount = MatchedState.SlotCounts[SlotId];
+
+		double BestDistSq = TNumericLimits<double>::Max();
+		for (int32 i = 0; i < SlotCount; ++i)
+		{
+			const double DistSq = FVector::DistSquared(Front.Positions[SlotStart + i], InNode->Center);
+			if (DistSq < BestDistSq)
+			{
+				BestDistSq = DistSq;
+				ParticlePos = Front.Positions[SlotStart + i];
+				ParticleExtent = Front.Extents[SlotStart + i];
+			}
+		}
+	}
+
 	AStarSystemActor* System = StarSystemPool.Pop();
 	SpawnedStarSystems.Add(InNode, TWeakObjectPtr<AStarSystemActor>(System));
 	System->ResetForSpawn();
 
-	// Configure params from the octree node, mirroring UniverseActor::SpawnGalaxyFromPool.
-	System->Params.UnitScale = (static_cast<double>(InNode->Extent) * Params.UnitScale) / System->Params.Extent;
+	// UnitScale: scale the system so its virtual space is BoundsScaleMultiplier
+	// times larger than the star sprite's world radius.
+	//
+	// Base (no multiplier): UnitScale = (ParticleExtent * Galaxy.UnitScale) / Extent
+	//   → Extent octree units == one star sprite radius in world space.
+	//   → All planets orbit within the star glyph itself. Wrong.
+	//
+	// With multiplier:  UnitScale = (ParticleExtent * Galaxy.UnitScale * BoundsScaleMultiplier) / Extent
+	//   → Extent octree units == BoundsScaleMultiplier star radii in world space.
+	//   → OuterOrbitFraction * Extent octree units == a comfortable orbital distance.
+	System->Params.UnitScale = (static_cast<double>(ParticleExtent) * Params.UnitScale
+		* System->Params.BoundsScaleMultiplier) / System->Params.Extent;
 	System->SpeedScale = Universe ? Universe->SpeedScale : SpeedScale;
 	System->Params.Seed = InNode->Data.ObjectId;
 	System->Params.ParentColor = FLinearColor(InNode->Data.Composition);
 	System->Params.Rotation = FRandomStream(InNode->Data.ObjectId).GetUnitVector().Rotation();
 
-	// Deferred placement — position computed in FinalizeStarSystemPlacement on
-	// the first tick after async init, using that frame's VirtualTraversal.
-	System->PendingNodeCenter = InNode->Center;
+	// Deferred placement — FinalizeStarSystemPlacement uses this frame's VT.
+	System->PendingNodeCenter = ParticlePos;
 	System->bPendingPlacement = true;
 
 	UE_LOG(LogTemp, Log,
-		TEXT("AGalaxyActor::SpawnStarSystemFromPool — node center=(%.1f,%.1f,%.1f) extent=%.2f unitScale=%.4e seed=%d (placement deferred)"),
-		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
-		InNode->Extent, System->Params.UnitScale, System->Params.Seed);
+		TEXT("AGalaxyActor::SpawnStarSystemFromPool — particle=(%.1f,%.1f,%.1f) extent=%.2f unitScale=%.4e seed=%d (deferred)"),
+		ParticlePos.X, ParticlePos.Y, ParticlePos.Z,
+		ParticleExtent, System->Params.UnitScale, System->Params.Seed);
 
 	System->Initialize();
 }

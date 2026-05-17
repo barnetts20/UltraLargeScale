@@ -48,23 +48,31 @@ struct SVO_API FStarSystemParams : public FBaseParams
 	FLinearColor StarColor = FLinearColor(1, 1, 1, 1);
 
 	/** How much larger the star system bounds are relative to the star sprite.
-	 *  The sprite's world radius ≈ Extent * UnitScale. The bounds used for
-	 *  the planet Niagara system is that * BoundsScaleMultiplier.
-	 *  Tune to cover all planetary orbits comfortably. */
+	 *  The star's world radius = ParticleExtent * Galaxy.UnitScale.
+	 *  The star system's virtual space covers BoundsScaleMultiplier times that,
+	 *  so planets can orbit well outside the star sprite's footprint.
+	 *  Tune this until planets are visibly spread out when approaching the star.
+	 *  1000 is a good starting point for a solar-system-scale first pass. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Star")
-	double BoundsScaleMultiplier = 8.0;
+	double BoundsScaleMultiplier = 30.0;
 
 	/** Maximum number of planet sprites to generate (line layout). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets")
 	int32 MaxPlanets = 8;
 
+	/** Planet sprite radius as a fraction of the spacing between adjacent orbits.
+	 *  Lower = smaller planets relative to their spacing.
+	 *  Start around 0.008-0.015 — tune until they look right at approach distance. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets")
+	double PlanetExtentFraction = 0.01;
+
 	/** Fraction of Extent used for innermost orbit. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets")
-	double InnerOrbitFraction = 0.05;
+	double InnerOrbitFraction = 0.2;
 
 	/** Fraction of Extent used for outermost orbit. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets")
-	double OuterOrbitFraction = 0.65;
+	double OuterOrbitFraction = 0.6;
 
 	// --- Tier configs ---
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tiers")

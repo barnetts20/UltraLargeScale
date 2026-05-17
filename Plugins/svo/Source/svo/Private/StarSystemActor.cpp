@@ -25,14 +25,16 @@ AStarSystemActor::AStarSystemActor()
 	PrimaryActorTick.bCanEverTick = true;
 	SetActorTickEnabled(false);
 
-	// Load Niagara assets. Mid/Small use the same asset as Large for now
-	// since they have zero particles — swap for proper assets when adding content.
+	// Load Niagara assets. Paths mirror the galaxy naming convention.
+	// Clone NG_GalaxyLarge/Mid/Small into the StarSystem folder and rename.
+	// Mid/Small are zero-particle placeholders for now — they share the Large
+	// asset so InitializeTier doesn't fail on a null NiagaraSystem pointer.
+	// Swap StarSystemMidCloud / StarSystemSmallCloud for dedicated assets
+	// once you've created NG_StarSystemMid and NG_StarSystemSmall.
 	StarSystemLargeCloud = LoadObject<UNiagaraSystem>(nullptr,
 		TEXT("/svo/StarSystem/NG_StarSystemLarge.NG_StarSystemLarge"));
-	StarSystemMidCloud = LoadObject<UNiagaraSystem>(nullptr,
-		TEXT("/svo/StarSystem/NG_StarSystemMid.NG_StarSystemMid"));
-	StarSystemSmallCloud = LoadObject<UNiagaraSystem>(nullptr,
-		TEXT("/svo/StarSystem/NG_StarSystemSmall.NG_StarSystemSmall"));
+	StarSystemMidCloud = StarSystemLargeCloud;  // placeholder — replace with NG_StarSystemMid
+	StarSystemSmallCloud = StarSystemLargeCloud;  // placeholder — replace with NG_StarSystemSmall
 
 	Octree = MakeShared<FOctree>(Params.Extent);
 }
@@ -206,32 +208,30 @@ void AStarSystemActor::InitializeData()
 			: 0.5;
 		const double OrbitRadius = FMath::Lerp(InnerRadius, OuterRadius, t);
 
-		// Place along +X axis.
+		// Place along +X axis — easy to traverse in a straight line.
 		PlanetPositions[i] = FVector(OrbitRadius, 0.0, 0.0);
 
-		// Assign a simple scale that grows with orbit distance (inner = smaller).
-		// Use FPointData::MakePointDataFromWorldScale to get a depth-consistent
-		// particle extent. For display we just store the octree-space radius.
-		// Planet world diameter: lerp from ~Mercury to ~Neptune range.
-		const double WorldDiameterCm = FMath::Lerp(
-			5.0e8,    // ~Mercury diameter in cm
-			5.0e10,   // ~Neptune diameter in cm
-			t);
-		const double OctreeRadius = (WorldDiameterCm * 0.5) / Params.UnitScale;
-		PlanetExtents[i] = static_cast<float>(FMath::Max(OctreeRadius, 1.0));
+		// Planet sprite size: 1% of the spacing between adjacent orbits.
+		// Keeps planets clearly distinct from each other and from the star.
+		// Tune PlanetExtentFraction on FStarSystemParams if needed.
+		const double Spacing = (NumPlanets > 1) ? (OuterRadius - InnerRadius) / static_cast<double>(NumPlanets - 1) : OuterRadius;
+		const double PlanetExtent = Spacing * Params.PlanetExtentFraction;
+		PlanetExtents[i] = static_cast<float>(FMath::Max(PlanetExtent, 1.0));
 
 		// Vary color by orbit: inner = warm rocky, outer = cool icy blue.
 		PlanetColors[i] = FLinearColor(
-			FMath::Lerp(0.8f, 0.2f, static_cast<float>(t)),  // R: red → blue
-			FMath::Lerp(0.5f, 0.7f, static_cast<float>(t)),  // G: mid
-			FMath::Lerp(0.2f, 1.0f, static_cast<float>(t)),  // B: orange → blue
+			FMath::Lerp(0.9f, 0.1f, static_cast<float>(t)),  // R
+			FMath::Lerp(0.4f, 0.6f, static_cast<float>(t)),  // G
+			FMath::Lerp(0.1f, 1.0f, static_cast<float>(t)),  // B
 			1.0f
 		);
 	}
 
 	UE_LOG(LogTemp, Log,
-		TEXT("AStarSystemActor::InitializeData — %d planets generated along +X [%.0f … %.0f octree units]"),
-		NumPlanets, InnerRadius, OuterRadius);
+		TEXT("AStarSystemActor::InitializeData — %d planets along +X [%.0f … %.0f octree units], extents ~%.0f (fraction=%.3f)"),
+		NumPlanets, InnerRadius, OuterRadius,
+		NumPlanets > 1 ? (OuterRadius - InnerRadius) / static_cast<double>(NumPlanets - 1) * Params.PlanetExtentFraction : 1.0,
+		Params.PlanetExtentFraction);
 }
 #pragma endregion
 
