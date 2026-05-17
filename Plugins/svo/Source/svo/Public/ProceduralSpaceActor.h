@@ -79,7 +79,7 @@ public:
 #pragma endregion
 
 public:
-#pragma region Initialization (virtual — override to implement)
+#pragma region Initialization (virtual - override to implement)
     virtual void InitializeData();
     virtual void InitializeVolumetric();
     virtual void InitializeNiagara();
