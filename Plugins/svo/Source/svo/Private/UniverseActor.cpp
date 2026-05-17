@@ -466,7 +466,8 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 
 	// Derive UnitScale from the particle extent instead of the node extent.
 	Galaxy->Params.UnitScale = (static_cast<double>(ParticleExtent) * this->Params.UnitScale) / Galaxy->Params.Extent;
-	Galaxy->Params.MaxEntityScale = (static_cast<double>(ParticleExtent) * this->Params.UnitScale) * .00025;
+	// MaxEntityScale is derived from MaxEntityScaleFraction in GalaxyActor::InitializeData.
+	// No need to set it here — DeriveScaleRanges handles the cascade.
 
 	Galaxy->SpeedScale = SpeedScale;
 	Galaxy->Params.Seed = InNode->Data.ObjectId;

@@ -30,13 +30,21 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density Volume")
 	int32 DensityVolumeResolution = 256;
 
-	double MaxGalaxyUnitScale = 1;
 	// --- Tier scale derivation ---
 
-	/// The absolute largest entity scale (world units) this galaxy supports.
-	/// All tier scale ranges cascade downward from this single value,
-	/// identical to FUniverseParams::MaxEntityScale logic.
+	/// Largest particle size as a fraction of the galaxy's physical
+	/// extent (Extent * UnitScale). Since UnitScale varies across
+	/// universe tiers (proportional to galaxy size), tying MaxEntityScale
+	/// to it ensures all galaxies produce particles at the same
+	/// proportional fraction of their volume.
+	///
+	/// At runtime: MaxEntityScale = MaxEntityScaleFraction * Extent * UnitScale.
+	/// MaxEntityScale is then derived and should not be set directly.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
+	double MaxEntityScaleFraction = 0.0001;
+
+	/// Derived at runtime from MaxEntityScaleFraction * UnitScale.
+	/// Do not author directly — overwritten in InitializeData.
 	double MaxEntityScale = 1e18;
 
 	// --- Per-tier streaming configs ---

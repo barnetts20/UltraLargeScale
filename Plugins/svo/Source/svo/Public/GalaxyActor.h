@@ -33,6 +33,7 @@ public:
 	bool bAutoInitializeOnBeginPlay = false;
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	// Virtual traversal of the player through galaxy-local space. Initialized
 	// at spawn to (PlayerPos - SpawnLoc) so particles appear at the correct
@@ -127,6 +128,10 @@ protected:
 	TSubclassOf<AStarSystemActor> StarSystemActorClass;
 	int StarSystemPoolSize = 5;
 	TArray<AStarSystemActor*> StarSystemPool;
+
+	/// Galaxy-specific spawn location: accounts for VirtualTraversal.
+	/// Mirrors AUniverseActor::ComputeChildSpawnLocation.
+	FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const;
 #pragma endregion
 
 #pragma region Tick

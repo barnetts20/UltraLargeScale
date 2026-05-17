@@ -47,6 +47,27 @@ void AGalaxyActor::BeginPlay()
 }
 #pragma endregion
 
+#pragma region EndPlay
+void AGalaxyActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	InitializationState = ELifecycleState::Pooling;
+	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
+	{
+		for (UNiagaraComponent*& NC : Tier->NiagaraComponents)
+		{
+			if (NC)
+			{
+				NC->Deactivate();
+				NC->DestroyComponent();
+				NC = nullptr;
+			}
+		}
+	}
+	TierNiagaraComponents.Empty();
+	Super::EndPlay(EndPlayReason);
+}
+#pragma endregion
+
 #pragma region Pool Lifecycle
 void AGalaxyActor::ResetForPool()
 {
@@ -114,6 +135,16 @@ void AGalaxyActor::InitializeData()
 	double StartTime = FPlatformTime::Seconds();
 
 	GalaxyGenerator.Params = Params;
+
+	// Derive MaxEntityScale from the normalized fraction and the galaxy's
+	// physical extent so particle scale ranges are proportional to the
+	// galaxy's virtual volume, consistent across differently-sized galaxies
+	// spawned from different universe tiers.
+	// Must run before Initialize/generation reads scale ranges.
+	GalaxyGenerator.Params.MaxEntityScale = Params.MaxEntityScaleFraction
+		* static_cast<double>(Params.Extent) * Params.UnitScale;
+	GalaxyGenerator.Params.DeriveScaleRanges();
+
 	GalaxyGenerator.Initialize();
 
 	if (InitializationState == ELifecycleState::Pooling) return;
@@ -407,6 +438,20 @@ void AGalaxyActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
 			MidTierState.bUpdateInProgress.load() ? 1 : 0,
 			SmallTierState.bUpdateInProgress.load() ? 1 : 0);
 	}
+}
+#pragma endregion
+
+#pragma region Child Spawn Location
+FVector AGalaxyActor::ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const
+{
+	// Rendered position of the particle = ActorLocation + NodeCenter - VirtualTraversal.
+	// The child actor is physically larger than the node, so it must be placed
+	// proportionally further along the camera-to-node vector to subtend the
+	// same angular size.
+	const double SizeRatio = Params.UnitScale / ChildUnitScale;
+	const FVector RenderedPos = GetActorLocation() + NodeCenter - VirtualTraversal;
+	const FVector CameraToNode = RenderedPos - CurrentFrameOfReferenceLocation;
+	return CurrentFrameOfReferenceLocation + CameraToNode * SizeRatio;
 }
 #pragma endregion
 

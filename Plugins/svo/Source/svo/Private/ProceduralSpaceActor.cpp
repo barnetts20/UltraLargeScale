@@ -53,7 +53,10 @@ void AProceduralSpaceActor::Initialize()
 
 void AProceduralSpaceActor::ResetForSpawn()
 {
-    SetActorTickEnabled(true);
+    // Do NOT re-enable tick here. Pool-managed actors (Galaxy, StarSystem)
+    // are driven by their parent's TickFromParent — enabling UE tick would
+    // double-tick them. Level-placed actors that need UE tick should enable
+    // it explicitly after ResetForSpawn.
     InitializationState = ELifecycleState::Uninitialized;
     bPendingPlacement = false;
     PendingNodeCenter = FVector::ZeroVector;
