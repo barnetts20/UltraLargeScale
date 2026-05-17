@@ -1,13 +1,11 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
-
 #include "ParallaxStaticMeshActor.h"
-#include <Kismet/GameplayStatics.h>
+#include "StarSystemActor.h"
 
-// Sets default values
 AParallaxStaticMeshActor::AParallaxStaticMeshActor()
 {
-	PrimaryActorTick.bCanEverTick = true;
+	// Tick is disabled — position is driven by AStarSystemActor::TickFromParent
+	// via TickFromStarSystem each frame. Self-ticking would fight the VT model.
+	PrimaryActorTick.bCanEverTick = false;
 
 	MeshComponent = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("MeshComponent"));
 	RootComponent = MeshComponent;
@@ -16,64 +14,26 @@ AParallaxStaticMeshActor::AParallaxStaticMeshActor()
 	MeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	MeshComponent->SetCollisionResponseToAllChannels(ECR_Block);
 	MeshComponent->SetRenderCustomDepth(true);
-
 	MeshComponent->SetCustomDepthStencilValue(1);
-
-	UnitScale = 1.0;
-	SpeedScale = 1.0;
 }
 
-// Called when the game starts or when spawned
-void AParallaxStaticMeshActor::BeginPlay()
+void AParallaxStaticMeshActor::TickFromStarSystem(const FVector& InPlayerPos)
 {
-	Super::BeginPlay();
-	// Set initial frame of reference
-	if (const auto* World = GetWorld())
-	{
-		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-		{
-			if (APawn* Pawn = Controller->GetPawn())
-			{
-				LastFrameOfReferenceLocation = Pawn->GetActorLocation();
-			}
-		}
-	}
+	if (!System) return;
+
+	// The planet's rendered world position is:
+	//   PlayerPos + (NodeCenter - VirtualTraversal)
+	//
+	// This is the same formula used by Niagara to place particles — each
+	// particle renders at (PlayerPos + (LocalPos - VT)). We replicate it
+	// here so the mesh sits exactly on top of the planet sprite it replaced.
+	//
+	// The star system actor is already pegged to InPlayerPos each tick,
+	// so GetActorLocation() == InPlayerPos for the system. We compute the
+	// offset directly.
+	const FVector WorldPos = InPlayerPos + (System->VirtualTraversal != FVector::ZeroVector
+		? (NodeCenter - System->VirtualTraversal)
+		: NodeCenter);
+
+	SetActorLocation(WorldPos);
 }
-
-#pragma region Parallax
-void AParallaxStaticMeshActor::ApplyParallaxOffset()
-{
-	bool bHasReference = false;
-	if (const auto* World = GetWorld())
-	{
-		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
-		{
-			if (APawn* Pawn = Controller->GetPawn())
-			{
-				CurrentFrameOfReferenceLocation = Pawn->GetActorLocation();
-				bHasReference = true;
-			}
-		}
-	}
-	if (!bHasReference)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("Parallax: No valid reference camera or pawn found."));
-		return;
-	}
-	FVector CurrentActorLocation = GetActorLocation();
-
-	double ParallaxRatio = (System && System->Galaxy && System->Galaxy->Universe ? System->Galaxy->Universe->SpeedScale : SpeedScale) / UnitScale;
-	FVector PlayerOffset = CurrentFrameOfReferenceLocation - LastFrameOfReferenceLocation;
-	LastFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
-	FVector ParallaxOffset = PlayerOffset * (1.0 - ParallaxRatio);
-	FVector NewActorLocation = CurrentActorLocation + ParallaxOffset;
-
-	SetActorLocation(NewActorLocation);
-}
-
-void AParallaxStaticMeshActor::Tick(float DeltaTime)
-{
-	Super::Tick(DeltaTime);
-	ApplyParallaxOffset();
-}
-#pragma endregion

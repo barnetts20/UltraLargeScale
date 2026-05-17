@@ -1,37 +1,34 @@
-#pragma once
+﻿#pragma once
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
-#include <StarSystemActor.h>
 #include "ParallaxStaticMeshActor.generated.h"
+
+class AStarSystemActor;
 
 UCLASS()
 class SVO_API AParallaxStaticMeshActor : public AActor
 {
 	GENERATED_BODY()
-	
-public:	
-	// Sets default values for this actor's properties
+
+public:
 	AParallaxStaticMeshActor();
-	AStarSystemActor* System;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	UStaticMeshComponent* MeshComponent;
 
-	// Parallax parameters - set by spawner
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parallax")
-	double UnitScale = 1;
+	/** Owning star system. Set by SpawnPlanetFromPool. Used to derive
+	 *  the correct SpeedScale chain (StarSystem → Galaxy → Universe). */
+	UPROPERTY()
+	AStarSystemActor* System = nullptr;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parallax")
-	double SpeedScale = 1;
+	/** Octree-local center of this planet's node (star-system VT space).
+	 *  Stored at spawn so TickFromStarSystem can recompute world position
+	 *  each frame using the current VirtualTraversal. */
+	FVector NodeCenter = FVector::ZeroVector;
 
-	#pragma region Parallax
-	FVector LastFrameOfReferenceLocation = FVector(0, 0, 0);
-	FVector CurrentFrameOfReferenceLocation;
-	void ApplyParallaxOffset();
-	virtual void Tick(float DeltaTime) override;
-#pragma endregion
-protected:
-	// Called when the game starts or when spawned
-	virtual void BeginPlay() override;
+	/** Called every frame by AStarSystemActor::TickFromParent.
+	 *  Recomputes world position from the system's current VirtualTraversal
+	 *  so the planet stays locked to its parallax-correct location. */
+	void TickFromStarSystem(const FVector& InPlayerPos);
 };
