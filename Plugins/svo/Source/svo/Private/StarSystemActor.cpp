@@ -10,8 +10,10 @@
 #include "ParallaxStaticMeshActor.h"
 #include "FTierStreamingSystem.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
+#include <DrawDebugHelpers.h>
 #include <Kismet/GameplayStatics.h>
 #include <NiagaraFunctionLibrary.h>
+#include <TimerManager.h>
 #pragma endregion
 
 // ---------------------------------------------------------------------------
@@ -70,6 +72,7 @@ void AStarSystemActor::BeginPlay()
 void AStarSystemActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	InitializationState = ELifecycleState::Pooling;
+	StopSpawnScanTimer();
 
 	// Destroy any live planet actors.
 	for (auto& Pair : SpawnedPlanets)
@@ -141,6 +144,12 @@ void AStarSystemActor::ResetForPool()
 	}
 	TierNiagaraComponents.Empty();
 	DiagTickCount = 0;
+
+	StopSpawnScanTimer();
+	bHasPendingScanResults = false;
+	PendingScanResults.Empty();
+	TrackedPlanetNodes.Empty();
+	bSpawnScanInProgress.store(false);
 
 	PlanetPositions.Empty();
 	PlanetExtents.Empty();
@@ -301,6 +310,15 @@ void AStarSystemActor::InitializeNiagara()
 	if (InitializationState == ELifecycleState::Pooling) return;
 
 	InitializationState = ELifecycleState::Ready;
+
+	// Start the planet spawn-scan timer now that the octree is populated.
+	TWeakObjectPtr<AStarSystemActor> WeakThis(this);
+	AsyncTask(ENamedThreads::GameThread, [WeakThis]()
+		{
+			if (AStarSystemActor* Self = WeakThis.Get())
+				Self->StartSpawnScanTimer();
+		});
+
 	UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::InitializeNiagara — Ready"));
 }
 #pragma endregion
@@ -519,16 +537,14 @@ void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPo
 	FTierStreamingSystem::UpdateTier(Ctx, MidTierConfig, MidTierState);
 	FTierStreamingSystem::UpdateTier(Ctx, SmallTierConfig, SmallTierState);
 
-	// --- Spawn scan: process nodes from the large tier's octree ---
-	// The large tier's InitializeTier ran InsertSlotIntoOctree for all planet
-	// nodes, so the octree now has FOctreeNodes we can scan against the player's
-	// virtual position for spawn/despawn thresholds.
-	// This mirrors how GalaxyActor drives star system spawning via
-	// ProceduralSpaceActor::TickFromParent's spawn scan.
-	// Base class TickFromParent handles the scan using SpawnScreenSpaceThreshold
-	// and calls SpawnEntityFromPool / ReturnEntityToPool on the results.
-	// We defer to base here:
-	AProceduralSpaceActor::TickFromParent(DeltaTime, InPlayerPos);
+	// --- Planet spawn scan ---
+	// VirtualTraversal is resolved for this frame; process any pending
+	// octree query results to fire SpawnPlanetFromPool / ReturnPlanetToPool.
+	ProcessPendingScanResults();
+
+	// --- Deferred planet placement ---
+	// Planets are static mesh actors — no async init needed, so we finalize
+	// placement immediately in SpawnPlanetFromPool. Nothing to drive here.
 
 	if (IsDebug) DrawDebugBounds();
 
@@ -544,7 +560,121 @@ void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPo
 #pragma endregion
 
 // ---------------------------------------------------------------------------
-//  Planet Spawn / Despawn Hooks  (mirrors GalaxyActor star system hooks)
+//  Spawn Range Scanning
+// ---------------------------------------------------------------------------
+#pragma region Spawn Range Scanning
+void AStarSystemActor::StartSpawnScanTimer()
+{
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(SpawnScanTimerHandle);
+		World->GetTimerManager().SetTimer(SpawnScanTimerHandle, this,
+			&AStarSystemActor::UpdateSpawnRangeNodes, SpawnScanInterval, true);
+	}
+}
+
+void AStarSystemActor::StopSpawnScanTimer()
+{
+	if (UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(SpawnScanTimerHandle);
+	TrackedPlanetNodes.Empty();
+	bHasPendingScanResults = false;
+	PendingScanResults.Empty();
+}
+
+void AStarSystemActor::UpdateSpawnRangeNodes()
+{
+	if (InitializationState != ELifecycleState::Ready) return;
+	if (!Octree.IsValid()) return;
+	if (bSpawnScanInProgress.load()) return;
+
+	bSpawnScanInProgress.store(true);
+
+	// Snapshot VirtualTraversal — the player's position in star-system-local
+	// octree space. Planet node centers are in this same space, so the
+	// screen-space distance test is correctly scaled.
+	const FVector LocalPlayerPos = VirtualTraversal;
+
+	TWeakObjectPtr<AStarSystemActor> WeakThis(this);
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, LocalPlayerPos]()
+		{
+			AStarSystemActor* Self = WeakThis.Get();
+			if (!Self) return;
+
+			const TArray<TSharedPtr<FOctreeNode>> NearbyArray =
+				Self->Octree->GetNodesByScreenSpace(LocalPlayerPos, Self->SpawnScreenSpaceThreshold);
+
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, NearbyArray]()
+				{
+					AStarSystemActor* InnerSelf = WeakThis.Get();
+					if (!InnerSelf) return;
+					InnerSelf->PendingScanResults = NearbyArray;
+					InnerSelf->bHasPendingScanResults = true;
+					InnerSelf->bSpawnScanInProgress.store(false);
+				});
+		});
+}
+
+void AStarSystemActor::ProcessPendingScanResults()
+{
+	if (!bHasPendingScanResults) return;
+	bHasPendingScanResults = false;
+
+	TSet<TSharedPtr<FOctreeNode>> NearbySet(PendingScanResults);
+	PendingScanResults.Empty();
+
+	for (const TSharedPtr<FOctreeNode>& Node : NearbySet)
+	{
+		if (!TrackedPlanetNodes.Contains(Node))
+		{
+			LogSpawnNodeEnter(Node);
+			SpawnPlanetFromPool(Node);
+		}
+		if (bDebugDrawSpawnNodes) DebugDrawSpawnNode(Node);
+	}
+
+	TSet<TSharedPtr<FOctreeNode>> Exited = TrackedPlanetNodes.Difference(NearbySet);
+	for (const TSharedPtr<FOctreeNode>& Node : Exited)
+	{
+		LogSpawnNodeExit(Node);
+		ReturnPlanetToPool(Node);
+	}
+
+	TrackedPlanetNodes = MoveTemp(NearbySet);
+}
+
+void AStarSystemActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) const
+{
+	if (!InNode.IsValid()) return;
+	UE_LOG(LogTemp, Log,
+		TEXT("AStarSystemActor::SpawnScan ENTER — center=(%.1f,%.1f,%.1f) extent=%.2f objId=%d"),
+		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
+		InNode->Extent, InNode->Data.ObjectId);
+}
+
+void AStarSystemActor::LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const
+{
+	if (!InNode.IsValid()) return;
+	UE_LOG(LogTemp, Log,
+		TEXT("AStarSystemActor::SpawnScan EXIT  — center=(%.1f,%.1f,%.1f) extent=%.2f objId=%d"),
+		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
+		InNode->Extent, InNode->Data.ObjectId);
+}
+
+void AStarSystemActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) const
+{
+	if (!InNode.IsValid()) return;
+	const UWorld* World = GetWorld();
+	if (!World) return;
+	// Rendered world pos = PlayerPos + NodeCenter - VirtualTraversal
+	const FVector NodeCenterWorld = GetActorLocation() + InNode->Center - VirtualTraversal;
+	DrawDebugBox(World, NodeCenterWorld, FVector(InNode->Extent * Params.UnitScale),
+		FColor::Green, false, SpawnScanInterval, 0, 5.0f);
+}
+#pragma endregion
+
+// ---------------------------------------------------------------------------
+//  Planet Spawn / Despawn Hooks
 // ---------------------------------------------------------------------------
 #pragma region Planet Spawn Hooks
 void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
@@ -556,23 +686,21 @@ void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
 	UWorld* World = GetWorld();
 	if (!World) return;
 
-	// Compute spawn location using the same parallax-aware formula as
-	// GalaxyActor::SpawnStarSystemFromPool.
-	// For planet placeholders, UnitScale = (InNode->Extent * Params.UnitScale) / PlanetExtent.
-	// We don't have a dedicated pool yet, so we spawn a fresh actor each time.
-	// When a proper planet actor class exists, swap this for a pool pop.
+	// Planet placeholder UnitScale — the planet actor's virtual space is sized
+	// to match the node's world extent. Unlike star systems (which need the
+	// BoundsScaleMultiplier expansion), planet actors sit at 1:1 with the node.
 	const double NodeWorldExtentCm = static_cast<double>(InNode->Extent) * Params.UnitScale;
-	// Placeholder UnitScale = the star system's UnitScale shrunk by the node's depth ratio.
 	const double PlanetUnitScale = NodeWorldExtentCm / static_cast<double>(Params.Extent);
 
 	FActorSpawnParameters SpawnParams;
-	SpawnParams.SpawnCollisionHandlingOverride =
-		ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	// -- Placeholder: spawn a ParallaxStaticMeshActor as a stand-in --
+	// Spawn at the node's rendered world position using the VT-aware formula.
+	const FVector SpawnLoc = ComputeChildSpawnLocation(InNode->Center, PlanetUnitScale);
+
 	AParallaxStaticMeshActor* Planet = World->SpawnActor<AParallaxStaticMeshActor>(
 		AParallaxStaticMeshActor::StaticClass(),
-		ComputeChildSpawnLocation(InNode->Center, PlanetUnitScale),
+		SpawnLoc,
 		FRotator::ZeroRotator,
 		SpawnParams);
 
@@ -582,30 +710,26 @@ void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
 		return;
 	}
 
-	// Configure the placeholder mesh.
 	Planet->UnitScale = PlanetUnitScale;
 	Planet->SpeedScale = GetParentSpeedScale();
-	// Planet->System = this;  // Uncomment when AParallaxStaticMeshActor gains a StarSystem ref.
 
 	UStaticMesh* SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitSphere.UnitSphere"));
 	if (SphereMesh && Planet->MeshComponent)
 	{
 		Planet->MeshComponent->SetStaticMesh(SphereMesh);
 
-		// Scale the mesh so it visually matches the node's world extent.
-		const double MeshScaleCm = NodeWorldExtentCm * 2.0; // diameter in cm
-		// UnitSphere radius = 50 cm, so divide by 50 to get scale factor.
-		const double MeshScale = MeshScaleCm / 50.0;
+		// Scale sphere to match the planet's world-space diameter.
+		// UnitSphere has a 50cm radius, so scale = diameter / 100.
+		const double MeshScale = (NodeWorldExtentCm * 2.0) / 100.0;
 		Planet->MeshComponent->SetWorldScale3D(FVector(MeshScale));
 
-		// Apply planet color from the node's composition.
+		// Apply per-planet color from the octree node composition.
 		UMaterialInterface* BaseMat = Planet->MeshComponent->GetMaterial(0);
 		if (BaseMat)
 		{
 			UMaterialInstanceDynamic* DynMat =
 				UMaterialInstanceDynamic::Create(BaseMat, Planet->MeshComponent);
-			DynMat->SetVectorParameterValue(
-				FName("BaseColor"),
+			DynMat->SetVectorParameterValue(FName("BaseColor"),
 				FLinearColor(InNode->Data.Composition));
 			Planet->MeshComponent->SetMaterial(0, DynMat);
 		}
@@ -614,9 +738,16 @@ void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
 	SpawnedPlanets.Add(InNode, TWeakObjectPtr<AActor>(Planet));
 
 	UE_LOG(LogTemp, Log,
-		TEXT("AStarSystemActor::SpawnPlanetFromPool — spawned planet at %s (UnitScale=%.4f)"),
-		*ComputeChildSpawnLocation(InNode->Center, PlanetUnitScale).ToString(),
-		PlanetUnitScale);
+		TEXT("AStarSystemActor::SpawnPlanetFromPool — planet at (%.1f,%.1f,%.1f) worldRadius=%.1fcm"),
+		SpawnLoc.X, SpawnLoc.Y, SpawnLoc.Z, NodeWorldExtentCm);
+}
+
+void AStarSystemActor::FinalizePlanetPlacement(AActor* Planet, TSharedPtr<FOctreeNode> InNode)
+{
+	// Static mesh planets have no async init — placement is immediate in
+	// SpawnPlanetFromPool. This function is a hook for when real planet actors
+	// (with async initialization) replace the placeholder.
+	// For now it's unused but declared so the header compiles cleanly.
 }
 
 void AStarSystemActor::ReturnPlanetToPool(TSharedPtr<FOctreeNode> InNode)
@@ -626,20 +757,15 @@ void AStarSystemActor::ReturnPlanetToPool(TSharedPtr<FOctreeNode> InNode)
 	TWeakObjectPtr<AActor> WeakPlanet;
 	if (SpawnedPlanets.RemoveAndCopyValue(InNode, WeakPlanet))
 	{
-		if (AActor* Planet = WeakPlanet.Get())
-		{
-			// Destroy on game thread. When we have a real planet pool, this
-			// becomes a ResetForPool + pool re-insert instead.
-			TWeakObjectPtr<AActor> WeakP(Planet);
-			AsyncTask(ENamedThreads::GameThread, [WeakP]()
+		TWeakObjectPtr<AActor> WeakP(WeakPlanet);
+		AsyncTask(ENamedThreads::GameThread, [WeakP]()
+			{
+				if (AActor* P = WeakP.Get(); P && IsValid(P))
 				{
-					if (AActor* P = WeakP.Get(); P && IsValid(P))
-					{
-						P->Destroy();
-						UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::ReturnPlanetToPool — destroyed planet"));
-					}
-				});
-		}
+					P->Destroy();
+					UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::ReturnPlanetToPool — destroyed"));
+				}
+			});
 	}
 }
 #pragma endregion
@@ -655,7 +781,6 @@ void AStarSystemActor::DrawPlanetDebugPositions() const
 	const FVector ActorLoc = GetActorLocation();
 	for (int32 i = 0; i < PlanetPositions.Num(); i++)
 	{
-		// Render position = ActorLoc + PlanetPos - VirtualTraversal
 		const FVector WorldPos = ActorLoc + PlanetPositions[i] - VirtualTraversal;
 		const float Radius = static_cast<float>(PlanetExtents[i] * Params.UnitScale);
 		DrawDebugSphere(GetWorld(), WorldPos, FMath::Max(Radius, 1.0f),

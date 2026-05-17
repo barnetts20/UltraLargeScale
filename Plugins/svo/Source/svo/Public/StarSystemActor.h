@@ -68,11 +68,11 @@ struct SVO_API FStarSystemParams : public FBaseParams
 
 	/** Fraction of Extent used for innermost orbit. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets")
-	double InnerOrbitFraction = 0.2;
+	double InnerOrbitFraction = 0.08;
 
 	/** Fraction of Extent used for outermost orbit. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets")
-	double OuterOrbitFraction = 0.6;
+	double OuterOrbitFraction = 0.85;
 
 	// --- Tier configs ---
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tiers")
@@ -143,6 +143,21 @@ public:
 	double ParallaxPushThreshold = 0.5;
 #pragma endregion
 
+#pragma region Spawn Range Scanning (public - tunable in editor)
+	/** Interval in seconds between planet spawn-scan queries. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
+	float SpawnScanInterval = 0.1f;
+
+	/** Screen-space threshold for planet spawn/despawn.
+	 *  Smaller = spawn from further away. Try 0.01-0.05. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
+	double SpawnScreenSpaceThreshold = 0.02;
+
+	/** Draw debug boxes around nodes that pass the spawn threshold. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
+	bool bDebugDrawSpawnNodes = false;
+#pragma endregion
+
 #pragma region Pool Lifecycle
 	virtual void ResetForPool() override;
 	virtual void ResetForSpawn() override;
@@ -159,6 +174,7 @@ public:
 
 	void SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode);
 	void ReturnPlanetToPool(TSharedPtr<FOctreeNode> InNode);
+	void FinalizePlanetPlacement(AActor* Planet, TSharedPtr<FOctreeNode> InNode);
 
 	// Generic aliases expected by ProximityTrackerComponent.
 	// Forward to the typed planet hooks so existing call sites compile unchanged.
@@ -237,5 +253,23 @@ protected:
 	int32 DiagTickCount = 0;
 
 	void DrawPlanetDebugPositions() const;
+#pragma endregion
+
+private:
+#pragma region Spawn Scan - Internal
+	std::atomic<bool> bSpawnScanInProgress{ false };
+	FTimerHandle SpawnScanTimerHandle;
+	TSet<TSharedPtr<FOctreeNode>> TrackedPlanetNodes;
+	bool bHasPendingScanResults = false;
+	TArray<TSharedPtr<FOctreeNode>> PendingScanResults;
+
+	void StartSpawnScanTimer();
+	void StopSpawnScanTimer();
+	void UpdateSpawnRangeNodes();
+	void ProcessPendingScanResults();
+
+	void LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) const;
+	void LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const;
+	void DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) const;
 #pragma endregion
 };
