@@ -79,8 +79,6 @@ protected:
 #pragma endregion
 
 #pragma region Niagara Assets
-	FString NiagaraPath = FString("/svo/Galaxy/NG_GalaxyLarge.NG_GalaxyLarge");
-
 	UPROPERTY()
 	UNiagaraSystem* GalaxyLargeCloud;
 
@@ -126,7 +124,7 @@ protected:
 
 #pragma region Star System Pool
 	TSubclassOf<AStarSystemActor> StarSystemActorClass;
-	int StarSystemPoolSize = 5;
+	int32 StarSystemPoolSize = 5;
 	TArray<AStarSystemActor*> StarSystemPool;
 
 	/// Galaxy-specific spawn location: accounts for VirtualTraversal.
@@ -135,7 +133,12 @@ protected:
 #pragma endregion
 
 #pragma region Tick
-	int32 DiagTickCount = 0;
+	/** Only active for level-placed standalone galaxies. Pool-managed galaxies
+	 *  have UE tick disabled and are driven by AUniverseActor::TickFromParent. */
 	virtual void Tick(float DeltaTime) override;
+#pragma endregion
+
+#pragma region Diagnostics
+	int32 DiagTickCount = 0;
 #pragma endregion
 };

@@ -14,7 +14,11 @@
 #pragma region Constructor/Destructor
 AGalaxyActor::AGalaxyActor()
 {
+	// Galaxies are driven by their parent universe via TickFromParent.
+	// UE tick is only enabled for level-placed standalone galaxies
+	// (bAutoInitializeOnBeginPlay = true) in BeginPlay.
 	PrimaryActorTick.bCanEverTick = true;
+	SetActorTickEnabled(false);
 
 	GalaxyLargeCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Galaxy/NG_GalaxyLarge.NG_GalaxyLarge"));
 	GalaxyMidCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Galaxy/NG_GalaxyMid.NG_GalaxyMid"));
@@ -36,6 +40,10 @@ void AGalaxyActor::BeginPlay()
 	Super::BeginPlay();
 	if (bAutoInitializeOnBeginPlay)
 	{
+		// Level-placed standalone galaxy: enable UE tick since there is
+		// no parent universe to drive TickFromParent.
+		SetActorTickEnabled(true);
+
 		InitializationState = ELifecycleState::Initializing;
 		TWeakObjectPtr<AGalaxyActor> WeakThis(this);
 		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis]()
@@ -95,6 +103,7 @@ void AGalaxyActor::ResetForPool()
 		Tier->bNeedsPush.store(false);
 	}
 	TierNiagaraComponents.Empty();
+	DiagTickCount = 0;
 
 	// Base class handles VolumetricComponent and legacy NiagaraComponent
 	Super::ResetForPool();
@@ -107,6 +116,7 @@ void AGalaxyActor::ResetForSpawn()
 	LastPushedVirtualTraversal = FVector::ZeroVector;
 	LastFrameOfReferenceLocation = FVector::ZeroVector;
 	CurrentFrameOfReferenceLocation = FVector::ZeroVector;
+	DiagTickCount = 0;
 }
 #pragma endregion
 
@@ -347,17 +357,22 @@ FTierStreamingContext AGalaxyActor::BuildStreamingContext() const
 #pragma region Tick
 void AGalaxyActor::Tick(float DeltaTime)
 {
-	// Pool-managed galaxies have UE tick disabled and are driven exclusively by
-	// AUniverseActor::Tick via TickFromParent. This path only executes for
-	// level-placed galaxies (bAutoInitializeOnBeginPlay = true).
+	// Only runs for level-placed standalone galaxies (bAutoInitializeOnBeginPlay).
+	// Pool-managed galaxies have UE tick disabled and are driven exclusively
+	// by AUniverseActor::Tick via TickFromParent.
 	AActor::Tick(DeltaTime);
 	if (InitializationState != ELifecycleState::Ready) return;
 
 	FVector CurrentPlayerPos = FVector::ZeroVector;
+	bool bHasReference = false;
 	if (const auto* World = GetWorld())
 		if (auto* Controller = UGameplayStatics::GetPlayerController(World, 0))
 			if (APawn* Pawn = Controller->GetPawn())
+			{
 				CurrentPlayerPos = Pawn->GetActorLocation();
+				bHasReference = true;
+			}
+	if (!bHasReference) return;
 
 	TickFromParent(DeltaTime, CurrentPlayerPos);
 }

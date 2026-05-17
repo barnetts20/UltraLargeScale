@@ -104,17 +104,20 @@ void AUniverseActor::InitializeChildPool()
 {
 	TPromise<void> CompletionPromise;
 	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	AsyncTask(ENamedThreads::GameThread, [this, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
+	TWeakObjectPtr<AUniverseActor> WeakThis(this);
+	AsyncTask(ENamedThreads::GameThread, [WeakThis, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
 		{
-			for (int32 i = 0; i < GalaxyPoolSize; i++)
+			AUniverseActor* Self = WeakThis.Get();
+			if (!Self) { CompletionPromise.SetValue(); return; }
+			for (int32 i = 0; i < Self->GalaxyPoolSize; i++)
 			{
-				AGalaxyActor* Galaxy = GetWorld()->SpawnActor<AGalaxyActor>(GalaxyActorClass, FVector::ZeroVector, FRotator::ZeroRotator);
+				AGalaxyActor* Galaxy = Self->GetWorld()->SpawnActor<AGalaxyActor>(Self->GalaxyActorClass, FVector::ZeroVector, FRotator::ZeroRotator);
 				Galaxy->bAutoInitializeOnBeginPlay = false;
-				Galaxy->Universe = this;
+				Galaxy->Universe = Self;
 				Galaxy->SetActorHiddenInGame(true);
-				GalaxyPool.Add(Galaxy);
+				Self->GalaxyPool.Add(Galaxy);
 			}
-			UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeChildPool — pre-warmed %d galaxy actors"), GalaxyPoolSize);
+			UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeChildPool — pre-warmed %d galaxy actors"), Self->GalaxyPoolSize);
 			CompletionPromise.SetValue();
 		});
 	CompletionFuture.Wait();
@@ -251,20 +254,30 @@ void AUniverseActor::CheckOctreeBounds()
 	if (bAnyUpdating) return;
 	bRebaseInProgress.store(true);
 	const FVector RebaseOrigin = VirtualTraversal;
+	const double RebaseTreeExtent = Params.Extent * PersistentTreeMultiplier;
+
+	// Snapshot context values now, on the game thread, so the async task
+	// doesn't read VirtualTraversal / Octree / etc. while Tick mutates them.
+	// BuildStreamingContext is safe here because no tier update is in progress
+	// (checked above) and we're on the game thread.
+	FTierStreamingContext RebaseCtx = BuildStreamingContext();
+
 	TWeakObjectPtr<AUniverseActor> WeakThis(this);
-	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, RebaseOrigin]() {
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, RebaseOrigin, RebaseTreeExtent, RebaseCtx]() {
 		AUniverseActor* Self = WeakThis.Get();
 		if (!Self) return;
-		UE_LOG(LogTemp, Warning, TEXT("AUniverseActor::RebaseOctree -- rebasing to (%.1f, %.1f, %.1f)"), RebaseOrigin.X, RebaseOrigin.Y, RebaseOrigin.Z);
-		const double TreeExtent = Self->Params.Extent * PersistentTreeMultiplier;
-		Self->Octree = MakeShared<FOctree>(TreeExtent, RebaseOrigin);
-		// Re-insert all tiers using their current front buffers.
-		FTierStreamingContext RebaseCtx = Self->BuildStreamingContext();
-		FTierStreamingSystem::InsertTierIntoOctree(RebaseCtx, Self->CoarseTierConfig, Self->CoarseTierState,
+		UE_LOG(LogTemp, Log, TEXT("AUniverseActor::RebaseOctree -- rebasing to (%.1f, %.1f, %.1f)"), RebaseOrigin.X, RebaseOrigin.Y, RebaseOrigin.Z);
+		Self->Octree = MakeShared<FOctree>(RebaseTreeExtent, RebaseOrigin);
+
+		// Build an insert context that uses the new octree but the snapshotted VT.
+		FTierStreamingContext InsertCtx = RebaseCtx;
+		InsertCtx.Octree = Self->Octree;
+
+		FTierStreamingSystem::InsertTierIntoOctree(InsertCtx, Self->CoarseTierConfig, Self->CoarseTierState,
 			Self->CoarseTierState.FrontIdx.load());
-		FTierStreamingSystem::InsertTierIntoOctree(RebaseCtx, Self->MidTierConfig, Self->MidTierState,
+		FTierStreamingSystem::InsertTierIntoOctree(InsertCtx, Self->MidTierConfig, Self->MidTierState,
 			Self->MidTierState.FrontIdx.load());
-		FTierStreamingSystem::InsertTierIntoOctree(RebaseCtx, Self->SmallTierConfig, Self->SmallTierState,
+		FTierStreamingSystem::InsertTierIntoOctree(InsertCtx, Self->SmallTierConfig, Self->SmallTierState,
 			Self->SmallTierState.FrontIdx.load());
 		Self->bRebaseInProgress.store(false);
 		});
@@ -491,12 +504,12 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	// Keep the galaxy hidden until placement finalizes.
 	// (Pool pre-warms with SetActorHiddenInGame(true) already.)
 
-	UE_LOG(LogTemp, Warning, TEXT("=== SpawnGalaxyFromPool (deferred placement) ==="));
-	UE_LOG(LogTemp, Warning, TEXT("  Node: center=(%.1f, %.1f, %.1f) extent=%.2f objId=%d tier=%s"),
+	UE_LOG(LogTemp, Log, TEXT("=== SpawnGalaxyFromPool (deferred placement) ==="));
+	UE_LOG(LogTemp, Log, TEXT("  Node: center=(%.1f, %.1f, %.1f) extent=%.2f objId=%d tier=%s"),
 		InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Data.ObjectId, *MatchedConfig.TierName);
-	UE_LOG(LogTemp, Warning, TEXT("  Particle: pos=(%.1f, %.1f, %.1f) extent=%.2f"),
+	UE_LOG(LogTemp, Log, TEXT("  Particle: pos=(%.1f, %.1f, %.1f) extent=%.2f"),
 		ParticlePos.X, ParticlePos.Y, ParticlePos.Z, ParticleExtent);
-	UE_LOG(LogTemp, Warning, TEXT("  Galaxy: unitScale=%.2e extent=%.0f sizeRatio=%.2f seed=%d (placement deferred)"),
+	UE_LOG(LogTemp, Log, TEXT("  Galaxy: unitScale=%.2e extent=%.0f sizeRatio=%.2f seed=%d (placement deferred)"),
 		Galaxy->Params.UnitScale, Galaxy->Params.Extent,
 		Params.UnitScale / Galaxy->Params.UnitScale,
 		Galaxy->Params.Seed);
@@ -534,8 +547,8 @@ void AUniverseActor::FinalizeGalaxyPlacement(AGalaxyActor* Galaxy)
 	Galaxy->SetActorHiddenInGame(false);
 	Galaxy->bPendingPlacement = false;
 
-	UE_LOG(LogTemp, Warning, TEXT("=== FinalizeGalaxyPlacement ==="));
-	UE_LOG(LogTemp, Warning, TEXT("  Galaxy: spawnLoc=(%.1f, %.1f, %.1f) VT=(%.1f, %.1f, %.1f) playerPos=(%.1f, %.1f, %.1f)"),
+	UE_LOG(LogTemp, Log, TEXT("=== FinalizeGalaxyPlacement ==="));
+	UE_LOG(LogTemp, Log, TEXT("  Galaxy: spawnLoc=(%.1f, %.1f, %.1f) VT=(%.1f, %.1f, %.1f) playerPos=(%.1f, %.1f, %.1f)"),
 		SpawnLoc.X, SpawnLoc.Y, SpawnLoc.Z,
 		Galaxy->VirtualTraversal.X, Galaxy->VirtualTraversal.Y, Galaxy->VirtualTraversal.Z,
 		CurrentFrameOfReferenceLocation.X, CurrentFrameOfReferenceLocation.Y, CurrentFrameOfReferenceLocation.Z);
