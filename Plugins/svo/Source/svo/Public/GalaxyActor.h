@@ -2,6 +2,9 @@
 // Full tier streaming system mirroring UniverseActor.
 // Large tier: exhaustive single-pass (NeighborhoodRadius=0), always loaded.
 // Mid/Small tiers: neighborhood streaming with cell cache.
+// Spawn scan: timer-based octree query (VirtualTraversal space) drives
+//             SpawnStarSystemFromPool / ReturnStarSystemToPool, mirroring
+//             the universe-level galaxy spawn pipeline exactly.
 
 #pragma once
 #include "CoreMinimal.h"
@@ -35,12 +38,7 @@ public:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
-	// Virtual traversal of the player through galaxy-local space. Initialized
-	// at spawn to (PlayerPos - SpawnLoc) so particles appear at the correct
-	// world position from the first frame. Accumulates PlayerDelta *
-	// (SpeedScale / UnitScale) each tick � shrinking toward zero as the player
-	// approaches � giving full floating-point precision when nearby.
-	// Used identically to AUniverseActor::VirtualTraversal.
+	// Virtual traversal of the player through galaxy-local space.
 	FVector VirtualTraversal = FVector::ZeroVector;
 
 	/** VirtualTraversal value at the last Niagara position push. */
@@ -48,6 +46,21 @@ public:
 
 	/** Minimum VT delta before re-pushing positions to Niagara. */
 	double ParallaxPushThreshold = 0.5;
+#pragma endregion
+
+#pragma region Spawn Range Scanning (public - tunable in editor)
+	/** Interval in seconds between spawn-scan background queries. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
+	float SpawnScanInterval = 0.1f;
+
+	/** Minimum screen-space angular size (Extent / Distance) for a node to
+	 *  trigger a spawn event. Squared internally before traversal. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
+	double SpawnScreenSpaceThreshold = 0.033;
+
+	/** When true, draws a debug box around each node that passes the threshold. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
+	bool bDebugDrawSpawnNodes = false;
 #pragma endregion
 
 #pragma region Pooled Spawn/Despawn Hooks
@@ -64,7 +77,9 @@ public:
 	virtual void ResetForPool() override;
 	virtual void ResetForSpawn() override;
 #pragma endregion
+
 	virtual void TickFromParent(float DeltaTime, const FVector& InPlayerPos) override;
+
 protected:
 #pragma region Params Accessors
 	virtual double GetUnitScale() const override { return Params.UnitScale; }
@@ -127,22 +142,49 @@ protected:
 	int32 StarSystemPoolSize = 5;
 	TArray<AStarSystemActor*> StarSystemPool;
 
-	/// Galaxy-specific spawn location: accounts for VirtualTraversal.
-	/// Mirrors AUniverseActor::ComputeChildSpawnLocation.
+	/// Mirrors AUniverseActor::ComputeChildSpawnLocation, accounts for VT.
 	virtual FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const override;
 
 	/// Galaxy parallax is handled inline in TickFromParent (VirtualTraversal model).
-	/// This override exists to satisfy the pure virtual; it is never called directly.
 	virtual void ApplyParallaxOffset() override;
+
+	/** Deferred placement: finalizes world position and VirtualTraversal for a
+	 *  star system on the first tick after async init completes, mirroring
+	 *  AUniverseActor::FinalizeGalaxyPlacement. */
+	void FinalizeStarSystemPlacement(AStarSystemActor* System);
 #pragma endregion
 
 #pragma region Tick
-	/** Only active for level-placed standalone galaxies. Pool-managed galaxies
-	 *  have UE tick disabled and are driven by AUniverseActor::TickFromParent. */
 	virtual void Tick(float DeltaTime) override;
 #pragma endregion
 
 #pragma region Diagnostics
 	int32 DiagTickCount = 0;
+#pragma endregion
+
+private:
+#pragma region Spawn Scan - Internal
+	/** Guards against overlapping spawn-scan background tasks. */
+	std::atomic<bool> bSpawnScanInProgress{ false };
+
+	/** Timer handle for the recurring spawn-scan interval. */
+	FTimerHandle SpawnScanTimerHandle;
+
+	/** Nodes currently inside the spawn threshold. Diffed each interval. */
+	TSet<TSharedPtr<FOctreeNode>> TrackedSpawnNodes;
+
+	/** Pending results from the async octree query, consumed in TickFromParent
+	 *  after VirtualTraversal is resolved for the current frame. */
+	bool bHasPendingScanResults = false;
+	TArray<TSharedPtr<FOctreeNode>> PendingScanResults;
+
+	void StartSpawnScanTimer();
+	void StopSpawnScanTimer();
+	void UpdateSpawnRangeNodes();
+	void ProcessPendingScanResults();
+
+	void LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) const;
+	void LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const;
+	void DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) const;
 #pragma endregion
 };
