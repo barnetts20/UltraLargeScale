@@ -383,27 +383,21 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	FParticleTierConfig& MatchedConfig = *TierConfigs[TierIndex];
 	FParticleTierState& MatchedState = *TierStates[TierIndex];
 
-	// ObjectId is the slot index within that tier's buffer.
+	// ObjectId is the slot index, ParticleIndex is the offset within the slot.
 	const int32 SlotId = InNode->Data.ObjectId;
 	const int32 FrontIdx = MatchedState.FrontIdx.load();
 	const FNiagaraParticleBuffer& Front = MatchedState.Buffers[0][FrontIdx];
 	const int32 SlotStart = SlotId * MatchedConfig.SlotCapacity;
-	const int32 SlotCount = MatchedState.SlotCounts[SlotId];
 
-	// Find the particle closest to the node center (node is octree-quantized).
+	// Direct lookup via ParticleIndex — no slot scan needed.
 	FVector ParticlePos = InNode->Center;
 	float ParticleExtent = static_cast<float>(InNode->Extent);
-	double BestDistSq = TNumericLimits<double>::Max();
-
-	for (int32 i = 0; i < SlotCount; ++i)
+	const int32 ParticleIdx = InNode->Data.ParticleIndex;
+	if (ParticleIdx >= 0)
 	{
-		const double DistSq = FVector::DistSquared(Front.Positions[SlotStart + i], InNode->Center);
-		if (DistSq < BestDistSq)
-		{
-			BestDistSq = DistSq;
-			ParticlePos = Front.Positions[SlotStart + i];
-			ParticleExtent = Front.Extents[SlotStart + i];
-		}
+		const int32 Idx = SlotStart + ParticleIdx;
+		ParticlePos = Front.Positions[Idx];
+		ParticleExtent = Front.Extents[Idx];
 	}
 
 	// Start with the universe-level galaxy params (editor-tunable template),

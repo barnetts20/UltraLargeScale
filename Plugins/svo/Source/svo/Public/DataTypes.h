@@ -1,4 +1,4 @@
-// Fill out your copyright notice in the Description page of Project Settings.
+ï»¿// Fill out your copyright notice in the Description page of Project Settings.
 
 #pragma once
 
@@ -8,14 +8,20 @@
 
 struct SVO_API FVoxelData {
 public:
-	FVoxelData() : ScaleFactor(0.0), Density(0.0), Composition(0, 0, 0), ObjectId(-1), TypeId(-1) {};
-	FVoxelData(float InDensity, float InGasDensity, FVector InComposition, int InObjectId, int InTypeId = -1) : ScaleFactor(InDensity), Density(InGasDensity), Composition(InComposition), ObjectId(InObjectId), TypeId(InTypeId) {};
+	FVoxelData() : ScaleFactor(0.0), Density(0.0), Composition(0, 0, 0), ObjectId(-1), TypeId(-1), ParticleIndex(-1) {};
+	FVoxelData(float InDensity, float InGasDensity, FVector InComposition, int InObjectId, int InTypeId = -1) : ScaleFactor(InDensity), Density(InGasDensity), Composition(InComposition), ObjectId(InObjectId), TypeId(InTypeId), ParticleIndex(-1) {};
 
 	float ScaleFactor;
 	float Density;
 	FVector Composition;
 	int ObjectId;
 	int TypeId;
+
+	/** Particle offset within the slot (0-based). The absolute buffer index
+	 *  is SlotIndex * SlotCapacity + ParticleIndex. Set during octree
+	 *  insertion so spawn hooks can read the exact particle without scanning
+	 *  the entire slot. -1 if not set (e.g. manually inserted nodes). */
+	int ParticleIndex;
 
 	// Collision overflow for nodes that receive multiple inserts at the same
 	// quantized depth/position. ObjectId carries the first inserter's id;
@@ -147,7 +153,7 @@ public:
 };
 
 // ---------------------------------------------------------------------------
-// Cached cell data — stores all generated particle data for a single
+// Cached cell data ï¿½ stores all generated particle data for a single
 // streaming cell so it can be restored on re-entry without re-running
 // procgen. Used by the persistent-cache refactor; the streaming pipeline
 // writes one of these on first generation (cache-miss) and reads it back

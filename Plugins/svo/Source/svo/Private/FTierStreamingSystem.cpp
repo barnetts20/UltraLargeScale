@@ -431,7 +431,7 @@ void FTierStreamingSystem::InsertTierIntoOctree(
 			const int32 Idx = BufferStart + i;
 			if (InsertBuffer.Extents[Idx] <= 0.0f) continue;
 			InsertParticleIntoOctree(Ctx, Entry, InsertBuffer.Positions[Idx],
-				InsertBuffer.Extents[Idx], Entry.SlotIndex, TreeExtent, Config.TierIndex);
+				InsertBuffer.Extents[Idx], Entry.SlotIndex, i, TreeExtent, Config.TierIndex);
 		}
 	}
 }
@@ -460,21 +460,17 @@ void FTierStreamingSystem::InsertSlotIntoOctree(
 		const int32 Idx = BufferStart + i;
 		if (InsertBuffer.Extents[Idx] <= 0.0f) continue;
 		InsertParticleIntoOctree(Ctx, *Entry, InsertBuffer.Positions[Idx],
-			InsertBuffer.Extents[Idx], SlotIndex, TreeExtent, Config.TierIndex);
+			InsertBuffer.Extents[Idx], SlotIndex, i, TreeExtent, Config.TierIndex);
 	}
 }
 
 void FTierStreamingSystem::InsertParticleIntoOctree(
 	const FTierStreamingContext& Ctx,
 	FSlotEntry& Entry, const FVector& Position, float Extent,
-	int32 SlotIndex, double TreeExtent, int32 TierIndex)
+	int32 SlotIndex, int32 ParticleIndex, double TreeExtent, int32 TierIndex)
 {
 	if (Extent <= 0.0f) return;
 
-	// UnitScale == 1.0 means extents are already in octree-local units
-	// (Universe case). Otherwise convert through the actor's UnitScale
-	// (Galaxy case: Extent * UnitScale / UnitScale cancels, but
-	// MakePointDataFromWorldScale needs both to compute insert depth).
 	FPointData PD = FPointData::MakePointDataFromWorldScale(
 		static_cast<double>(Extent) * Ctx.UnitScale,
 		Ctx.UnitScale,
@@ -482,6 +478,7 @@ void FTierStreamingSystem::InsertParticleIntoOctree(
 	PD.SetPosition(Position);
 	PD.Data.ObjectId = SlotIndex;
 	PD.Data.TypeId = TierIndex;
+	PD.Data.ParticleIndex = ParticleIndex;
 
 	TSharedPtr<FOctreeNode> Node = Ctx.Octree->InsertPosition(
 		PD.GetPosition(), PD.InsertDepth, PD.Data);

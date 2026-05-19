@@ -593,26 +593,17 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 	FVector  ParticlePos = InNode->Center;  // fallback
 	float    ParticleExtent = static_cast<float>(InNode->Extent);
 
+	// Direct lookup via ParticleIndex — no slot scan needed.
 	const int32 SlotId = InNode->Data.ObjectId;
+	const int32 ParticleIdx = InNode->Data.ParticleIndex;
 	const int32 FrontIdx = MatchedState.FrontIdx.load();
-	if (MatchedState.Buffers.Num() > 0 && SlotId >= 0 &&
+	if (ParticleIdx >= 0 && MatchedState.Buffers.Num() > 0 && SlotId >= 0 &&
 		SlotId < MatchedState.SlotCounts.Num())
 	{
 		const FNiagaraParticleBuffer& Front = MatchedState.Buffers[0][FrontIdx];
-		const int32 SlotStart = SlotId * MatchedConfig.SlotCapacity;
-		const int32 SlotCount = MatchedState.SlotCounts[SlotId];
-
-		double BestDistSq = TNumericLimits<double>::Max();
-		for (int32 i = 0; i < SlotCount; ++i)
-		{
-			const double DistSq = FVector::DistSquared(Front.Positions[SlotStart + i], InNode->Center);
-			if (DistSq < BestDistSq)
-			{
-				BestDistSq = DistSq;
-				ParticlePos = Front.Positions[SlotStart + i];
-				ParticleExtent = Front.Extents[SlotStart + i];
-			}
-		}
+		const int32 Idx = SlotId * MatchedConfig.SlotCapacity + ParticleIdx;
+		ParticlePos = Front.Positions[Idx];
+		ParticleExtent = Front.Extents[Idx];
 	}
 
 	AStarSystemActor* System = StarSystemPool.Pop();
