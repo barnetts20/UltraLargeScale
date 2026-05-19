@@ -13,7 +13,7 @@
 #include <DrawDebugHelpers.h>
 #include <Kismet/GameplayStatics.h>
 #include <NiagaraFunctionLibrary.h>
-#include <TimerManager.h>
+
 #pragma endregion
 
 // ---------------------------------------------------------------------------
@@ -72,7 +72,12 @@ void AStarSystemActor::BeginPlay()
 void AStarSystemActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	InitializationState = ELifecycleState::Pooling;
-	StopSpawnScanTimer();
+
+	// Clear scan state (no timer to stop)
+	bHasPendingScanResults = false;
+	PendingScanResults.Empty();
+	TrackedPlanetNodes.Empty();
+	bSpawnScanInProgress.store(false);
 
 	// Destroy any live planet actors.
 	for (auto& Pair : SpawnedPlanets)
@@ -145,7 +150,6 @@ void AStarSystemActor::ResetForPool()
 	TierNiagaraComponents.Empty();
 	DiagTickCount = 0;
 
-	StopSpawnScanTimer();
 	bHasPendingScanResults = false;
 	PendingScanResults.Empty();
 	TrackedPlanetNodes.Empty();
@@ -311,13 +315,7 @@ void AStarSystemActor::InitializeNiagara()
 
 	InitializationState = ELifecycleState::Ready;
 
-	// Start the planet spawn-scan timer now that the octree is populated.
-	TWeakObjectPtr<AStarSystemActor> WeakThis(this);
-	AsyncTask(ENamedThreads::GameThread, [WeakThis]()
-		{
-			if (AStarSystemActor* Self = WeakThis.Get())
-				Self->StartSpawnScanTimer();
-		});
+	// No timer start needed — Universe::DetermineAndDispatchScan drives scans.
 
 	UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::InitializeNiagara — Ready"));
 }
@@ -568,36 +566,17 @@ void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPo
 //  Spawn Range Scanning
 // ---------------------------------------------------------------------------
 #pragma region Spawn Range Scanning
-void AStarSystemActor::StartSpawnScanTimer()
-{
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(SpawnScanTimerHandle);
-		World->GetTimerManager().SetTimer(SpawnScanTimerHandle, this,
-			&AStarSystemActor::UpdateSpawnRangeNodes, SpawnScanInterval, true);
-	}
-}
-
-void AStarSystemActor::StopSpawnScanTimer()
-{
-	if (UWorld* World = GetWorld())
-		World->GetTimerManager().ClearTimer(SpawnScanTimerHandle);
-	TrackedPlanetNodes.Empty();
-	bHasPendingScanResults = false;
-	PendingScanResults.Empty();
-}
-
-void AStarSystemActor::UpdateSpawnRangeNodes()
+void AStarSystemActor::RequestScan()
 {
 	if (InitializationState != ELifecycleState::Ready) return;
 	if (!Octree.IsValid()) return;
 	if (bSpawnScanInProgress.load()) return;
 
-	bSpawnScanInProgress.store(true);
+	const double Now = FPlatformTime::Seconds();
+	if (Now - LastScanDispatchTime < SpawnScanInterval) return;
+	LastScanDispatchTime = Now;
 
-	// Snapshot VirtualTraversal — the player's position in star-system-local
-	// octree space. Planet node centers are in this same space, so the
-	// screen-space distance test is correctly scaled.
+	bSpawnScanInProgress.store(true);
 	const FVector LocalPlayerPos = VirtualTraversal;
 
 	TWeakObjectPtr<AStarSystemActor> WeakThis(this);
@@ -618,6 +597,15 @@ void AStarSystemActor::UpdateSpawnRangeNodes()
 					InnerSelf->bSpawnScanInProgress.store(false);
 				});
 		});
+}
+
+bool AStarSystemActor::IsPlayerInsideBounds() const
+{
+	if (!Octree.IsValid()) return false;
+	const double E = Octree->Extent;
+	return FMath::Abs(VirtualTraversal.X) <= E
+		&& FMath::Abs(VirtualTraversal.Y) <= E
+		&& FMath::Abs(VirtualTraversal.Z) <= E;
 }
 
 void AStarSystemActor::ProcessPendingScanResults()
@@ -747,7 +735,7 @@ void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
 	//
 	// UnitSphere has a 50 cm radius → diameter = 100 cm.
 	// To make the sphere match a radius of 'R' cm: scale = (R * 2) / 100.
-	const double WorldRadiusCm = static_cast<double>(ParticleExtent) / 2; //TODO: We already have particle extent, this is the same, we dont need world radius cm
+	const double WorldRadiusCm = static_cast<double>(ParticleExtent); //TODO: We already have particle extent, this is the same, we dont need world radius cm
 	const double MeshScale = WorldRadiusCm;
 
 	UStaticMesh* SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitSphere.UnitSphere"));

@@ -186,7 +186,7 @@ public:
 
 #pragma region Spawn Range Scanning
 
-	/** Interval in seconds between spawn-scan background queries. */
+	/** Interval in seconds between spawn-scan dispatches. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
 	float SpawnScanInterval = 0.1f;
 
@@ -444,8 +444,8 @@ private:
 	 *  is updated. */
 	std::atomic<bool> bSpawnScanInProgress{ false };
 
-	/** Timer handle for the recurring spawn-scan interval. */
-	FTimerHandle SpawnScanTimerHandle;
+	/** Time of last scan dispatch. Used for interval throttling. */
+	double LastScanDispatchTime = 0.0;
 
 	/** Set of nodes currently inside the spawn threshold. Diffed each scan
 	 *  interval to produce enter/exit events. Game-thread only. */
@@ -459,19 +459,17 @@ private:
 	bool bHasPendingScanResults = false;
 	TArray<TSharedPtr<FOctreeNode>> PendingScanResults;
 
-	/** Starts the recurring spawn-scan timer. Called on the game thread after
-	 *  initialization completes. */
-	void StartSpawnScanTimer();
-
-	/** Clears the timer and empties TrackedSpawnNodes. Called from EndPlay. */
-	void StopSpawnScanTimer();
+	/** Dispatches an async octree scan if enough time has elapsed
+	 *  since the last dispatch and no scan is already in flight.
+	 *  Called by DetermineAndDispatchScan — not by a timer. */
+	void RequestScan();
 
 	/**
-	 * Timer callback. Dispatches a background octree query, then stores
-	 * results into PendingScanResults for deferred processing in Tick.
-	 * Skips if a scan is already in progress (bSpawnScanInProgress).
+	 * Walks the active hierarchy deepest-first (star systems → galaxies →
+	 * universe) and dispatches exactly one scan per tick to the deepest
+	 * level the player is currently inside. Replaces all per-level timers.
 	 */
-	void UpdateSpawnRangeNodes();
+	void DetermineAndDispatchScan();
 
 	/**
 	 * Processes pending scan results after ApplyParallaxOffset has resolved

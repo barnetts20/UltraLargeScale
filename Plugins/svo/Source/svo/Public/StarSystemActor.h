@@ -144,7 +144,7 @@ public:
 #pragma endregion
 
 #pragma region Spawn Range Scanning (public - tunable in editor)
-	/** Interval in seconds between planet spawn-scan queries. */
+	/** Interval in seconds between planet spawn-scan dispatches. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
 	float SpawnScanInterval = 0.1f;
 
@@ -258,18 +258,25 @@ protected:
 private:
 #pragma region Spawn Scan - Internal
 	std::atomic<bool> bSpawnScanInProgress{ false };
-	FTimerHandle SpawnScanTimerHandle;
+	double LastScanDispatchTime = 0.0;
 	TSet<TSharedPtr<FOctreeNode>> TrackedPlanetNodes;
 	bool bHasPendingScanResults = false;
 	TArray<TSharedPtr<FOctreeNode>> PendingScanResults;
 
-	void StartSpawnScanTimer();
-	void StopSpawnScanTimer();
-	void UpdateSpawnRangeNodes();
 	void ProcessPendingScanResults();
 
 	void LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) const;
 	void LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const;
 	void DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) const;
+#pragma endregion
+
+public:
+#pragma region Hierarchical Scan (called by Universe)
+	/** Dispatches an async scan if enough time has elapsed. Called by
+	 *  Universe::DetermineAndDispatchScan, not by a timer. */
+	virtual void RequestScan() override;
+
+	/** Returns true if VirtualTraversal is within this system's octree bounds. */
+	virtual bool IsPlayerInsideBounds() const override;
 #pragma endregion
 };

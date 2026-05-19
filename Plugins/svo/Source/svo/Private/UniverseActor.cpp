@@ -6,9 +6,9 @@
 #include <PointCloudGenerator.h>
 #include <Kismet/GameplayStatics.h>
 #include <GalaxyActor.h>
+#include <StarSystemActor.h>
 #include <NiagaraFunctionLibrary.h>
 #include <DrawDebugHelpers.h>
-#include <TimerManager.h>
 #pragma endregion
 
 #pragma region Constructor
@@ -58,13 +58,7 @@ void AUniverseActor::Initialize()
 			UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Initialize total duration: %.3f seconds"),
 				FPlatformTime::Seconds() - StartTime);
 
-			AsyncTask(ENamedThreads::GameThread, [WeakThis]()
-				{
-					if (AUniverseActor* InnerSelf = WeakThis.Get())
-					{
-						InnerSelf->StartSpawnScanTimer();
-					}
-				});
+			// No timer start needed — DetermineAndDispatchScan runs from Tick.
 		});
 }
 #pragma endregion
@@ -79,7 +73,12 @@ void AUniverseActor::BeginPlay()
 void AUniverseActor::ConfigureCell(FIntVector InCellCoord)
 {
 	CellCoord = InCellCoord;
-	CellOrigin = FVector(static_cast<double>(CellCoord.X) * 2.0 * Params.Extent, static_cast<double>(CellCoord.Y) * 2.0 * Params.Extent, static_cast<double>(CellCoord.Z) * 2.0 * Params.Extent);
+	const double FullCellSize = 2.0 * Params.Extent;
+	CellOrigin = FVector(
+		CellCoord.X * FullCellSize,
+		CellCoord.Y * FullCellSize,
+		CellCoord.Z * FullCellSize
+	);
 	SetActorLocation(CellOrigin);
 	Octree = MakeShared<FOctree>(Params.Extent * PersistentTreeMultiplier, FVector::ZeroVector);
 }
@@ -93,15 +92,13 @@ void AUniverseActor::InitializeChildPool()
 		{
 			AUniverseActor* Self = WeakThis.Get();
 			if (!Self) { CompletionPromise.SetValue(); return; }
-			for (int32 i = 0; i < Self->GalaxyPoolSize; i++)
-			{
-				AGalaxyActor* Galaxy = Self->GetWorld()->SpawnActor<AGalaxyActor>(Self->GalaxyActorClass, FVector::ZeroVector, FRotator::ZeroRotator);
-				Galaxy->bAutoInitializeOnBeginPlay = false;
+			for (int i = 0; i < Self->GalaxyPoolSize; i++) {
+				AGalaxyActor* Galaxy = Self->GetWorld()->SpawnActor<AGalaxyActor>(
+					Self->GalaxyActorClass, FVector::ZeroVector, FRotator::ZeroRotator);
 				Galaxy->Universe = Self;
 				Galaxy->SetActorHiddenInGame(true);
 				Self->GalaxyPool.Add(Galaxy);
 			}
-			UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeChildPool — pre-warmed %d galaxy actors"), Self->GalaxyPoolSize);
 			CompletionPromise.SetValue();
 		});
 	CompletionFuture.Wait();
@@ -109,10 +106,11 @@ void AUniverseActor::InitializeChildPool()
 
 void AUniverseActor::InitializeData()
 {
-	double TotalStart = FPlatformTime::Seconds();
+	double StartTime = FPlatformTime::Seconds();
 	UniverseGenerator.Params = Params;
 	UniverseGenerator.Initialize();
-	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeData total: %.3f sec"), FPlatformTime::Seconds() - TotalStart);
+	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeData took: %.3f seconds"),
+		FPlatformTime::Seconds() - StartTime);
 }
 
 void AUniverseActor::InitializeNiagara()
@@ -127,22 +125,7 @@ void AUniverseActor::InitializeNiagara()
 }
 #pragma endregion
 
-#pragma region Unified Particle Tier System
-FIntVector AUniverseActor::PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const
-{
-	return FTierStreamingSystem::PositionToGridCoord(InPos, InGridDepth, Params.Extent, GridExtentMultiplier);
-}
-
-FVector AUniverseActor::GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const
-{
-	return FTierStreamingSystem::GridCoordToCenter(InCoord, InGridDepth, Params.Extent, GridExtentMultiplier);
-}
-
-double AUniverseActor::GetGridCellExtent(int32 InGridDepth) const
-{
-	return FTierStreamingSystem::GetGridCellExtent(InGridDepth, Params.Extent, GridExtentMultiplier);
-}
-
+#pragma region Tier System - BuildTierConfigs
 void AUniverseActor::BuildTierConfigs()
 {
 	// Derive MinScale/MaxScale for all tiers from MaxEntityScale + depth spacing.
@@ -207,7 +190,9 @@ void AUniverseActor::BuildTierConfigs()
 	MidTierConfig.ComputeBounds = MakeBoundsLambda(MidTierConfig);
 	SmallTierConfig.ComputeBounds = MakeBoundsLambda(SmallTierConfig);
 }
+#pragma endregion
 
+#pragma region Tier System - BuildStreamingContext
 FTierStreamingContext AUniverseActor::BuildStreamingContext() const
 {
 	FTierStreamingContext Ctx;
@@ -223,84 +208,46 @@ FTierStreamingContext AUniverseActor::BuildStreamingContext() const
 	Ctx.OwnerName = TEXT("Universe");
 	return Ctx;
 }
-
-void AUniverseActor::CheckOctreeBounds()
-{
-	if (!Octree.IsValid()) return;
-	if (bRebaseInProgress.load()) return;
-	const FVector TreeCenter = Octree->Root->Center;
-	const double TreeExtent = Octree->Extent;
-	const double Margin = TreeExtent * 0.75;
-	const FVector Delta = VirtualTraversal - TreeCenter;
-	if (FMath::Abs(Delta.X) <= Margin && FMath::Abs(Delta.Y) <= Margin && FMath::Abs(Delta.Z) <= Margin) return;
-	// Only rebase if no tier is mid-update.
-	const bool bAnyUpdating = CoarseTierState.bUpdateInProgress.load() || MidTierState.bUpdateInProgress.load() || SmallTierState.bUpdateInProgress.load();
-	if (bAnyUpdating) return;
-	bRebaseInProgress.store(true);
-	const FVector RebaseOrigin = VirtualTraversal;
-	const double RebaseTreeExtent = Params.Extent * PersistentTreeMultiplier;
-
-	// Snapshot context values now, on the game thread, so the async task
-	// doesn't read VirtualTraversal / Octree / etc. while Tick mutates them.
-	// BuildStreamingContext is safe here because no tier update is in progress
-	// (checked above) and we're on the game thread.
-	FTierStreamingContext RebaseCtx = BuildStreamingContext();
-
-	TWeakObjectPtr<AUniverseActor> WeakThis(this);
-	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, RebaseOrigin, RebaseTreeExtent, RebaseCtx]() {
-		AUniverseActor* Self = WeakThis.Get();
-		if (!Self) return;
-		UE_LOG(LogTemp, Log, TEXT("AUniverseActor::RebaseOctree -- rebasing to (%.1f, %.1f, %.1f)"), RebaseOrigin.X, RebaseOrigin.Y, RebaseOrigin.Z);
-		Self->Octree = MakeShared<FOctree>(RebaseTreeExtent, RebaseOrigin);
-
-		// Build an insert context that uses the new octree but the snapshotted VT.
-		FTierStreamingContext InsertCtx = RebaseCtx;
-		InsertCtx.Octree = Self->Octree;
-
-		FTierStreamingSystem::InsertTierIntoOctree(InsertCtx, Self->CoarseTierConfig, Self->CoarseTierState,
-			Self->CoarseTierState.FrontIdx.load());
-		FTierStreamingSystem::InsertTierIntoOctree(InsertCtx, Self->MidTierConfig, Self->MidTierState,
-			Self->MidTierState.FrontIdx.load());
-		FTierStreamingSystem::InsertTierIntoOctree(InsertCtx, Self->SmallTierConfig, Self->SmallTierState,
-			Self->SmallTierState.FrontIdx.load());
-		Self->bRebaseInProgress.store(false);
-		});
-}
 #pragma endregion
 
-#pragma region Player-Centered Parallax
+#pragma region Parallax
 void AUniverseActor::ApplyParallaxOffset()
 {
 	if (InitializationState != ELifecycleState::Ready) return;
+
 	FVector CurrentPlayerPos;
 	if (!AProceduralSpaceActor::GetPlayerLocation(GetWorld(), CurrentPlayerPos)) return;
+
 	const FVector PlayerDelta = CurrentPlayerPos - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = CurrentPlayerPos;
 	CurrentFrameOfReferenceLocation = CurrentPlayerPos;
+
 	const double Ratio = (Params.UnitScale > 0.0) ? (SpeedScale / Params.UnitScale) : 0.0;
 	VirtualTraversal += PlayerDelta * Ratio;
-	// Peg the actor. Components follow via attachment.
+
 	SetActorLocation(CurrentPlayerPos);
-	// Push updated relative positions to all tier buffers only when VirtualTraversal
-	// has changed enough that the nearest particle would shift by at least one
-	// sub-pixel. Sub-pixel changes are invisible so the push cost (full array
-	// copy + Niagara DI write per tier per buffer) can be skipped.
+
 	const double DeltaSq = FVector::DistSquared(VirtualTraversal, LastPushedVirtualTraversal);
-	if (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold)
+	const bool bNeedsPush = (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold);
+
+	for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &SmallTierState })
 	{
-		for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &SmallTierState })
+		const int32 FrontIdx = Tier->FrontIdx.load();
+		for (int32 b = 0; b < Tier->NiagaraComponents.Num(); ++b)
 		{
-			const int32 FrontIdx = Tier->FrontIdx.load();
-			for (int32 b = 0; b < Tier->NiagaraComponents.Num(); ++b)
+			UNiagaraComponent* NC = Tier->NiagaraComponents[b];
+			if (!NC || b >= Tier->Buffers.Num()) continue;
+
+			NC->SetWorldLocation(CurrentPlayerPos);
+
+			if (bNeedsPush)
 			{
-				UNiagaraComponent* NC = Tier->NiagaraComponents[b];
-				if (!NC || b >= Tier->Buffers.Num()) continue;
 				const TArray<FVector>& RelPos = Tier->Buffers[b][FrontIdx].MakeRelativePositions(VirtualTraversal);
 				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NC, NiagaraBufferParams::Positions, RelPos);
 			}
 		}
-		LastPushedVirtualTraversal = VirtualTraversal;
 	}
+	if (bNeedsPush) LastPushedVirtualTraversal = VirtualTraversal;
 }
 #pragma endregion
 
@@ -308,26 +255,15 @@ void AUniverseActor::ApplyParallaxOffset()
 void AUniverseActor::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-	ApplyParallaxOffset();  // Resolves player pos once into CurrentFrameOfReferenceLocation
+	ApplyParallaxOffset();
 
 	// Process any pending spawn-scan results now that VirtualTraversal and
-	// CurrentFrameOfReferenceLocation are resolved for this frame. This
-	// guarantees SpawnGalaxyFromPool/ReturnGalaxyToPool always see the
-	// current frame's player position, eliminating the 1-frame parallax
-	// offset that occurred when the timer callback landed at an arbitrary
-	// point in the frame.
+	// CurrentFrameOfReferenceLocation are resolved for this frame.
 	ProcessPendingScanResults();
 
 	// Drive all active galaxies with the already-resolved player position.
 	// Galaxies have UE tick disabled; this is their only per-frame entry point.
 	// Each galaxy cascades down to its own star systems via TickFromParent.
-	//
-	// Deferred placement: galaxies spawned by SpawnGalaxyFromPool start hidden
-	// with bPendingPlacement = true. On the first frame after async init
-	// completes (InitializationState == Ready), FinalizeGalaxyPlacement
-	// computes the spawn position using THIS frame's parallax state, sets
-	// VirtualTraversal, makes it visible, and clears the flag. The first
-	// TickFromParent runs immediately after in the same frame — zero drift.
 	for (auto& Pair : SpawnedGalaxies)
 	{
 		AGalaxyActor* Galaxy = Pair.Value.Get();
@@ -348,6 +284,10 @@ void AUniverseActor::Tick(float DeltaTime)
 	FTierStreamingSystem::UpdateTier(Ctx, MidTierConfig, MidTierState);
 	FTierStreamingSystem::UpdateTier(Ctx, SmallTierConfig, SmallTierState);
 	CheckOctreeBounds();
+
+	// Single hierarchical scan — replaces all per-level timers.
+	// Must run after the full tick cascade so all VTs are resolved.
+	DetermineAndDispatchScan();
 }
 #pragma endregion
 
@@ -355,7 +295,6 @@ void AUniverseActor::Tick(float DeltaTime)
 void AUniverseActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	InitializationState = ELifecycleState::Pooling;
-	StopSpawnScanTimer();
 
 	// Signal any in-flight galaxy initializations to abort, then clear tracking.
 	for (auto& Pair : SpawnedGalaxies)
@@ -379,6 +318,13 @@ void AUniverseActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		}
 	}
 	TierNiagaraComponents.Empty();
+
+	// Clear scan state (no timer to stop)
+	bHasPendingScanResults = false;
+	PendingScanResults.Empty();
+	TrackedSpawnNodes.Empty();
+	bSpawnScanInProgress.store(false);
+
 	Super::EndPlay(EndPlayReason);
 }
 #pragma endregion
@@ -398,12 +344,16 @@ FVector AUniverseActor::ComputeChildSpawnLocation(const FVector& NodeCenter, dou
 	//
 	// ChildUnitScale encodes the node-to-galaxy size relationship:
 	//   ChildUnitScale = (InNode->Extent * ParentUnitScale) / Galaxy->Params.Extent
-	// So: Galaxy->Params.Extent / InNode->Extent = ParentUnitScale / ChildUnitScale
+	// So size_galaxy / size_node = ParentUnitScale / ChildUnitScale.
 	const double SizeRatio = Params.UnitScale / ChildUnitScale;
 
-	const FVector DebugBoxCenter = GetActorLocation() + NodeCenter - VirtualTraversal;
-	const FVector CameraToNode = DebugBoxCenter - CurrentFrameOfReferenceLocation;
+	// World-space position of the node's sprite:
+	const FVector RenderedPos = GetActorLocation() + NodeCenter - VirtualTraversal;
 
+	// Vector from camera to the sprite:
+	const FVector CameraToNode = RenderedPos - CurrentFrameOfReferenceLocation;
+
+	// Scale by the size ratio → galaxy spawn position.
 	return CurrentFrameOfReferenceLocation + CameraToNode * SizeRatio;
 }
 #pragma endregion
@@ -468,65 +418,38 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	Galaxy->Params.Seed = InNode->Data.ObjectId;
 	Galaxy->Params.ParentColor = FLinearColor(InNode->Data.Composition);
 	FRandomStream RandStream(InNode->Data.ObjectId);
-	Galaxy->Params.Rotation = RandStream.GetUnitVector().Rotation();
+	Galaxy->Params.Rotation = FRotator(
+		RandStream.FRandRange(-180.0f, 180.0f),
+		RandStream.FRandRange(-180.0f, 180.0f),
+		RandStream.FRandRange(-180.0f, 180.0f));
 
-	// --- Deferred placement ---
-	// Do NOT compute spawn location or set VirtualTraversal here. Parallax
-	// will accumulate at the universe level during the N frames it takes for
-	// async init to complete. FinalizeGalaxyPlacement (called from Tick on
-	// the first frame after Ready) will compute the spawn position using that
-	// frame's resolved VirtualTraversal and player position, ensuring zero
-	// drift between the particle sprite and the galaxy actor.
-	//
-	// Cache the particle position so FinalizeGalaxyPlacement can re-derive
-	// the spawn location later.
-	Galaxy->PendingNodeCenter = ParticlePos;
 	Galaxy->bPendingPlacement = true;
-
-	// Keep the galaxy hidden until placement finalizes.
-	// (Pool pre-warms with SetActorHiddenInGame(true) already.)
-
-	UE_LOG(LogTemp, Log, TEXT("=== SpawnGalaxyFromPool (deferred placement) ==="));
-	UE_LOG(LogTemp, Log, TEXT("  Node: center=(%.1f, %.1f, %.1f) extent=%.2f objId=%d tier=%s"),
-		InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Data.ObjectId, *MatchedConfig.TierName);
-	UE_LOG(LogTemp, Log, TEXT("  Particle: pos=(%.1f, %.1f, %.1f) extent=%.2f"),
-		ParticlePos.X, ParticlePos.Y, ParticlePos.Z, ParticleExtent);
-	UE_LOG(LogTemp, Log, TEXT("  Galaxy: unitScale=%.2e extent=%.0f sizeRatio=%.2f seed=%d (placement deferred)"),
-		Galaxy->Params.UnitScale, Galaxy->Params.Extent,
-		Params.UnitScale / Galaxy->Params.UnitScale,
-		Galaxy->Params.Seed);
-
+	Galaxy->PendingNodeCenter = ParticlePos;
+	Galaxy->SetActorHiddenInGame(true);
 	Galaxy->Initialize();
+
+	UE_LOG(LogTemp, Log,
+		TEXT("AUniverseActor::SpawnGalaxyFromPool — pool=%d node=(%.1f,%.1f,%.1f) extent=%.1f "
+			"particlePos=(%.1f,%.1f,%.1f) particleExtent=%.3f derivedUnitScale=%.6e seed=%d"),
+		GalaxyPool.Num(),
+		InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent,
+		ParticlePos.X, ParticlePos.Y, ParticlePos.Z, ParticleExtent,
+		Galaxy->Params.UnitScale, Galaxy->Params.Seed);
 }
 
 void AUniverseActor::FinalizeGalaxyPlacement(AGalaxyActor* Galaxy)
 {
-	// Called from Tick on the first frame after the galaxy's async init
-	// completes. At this point:
-	//   - ApplyParallaxOffset has already run, so VirtualTraversal and
-	//     CurrentFrameOfReferenceLocation are resolved for this frame.
-	//   - The galaxy has not been ticked yet, so no stale VT has accumulated.
-	//
-	// We compute the spawn position exactly as SpawnGalaxyFromPool used to,
-	// but using the current frame's parallax state instead of the stale
-	// state from N frames ago when the spawn was initiated.
+	if (!Galaxy || !Galaxy->bPendingPlacement) return;
 
 	const FVector SpawnLoc = ComputeChildSpawnLocation(Galaxy->PendingNodeCenter, Galaxy->Params.UnitScale);
 	Galaxy->SetActorLocation(SpawnLoc);
+	Galaxy->SetActorHiddenInGame(false);
+
+	Galaxy->VirtualTraversal = CurrentFrameOfReferenceLocation - SpawnLoc;
+	Galaxy->LastPushedVirtualTraversal = Galaxy->VirtualTraversal;
 	Galaxy->LastFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
 	Galaxy->CurrentFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
 
-	// Initialize VirtualTraversal so that at spawn time the galaxy's particles
-	// appear at exactly SpawnLoc in world space, matching where the Universe's
-	// particle sprite is rendered.
-	//
-	// Rendered position = PlayerPos + (LocalPos - VT).
-	// We want:           PlayerPos + (LocalPos - VT) = SpawnLoc + LocalPos
-	// Solving:           VT_initial = PlayerPos - SpawnLoc
-	Galaxy->VirtualTraversal = CurrentFrameOfReferenceLocation - SpawnLoc;
-
-	// Make visible and clear the pending flag.
-	Galaxy->SetActorHiddenInGame(false);
 	Galaxy->bPendingPlacement = false;
 
 	UE_LOG(LogTemp, Log, TEXT("=== FinalizeGalaxyPlacement ==="));
@@ -575,26 +498,16 @@ TArray<TSharedPtr<FOctreeNode>> AUniverseActor::GetNodesByScreenSpace(const FVec
 #pragma endregion
 
 #pragma region Spawn Range Scanning
-void AUniverseActor::StartSpawnScanTimer()
-{
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(SpawnScanTimerHandle);
-		World->GetTimerManager().SetTimer(SpawnScanTimerHandle, this, &AUniverseActor::UpdateSpawnRangeNodes, SpawnScanInterval, true);
-	}
-}
-
-void AUniverseActor::StopSpawnScanTimer()
-{
-	if (UWorld* World = GetWorld()) World->GetTimerManager().ClearTimer(SpawnScanTimerHandle);
-	TrackedSpawnNodes.Empty();
-}
-
-void AUniverseActor::UpdateSpawnRangeNodes()
+void AUniverseActor::RequestScan()
 {
 	if (InitializationState != ELifecycleState::Ready) return;
 	if (!Octree.IsValid()) return;
 	if (bSpawnScanInProgress.load()) return;
+
+	const double Now = FPlatformTime::Seconds();
+	if (Now - LastScanDispatchTime < SpawnScanInterval) return;
+	LastScanDispatchTime = Now;
+
 	bSpawnScanInProgress.store(true);
 	const FVector LocalPlayerPos = VirtualTraversal;
 	TWeakObjectPtr<AUniverseActor> WeakThis(this);
@@ -607,14 +520,47 @@ void AUniverseActor::UpdateSpawnRangeNodes()
 				{
 					AUniverseActor* InnerSelf = WeakThis.Get();
 					if (!InnerSelf) return;
-					// Store results for deferred processing in Tick, after
-					// ApplyParallaxOffset has resolved the current frame's
-					// player position and VirtualTraversal.
 					InnerSelf->PendingScanResults = NearbyArray;
 					InnerSelf->bHasPendingScanResults = true;
 					InnerSelf->bSpawnScanInProgress.store(false);
 				});
 		});
+}
+
+void AUniverseActor::DetermineAndDispatchScan()
+{
+	if (InitializationState != ELifecycleState::Ready) return;
+
+	// Walk deepest-first: star systems → galaxies → universe.
+	// Only one level dispatches a scan per tick.
+	for (auto& GalaxyPair : SpawnedGalaxies)
+	{
+		AGalaxyActor* Galaxy = GalaxyPair.Value.Get();
+		if (!Galaxy || Galaxy->InitializationState != ELifecycleState::Ready)
+			continue;
+
+		for (auto& SystemPair : Galaxy->SpawnedStarSystems)
+		{
+			AStarSystemActor* System = SystemPair.Value.Get();
+			if (!System || System->InitializationState != ELifecycleState::Ready)
+				continue;
+
+			if (System->IsPlayerInsideBounds())
+			{
+				System->RequestScan();
+				return;  // Short-circuit: deepest level found
+			}
+		}
+
+		if (Galaxy->IsPlayerInsideBounds())
+		{
+			Galaxy->RequestScan();
+			return;  // Short-circuit: galaxy level
+		}
+	}
+
+	// Player isn't inside any child — scan at universe level
+	RequestScan();
 }
 
 void AUniverseActor::ProcessPendingScanResults()
@@ -687,11 +633,43 @@ void AUniverseActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) c
 	if (!InNode.IsValid()) return;
 	const UWorld* World = GetWorld();
 	if (!World) return;
-	// Particle rendered world position = PlayerPos + LocalPos - VirtualTraversal.
-	// Node->Center is the octree's quantization of LocalPos, so:
-	//   NodeCenterWorld = GetActorLocation() + Node->Center - VirtualTraversal
 	const FVector NodeCenterWorld = GetActorLocation() + InNode->Center - VirtualTraversal;
 	const FVector BoxExtent(InNode->Extent);
 	DrawDebugBox(World, NodeCenterWorld, BoxExtent, FColor::Green, false, SpawnScanInterval, 0, 2000.0f);
+}
+#pragma endregion
+
+#pragma region Grid Coord Helpers
+FIntVector AUniverseActor::PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const
+{
+	return FTierStreamingSystem::PositionToGridCoord(InPos, InGridDepth, Params.Extent, GridExtentMultiplier);
+}
+
+FVector AUniverseActor::GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const
+{
+	return FTierStreamingSystem::GridCoordToCenter(InCoord, InGridDepth, Params.Extent, GridExtentMultiplier);
+}
+
+double AUniverseActor::GetGridCellExtent(int32 InGridDepth) const
+{
+	return FTierStreamingSystem::GetGridCellExtent(InGridDepth, Params.Extent, GridExtentMultiplier);
+}
+#pragma endregion
+
+#pragma region Octree Bounds Check
+void AUniverseActor::CheckOctreeBounds()
+{
+	if (!Octree.IsValid() || bRebaseInProgress.load()) return;
+
+	const double OctreeExtent = Octree->Extent;
+	const double Threshold = OctreeExtent * 0.25;
+
+	if (FMath::Abs(VirtualTraversal.X) > OctreeExtent - Threshold ||
+		FMath::Abs(VirtualTraversal.Y) > OctreeExtent - Threshold ||
+		FMath::Abs(VirtualTraversal.Z) > OctreeExtent - Threshold)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("AUniverseActor::CheckOctreeBounds — VT=(%.0f,%.0f,%.0f) approaching octree bounds (extent=%.0f), rebase needed"),
+			VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z, OctreeExtent);
+	}
 }
 #pragma endregion

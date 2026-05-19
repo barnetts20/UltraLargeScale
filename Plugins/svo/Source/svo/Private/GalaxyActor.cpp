@@ -10,7 +10,7 @@
 #include <DrawDebugHelpers.h>
 #include <Kismet/GameplayStatics.h>
 #include <NiagaraFunctionLibrary.h>
-#include <TimerManager.h>
+
 #pragma endregion
 
 #pragma region Constructor/Destructor
@@ -58,7 +58,12 @@ void AGalaxyActor::BeginPlay()
 void AGalaxyActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	InitializationState = ELifecycleState::Pooling;
-	StopSpawnScanTimer();
+
+	// Clear scan state (no timer to stop)
+	bHasPendingScanResults = false;
+	PendingScanResults.Empty();
+	TrackedSpawnNodes.Empty();
+	bSpawnScanInProgress.store(false);
 
 	// Signal any in-flight star system initializations to abort, then clear tracking.
 	for (auto& Pair : SpawnedStarSystems)
@@ -92,7 +97,6 @@ void AGalaxyActor::ApplyParallaxOffset()
 #pragma region Pool Lifecycle
 void AGalaxyActor::ResetForPool()
 {
-	StopSpawnScanTimer();
 	bHasPendingScanResults = false;
 	PendingScanResults.Empty();
 	TrackedSpawnNodes.Empty();
@@ -239,16 +243,7 @@ void AGalaxyActor::InitializeNiagara()
 	if (InitializationState == ELifecycleState::Pooling) return;
 	FTierStreamingSystem::InitializeTier(Ctx, SmallTierConfig, SmallTierState, TierNiagaraComponents);
 
-	// Start the spawn scan timer now that the octree is populated.
-	// Must be on the game thread — InitializeNiagara is already dispatched there
-	// via TPromise rendezvous inside FTierStreamingSystem::InitializeTier.
-	// We use AsyncTask here to be safe in case the call path changes.
-	TWeakObjectPtr<AGalaxyActor> WeakThis(this);
-	AsyncTask(ENamedThreads::GameThread, [WeakThis]()
-		{
-			if (AGalaxyActor* Self = WeakThis.Get())
-				Self->StartSpawnScanTimer();
-		});
+	// No timer start needed — Universe::DetermineAndDispatchScan drives scans.
 
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeNiagara total: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
 }
@@ -470,37 +465,17 @@ FVector AGalaxyActor::ComputeChildSpawnLocation(const FVector& NodeCenter, doubl
 #pragma endregion
 
 #pragma region Spawn Range Scanning
-void AGalaxyActor::StartSpawnScanTimer()
-{
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(SpawnScanTimerHandle);
-		World->GetTimerManager().SetTimer(SpawnScanTimerHandle, this,
-			&AGalaxyActor::UpdateSpawnRangeNodes, SpawnScanInterval, true);
-	}
-}
-
-void AGalaxyActor::StopSpawnScanTimer()
-{
-	if (UWorld* World = GetWorld())
-		World->GetTimerManager().ClearTimer(SpawnScanTimerHandle);
-	TrackedSpawnNodes.Empty();
-	bHasPendingScanResults = false;
-	PendingScanResults.Empty();
-}
-
-void AGalaxyActor::UpdateSpawnRangeNodes()
+void AGalaxyActor::RequestScan()
 {
 	if (InitializationState != ELifecycleState::Ready) return;
 	if (!Octree.IsValid()) return;
 	if (bSpawnScanInProgress.load()) return;
 
-	bSpawnScanInProgress.store(true);
+	const double Now = FPlatformTime::Seconds();
+	if (Now - LastScanDispatchTime < SpawnScanInterval) return;
+	LastScanDispatchTime = Now;
 
-	// Snapshot VirtualTraversal — this is the player's position in galaxy-local
-	// octree space, exactly analogous to what UniverseActor passes to its scan.
-	// Node->Center values in the octree are in this same space, so the
-	// screen-space distance test (Extent / Distance) is correctly scaled.
+	bSpawnScanInProgress.store(true);
 	const FVector LocalPlayerPos = VirtualTraversal;
 
 	TWeakObjectPtr<AGalaxyActor> WeakThis(this);
@@ -521,6 +496,15 @@ void AGalaxyActor::UpdateSpawnRangeNodes()
 					InnerSelf->bSpawnScanInProgress.store(false);
 				});
 		});
+}
+
+bool AGalaxyActor::IsPlayerInsideBounds() const
+{
+	if (!Octree.IsValid()) return false;
+	const double E = Octree->Extent;
+	return FMath::Abs(VirtualTraversal.X) <= E
+		&& FMath::Abs(VirtualTraversal.Y) <= E
+		&& FMath::Abs(VirtualTraversal.Z) <= E;
 }
 
 void AGalaxyActor::ProcessPendingScanResults()

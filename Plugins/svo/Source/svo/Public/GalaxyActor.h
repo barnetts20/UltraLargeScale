@@ -2,9 +2,9 @@
 // Full tier streaming system mirroring UniverseActor.
 // Large tier: exhaustive single-pass (NeighborhoodRadius=0), always loaded.
 // Mid/Small tiers: neighborhood streaming with cell cache.
-// Spawn scan: timer-based octree query (VirtualTraversal space) drives
-//             SpawnStarSystemFromPool / ReturnStarSystemToPool, mirroring
-//             the universe-level galaxy spawn pipeline exactly.
+// Spawn scan: driven by Universe::DetermineAndDispatchScan via RequestScan(),
+//             dispatches async octree query (VirtualTraversal space) to drive
+//             SpawnStarSystemFromPool / ReturnStarSystemToPool.
 
 #pragma once
 #include "CoreMinimal.h"
@@ -49,15 +49,13 @@ public:
 #pragma endregion
 
 #pragma region Spawn Range Scanning (public - tunable in editor)
-	/** Interval in seconds between spawn-scan background queries. */
+	/** Interval in seconds between spawn-scan dispatches. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
 	float SpawnScanInterval = 0.1f;
 
 	/** Minimum screen-space angular size (Extent / Distance) for a node to
 	 *  trigger a star system spawn. Squared internally before traversal.
-	 *  Lower values = spawn/despawn from further away.
-	 *  UniverseActor default is 0.033. For star systems to load earlier
-	 *  (before you're right on top of the sprite), try 0.005–0.015. */
+	 *  Lower values = spawn/despawn from further away. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
 	double SpawnScreenSpaceThreshold = 0.01;
 
@@ -170,8 +168,8 @@ private:
 	/** Guards against overlapping spawn-scan background tasks. */
 	std::atomic<bool> bSpawnScanInProgress{ false };
 
-	/** Timer handle for the recurring spawn-scan interval. */
-	FTimerHandle SpawnScanTimerHandle;
+	/** Time of last scan dispatch. Used for interval throttling. */
+	double LastScanDispatchTime = 0.0;
 
 	/** Nodes currently inside the spawn threshold. Diffed each interval. */
 	TSet<TSharedPtr<FOctreeNode>> TrackedSpawnNodes;
@@ -181,13 +179,20 @@ private:
 	bool bHasPendingScanResults = false;
 	TArray<TSharedPtr<FOctreeNode>> PendingScanResults;
 
-	void StartSpawnScanTimer();
-	void StopSpawnScanTimer();
-	void UpdateSpawnRangeNodes();
 	void ProcessPendingScanResults();
 
 	void LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) const;
 	void LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const;
 	void DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) const;
+#pragma endregion
+
+public:
+#pragma region Hierarchical Scan (called by Universe)
+	/** Dispatches an async scan if enough time has elapsed. Called by
+	 *  Universe::DetermineAndDispatchScan, not by a timer. */
+	virtual void RequestScan() override;
+
+	/** Returns true if VirtualTraversal is within this galaxy's octree bounds. */
+	virtual bool IsPlayerInsideBounds() const override;
 #pragma endregion
 };

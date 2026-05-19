@@ -132,4 +132,19 @@ public:
     // tier streaming, and cascading down to its own star systems.
     virtual void TickFromParent(float DeltaTime, const FVector& InPlayerPos);
 #pragma endregion
+
+#pragma region Hierarchical Spawn Scanning
+    /** Time of last scan dispatch. Used for interval throttling
+     *  now that scans are driven from the tick chain instead of timers. */
+    double LastScanDispatchTime = 0.0;
+
+    /** Request a scan if enough time has elapsed and no scan is in flight.
+     *  Called by the Universe's DetermineAndDispatchScan, not by a timer.
+     *  Subclasses override to dispatch their async octree query. */
+    virtual void RequestScan() {}
+
+    /** Returns true if the player's VirtualTraversal is within this actor's
+     *  octree bounds. Used by the Universe to determine which level to scan. */
+    virtual bool IsPlayerInsideBounds() const { return false; }
+#pragma endregion
 };
