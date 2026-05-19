@@ -747,7 +747,7 @@ void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
 	//
 	// UnitSphere has a 50 cm radius → diameter = 100 cm.
 	// To make the sphere match a radius of 'R' cm: scale = (R * 2) / 100.
-	const double WorldRadiusCm = static_cast<double>(ParticleExtent); //TODO: We already have particle extent, this is the same, we dont need world radius cm
+	const double WorldRadiusCm = static_cast<double>(ParticleExtent) / 2; //TODO: We already have particle extent, this is the same, we dont need world radius cm
 	const double MeshScale = WorldRadiusCm;
 
 	UStaticMesh* SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitSphere.UnitSphere"));

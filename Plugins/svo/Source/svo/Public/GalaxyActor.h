@@ -137,7 +137,7 @@ protected:
 #pragma endregion
 
 #pragma region Volumetric
-	FString VolumetricMaterialPath = FString("/svo/Materials/RayMarchers/MT_GalaxyRaymarchPseudoVolume_Inst.MT_GalaxyRaymarchPseudoVolume_Inst");
+	FString VolumetricMaterialPath = FString("/svo/Galaxy/MT_GalaxyRaymarchPseudoVolume_Inst.MT_GalaxyRaymarchPseudoVolume_Inst");
 #pragma endregion
 
 #pragma region Star System Pool
