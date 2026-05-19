@@ -37,6 +37,22 @@ struct FNiagaraParticleBuffer
     int32 TotalSlots = 0;
     int32 SlotCapacity = 0;
 
+    // Largest particle extent in this buffer. Updated by RecomputeMaxExtent
+    // on the async thread after generation/cache-restore completes. Read by
+    // PushTierToNiagara on the game thread to expand Niagara fixed bounds.
+    float MaxExtent = 0.f;
+
+    // Scans the Extents array and caches the result in MaxExtent.
+    // Called on the async thread at the end of UpdateTier, after all
+    // generation and cache restores are done.
+    void RecomputeMaxExtent()
+    {
+        float Max = 0.f;
+        for (int32 i = 0; i < Extents.Num(); ++i)
+            Max = FMath::Max(Max, Extents[i]);
+        MaxExtent = Max;
+    }
+
     // --- Lifecycle ---
 
     // Allocate (or reallocate) all active arrays. Pass bWantRotations=false for
@@ -65,6 +81,7 @@ struct FNiagaraParticleBuffer
         Positions = Other.Positions;
         Extents = Other.Extents;
         Colors = Other.Colors;
+        MaxExtent = Other.MaxExtent;
         if (Rotations.Num() > 0 && Other.Rotations.Num() > 0)
             Rotations = Other.Rotations;
     }

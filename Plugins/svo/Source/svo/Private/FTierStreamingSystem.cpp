@@ -82,6 +82,10 @@ void FTierStreamingSystem::InitializeTier(
 		for (const auto& Pair : ToGenerate)
 			CacheCellFromBuffers(Config, State, Pair.Key, Pair.Value, 0);
 
+		// Cache MaxExtent before mirroring so CopyFrom propagates it.
+		for (int32 b = 0; b < NumBuffers; ++b)
+			State.Buffers[b][0].RecomputeMaxExtent();
+
 		// Mirror front → back so either buffer is a valid starting state.
 		for (int32 b = 0; b < NumBuffers; ++b)
 			State.Buffers[b][1].CopyFrom(State.Buffers[b][0]);
@@ -364,6 +368,10 @@ void FTierStreamingSystem::UpdateTier(
 			for (const auto& EnteringPair : AllEnteringSlots)
 				InsertSlotIntoOctree(InsertCtx, Config, State, EnteringPair.Key, EnteringPair.Value, BackIdx);
 
+			// Cache MaxExtent so PushTierToNiagara doesn't need a full scan.
+			for (int32 b = 0; b < NumBuffers; ++b)
+				State.Buffers[b][BackIdx].RecomputeMaxExtent();
+
 			// Swap and signal.
 			State.FrontIdx.store(BackIdx);
 			State.bNeedsPush.store(true);
@@ -392,14 +400,8 @@ void FTierStreamingSystem::PushTierToNiagara(
 		UNiagaraComponent* NC = State.NiagaraComponents[b];
 		if (!NC) continue;
 
-		// Compute per-buffer bounds: expand the base bounds by the largest
-		// particle extent in this buffer so sprites near the edge aren't culled.
 		const auto& Buf = State.Buffers[b][FrontIdx];
-		float MaxParticleExtent = 0.f;
-		for (int32 i = 0; i < Buf.Extents.Num(); ++i)
-			MaxParticleExtent = FMath::Max(MaxParticleExtent, Buf.Extents[i]);
-
-		const FBox BufferBounds = BaseBounds.ExpandBy(static_cast<double>(MaxParticleExtent));
+		const FBox BufferBounds = BaseBounds.ExpandBy(static_cast<double>(Buf.MaxExtent));
 		NC->SetSystemFixedBounds(BufferBounds);
 		Buf.PushToNiagara(NC, Ctx.VirtualTraversal);
 	}
