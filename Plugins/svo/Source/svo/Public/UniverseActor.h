@@ -90,9 +90,9 @@ public:
 	 * spatial registry of all visited particles. Rebased only when
 	 * VirtualTraversal approaches the root bounds (extremely rare).
 	 *
-	 * Data.ObjectId on each node carries the flat slot index into the tier's
-	 * particle buffers. Queries dereference back through that index to read
-	 * pre-computed positions and extents.
+	 * Data.ObjectId on each node carries a deterministic hierarchical seed
+	 * (composed via FVoxelData::ComposeSeed). Data.ParticleIndex carries the
+	 * absolute buffer index for direct position/extent lookup.
 	 *
 	 * Sized to PersistentTreeMultiplier * Params.Extent to give many cell-widths
 	 * of travel before rebasing is needed.

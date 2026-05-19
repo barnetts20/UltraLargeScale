@@ -205,6 +205,7 @@ FTierStreamingContext AUniverseActor::BuildStreamingContext() const
 	Ctx.AttachRoot = GetRootComponent();
 	Ctx.bNiagaraAbsolutePosition = false;
 	Ctx.OwnerName = TEXT("Universe");
+	Ctx.ParentSeed = Params.Seed;
 	return Ctx;
 }
 #pragma endregion
@@ -362,7 +363,7 @@ FVector AUniverseActor::ComputeChildSpawnLocation(const FVector& NodeCenter, dou
 void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 {
 	if (!InNode.IsValid() || !GalaxyActorClass || SpawnedGalaxies.Contains(InNode) || InitializationState != ELifecycleState::Ready) return;
-	if (InNode->Data.ObjectId < 0) return;
+	if (InNode->Data.ParticleIndex < 0) return;
 	if (GalaxyPool.Num() == 0)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("Galaxy pool exhausted, consider increasing GalaxyPoolSize"));
@@ -382,21 +383,17 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	FParticleTierConfig& MatchedConfig = *TierConfigs[TierIndex];
 	FParticleTierState& MatchedState = *TierStates[TierIndex];
 
-	// ObjectId is the slot index, ParticleIndex is the offset within the slot.
-	const int32 SlotId = InNode->Data.ObjectId;
+	// ParticleIndex is the absolute buffer index. Direct lookup — no slot math needed.
 	const int32 FrontIdx = MatchedState.FrontIdx.load();
 	const FNiagaraParticleBuffer& Front = MatchedState.Buffers[0][FrontIdx];
-	const int32 SlotStart = SlotId * MatchedConfig.SlotCapacity;
 
-	// Direct lookup via ParticleIndex — no slot scan needed.
 	FVector ParticlePos = InNode->Center;
 	float ParticleExtent = static_cast<float>(InNode->Extent);
-	const int32 ParticleIdx = InNode->Data.ParticleIndex;
-	if (ParticleIdx >= 0)
+	const int32 AbsIdx = InNode->Data.ParticleIndex;
+	if (AbsIdx >= 0)
 	{
-		const int32 Idx = SlotStart + ParticleIdx;
-		ParticlePos = Front.Positions[Idx];
-		ParticleExtent = Front.Extents[Idx];
+		ParticlePos = Front.Positions[AbsIdx];
+		ParticleExtent = Front.Extents[AbsIdx];
 	}
 
 	// Start with the universe-level galaxy params (editor-tunable template),
@@ -409,6 +406,8 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	// No need to set it here — DeriveScaleRanges handles the cascade.
 
 	Galaxy->SpeedScale = SpeedScale;
+	// ObjectId is the deterministic hierarchical seed composed from
+	// (UniverseSeed, GridCoord, GenerationIndex) during octree insertion.
 	Galaxy->Params.Seed = InNode->Data.ObjectId;
 	Galaxy->Params.ParentColor = FLinearColor(InNode->Data.Composition);
 	FRandomStream RandStream(InNode->Data.ObjectId);
@@ -461,7 +460,7 @@ void AUniverseActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 	if (!SpawnedGalaxies.RemoveAndCopyValue(InNode, WeakGalaxy)) return;
 	AGalaxyActor* Galaxy = WeakGalaxy.Get();
 	if (!Galaxy) return;
-	UE_LOG(LogTemp, Log, TEXT("Returning galaxy to pool for node ObjectId: %d"), InNode->Data.ObjectId);
+	UE_LOG(LogTemp, Log, TEXT("Returning galaxy to pool for node seed: %d"), InNode->Data.ObjectId);
 	Galaxy->ResetForPool();
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, WeakGalaxy]()
 		{
@@ -586,9 +585,10 @@ void AUniverseActor::ProcessPendingScanResults()
 void AUniverseActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) const
 {
 	if (!InNode.IsValid()) return;
-	const int32 SlotId = InNode->Data.ObjectId;
+	const int32 Seed = InNode->Data.ObjectId;
+	const int32 AbsIdx = InNode->Data.ParticleIndex;
 	const int32 ExtraCount = InNode->Data.AdditionalObjectIds.Num();
-	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::SpawnScan ENTER — node center=(%.1f, %.1f, %.1f) extent=%.2f depth=%d slot=%d extras=%d scale=%.3f tier=%d"), InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Depth, SlotId, ExtraCount, InNode->Data.ScaleFactor, InNode->Data.TypeId);
+	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::SpawnScan ENTER — node center=(%.1f, %.1f, %.1f) extent=%.2f depth=%d seed=%d bufIdx=%d extras=%d scale=%.3f tier=%d"), InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Depth, Seed, AbsIdx, ExtraCount, InNode->Data.ScaleFactor, InNode->Data.TypeId);
 	if (bLogSpawnEnterExitBuffers)
 	{
 		// Use TypeId (set by InsertParticleIntoOctree) to identify the source tier.
@@ -602,8 +602,9 @@ void AUniverseActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) co
 		case 2: Config = &SmallTierConfig;  State = &SmallTierState;  TierLabel = TEXT("small");  break;
 		default: break;
 		}
-		if (Config && State && State->Buffers.Num() > 0)
+		if (Config && State && State->Buffers.Num() > 0 && AbsIdx >= 0)
 		{
+			const int32 SlotId = AbsIdx / Config->SlotCapacity;
 			const FNiagaraParticleBuffer& Front = State->Buffers[0][State->FrontIdx.load()];
 			const int32 Start = SlotId * Config->SlotCapacity;
 			int32 LiveCount = 0;
@@ -619,7 +620,7 @@ void AUniverseActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) co
 void AUniverseActor::LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const
 {
 	if (!InNode.IsValid()) return;
-	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::SpawnScan EXIT  — node center=(%.1f, %.1f, %.1f) extent=%.2f depth=%d slot=%d"), InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Depth, InNode->Data.ObjectId);
+	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::SpawnScan EXIT  — node center=(%.1f, %.1f, %.1f) extent=%.2f depth=%d seed=%d"), InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Depth, InNode->Data.ObjectId);
 }
 
 void AUniverseActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) const

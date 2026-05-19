@@ -424,6 +424,7 @@ void FTierStreamingSystem::InsertTierIntoOctree(
 	for (auto& Pair : State.ActiveSlots)
 	{
 		FSlotEntry& Entry = Pair.Value;
+		const FIntVector& Coord = Pair.Key;
 		Entry.InsertedNodes.Reset();
 		const int32 Count = State.SlotCounts[Entry.SlotIndex];
 		Entry.InsertedNodes.Reserve(Count);
@@ -433,7 +434,7 @@ void FTierStreamingSystem::InsertTierIntoOctree(
 			const int32 Idx = BufferStart + i;
 			if (InsertBuffer.Extents[Idx] <= 0.0f) continue;
 			InsertParticleIntoOctree(Ctx, Entry, InsertBuffer.Positions[Idx],
-				InsertBuffer.Extents[Idx], Entry.SlotIndex, i, TreeExtent, Config.TierIndex);
+				InsertBuffer.Extents[Idx], Coord, i, Idx, TreeExtent, Config.TierIndex);
 		}
 	}
 }
@@ -462,14 +463,15 @@ void FTierStreamingSystem::InsertSlotIntoOctree(
 		const int32 Idx = BufferStart + i;
 		if (InsertBuffer.Extents[Idx] <= 0.0f) continue;
 		InsertParticleIntoOctree(Ctx, *Entry, InsertBuffer.Positions[Idx],
-			InsertBuffer.Extents[Idx], SlotIndex, i, TreeExtent, Config.TierIndex);
+			InsertBuffer.Extents[Idx], Coord, i, Idx, TreeExtent, Config.TierIndex);
 	}
 }
 
 void FTierStreamingSystem::InsertParticleIntoOctree(
 	const FTierStreamingContext& Ctx,
 	FSlotEntry& Entry, const FVector& Position, float Extent,
-	int32 SlotIndex, int32 ParticleIndex, double TreeExtent, int32 TierIndex)
+	const FIntVector& GridCoord, int32 GenerationIndex, int32 AbsoluteBufferIndex,
+	double TreeExtent, int32 TierIndex)
 {
 	if (Extent <= 0.0f) return;
 
@@ -478,9 +480,9 @@ void FTierStreamingSystem::InsertParticleIntoOctree(
 		Ctx.UnitScale,
 		static_cast<int64>(TreeExtent));
 	PD.SetPosition(Position);
-	PD.Data.ObjectId = SlotIndex;
+	PD.Data.ObjectId = FVoxelData::ComposeSeed(Ctx.ParentSeed, GridCoord, GenerationIndex);
 	PD.Data.TypeId = TierIndex;
-	PD.Data.ParticleIndex = ParticleIndex;
+	PD.Data.ParticleIndex = AbsoluteBufferIndex;
 
 	TSharedPtr<FOctreeNode> Node = Ctx.Octree->InsertPosition(
 		PD.GetPosition(), PD.InsertDepth, PD.Data);

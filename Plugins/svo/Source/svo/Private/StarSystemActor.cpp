@@ -292,8 +292,9 @@ void AStarSystemActor::InitializeNiagara()
 		VD.ScaleFactor = 0.5f;
 		VD.Density = 1.0f;
 		VD.Composition = FVector(PlanetColors[i].R, PlanetColors[i].G, PlanetColors[i].B);
-		VD.ObjectId = Params.Seed * 1000 + i;
+		VD.ObjectId = FVoxelData::ComposeSeed(Params.Seed, FIntVector::ZeroValue, i);
 		VD.TypeId = static_cast<int32>(StarSystemDataGenerator::EObjectType::TerrestrialPlanet);
+		VD.ParticleIndex = i;
 
 		// FOctree exposes InsertPosition (not Insert).
 		Octree->InsertPosition(PlanetPositions[i], BestDepth, VD);
@@ -430,6 +431,7 @@ FTierStreamingContext AStarSystemActor::BuildStreamingContext() const
 	Ctx.AttachRoot = GetRootComponent();
 	Ctx.bNiagaraAbsolutePosition = false;
 	Ctx.OwnerName = GetName();
+	Ctx.ParentSeed = Params.Seed;
 	return Ctx;
 }
 #pragma endregion
@@ -642,16 +644,16 @@ void AStarSystemActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) 
 {
 	if (!InNode.IsValid()) return;
 	UE_LOG(LogTemp, Log,
-		TEXT("AStarSystemActor::SpawnScan ENTER — center=(%.1f,%.1f,%.1f) extent=%.2f objId=%d"),
+		TEXT("AStarSystemActor::SpawnScan ENTER — center=(%.1f,%.1f,%.1f) extent=%.2f seed=%d planetIdx=%d"),
 		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
-		InNode->Extent, InNode->Data.ObjectId);
+		InNode->Extent, InNode->Data.ObjectId, InNode->Data.ParticleIndex);
 }
 
 void AStarSystemActor::LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const
 {
 	if (!InNode.IsValid()) return;
 	UE_LOG(LogTemp, Log,
-		TEXT("AStarSystemActor::SpawnScan EXIT  — center=(%.1f,%.1f,%.1f) extent=%.2f objId=%d"),
+		TEXT("AStarSystemActor::SpawnScan EXIT  — center=(%.1f,%.1f,%.1f) extent=%.2f seed=%d"),
 		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
 		InNode->Extent, InNode->Data.ObjectId);
 }
@@ -684,12 +686,11 @@ void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
 	// --- Resolve the actual particle position and extent from the buffer ---
 	// The octree node center is a quantized cell center, and InNode->Extent
 	// is the cell half-size at that depth — neither matches the real particle.
-	// ObjectId encodes: Seed * 1000 + PlanetIndex  (set in InitializeNiagara).
-	// Extract the planet index and read the authoritative values directly.
+	// ParticleIndex stores the planet index directly (set in InitializeNiagara).
 	FVector  ParticlePos = InNode->Center;                           // fallback
 	float    ParticleExtent = static_cast<float>(InNode->Extent);       // fallback
 
-	const int32 PlanetIndex = InNode->Data.ObjectId - (Params.Seed * 1000);
+	const int32 PlanetIndex = InNode->Data.ParticleIndex;
 	if (PlanetIndex >= 0 && PlanetIndex < PlanetPositions.Num())
 	{
 		ParticlePos = PlanetPositions[PlanetIndex];
@@ -698,9 +699,9 @@ void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
 	else
 	{
 		UE_LOG(LogTemp, Warning,
-			TEXT("AStarSystemActor::SpawnPlanetFromPool — could not resolve planet index "
-				"from ObjectId=%d Seed=%d, falling back to octree node center"),
-			InNode->Data.ObjectId, Params.Seed);
+			TEXT("AStarSystemActor::SpawnPlanetFromPool — invalid ParticleIndex=%d "
+				"(seed=%d, %d planets), falling back to octree node center"),
+			PlanetIndex, Params.Seed, PlanetPositions.Num());
 	}
 
 	FActorSpawnParameters SpawnParams;

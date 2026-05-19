@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "CoreMinimal.h"
 #include "DataTypes.h"
@@ -16,7 +16,7 @@ class USceneComponent;
  */
 struct FTierStreamingContext
 {
-	/** Sector/galaxy extent � drives grid cell sizing and dead-pos parking. */
+	/** Sector/galaxy extent � drives grid cell sizing and dead-pos parking. */
 	double Extent = 0.0;
 
 	/** UnitScale of the owning actor. Used by InsertParticleIntoOctree to
@@ -52,4 +52,11 @@ struct FTierStreamingContext
 
 	/** Owning actor name for log output. */
 	FString OwnerName;
+
+	/** The owning actor's Params.Seed. Used by the octree insertion pipeline
+	 *  to compose deterministic child seeds via FVoxelData::ComposeSeed.
+	 *  Each hierarchy level passes its own seed (which is itself a ComposeSeed
+	 *  output from its parent), forming a chain:
+	 *  UniverseSeed → GalaxySeed → StarSystemSeed → PlanetSeed. */
+	int32 ParentSeed = 0;
 };

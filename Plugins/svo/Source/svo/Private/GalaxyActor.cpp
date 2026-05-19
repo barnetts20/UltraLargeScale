@@ -357,6 +357,7 @@ FTierStreamingContext AGalaxyActor::BuildStreamingContext() const
 	Ctx.AttachRoot = GetRootComponent();
 	Ctx.bNiagaraAbsolutePosition = false;
 	Ctx.OwnerName = GetName();
+	Ctx.ParentSeed = Params.Seed;
 	return Ctx;
 }
 #pragma endregion
@@ -541,7 +542,7 @@ void AGalaxyActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) cons
 {
 	if (!InNode.IsValid()) return;
 	UE_LOG(LogTemp, Log,
-		TEXT("AGalaxyActor::SpawnScan ENTER — center=(%.1f,%.1f,%.1f) extent=%.2f depth=%d objId=%d tier=%d"),
+		TEXT("AGalaxyActor::SpawnScan ENTER — center=(%.1f,%.1f,%.1f) extent=%.2f depth=%d seed=%d tier=%d"),
 		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
 		InNode->Extent, InNode->Depth, InNode->Data.ObjectId, InNode->Data.TypeId);
 }
@@ -550,7 +551,7 @@ void AGalaxyActor::LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const
 {
 	if (!InNode.IsValid()) return;
 	UE_LOG(LogTemp, Log,
-		TEXT("AGalaxyActor::SpawnScan EXIT  — center=(%.1f,%.1f,%.1f) extent=%.2f depth=%d objId=%d"),
+		TEXT("AGalaxyActor::SpawnScan EXIT  — center=(%.1f,%.1f,%.1f) extent=%.2f depth=%d seed=%d"),
 		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
 		InNode->Extent, InNode->Depth, InNode->Data.ObjectId);
 }
@@ -580,10 +581,9 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 		return;
 	}
 
-	// --- Resolve the actual particle position from the Large tier buffer ---
+	// --- Resolve the actual particle position from the tier buffer ---
 	// The octree node center is a quantized approximation; the real rendered
 	// position lives in the Niagara buffer. Mirrors UniverseActor::SpawnGalaxyFromPool.
-	// ObjectId on the node is the slot index written by InsertParticleIntoOctree.
 	const int32 TierIndex = FMath::Clamp(InNode->Data.TypeId, 0, 2);
 	FParticleTierConfig* TierConfigs[] = { &LargeTierConfig, &MidTierConfig, &SmallTierConfig };
 	FParticleTierState* TierStates[] = { &LargeTierState,  &MidTierState,  &SmallTierState };
@@ -593,17 +593,14 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 	FVector  ParticlePos = InNode->Center;  // fallback
 	float    ParticleExtent = static_cast<float>(InNode->Extent);
 
-	// Direct lookup via ParticleIndex — no slot scan needed.
-	const int32 SlotId = InNode->Data.ObjectId;
-	const int32 ParticleIdx = InNode->Data.ParticleIndex;
+	// ParticleIndex is the absolute buffer index. Direct lookup.
+	const int32 AbsIdx = InNode->Data.ParticleIndex;
 	const int32 FrontIdx = MatchedState.FrontIdx.load();
-	if (ParticleIdx >= 0 && MatchedState.Buffers.Num() > 0 && SlotId >= 0 &&
-		SlotId < MatchedState.SlotCounts.Num())
+	if (AbsIdx >= 0 && MatchedState.Buffers.Num() > 0)
 	{
 		const FNiagaraParticleBuffer& Front = MatchedState.Buffers[0][FrontIdx];
-		const int32 Idx = SlotId * MatchedConfig.SlotCapacity + ParticleIdx;
-		ParticlePos = Front.Positions[Idx];
-		ParticleExtent = Front.Extents[Idx];
+		ParticlePos = Front.Positions[AbsIdx];
+		ParticleExtent = Front.Extents[AbsIdx];
 	}
 
 	AStarSystemActor* System = StarSystemPool.Pop();
@@ -623,6 +620,8 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 	System->Params.UnitScale = (static_cast<double>(ParticleExtent) * Params.UnitScale
 		* System->Params.BoundsScaleMultiplier) / System->Params.Extent;
 	System->SpeedScale = Universe ? Universe->SpeedScale : SpeedScale;
+	// ObjectId is the deterministic hierarchical seed composed from
+	// (GalaxySeed, GridCoord, GenerationIndex) during octree insertion.
 	System->Params.Seed = InNode->Data.ObjectId;
 	System->Params.ParentColor = FLinearColor(InNode->Data.Composition);
 	System->Params.Rotation = FRandomStream(InNode->Data.ObjectId).GetUnitVector().Rotation();

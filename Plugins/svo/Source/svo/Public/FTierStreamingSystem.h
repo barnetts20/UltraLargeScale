@@ -303,7 +303,8 @@ struct FTierStreamingSystem
 
 	static void InsertParticleIntoOctree(const FTierStreamingContext& Ctx,
 		FSlotEntry& Entry, const FVector& Position, float Extent,
-		int32 SlotIndex, int32 ParticleIndex, double TreeExtent, int32 TierIndex);
+		const FIntVector& GridCoord, int32 GenerationIndex, int32 AbsoluteBufferIndex,
+		double TreeExtent, int32 TierIndex);
 
 	// ========================================================================
 	//  Cell Cache

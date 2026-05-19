@@ -14,21 +14,54 @@ public:
 	float ScaleFactor;
 	float Density;
 	FVector Composition;
+
+	/** Deterministic hierarchical seed for this node. Composed via ComposeSeed
+	 *  from the parent actor's seed, the tier grid coordinate, and the particle's
+	 *  generation index. Always >= 0; -1 is reserved as the "empty node" sentinel
+	 *  in the octree collision logic. Passed down as Params.Seed when spawning
+	 *  child actors (galaxies, star systems, planets). */
 	int ObjectId;
+
 	int TypeId;
 
-	/** Particle offset within the slot (0-based). The absolute buffer index
-	 *  is SlotIndex * SlotCapacity + ParticleIndex. Set during octree
-	 *  insertion so spawn hooks can read the exact particle without scanning
-	 *  the entire slot. -1 if not set (e.g. manually inserted nodes). */
+	/** Absolute index into the tier's flat particle buffer. Set during octree
+	 *  insertion: AbsoluteIndex = SlotIndex * SlotCapacity + ParticleOffset.
+	 *  Spawn hooks read positions/extents directly at Buffer[ParticleIndex].
+	 *  Slot can be recovered as ParticleIndex / SlotCapacity when needed.
+	 *  -1 if not set (e.g. manually inserted nodes outside the tier system). */
 	int ParticleIndex;
 
 	// Collision overflow for nodes that receive multiple inserts at the same
-	// quantized depth/position. ObjectId carries the first inserter's id;
-	// any subsequent inserts append to AdditionalObjectIds. Empty for the
-	// non-collision case (vast majority of nodes), so the per-node memory
-	// cost is just the empty TArray header.
+	// quantized depth/position. ObjectId carries the first inserter's seed;
+	// any subsequent inserts at the same node append to AdditionalObjectIds.
+	// Empty for the non-collision case (vast majority of nodes), so the
+	// per-node memory cost is just the empty TArray header.
 	TArray<int32> AdditionalObjectIds;
+
+	/**
+	 * Composes a deterministic, always-positive seed from a parent seed,
+	 * a grid coordinate, and a particle index within that cell. The result
+	 * is globally unique across the hierarchy when each level passes its
+	 * own Params.Seed (itself a ComposeSeed output) as InParentSeed.
+	 *
+	 * The sign bit is masked off so the result is always >= 0, preserving
+	 * the ObjectId == -1 "empty node" sentinel in the octree.
+	 *
+	 * @param InParentSeed     The owning actor's Params.Seed.
+	 * @param InCoord          Tier grid coordinate of the cell.
+	 * @param InParticleIndex  Generation-order index within the cell.
+	 * @return                 Positive int32 seed, never -1.
+	 */
+	static int32 ComposeSeed(int32 InParentSeed, const FIntVector& InCoord, int32 InParticleIndex)
+	{
+		const uint32 CoordHash = HashCombine(
+			HashCombine(GetTypeHash(InCoord.X), GetTypeHash(InCoord.Y)),
+			GetTypeHash(InCoord.Z));
+		const uint32 Raw = HashCombine(
+			static_cast<uint32>(InParentSeed),
+			HashCombine(CoordHash, static_cast<uint32>(InParticleIndex)));
+		return static_cast<int32>(Raw & 0x7FFFFFFF);
+	}
 };
 
 struct SVO_API FPointData
