@@ -31,9 +31,7 @@ void AParallaxStaticMeshActor::TickFromStarSystem(const FVector& InPlayerPos)
 	// The star system actor is already pegged to InPlayerPos each tick,
 	// so GetActorLocation() == InPlayerPos for the system. We compute the
 	// offset directly.
-	const FVector WorldPos = InPlayerPos + (System->VirtualTraversal != FVector::ZeroVector
-		? (NodeCenter - System->VirtualTraversal)
-		: NodeCenter);
+	const FVector WorldPos = InPlayerPos + (NodeCenter - System->VirtualTraversal);
 
 	SetActorLocation(WorldPos);
 }

@@ -691,13 +691,35 @@ void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
 	UWorld* World = GetWorld();
 	if (!World) return;
 
+	// --- Resolve the actual particle position and extent from the buffer ---
+	// The octree node center is a quantized cell center, and InNode->Extent
+	// is the cell half-size at that depth — neither matches the real particle.
+	// ObjectId encodes: Seed * 1000 + PlanetIndex  (set in InitializeNiagara).
+	// Extract the planet index and read the authoritative values directly.
+	FVector  ParticlePos = InNode->Center;                           // fallback
+	float    ParticleExtent = static_cast<float>(InNode->Extent);       // fallback
+
+	const int32 PlanetIndex = InNode->Data.ObjectId - (Params.Seed * 1000);
+	if (PlanetIndex >= 0 && PlanetIndex < PlanetPositions.Num())
+	{
+		ParticlePos = PlanetPositions[PlanetIndex];
+		ParticleExtent = PlanetExtents[PlanetIndex];
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("AStarSystemActor::SpawnPlanetFromPool — could not resolve planet index "
+				"from ObjectId=%d Seed=%d, falling back to octree node center"),
+			InNode->Data.ObjectId, Params.Seed);
+	}
+
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	// Initial world position: PlayerPos + (NodeCenter - VirtualTraversal).
+	// Initial world position: PlayerPos + (ParticlePos - VirtualTraversal).
 	// TickFromStarSystem will recompute this every frame, so the spawn
 	// position just needs to be roughly correct to avoid a one-frame pop.
-	const FVector SpawnLoc = CurrentFrameOfReferenceLocation + (InNode->Center - VirtualTraversal);
+	const FVector SpawnLoc = CurrentFrameOfReferenceLocation + (ParticlePos - VirtualTraversal);
 
 	AParallaxStaticMeshActor* Planet = World->SpawnActor<AParallaxStaticMeshActor>(
 		AParallaxStaticMeshActor::StaticClass(),
@@ -711,15 +733,22 @@ void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
 		return;
 	}
 
-	// Wire back-reference and store the node center in VT-space so
-	// TickFromStarSystem can recompute world position every frame.
+	// Wire back-reference and store the ACTUAL particle position (not the
+	// quantized node center) so TickFromStarSystem recomputes the correct
+	// world position every frame.
 	Planet->System = this;
-	Planet->NodeCenter = InNode->Center;
+	Planet->NodeCenter = ParticlePos;
 
-	// Visual size: the node's extent in world-space cm gives the sphere radius.
-	// UnitSphere has a 50cm radius → scale = (extent_cm * 2) / 100.
-	const double WorldRadiusCm = static_cast<double>(InNode->Extent) * Params.UnitScale;
-	const double MeshScale = (WorldRadiusCm * 2.0) / 100.0;
+	// Visual size: Niagara positions and extents are pushed in octree-local
+	// units, and the Niagara component sits at the player position.
+	// 1 octree unit = 1 cm of offset from the camera. The mesh must match:
+	// its world-space radius IS the raw particle extent (the same value
+	// Niagara uses for sprite sizing).
+	//
+	// UnitSphere has a 50 cm radius → diameter = 100 cm.
+	// To make the sphere match a radius of 'R' cm: scale = (R * 2) / 100.
+	const double WorldRadiusCm = static_cast<double>(ParticleExtent); //TODO: We already have particle extent, this is the same, we dont need world radius cm
+	const double MeshScale = WorldRadiusCm;
 
 	UStaticMesh* SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitSphere.UnitSphere"));
 	if (SphereMesh && Planet->MeshComponent)
@@ -741,9 +770,15 @@ void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
 	SpawnedPlanets.Add(InNode, TWeakObjectPtr<AActor>(Planet));
 
 	UE_LOG(LogTemp, Log,
-		TEXT("AStarSystemActor::SpawnPlanetFromPool — planet at (%.1f,%.1f,%.1f) radius=%.1fcm nodeCenter=(%.1f,%.1f,%.1f)"),
-		SpawnLoc.X, SpawnLoc.Y, SpawnLoc.Z, WorldRadiusCm,
-		InNode->Center.X, InNode->Center.Y, InNode->Center.Z);
+		TEXT("AStarSystemActor::SpawnPlanetFromPool — planet[%d] at (%.1f,%.1f,%.1f) "
+			"radius=%.1fcm scale=%.4f particlePos=(%.1f,%.1f,%.1f) "
+			"nodeCenter=(%.1f,%.1f,%.1f) VT=(%.1f,%.1f,%.1f)"),
+		PlanetIndex,
+		SpawnLoc.X, SpawnLoc.Y, SpawnLoc.Z,
+		WorldRadiusCm, MeshScale,
+		ParticlePos.X, ParticlePos.Y, ParticlePos.Z,
+		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
+		VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z);
 }
 
 void AStarSystemActor::FinalizePlanetPlacement(AActor* Planet, TSharedPtr<FOctreeNode> InNode)
