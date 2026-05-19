@@ -28,12 +28,6 @@ public:
 	// any subsequent inserts append to AdditionalObjectIds. Empty for the
 	// non-collision case (vast majority of nodes), so the per-node memory
 	// cost is just the empty TArray header.
-	//
-	// Callers that only consume "the" ObjectId (the existing convention
-	// across PointCloudGenerator, GalaxyDataGenerator, ParallaxNiagaraSystem,
-	// GalaxyActor, etc.) continue to work unchanged. Callers that want full
-	// collision-aware enumeration walk both ObjectId (if != -1) and
-	// AdditionalObjectIds.
 	TArray<int32> AdditionalObjectIds;
 };
 

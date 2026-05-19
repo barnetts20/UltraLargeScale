@@ -3,7 +3,6 @@
 #include "FTierStreamingSystem.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include "FVolumeTextureUtils.h"
-#include <PointCloudGenerator.h>
 #include <Kismet/GameplayStatics.h>
 #include <GalaxyActor.h>
 #include <StarSystemActor.h>
