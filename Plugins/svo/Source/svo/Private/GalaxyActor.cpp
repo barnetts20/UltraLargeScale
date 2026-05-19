@@ -355,7 +355,7 @@ FTierStreamingContext AGalaxyActor::BuildStreamingContext() const
 	Ctx.InitializationState = InitializationState;
 	Ctx.bRebaseInProgress = false;
 	Ctx.AttachRoot = GetRootComponent();
-	Ctx.bNiagaraAbsolutePosition = true;
+	Ctx.bNiagaraAbsolutePosition = false;
 	Ctx.OwnerName = GetName();
 	return Ctx;
 }
@@ -391,24 +391,26 @@ void AGalaxyActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
 		VolumetricComponent->SetWorldLocation(InPlayerPos - VirtualTraversal);
 
 	// --- Niagara position push ---
+	// Galaxy Niagara components are attached (not absolute-positioned),
+	// so they follow the actor via SetActorLocation above. Only enter
+	// the per-component loop when positions actually need re-pushing.
 	const double DeltaSq = FVector::DistSquared(VirtualTraversal, LastPushedVirtualTraversal);
 	const bool bNeedsPush = (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold);
-	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
+	if (bNeedsPush)
 	{
-		const int32 FrontIdx = Tier->FrontIdx.load();
-		for (int32 b = 0; b < Tier->NiagaraComponents.Num(); ++b)
+		for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 		{
-			UNiagaraComponent* NC = Tier->NiagaraComponents[b];
-			if (!NC || b >= Tier->Buffers.Num()) continue;
-			NC->SetWorldLocation(InPlayerPos);
-			if (bNeedsPush)
+			const int32 FrontIdx = Tier->FrontIdx.load();
+			for (int32 b = 0; b < Tier->NiagaraComponents.Num(); ++b)
 			{
+				UNiagaraComponent* NC = Tier->NiagaraComponents[b];
+				if (!NC || b >= Tier->Buffers.Num()) continue;
 				const TArray<FVector>& RelPos = Tier->Buffers[b][FrontIdx].MakeRelativePositions(VirtualTraversal);
 				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NC, NiagaraBufferParams::Positions, RelPos);
 			}
 		}
+		LastPushedVirtualTraversal = VirtualTraversal;
 	}
-	if (bNeedsPush) LastPushedVirtualTraversal = VirtualTraversal;
 
 	// --- Process pending spawn-scan results ---
 	// VirtualTraversal is resolved for this frame, so SpawnStarSystemFromPool

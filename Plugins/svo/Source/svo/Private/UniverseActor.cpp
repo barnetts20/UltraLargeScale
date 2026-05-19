@@ -230,24 +230,25 @@ void AUniverseActor::ApplyParallaxOffset()
 	const double DeltaSq = FVector::DistSquared(VirtualTraversal, LastPushedVirtualTraversal);
 	const bool bNeedsPush = (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold);
 
-	for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &SmallTierState })
+	// Universe Niagara components are attached (not absolute-positioned),
+	// so they follow the actor via SetActorLocation above. Only enter
+	// the per-component loop when positions actually need re-pushing.
+	if (bNeedsPush)
 	{
-		const int32 FrontIdx = Tier->FrontIdx.load();
-		for (int32 b = 0; b < Tier->NiagaraComponents.Num(); ++b)
+		for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &SmallTierState })
 		{
-			UNiagaraComponent* NC = Tier->NiagaraComponents[b];
-			if (!NC || b >= Tier->Buffers.Num()) continue;
-
-			NC->SetWorldLocation(CurrentPlayerPos);
-
-			if (bNeedsPush)
+			const int32 FrontIdx = Tier->FrontIdx.load();
+			for (int32 b = 0; b < Tier->NiagaraComponents.Num(); ++b)
 			{
+				UNiagaraComponent* NC = Tier->NiagaraComponents[b];
+				if (!NC || b >= Tier->Buffers.Num()) continue;
+
 				const TArray<FVector>& RelPos = Tier->Buffers[b][FrontIdx].MakeRelativePositions(VirtualTraversal);
 				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NC, NiagaraBufferParams::Positions, RelPos);
 			}
 		}
+		LastPushedVirtualTraversal = VirtualTraversal;
 	}
-	if (bNeedsPush) LastPushedVirtualTraversal = VirtualTraversal;
 }
 #pragma endregion
 
