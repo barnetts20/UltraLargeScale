@@ -3,8 +3,6 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "FOctree.h"
-#include "NiagaraComponent.h"
-#include "NiagaraSystem.h"
 #include "ProceduralSpaceActor.generated.h"
 
 /// <summary>
@@ -31,7 +29,16 @@ struct SVO_API FBaseParams {
 };
 
 /// <summary>
-/// BASE PROCEDURAL SPACE ACTOR - Abstract base for Universe/Galaxy/StarSystem
+/// BASE PROCEDURAL SPACE ACTOR - Abstract base for Universe/Galaxy/StarSystem.
+///
+/// Provides shared state (octree, lifecycle, parallax, virtual traversal) and
+/// a default async initialization chain (InitializeChildPool → InitializeData
+/// → InitializeVolumetric → InitializeNiagara). Subclasses override the
+/// virtual hooks to implement level-specific generation and rendering.
+///
+/// Does NOT override Tick. The root actor (Universe) overrides Tick directly;
+/// child actors (Galaxy, StarSystem) are driven by their parent's
+/// TickFromParent cascade and should not tick independently when pool-managed.
 /// </summary>
 UCLASS(Abstract)
 class SVO_API AProceduralSpaceActor : public AActor
@@ -48,11 +55,16 @@ public:
     bool IsDebug = false;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parallax Properties")
-    double SpeedScale = 1.0;  // Runtime parameter (not in Params)
+    double SpeedScale = 1.0;
+
+    /** When true the actor auto-initializes from BeginPlay. Convenient for
+     *  level-placed test actors. Set to false for pool-managed actors where
+     *  the parent configures params before calling Initialize(). */
+    UPROPERTY(EditAnywhere, Category = "Initialization")
+    bool bAutoInitializeOnBeginPlay = false;
 
     /** Utility: resolves the local player pawn's world position.
-     *  Returns true on success; OutLocation is untouched on failure.
-     *  Static so non-inheriting classes (e.g. AUniverseActor) can call it. */
+     *  Returns true on success; OutLocation is untouched on failure. */
     static bool GetPlayerLocation(const UWorld* World, FVector& OutLocation);
 #pragma endregion
 
@@ -73,8 +85,8 @@ public:
 #pragma endregion
 
 #pragma region Lifecycle (overrideable)
-    virtual void Initialize();      // Kicks off async init
-    virtual void ResetForSpawn();   // Called before Initialize
+    virtual void Initialize();      // Kicks off async init chain
+    virtual void ResetForSpawn();   // Called before Initialize on pooled actors
     virtual void ResetForPool();    // Called when returning to pool
 #pragma endregion
 
@@ -83,18 +95,13 @@ public:
     virtual void InitializeData();
     virtual void InitializeVolumetric();
     virtual void InitializeNiagara();
-    virtual void InitializeChildPool();  // Optional - Universe/Galaxy override this
+    virtual void InitializeChildPool();
 #pragma endregion
 
 #pragma region Params Accessors
     virtual double GetUnitScale() const { return 1; }
     virtual double GetExtent() const { return 2147483648; }
     virtual double GetParentSpeedScale() const { return 1; }
-#pragma endregion
-
-#pragma region Shared Niagara
-    UPROPERTY()
-    UNiagaraComponent* NiagaraComponent;
 #pragma endregion
 
 #pragma region Shared Volumetric
@@ -112,24 +119,47 @@ public:
     FVector LastFrameOfReferenceLocation = FVector::ZeroVector;
     FVector CurrentFrameOfReferenceLocation = FVector::ZeroVector;
 
+    /**
+     * Accumulated virtual displacement of the player through this actor's
+     * local space. Advances by (SpeedScale / UnitScale) * PlayerDelta each
+     * tick. Used by Universe and Galaxy for camera-relative Niagara position
+     * pushes; StarSystem uses it for planet placement. The actor itself is
+     * pegged to the player so UE rendering stays in a clean numerical range.
+     */
+    FVector VirtualTraversal = FVector::ZeroVector;
+
+    /** VirtualTraversal value at the last Niagara position push. Used to skip
+     *  redundant pushes when the delta is sub-pixel. */
+    FVector LastPushedVirtualTraversal = FVector::ZeroVector;
+
+    /** Minimum VirtualTraversal delta before re-pushing camera-relative
+     *  positions to Niagara. Sub-pixel changes are invisible, so skipping
+     *  them avoids the full array copy+push cost per tier per tick. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parallax Properties")
+    double ParallaxPushThreshold = 0.5;
+
 #pragma region Parallax Spawn Calculation
-    // Computes correct spawn position for a child actor based on parallax ratios.
-    // Each subclass must implement this — the formula depends on whether the actor
-    // uses VirtualTraversal (Universe, Galaxy) or position-based parallax (StarSystem).
+    /** Computes correct spawn position for a child actor based on parallax
+     *  ratios. Each subclass must implement this — the formula depends on
+     *  whether the actor uses VirtualTraversal (Universe, Galaxy) or
+     *  position-based parallax (StarSystem). */
     virtual FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const { return FVector::ZeroVector; };
 #pragma endregion
-    // Each subclass must implement its own parallax model. Universe and Galaxy
-    // use VirtualTraversal accumulation; StarSystem uses position-based offset.
-    virtual void ApplyParallaxOffset() {};
-    virtual void DrawDebugBounds();
-    virtual void Tick(float DeltaTime) override;
 
-    // Called by the parent actor (Universe→Galaxy, Galaxy→StarSystem) instead of
-    // UE's per-actor tick dispatch. InPlayerPos is the already-resolved player
-    // world position for this frame — no child needs to query the controller.
-    // Base implementation applies the standard parallax offset (covers StarSystem).
-    // Galaxy overrides this to also handle VirtualTraversal, Niagara pushes,
-    // tier streaming, and cascading down to its own star systems.
+    /** Per-frame parallax update. Each subclass implements its own model.
+     *  Universe and Galaxy use VirtualTraversal accumulation; StarSystem
+     *  uses position-based offset. Default is a no-op. */
+    virtual void ApplyParallaxOffset() {};
+
+    virtual void DrawDebugBounds();
+
+    /** Called by the parent actor (Universe→Galaxy, Galaxy→StarSystem) instead
+     *  of UE's per-actor tick dispatch. InPlayerPos is the already-resolved
+     *  player world position for this frame — no child needs to query the
+     *  controller. Base implementation applies the standard position-based
+     *  parallax offset (covers StarSystem). Galaxy overrides to also handle
+     *  VirtualTraversal, Niagara pushes, tier streaming, and cascading down
+     *  to its own star systems. */
     virtual void TickFromParent(float DeltaTime, const FVector& InPlayerPos);
 #pragma endregion
 

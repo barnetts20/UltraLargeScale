@@ -2,12 +2,11 @@
 
 #pragma region Includes/ForwardDec
 #include "CoreMinimal.h"
-#include "GameFramework/Actor.h"
+#include "ProceduralSpaceActor.h"
 #include "UniverseDataGenerator.h"
 #include "GalaxyDataGenerator.h"    // FGalaxyParams — exposed at universe level for editor tuning
 #include "NiagaraSystem.h"
 #include "NiagaraComponent.h"
-#include "FOctree.h"
 #include "DataTypes.h"
 #include "FNiagaraParticleBuffer.h"
 #include "FTierStreamingContext.h"
@@ -34,7 +33,7 @@ class AGalaxyActor;
  * offsets before each Niagara push.
  */
 UCLASS()
-class SVO_API AUniverseActor : public AActor
+class SVO_API AUniverseActor : public AProceduralSpaceActor
 {
 	GENERATED_BODY()
 
@@ -55,12 +54,6 @@ public:
 	 *  per galaxy instance. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy Properties")
 	FGalaxyParams GalaxyParams;
-
-	/** Parallax speed multiplier. Per-tier virtual traversal ratio =
-	 *  SpeedScale / Params.UnitScale. Higher values make the sector appear
-	 *  closer (particles move faster relative to the player). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parallax Properties")
-	double SpeedScale = 1.0;
 
 #pragma endregion
 
@@ -83,21 +76,6 @@ public:
 #pragma endregion
 
 #pragma region Spatial Index
-
-	/**
-	 * Persistent sector-scope spatial index. Survives boundary crosses --
-	 * nodes are inserted on cell entry and left in place on exit, forming a
-	 * spatial registry of all visited particles. Rebased only when
-	 * VirtualTraversal approaches the root bounds (extremely rare).
-	 *
-	 * Data.ObjectId on each node carries a deterministic hierarchical seed
-	 * (composed via FVoxelData::ComposeSeed). Data.ParticleIndex carries the
-	 * absolute buffer index for direct position/extent lookup.
-	 *
-	 * Sized to PersistentTreeMultiplier * Params.Extent to give many cell-widths
-	 * of travel before rebasing is needed.
-	 */
-	TSharedPtr<FOctree> Octree;
 
 	/** Multiplier applied to Params.Extent for streaming cell size computation.
 	 *  CellSize = (Params.Extent * GridExtentMultiplier) / (1 << GridDepth). */
@@ -167,12 +145,6 @@ public:
 	UPROPERTY(VisibleAnywhere, Category = "Sector Grid")
 	FVector CellOrigin = FVector::ZeroVector;
 
-	/** When true the sector auto-initializes from BeginPlay. Convenient for
-	 *  level-placed test actors. Set to false for pool-managed sectors where
-	 *  ConfigureCell must run before Initialize(). */
-	UPROPERTY()
-	bool bAutoInitializeOnBeginPlay = true;
-
 	/**
 	 * Sets CellCoord and derives CellOrigin, then repositions the actor.
 	 * Also rebuilds the octree against the actual Params.Extent in case Params
@@ -210,17 +182,13 @@ public:
 
 #pragma region Lifecycle
 
-	/** Current initialization state. Drives async task guard checks and
-	 *  UpdateTier / ApplyParallaxOffset early-outs. */
-	ELifecycleState InitializationState = ELifecycleState::Uninitialized;
-
 	/**
 	 * Kicks off the async initialization chain:
 	 * InitializeChildPool → InitializeData → InitializeNiagara.
 	 * Each step checks InitializationState and bails if Pooling or Destroying
 	 * is set. Safe to call from BeginPlay or externally before FinishSpawning.
 	 */
-	void Initialize();
+	virtual void Initialize() override;
 
 #pragma endregion
 
@@ -231,19 +199,15 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
 
-	/** Placeholder for galaxy actor pool pre-warming. Currently a no-op pending
-	 *  galaxy refactor. */
-	void InitializeChildPool();
+	virtual void InitializeChildPool() override;
+	virtual void InitializeData() override;
+	virtual void InitializeNiagara() override;
 
-	/** Copies Params into UniverseGenerator and builds the noise graph.
-	 *  Called on a background thread from Initialize(). */
-	void InitializeData();
+#pragma endregion
 
-	/** Calls BuildTierConfigs then InitializeTier for all three tiers.
-	 *  Called on a background thread; each InitializeTier rendezvouses with
-	 *  the game thread via TPromise/TFuture for Niagara component creation. */
-	void InitializeNiagara();
-
+#pragma region Params Accessors
+	virtual double GetUnitScale() const override { return Params.UnitScale; }
+	virtual double GetExtent() const override { return Params.Extent; }
 #pragma endregion
 
 #pragma region Data Generation
@@ -366,47 +330,13 @@ protected:
 
 #pragma region Parallax
 
-	/** Previous frame's player world position. Used to compute PlayerDelta
-	 *  each tick for VirtualTraversal accumulation. */
-	FVector LastFrameOfReferenceLocation = FVector::ZeroVector;
-
-	/** Current frame's player world position. Cached for ComputeChildSpawnLocation. */
-	FVector CurrentFrameOfReferenceLocation = FVector::ZeroVector;
-
-	/**
-	 * Accumulated virtual displacement of the player through sector space.
-	 * Advances by (SpeedScale / Params.UnitScale) * PlayerDelta each tick.
-	 * The actor itself is pegged to the player so UE's rendering stays in a
-	 * clean numerical range; VirtualTraversal encodes how far the player has
-	 * "really" moved at sector scale.
-	 *
-	 * Used by:
-	 *   - PushTierToNiagara: RelativePos = LocalPos - VirtualTraversal.
-	 *   - ApplyParallaxOffset: per-frame position re-push.
-	 *   - UpdateTier: grid coord derivation for boundary-cross detection.
-	 *   - CheckOctreeBounds: rebase trigger.
-	 *   - DebugDrawSpawnNode: world-space node visualization.
-	 */
-	FVector VirtualTraversal = FVector::ZeroVector;
-
-	/** VirtualTraversal value at the last Niagara position push. Used to skip
-	 *  redundant pushes when the delta is sub-pixel. */
-	FVector LastPushedVirtualTraversal = FVector::ZeroVector;
-
-	/** Minimum VirtualTraversal delta (in octree units) before re-pushing
-	 *  camera-relative positions to Niagara. Sub-pixel changes are invisible,
-	 *  so skipping them avoids the full array copy+push cost per tier per tick.
-	 *  Tune via console: r.ParallaxPushThreshold */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parallax Properties")
-	double ParallaxPushThreshold = 0.5;
-
 	/**
 	 * Per-frame parallax update. Pegs the actor to the current player position,
 	 * advances VirtualTraversal, and re-pushes camera-relative positions to all
 	 * active Niagara components. Must be called before UpdateTier each tick so
 	 * streaming coord checks use the latest VirtualTraversal.
 	 */
-	void ApplyParallaxOffset();
+	virtual void ApplyParallaxOffset() override;
 
 #pragma endregion
 
@@ -432,7 +362,7 @@ protected:
 	 * @param ChildUnitScale The child actor's UnitScale (determines parallax depth).
 	 * @return               World-space spawn position.
 	 */
-	FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const;
+	virtual FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const override;
 
 #pragma endregion
 

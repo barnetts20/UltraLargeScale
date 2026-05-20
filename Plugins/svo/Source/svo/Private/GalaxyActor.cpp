@@ -87,11 +87,6 @@ void AGalaxyActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 #pragma endregion
 
 #pragma region Parallax
-void AGalaxyActor::ApplyParallaxOffset()
-{
-	// VirtualTraversal accumulation and Niagara pushes are handled inline in
-	// TickFromParent. This stub satisfies the pure virtual.
-}
 #pragma endregion
 
 #pragma region Pool Lifecycle

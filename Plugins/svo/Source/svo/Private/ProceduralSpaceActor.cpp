@@ -28,6 +28,7 @@ void AProceduralSpaceActor::Initialize()
     if (GetPlayerLocation(GetWorld(), PlayerPos))
     {
         LastFrameOfReferenceLocation = PlayerPos;
+        CurrentFrameOfReferenceLocation = PlayerPos;
     }
 
     TWeakObjectPtr<AProceduralSpaceActor> WeakThis(this);
@@ -84,13 +85,6 @@ void AProceduralSpaceActor::ResetForPool()
         VolumetricComponent = nullptr;
     }
 
-    if (NiagaraComponent)
-    {
-        NiagaraComponent->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
-        NiagaraComponent->DestroyComponent();
-        NiagaraComponent = nullptr;
-    }
-
     double Duration = FPlatformTime::Seconds() - StartTime;
     UE_LOG(LogTemp, Log, TEXT("%s::ResetForPool took: %.3f seconds"),
         *GetClass()->GetName(), Duration);
@@ -110,8 +104,6 @@ void AProceduralSpaceActor::InitializeNiagara()
 
 void AProceduralSpaceActor::InitializeChildPool()
 {
-    // Default implementation does nothing
-    // Universe and Galaxy will override this
 }
 
 void AProceduralSpaceActor::DrawDebugBounds()
@@ -147,13 +139,6 @@ void AProceduralSpaceActor::DrawDebugBounds()
             );
         }
     }
-}
-
-void AProceduralSpaceActor::Tick(float DeltaTime)
-{
-    Super::Tick(DeltaTime);
-    ApplyParallaxOffset();
-    if (IsDebug) DrawDebugBounds();
 }
 
 void AProceduralSpaceActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)

@@ -13,8 +13,7 @@
 #pragma region Constructor
 AUniverseActor::AUniverseActor()
 {
-	PrimaryActorTick.bCanEverTick = true;
-	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent")));
+	bAutoInitializeOnBeginPlay = true;
 	SectorLargeCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorLarge.NG_SectorLarge"));
 	SectorMidCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorMid.NG_SectorMid"));
 	SectorSmallCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorSmall.NG_SectorSmall"));
@@ -27,38 +26,7 @@ AUniverseActor::AUniverseActor()
 #pragma region Lifecycle
 void AUniverseActor::Initialize()
 {
-	InitializationState = ELifecycleState::Initializing;
-	FVector PlayerPos;
-	if (AProceduralSpaceActor::GetPlayerLocation(GetWorld(), PlayerPos))
-	{
-		LastFrameOfReferenceLocation = PlayerPos;
-		CurrentFrameOfReferenceLocation = PlayerPos;
-	}
-
-	TWeakObjectPtr<AUniverseActor> WeakThis(this);
-	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis]()
-		{
-			AUniverseActor* Self = WeakThis.Get();
-			if (!Self) return;
-
-			double StartTime = FPlatformTime::Seconds();
-
-			Self->InitializeChildPool();
-			if (Self->InitializationState == ELifecycleState::Pooling) return;
-
-			Self->InitializeData();
-			if (Self->InitializationState == ELifecycleState::Pooling) return;
-
-			Self->InitializeNiagara();
-			if (Self->InitializationState == ELifecycleState::Pooling) return;
-
-			Self->InitializationState = ELifecycleState::Ready;
-
-			UE_LOG(LogTemp, Log, TEXT("AUniverseActor::Initialize total duration: %.3f seconds"),
-				FPlatformTime::Seconds() - StartTime);
-
-			// No timer start needed — DetermineAndDispatchScan runs from Tick.
-		});
+	Super::Initialize();
 }
 #pragma endregion
 
@@ -216,7 +184,7 @@ void AUniverseActor::ApplyParallaxOffset()
 	if (InitializationState != ELifecycleState::Ready) return;
 
 	FVector CurrentPlayerPos;
-	if (!AProceduralSpaceActor::GetPlayerLocation(GetWorld(), CurrentPlayerPos)) return;
+	if (!GetPlayerLocation(GetWorld(), CurrentPlayerPos)) return;
 
 	const FVector PlayerDelta = CurrentPlayerPos - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = CurrentPlayerPos;

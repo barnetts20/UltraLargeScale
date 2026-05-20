@@ -32,20 +32,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Galaxy Parent Actor")
 	AUniverseActor* Universe;
 
-	UPROPERTY(EditAnywhere, Category = "Galaxy Properties")
-	bool bAutoInitializeOnBeginPlay = false;
-
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
-
-	// Virtual traversal of the player through galaxy-local space.
-	FVector VirtualTraversal = FVector::ZeroVector;
-
-	/** VirtualTraversal value at the last Niagara position push. */
-	FVector LastPushedVirtualTraversal = FVector::ZeroVector;
-
-	/** Minimum VT delta before re-pushing positions to Niagara. */
-	double ParallaxPushThreshold = 0.5;
 #pragma endregion
 
 #pragma region Spawn Range Scanning (public - tunable in editor)
@@ -145,9 +133,6 @@ protected:
 
 	/// Mirrors AUniverseActor::ComputeChildSpawnLocation, accounts for VT.
 	virtual FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const override;
-
-	/// Galaxy parallax is handled inline in TickFromParent (VirtualTraversal model).
-	virtual void ApplyParallaxOffset() override;
 
 	/** Deferred placement: finalizes world position and VirtualTraversal for a
 	 *  star system on the first tick after async init completes, mirroring

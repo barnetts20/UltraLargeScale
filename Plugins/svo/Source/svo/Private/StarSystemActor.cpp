@@ -103,17 +103,6 @@ void AStarSystemActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 #pragma endregion
 
 // ---------------------------------------------------------------------------
-//  Parallax stub (VirtualTraversal model handles everything in TickFromParent)
-// ---------------------------------------------------------------------------
-#pragma region Parallax Stub
-void AStarSystemActor::ApplyParallaxOffset()
-{
-	// VirtualTraversal accumulation and Niagara pushes are handled inline in
-	// TickFromParent — this stub satisfies the pure virtual.
-}
-#pragma endregion
-
-// ---------------------------------------------------------------------------
 //  Pool Lifecycle
 // ---------------------------------------------------------------------------
 #pragma region Pool Lifecycle

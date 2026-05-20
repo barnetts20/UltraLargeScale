@@ -123,24 +123,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "StarSystem Parent Actor")
 	AGalaxyActor* Galaxy;
 
-	UPROPERTY(EditAnywhere, Category = "StarSystem Properties")
-	bool bAutoInitializeOnBeginPlay = false;
-
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
-#pragma endregion
-
-#pragma region Virtual Traversal (mirrors GalaxyActor)
-	/** Virtual traversal of the player through star-system-local space.
-	 *  Accumulates PlayerDelta * (SpeedScale / UnitScale) each tick.
-	 *  Used to keep planet Niagara positions camera-relative. */
-	FVector VirtualTraversal = FVector::ZeroVector;
-
-	/** VirtualTraversal at the last Niagara position push. */
-	FVector LastPushedVirtualTraversal = FVector::ZeroVector;
-
-	/** Minimum VT delta before re-pushing positions to Niagara. */
-	double ParallaxPushThreshold = 0.5;
 #pragma endregion
 
 #pragma region Spawn Range Scanning (public - tunable in editor)
@@ -175,11 +159,6 @@ public:
 	void SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode);
 	void ReturnPlanetToPool(TSharedPtr<FOctreeNode> InNode);
 	void FinalizePlanetPlacement(AActor* Planet, TSharedPtr<FOctreeNode> InNode);
-
-	// Generic aliases expected by ProximityTrackerComponent.
-	// Forward to the typed planet hooks so existing call sites compile unchanged.
-	inline void SpawnEntityFromPool(TSharedPtr<FOctreeNode> InNode) { SpawnPlanetFromPool(InNode); }
-	inline void ReturnEntityToPool(TSharedPtr<FOctreeNode> InNode) { ReturnPlanetToPool(InNode); }
 #pragma endregion
 
 protected:
@@ -195,7 +174,6 @@ protected:
 	virtual void InitializeNiagara() override;
 	// No InitializeChildPool — star systems manage individual actor spawns, not a pool.
 
-	virtual void ApplyParallaxOffset() override; // Stub — VT model used instead.
 	virtual FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const override;
 #pragma endregion
 
