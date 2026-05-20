@@ -696,10 +696,11 @@ void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	// Initial world position: PlayerPos + (ParticlePos - VirtualTraversal).
-	// TickFromStarSystem will recompute this every frame, so the spawn
-	// position just needs to be roughly correct to avoid a one-frame pop.
-	const FVector SpawnLoc = CurrentFrameOfReferenceLocation + (ParticlePos - VirtualTraversal);
+	// Place the mesh at the parallax-correct world position. The planet sprite
+	// renders at (PlayerPos + (ParticlePos - VT)) in compressed virtual space.
+	// The static mesh lives in real UE space (UnitScale = 1), so we expand
+	// the camera-to-node vector by UnitScale to preserve angular position.
+	const FVector SpawnLoc = ComputeChildSpawnLocation(ParticlePos, 1.0);
 
 	AParallaxStaticMeshActor* Planet = World->SpawnActor<AParallaxStaticMeshActor>(
 		AParallaxStaticMeshActor::StaticClass(),
@@ -719,16 +720,13 @@ void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
 	Planet->System = this;
 	Planet->NodeCenter = ParticlePos;
 
-	// Visual size: Niagara positions and extents are pushed in octree-local
-	// units, and the Niagara component sits at the player position.
-	// 1 octree unit = 1 cm of offset from the camera. The mesh must match:
-	// its world-space radius IS the raw particle extent (the same value
-	// Niagara uses for sprite sizing).
-	//
-	// UnitSphere has a 50 cm radius → diameter = 100 cm.
-	// To make the sphere match a radius of 'R' cm: scale = (R * 2) / 100.
-	const double WorldRadiusCm = static_cast<double>(ParticleExtent); //TODO: We already have particle extent, this is the same, we dont need world radius cm
-	const double MeshScale = WorldRadiusCm;
+	// Visual size: the mesh must subtend the same angular size as the Niagara
+	// sprite it replaces. The sprite renders at ParticleExtent in compressed
+	// virtual space at distance |NodeCenter - VT|. The mesh sits at
+	// UnitScale * that distance, so it must be UnitScale * ParticleExtent
+	// to preserve the angular size ratio.
+	const double WorldRadius = static_cast<double>(ParticleExtent) * Params.UnitScale;
+	const double MeshScale = WorldRadius;
 
 	UStaticMesh* SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/svo/UnitSphere.UnitSphere"));
 	if (SphereMesh && Planet->MeshComponent)
@@ -751,14 +749,15 @@ void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
 
 	UE_LOG(LogTemp, Log,
 		TEXT("AStarSystemActor::SpawnPlanetFromPool — planet[%d] at (%.1f,%.1f,%.1f) "
-			"radius=%.1fcm scale=%.4f particlePos=(%.1f,%.1f,%.1f) "
-			"nodeCenter=(%.1f,%.1f,%.1f) VT=(%.1f,%.1f,%.1f)"),
+			"worldRadius=%.1f meshScale=%.4f particlePos=(%.1f,%.1f,%.1f) "
+			"nodeCenter=(%.1f,%.1f,%.1f) VT=(%.1f,%.1f,%.1f) unitScale=%.4e"),
 		PlanetIndex,
 		SpawnLoc.X, SpawnLoc.Y, SpawnLoc.Z,
-		WorldRadiusCm, MeshScale,
+		WorldRadius, MeshScale,
 		ParticlePos.X, ParticlePos.Y, ParticlePos.Z,
 		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
-		VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z);
+		VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z,
+		Params.UnitScale);
 }
 
 void AStarSystemActor::FinalizePlanetPlacement(AActor* Planet, TSharedPtr<FOctreeNode> InNode)

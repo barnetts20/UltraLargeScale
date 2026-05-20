@@ -3,7 +3,7 @@
 
 AParallaxStaticMeshActor::AParallaxStaticMeshActor()
 {
-	// Tick is disabled — position is driven by AStarSystemActor::TickFromParent
+	// Tick is disabled - position is driven by AStarSystemActor::TickFromParent
 	// via TickFromStarSystem each frame. Self-ticking would fight the VT model.
 	PrimaryActorTick.bCanEverTick = false;
 
@@ -21,17 +21,16 @@ void AParallaxStaticMeshActor::TickFromStarSystem(const FVector& InPlayerPos)
 {
 	if (!System) return;
 
-	// The planet's rendered world position is:
-	//   PlayerPos + (NodeCenter - VirtualTraversal)
+	// The mesh lives in real UE world space (UnitScale = 1). To stay visually
+	// aligned with the Niagara sprite it replaced, we place it at the same
+	// angular position as the sprite but scaled out by UnitScale:
 	//
-	// This is the same formula used by Niagara to place particles — each
-	// particle renders at (PlayerPos + (LocalPos - VT)). We replicate it
-	// here so the mesh sits exactly on top of the planet sprite it replaced.
+	//   SpritePos   = PlayerPos + (NodeCenter - VT)              [virtual space]
+	//   MeshPos     = PlayerPos + (NodeCenter - VT) * UnitScale  [real space]
 	//
-	// The star system actor is already pegged to InPlayerPos each tick,
-	// so GetActorLocation() == InPlayerPos for the system. We compute the
-	// offset directly.
-	const FVector WorldPos = InPlayerPos + (NodeCenter - System->VirtualTraversal);
+	// This is equivalent to ComputeChildSpawnLocation(NodeCenter, 1.0).
+	const FVector Offset = NodeCenter - System->VirtualTraversal;
+	const FVector WorldPos = InPlayerPos + Offset * System->Params.UnitScale;
 
 	SetActorLocation(WorldPos);
 }
