@@ -284,7 +284,7 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 	// Peak density drops with growth, controlled by falloff exponent.
 	// Exponent 1.0 = full inverse, 0.5 = sqrt, 0.0 = no drop.
 	const double densityScale = FMath::Pow(growthFactor, (double)Params.ArmDensityFalloffExponent);
-	const double peakDensity = (double)Params.SDFPeakDensity / FMath::Max(densityScale, 1e-6);
+	const double peakDensity = (double)Params.ArmPeakDensity / FMath::Max(densityScale, 1e-6);
 
 	double ArmDensity = 0.0;
 	if (ArmDist <= core)

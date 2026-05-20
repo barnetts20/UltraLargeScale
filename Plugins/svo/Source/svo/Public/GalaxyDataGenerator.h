@@ -20,10 +20,6 @@ struct SVO_API FGalaxyParams : public FBaseParams
 {
 	GENERATED_BODY()
 
-	// --- Noise ---
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	FNoiseParams NoiseParams;
-
 	// --- Density volume ---
 
 	/// Voxel resolution per axis for the density pseudo-volume texture.
@@ -41,7 +37,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// At runtime: MaxEntityScale = MaxEntityScaleFraction * Extent * UnitScale.
 	/// MaxEntityScale is then derived and should not be set directly.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
-	double MaxEntityScaleFraction = 0.0001;
+	double MaxEntityScaleFraction = 0.0002;
 
 	/// Derived at runtime from MaxEntityScaleFraction * UnitScale.
 	/// Do not author directly — overwritten in InitializeData.
@@ -57,16 +53,6 @@ struct SVO_API FGalaxyParams : public FBaseParams
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Small")
 	FTierParams SmallTier;
-
-	// --- Large tier particle count scaling ---
-
-	/// Min particle count for the large tier (smallest galaxy scale).
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Large Tier")
-	int32 MinLargeParticles = 1000;
-
-	/// Max particle count for the large tier (largest galaxy scale).
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Large Tier")
-	int32 MaxLargeParticles = 4000;
 
 	/// Per-instance count variance fraction [0, 1]. Applied as a +/- offset
 	/// on the lerped particle count for visual variety across galaxies.
@@ -86,7 +72,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Values of 2–4 are recommended; 5+ rarely improves acceptance rate
 	/// enough to justify the overhead.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Large Tier")
-	int32 LargeTierCullDepth = 2;
+	int32 LargeTierCullDepth = 3;
 
 	// --- Volume material params (carried over from legacy for volumetric setup) ---
 
@@ -133,7 +119,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 
 	/// Exponent applied to noise values during volume texture sampling.
 	/// Higher = sharper contrast between dense and empty regions.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density Volume")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density")
 	float NoisePower = 2.0f;
 
 	// =====================================================================
@@ -165,12 +151,12 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Scale radius for the Hernquist profile, in normalized [0,1] space.
 	/// Smaller = sharper core concentration. 0.1 = tight core, 0.3 = diffuse.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bulge")
-	float BulgeScaleRadius = 0.15f;
+	float BulgeScaleRadius = 1.0f;
 
 	/// Peak density of the bulge at the center (r approaching 0) [0, 1].
 	/// Zeroed for arm/disc iteration — set to 0.8-1.0 when compositing.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bulge")
-	float BulgePeakDensity = 0.0f;
+	float BulgePeakDensity = 0.03f;
 
 	/// Vertical squash factor for the bulge. 1.0 = sphere, < 1.0 = oblate.
 	/// Applied to Z before computing the Hernquist radius.
@@ -182,7 +168,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Beyond this the bulge contributes zero density. Prevents the
 	/// Hernquist 1/r^4 tail from polluting the disc/arm region.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bulge")
-	float BulgeCutoffRadius = 0.35f;
+	float BulgeCutoffRadius = 1.0f;
 
 	// --- Disc ---
 	// The disc uses a separable analytic profile: exponential radial decay
@@ -200,24 +186,24 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Acts as the sech²/exp scale height: ~76% of disc mass lies within
 	/// 1× this height above/below the plane. Maps to legacy DiscHeightRatio.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
-	float DiscHeightRatio = 0.08f;
+	float DiscHeightRatio = 0.3f;
 
 	/// Peak density of the disc at the center (r=0, z=0) [0, 1].
 	/// Zeroed for arm iteration — set to 0.3–0.5 when compositing.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
-	float DiscBaseDensity = 0.0f;
+	float DiscBaseDensity = 0.5f;
 
 	/// Exponential radial scale length, as a fraction of DiscRadius.
 	/// Controls how quickly density drops with radius.
 	/// 0.2 = tight nucleus-concentrated disc, 0.5 = very diffuse.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
-	float DiscRadialScaleLength = 0.35f;
+	float DiscRadialScaleLength = 0.5f;
 
 	/// Vertical profile exponent. Applied as exp(-(|z|/h)^DiscVerticalFalloff).
 	/// 1.0 = exponential / isothermal sheet (sharp equatorial peak).
 	/// 2.0 = Gaussian (softer, better for a thick stellar disc).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
-	float DiscVerticalFalloff = 1.0f;
+	float DiscVerticalFalloff = 3.0f;
 
 #pragma region Arm Params
 	// --- Arms (SDF-based) ---
@@ -228,12 +214,12 @@ struct SVO_API FGalaxyParams : public FBaseParams
 
 	/// Number of spiral arms. Maps to legacy ArmNumArms.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	int32 ArmCount = 2;
+	int32 ArmCount = 4;
 
 	/// Twist strength in radians at the disc edge (r = DiscRadius).
 	/// Higher = more wound spirals. Maps to legacy TwistStrength.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmTwistStrength = 4.0f;
+	float ArmTwistStrength = 6.0f;
 
 	/// Core twist boost — extra winding near the center that falls off
 	/// exponentially. Maps to legacy TwistCoreStrength. Set to 0 to disable.
@@ -243,17 +229,17 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Core twist radius — controls how quickly the core boost decays.
 	/// Maps to legacy TwistCoreRadius. Smaller = tighter core winding.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmCoreTwistRadius = 0.05f;
+	float ArmCoreTwistRadius = 0.1f;
 
 	/// Radial start of the arms, as a fraction of DiscRadius.
 	/// Below this radius, arms fade out (merge into bulge).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmStartRadius = 0.025f;
+	float ArmStartRadius = 0.05f;
 
 	/// Width of the blend zone where arms fade in from ArmStartRadius,
 	/// in normalized space. Controls how sharp the inner arm boundary is.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmStartBlendWidth = 0.05f;
+	float ArmStartBlendWidth = 0.15f;
 
 	/// Vertical squash coefficient for the arm distance calculation.
 	/// Multiplied into Z before computing distance from the arm centerline.
@@ -276,7 +262,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// At the inner edge, thicknesses are as specified. At the outer edge,
 	/// they are multiplied by this value. 1.0 = no growth, 3.0 = 3x wider.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmRadialGrowth = 3.0f;
+	float ArmRadialGrowth = 4.0f;
 
 	/// Controls how aggressively peak density drops as the arm widens.
 	/// Peak density = SDFPeakDensity / pow(growthFactor, this exponent).
@@ -284,14 +270,14 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// 0.5 = square root (3x wider = ~0.58 density, 2D area conservation)
 	/// 0.0 = no density drop at all (constant peak everywhere)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmDensityFalloffExponent = 0.5f;
+	float ArmDensityFalloffExponent = 0.333f;
 
 	/// Vertical squash at the OUTER edge (disc rim). Lerped from
 	/// ArmVerticalSquash at the inner edge to this value at the outer edge.
 	/// Should typically be less than ArmVerticalSquash (arms get vertically
 	/// thicker as they widen outward).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmVerticalSquashOuter = 2.0f;
+	float ArmVerticalSquashOuter = 3.0f;
 
 	// --- SDF → Density Remapping ---
 	// The arm SDF returns distance from the arm centerline (positive = inside
@@ -306,19 +292,19 @@ struct SVO_API FGalaxyParams : public FBaseParams
 
 	/// Distance from arm centerline within which density is at peak.
 	/// This defines the solid core of the arm. In normalized space.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Remap")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
 	float ArmCoreThickness = 0.0f;
 
 	/// Distance from arm centerline at which density reaches zero.
 	/// Must be >= ArmCoreThickness. The zone between core and envelope
 	/// is the falloff gradient. Also used for cell culling: cells whose
 	/// nearest possible SDF distance exceeds this are skipped entirely.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Remap")
-	float ArmEnvelopeThickness = 0.8f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
+	float ArmEnvelopeThickness = 0.6f;
 
 	/// Peak density at the arm core.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Remap")
-	float SDFPeakDensity = 0.9f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
+	float ArmPeakDensity = 1.0f;
 #pragma endregion
 
 	// --- Background / Halo ---
@@ -326,7 +312,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Low-level background density that fills the full galaxy volume.
 	/// Provides scattered stars outside the disc plane.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Background")
-	float BackgroundDensity = 0.0f;  // Zeroed for spiral iteration — restore to 0.02 when happy with arms
+	float BackgroundDensity = 0.01f; 
 
 	/// Vertical squash of the background halo. 1.0 = spherical, 0.5 = oblate.
 	/// Maps to legacy BackgroundHeightRatio.
@@ -374,15 +360,15 @@ struct SVO_API FGalaxyParams : public FBaseParams
 		// NeighborhoodRadius = 0 -> 1x1x1 = 1 slot, exhaustive single-pass.
 		LargeTier.GridDepth = 1;
 		LargeTier.NeighborhoodRadius = 0;
-		LargeTier.MaxParticlesPerSlot = 8000;
+		LargeTier.MaxParticlesPerSlot = 16000;
 
 		MidTier.GridDepth = 3;
 		MidTier.NeighborhoodRadius = 1;
-		MidTier.MaxParticlesPerSlot = 4000;
+		MidTier.MaxParticlesPerSlot = 8000;
 
 		SmallTier.GridDepth = 5;
 		SmallTier.NeighborhoodRadius = 1;
-		SmallTier.MaxParticlesPerSlot = 2000;
+		SmallTier.MaxParticlesPerSlot = 4000;
 
 		DeriveScaleRanges();
 	}
