@@ -60,11 +60,27 @@ struct SVO_API FStarSystemParams : public FBaseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets")
 	int32 MaxPlanets = 8;
 
-	/** Planet sprite radius as a fraction of the spacing between adjacent orbits.
-	 *  Lower = smaller planets relative to their spacing.
-	 *  Start around 0.008-0.015 — tune until they look right at approach distance. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets")
-	double PlanetExtentFraction = 0.01;
+	/** Absolute world-cm scale ranges for planet generation.
+	 *  Inner rocky planets are drawn from TerrestrialMinScale..TerrestrialMaxScale.
+	 *  Outer gas giants are drawn from GasGiantMinScale..GasGiantMaxScale.
+	 *  MakePointDataFromWorldScale converts these to octree-local extents
+	 *  using UnitScale, so planets have consistent physical sizes regardless
+	 *  of which galaxy or star spawned them.
+	 *
+	 *  Real references (diameters in cm):
+	 *    Mercury ≈ 4.9e8, Mars ≈ 6.8e8, Earth ≈ 1.27e9, Venus ≈ 1.2e9
+	 *    Neptune ≈ 4.95e9, Saturn ≈ 1.16e10, Jupiter ≈ 1.4e10 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets|Terrestrial")
+	double TerrestrialMinScale = 1e8;   // Small rocky (Ceres-to-Mercury class)
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets|Terrestrial")
+	double TerrestrialMaxScale = 1e9;   // Large super-Earth
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets|Gas Giant")
+	double GasGiantMinScale = 3e9;      // Sub-Neptune / ice giant
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets|Gas Giant")
+	double GasGiantMaxScale = 2e10;     // Hot Jupiter class
 
 	/** Fraction of Extent used for innermost orbit. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets")
@@ -86,9 +102,7 @@ struct SVO_API FStarSystemParams : public FBaseParams
 
 	FStarSystemParams()
 	{
-		// Star system extents are much smaller than galaxy; default values
-		// are illustrative — the spawning galaxy actor overwrites UnitScale.
-		Extent = 1 << 20; // ~1M octree units default; overridden at runtime.
+		//Extent = 274877906944;
 
 		LargeTier.GridDepth = 1;
 		LargeTier.NeighborhoodRadius = 0;

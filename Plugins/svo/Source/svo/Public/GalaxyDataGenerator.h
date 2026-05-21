@@ -28,21 +28,25 @@ struct SVO_API FGalaxyParams : public FBaseParams
 
 	// --- Tier scale derivation ---
 
-	/// Largest particle size as a fraction of the galaxy's physical
-	/// extent (Extent * UnitScale). Since UnitScale varies across
-	/// universe tiers (proportional to galaxy size), tying MaxEntityScale
-	/// to it ensures all galaxies produce particles at the same
-	/// proportional fraction of their volume.
+	/// Fixed absolute largest star-system scale in world cm.
+	/// All galaxies generate star particles in the same physical size
+	/// range regardless of parent galaxy size. The tier depth sequence
+	/// (1/3/5, spacing 2, ratio 4) gives a 64x total spread:
 	///
-	/// At runtime: MaxEntityScale = MaxEntityScaleFraction * Extent * UnitScale.
-	/// MaxEntityScale is then derived and should not be set directly.
-	/// TODO: We need a way for these values to be deterministically defined - if everything derives top to bottom we will end up with a large variance in scale for entities that should actually be similar...
+	///   Large: 3e18 → 7.5e17   (bright giants, wide binaries)
+	///   Mid:   7.5e17 → 1.875e17 (solar-type systems)
+	///   Small: 1.875e17 → ~4.7e16 (compact red dwarf systems)
+	///
+	/// Real references:
+	///   Solar system to Pluto orbit ≈ 1.2e19 cm diameter
+	///   Compact M-dwarf habitable zone ≈ 3e16 cm
+	///   Wide binary separation ≈ 1e18 cm
+	///
+	/// MakePointDataFromWorldScale converts these to octree-local extents
+	/// using the galaxy's UnitScale, so the octree depth adapts to each
+	/// galaxy's coordinate system while the physical size stays constant.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
-	double MaxEntityScaleFraction = 0.0002;
-
-	/// Derived at runtime from MaxEntityScaleFraction * UnitScale.
-	/// Do not author directly — overwritten in InitializeData.
-	double MaxEntityScale = 1e18;
+	double MaxEntityScale = 3e18;
 
 	// --- Per-tier streaming configs ---
 
@@ -308,7 +312,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Low-level background density that fills the full galaxy volume.
 	/// Provides scattered stars outside the disc plane.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Background")
-	float BackgroundDensity = 0.01f; 
+	float BackgroundDensity = 0.01f;
 
 	/// Vertical squash of the background halo. 1.0 = spherical, 0.5 = oblate.
 	/// Maps to legacy BackgroundHeightRatio.
@@ -347,7 +351,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	FGalaxyParams()
 	{
 		Seed = 666;
-		Extent = 2147483648;
+		Extent = 274877906944;
 		UnitScale = 1e11;
 		Rotation = FRotator::ZeroRotator;
 		ParentColor = FLinearColor(1, 1, 1, 0);

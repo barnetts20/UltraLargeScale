@@ -158,8 +158,9 @@ void AGalaxyActor::InitializeData()
 	double StartTime = FPlatformTime::Seconds();
 
 	GalaxyGenerator.Params = Params;
-	GalaxyGenerator.Params.MaxEntityScale = Params.MaxEntityScaleFraction
-		* static_cast<double>(Params.Extent) * Params.UnitScale;
+	// MaxEntityScale is a fixed absolute world-cm value on FGalaxyParams.
+	// DeriveScaleRanges cascades it through the tier depth sequence to
+	// set MinScale/MaxScale per tier. No per-instance derivation needed.
 	GalaxyGenerator.Params.DeriveScaleRanges();
 	GalaxyGenerator.Initialize();
 
@@ -612,8 +613,7 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 	// With multiplier:  UnitScale = (ParticleExtent * Galaxy.UnitScale * BoundsScaleMultiplier) / Extent
 	//   → Extent octree units == BoundsScaleMultiplier star radii in world space.
 	//   → OuterOrbitFraction * Extent octree units == a comfortable orbital distance.
-	System->Params.UnitScale = (static_cast<double>(ParticleExtent) * Params.UnitScale
-		* System->Params.BoundsScaleMultiplier) / System->Params.Extent;
+	System->Params.UnitScale = (static_cast<double>(ParticleExtent) * Params.UnitScale) / System->Params.Extent;
 	System->SpeedScale = Universe ? Universe->SpeedScale : SpeedScale;
 	// ObjectId is the deterministic hierarchical seed composed from
 	// (GalaxySeed, GridCoord, GenerationIndex) during octree insertion.

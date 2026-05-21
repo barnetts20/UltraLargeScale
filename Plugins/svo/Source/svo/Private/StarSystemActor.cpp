@@ -187,9 +187,13 @@ void AStarSystemActor::InitializeData()
 	// Rebuild the octree against the current Params.Extent.
 	Octree = MakeShared<FOctree>(Params.Extent);
 
+	UE_LOG(LogTemp, Warning, TEXT("StarSystem::InitializeData — UnitScale=%.6e, Extent=%.0f, Seed=%d"),
+		Params.UnitScale, Params.Extent, Params.Seed);
 	// --- Analytically build planet positions along +X axis ---
-	// We skip the noise generator entirely (density function = 0).
 	// Planets are evenly spaced between InnerOrbit and OuterOrbit along +X.
+	// Sizes use absolute world-cm scales converted to octree-local extents
+	// via UnitScale, so planets have consistent physical sizes regardless
+	// of which galaxy spawned the parent star.
 	const int32 NumPlanets = FMath::Max(1, Params.MaxPlanets);
 	const double InnerRadius = Params.Extent * Params.InnerOrbitFraction;
 	const double OuterRadius = Params.Extent * Params.OuterOrbitFraction;
@@ -199,6 +203,11 @@ void AStarSystemActor::InitializeData()
 	PlanetColors.SetNumUninitialized(NumPlanets);
 
 	FRandomStream Stream(Params.Seed);
+
+	// Decide frost line — inner planets are rocky, outer are gas giants.
+	const int32 FrostLineIndex = FMath::Clamp(
+		FMath::RoundToInt32(NumPlanets * Stream.FRandRange(0.35f, 0.55f)),
+		1, NumPlanets - 1);
 
 	for (int32 i = 0; i < NumPlanets; i++)
 	{
@@ -213,12 +222,35 @@ void AStarSystemActor::InitializeData()
 		// Place along +X axis — easy to traverse in a straight line.
 		PlanetPositions[i] = FVector(OrbitRadius, 0.0, 0.0);
 
-		// Planet sprite size: 1% of the spacing between adjacent orbits.
-		// Keeps planets clearly distinct from each other and from the star.
-		// Tune PlanetExtentFraction on FStarSystemParams if needed.
-		const double Spacing = (NumPlanets > 1) ? (OuterRadius - InnerRadius) / static_cast<double>(NumPlanets - 1) : OuterRadius;
-		const double PlanetExtent = Spacing * Params.PlanetExtentFraction;
-		PlanetExtents[i] = static_cast<float>(FMath::Max(PlanetExtent, 1.0));
+		// --- Absolute planet scale (world cm) → octree-local extent ---
+		// Inner planets (below frost line) draw from terrestrial range.
+		// Outer planets draw from gas giant range.
+		// Both are converted to octree-local units by dividing by UnitScale.
+		double PlanetWorldScale;
+		if (i < FrostLineIndex)
+		{
+			// Terrestrial: inner planets tend larger (Earth/Venus zone),
+			// outer rocky worlds tend smaller (Mars-class).
+			const double InnerT = (FrostLineIndex > 1)
+				? static_cast<double>(i) / static_cast<double>(FrostLineIndex - 1)
+				: 0.5;
+			const double MaxForSlot = FMath::Lerp(Params.TerrestrialMaxScale, Params.TerrestrialMinScale, InnerT);
+			PlanetWorldScale = Stream.FRandRange(Params.TerrestrialMinScale, MaxForSlot);
+		}
+		else
+		{
+			// Gas giant: closer to frost line = larger (Jupiter zone),
+			// far outer = smaller (Neptune/ice giants).
+			const double OuterT = (NumPlanets - FrostLineIndex > 1)
+				? static_cast<double>(i - FrostLineIndex) / static_cast<double>(NumPlanets - FrostLineIndex - 1)
+				: 0.5;
+			const double MaxForSlot = FMath::Lerp(Params.GasGiantMaxScale, Params.GasGiantMinScale, OuterT);
+			PlanetWorldScale = Stream.FRandRange(Params.GasGiantMinScale, MaxForSlot);
+		}
+
+		// Convert world-cm to octree-local extent.
+		const double PlanetLocalSize = PlanetWorldScale / Params.UnitScale;
+		PlanetExtents[i] = static_cast<float>(FMath::Max(PlanetLocalSize, 1.0));
 
 		// Vary color by orbit: inner = warm rocky, outer = cool icy blue.
 		PlanetColors[i] = FLinearColor(
@@ -230,10 +262,11 @@ void AStarSystemActor::InitializeData()
 	}
 
 	UE_LOG(LogTemp, Log,
-		TEXT("AStarSystemActor::InitializeData — %d planets along +X [%.0f … %.0f octree units], extents ~%.0f (fraction=%.3f)"),
-		NumPlanets, InnerRadius, OuterRadius,
-		NumPlanets > 1 ? (OuterRadius - InnerRadius) / static_cast<double>(NumPlanets - 1) * Params.PlanetExtentFraction : 1.0,
-		Params.PlanetExtentFraction);
+		TEXT("AStarSystemActor::InitializeData — %d planets along +X [%.0f … %.0f octree units], "
+			"frost line at index %d, UnitScale=%.4e, terrestrial=[%.2e..%.2e] gas=[%.2e..%.2e] cm"),
+		NumPlanets, InnerRadius, OuterRadius, FrostLineIndex, Params.UnitScale,
+		Params.TerrestrialMinScale, Params.TerrestrialMaxScale,
+		Params.GasGiantMinScale, Params.GasGiantMaxScale);
 }
 #pragma endregion
 
@@ -355,7 +388,7 @@ void AStarSystemActor::BuildTierConfigs()
 	// Large tier bounds: cover all planetary orbits.
 	// OuterOrbit = Extent * OuterOrbitFraction, padded by BoundsScaleMultiplier.
 	LargeTierConfig.ComputeBounds = [this]() {
-		const double HalfBound = Params.Extent * Params.OuterOrbitFraction * Params.BoundsScaleMultiplier;
+		const double HalfBound = Params.Extent * Params.OuterOrbitFraction;
 		return FBox(FVector(-HalfBound), FVector(HalfBound));
 		};
 

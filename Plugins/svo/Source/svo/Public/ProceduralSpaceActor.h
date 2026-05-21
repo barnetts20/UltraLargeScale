@@ -16,7 +16,7 @@ struct SVO_API FBaseParams {
     int Seed = 0;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-    double Extent = 2147483648;
+    double Extent = 274877906944; // 2^38
 
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Generation")
     double UnitScale = 1.0;  // Derived - set by spawning actor
@@ -100,7 +100,7 @@ public:
 
 #pragma region Params Accessors
     virtual double GetUnitScale() const { return 1; }
-    virtual double GetExtent() const { return 2147483648; }
+    virtual double GetExtent() const { return 274877906944; }
     virtual double GetParentSpeedScale() const { return 1; }
 #pragma endregion
 

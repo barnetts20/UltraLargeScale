@@ -1,4 +1,4 @@
-// Fill out your copyright notice in the Description page of Project Settings.
+﻿// Fill out your copyright notice in the Description page of Project Settings.
 
 
 #include "StarSystemDataGenerator.h"
@@ -120,15 +120,21 @@ void StarSystemDataGenerator::GeneratePlanet(const FOrbit& InPlanetOrbit, int32 
 	double scale = 0;
 	FVector composition;
 
+	// All scales are absolute world-cm (diameters). These are fixed physical
+	// sizes independent of which galaxy or star system spawned us.
+	// Real references:
+	//   Mercury ≈ 4.9e8, Mars ≈ 6.8e8, Earth ≈ 1.27e9, Venus ≈ 1.2e9
+	//   Neptune ≈ 4.95e9, Saturn ≈ 1.16e10, Jupiter ≈ 1.4e10
+
 	if (InPlanetOrbit.Type == EObjectType::TerrestrialPlanet)
 	{
 		// Distance-based sizing: inner planets can be larger (Venus/Earth-like)
 		if (normDist < 0.3)
-			scale = Stream.FRandRange(400000000, 1200000000); // Mercury to Earth
+			scale = Stream.FRandRange(5e8, 2e9);   // Mercury-to-super-Earth
 		else if (normDist < 0.6)
-			scale = Stream.FRandRange(300000000, 700000000); // Mars-like
+			scale = Stream.FRandRange(3.5e8, 1e9);  // Mars-like
 		else
-			scale = Stream.FRandRange(150000000, 500000000); // Icy dwarfs
+			scale = Stream.FRandRange(3e8, 6e8);    // Icy dwarfs
 
 		// Color variation for terrestrial
 		composition = FVector(
@@ -139,11 +145,11 @@ void StarSystemDataGenerator::GeneratePlanet(const FOrbit& InPlanetOrbit, int32 
 	}
 	else if (InPlanetOrbit.Type == EObjectType::GasPlanet)
 	{
-		// Gas giants larger in middle/outer system
+		// Gas giants: inner = Jupiter-class, outer = Neptune/ice-giant class
 		if (normDist < 0.4)
-			scale = Stream.FRandRange(4000000000, 10000000000); // Jupiter-like
+			scale = Stream.FRandRange(8e9, 2e10);   // Jupiter/Saturn class
 		else
-			scale = Stream.FRandRange(2000000000, 60000000000); // Neptune-like
+			scale = Stream.FRandRange(3e9, 8e9);    // Neptune/Uranus class
 
 		// Color variation for gas giants
 		float hue = Stream.FRand();
@@ -159,7 +165,7 @@ void StarSystemDataGenerator::GeneratePlanet(const FOrbit& InPlanetOrbit, int32 
 		return;
 	}
 
-	FPointData PlanetData = FPointData::MakePointDataFromWorldScale(scale, UnitScale, Extent);// MakePointDataFromScale(scale);
+	FPointData PlanetData = FPointData::MakePointDataFromWorldScale(scale, UnitScale, Extent);
 	PlanetData.Data.TypeId = InPlanetOrbit.Type;
 	PlanetData.Data.Composition = composition;
 	PlanetData.SetPosition(GetOrbitPosition(InPlanetOrbit));
@@ -276,10 +282,12 @@ void StarSystemDataGenerator::GenerateDebris(const FOrbit& InDebrisOrbit, int32 
 		FVector VerticalOffset = DebrisOrbit.Normal * Stream.FRandRange(-verticalThickness, verticalThickness);
 		FVector FinalPos = BasePos + VerticalOffset;
 
-		// Debris size variation
-		double debrisScale = Stream.FRandRange(500000, 1500000); // 1km to 5km asteroids
+		// Debris size variation (absolute world cm)
+		// Typical asteroids: 1-50 km diameter = 1e5 to 5e6 cm
+		// Large objects (Ceres-class): up to ~1e8 cm
+		double debrisScale = Stream.FRandRange(1e5, 5e6); // 1km to 50km asteroids
 		if (Stream.FRand() < 0.05) // 5% chance of larger object
-			debrisScale = Stream.FRandRange(1500000, 40000000);
+			debrisScale = Stream.FRandRange(5e6, 1e8);
 
 		FPointData DebrisData = FPointData::MakePointDataFromWorldScale(debrisScale, UnitScale, Extent);
 		DebrisData.Data.TypeId = EObjectType::Debris;
@@ -316,8 +324,8 @@ void StarSystemDataGenerator::GenerateUnboundDebris()
 			r * FMath::Cos(phi)
 		);
 
-		// Small debris objects
-		double debrisScale = Stream.FRandRange(500000, 2000000);
+		// Small debris objects (absolute world cm, 1-20 km diameter)
+		double debrisScale = Stream.FRandRange(1e5, 2e6);
 
 		FPointData DebrisData = FPointData::MakePointDataFromWorldScale(debrisScale, UnitScale, Extent);
 		DebrisData.Data.TypeId = EObjectType::Debris;
@@ -352,8 +360,8 @@ void StarSystemDataGenerator::GenerateGas()
 			z
 		);
 
-		// Very large, very low density gas clouds
-		FPointData GasData = FPointData::MakePointDataFromWorldScale(Stream.FRandRange(500000, 2000000), UnitScale, Extent);
+		// Very large, very low density gas clouds (absolute world cm)
+		FPointData GasData = FPointData::MakePointDataFromWorldScale(Stream.FRandRange(1e5, 2e6), UnitScale, Extent);
 		GasData.Data.Density = Stream.FRandRange(0.001, 0.01); // Very diffuse
 		GasData.Data.TypeId = EObjectType::Gas;
 		GasData.Data.Composition = FVector(0.1, 0.1, 0.15); // Faint blue

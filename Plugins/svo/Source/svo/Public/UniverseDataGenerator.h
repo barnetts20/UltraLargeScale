@@ -203,7 +203,7 @@ struct SVO_API FUniverseParams : public FBaseParams {
 
 	FUniverseParams() {
 		Seed = 69;
-		Extent = 2147483648;
+		Extent = 274877906944;
 		UnitScale = 2e17;
 		Rotation = FRotator::ZeroRotator;
 		ParentColor = FLinearColor(1, 1, 1);
