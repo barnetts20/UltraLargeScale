@@ -36,6 +36,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	///
 	/// At runtime: MaxEntityScale = MaxEntityScaleFraction * Extent * UnitScale.
 	/// MaxEntityScale is then derived and should not be set directly.
+	/// TODO: We need a way for these values to be deterministically defined - if everything derives top to bottom we will end up with a large variance in scale for entities that should actually be similar...
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
 	double MaxEntityScaleFraction = 0.0002;
 
@@ -54,11 +55,6 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Small")
 	FTierParams SmallTier;
 
-	/// Per-instance count variance fraction [0, 1]. Applied as a +/- offset
-	/// on the lerped particle count for visual variety across galaxies.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Large Tier")
-	float ParticleCountVariance = 0.15f;
-
 	// --- Large tier SDF culling grid ---
 
 	/// Grid depth used to subdivide the galaxy volume for SDF-based cell
@@ -72,7 +68,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Values of 2–4 are recommended; 5+ rarely improves acceptance rate
 	/// enough to justify the overhead.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Large Tier")
-	int32 LargeTierCullDepth = 3;
+	int32 LargeTierCullDepth = 2;
 
 	// --- Volume material params (carried over from legacy for volumetric setup) ---
 
@@ -107,7 +103,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	double VolumeWarpAmount = .05;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	double VolumeWarpScale = .33;
+	double VolumeWarpScale = .13;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
 	FString VolumeNoise = "/svo/VolumeTextures/VT_PerlinWorley_Balanced";
