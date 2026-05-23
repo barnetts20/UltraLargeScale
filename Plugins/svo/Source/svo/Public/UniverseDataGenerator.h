@@ -156,7 +156,7 @@ struct SVO_API FUniverseParams : public FBaseParams {
 
 	// --- Noise ---
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	FNoiseParams NoiseParams;
+	FNoiseParams DensityParams;
 
 	// --- Tier scale derivation ---
 

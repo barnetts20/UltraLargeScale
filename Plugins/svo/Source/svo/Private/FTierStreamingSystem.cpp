@@ -130,7 +130,8 @@ void FTierStreamingSystem::InitializeTier(
 
 					const FBox Bounds = Config.ComputeBounds();
 					NC->SetSystemFixedBounds(Bounds);
-					NC->TranslucencySortPriority = 0;
+					NC->TranslucencySortPriority = -1000;
+					NC->SetCustomDepthStencilValue(-1000);
 				}
 				else
 				{

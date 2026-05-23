@@ -4,7 +4,8 @@
 #include "CoreMinimal.h"
 #include "ProceduralSpaceActor.h"
 #include "UniverseDataGenerator.h"
-#include "GalaxyDataGenerator.h"    // FGalaxyParams — exposed at universe level for editor tuning
+#include "GalaxyDataGenerator.h"
+#include "StarSystemDataGenerator.h"
 #include "NiagaraSystem.h"
 #include "NiagaraComponent.h"
 #include "DataTypes.h"
@@ -42,16 +43,9 @@ public:
 
 #pragma region Editor Parameters
 
-	/** Full universe generation and tier streaming parameters. Editable in the
-	 *  Details panel; changes take effect on the next Initialize() call. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
-	FUniverseParams Params;
+	FUniverseParams UniverseParams;
 
-	/** Galaxy generation parameters. Owned at the universe level so the
-	 *  spiral density field, tier configs, and volume material settings can
-	 *  be tuned in-editor without rebuilding. Passed to each galaxy on spawn.
-	 *  Will eventually become a proceduralization bounds struct randomized
-	 *  per galaxy instance. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy Properties")
 	FGalaxyParams GalaxyParams;
 
@@ -206,8 +200,8 @@ protected:
 #pragma endregion
 
 #pragma region Params Accessors
-	virtual double GetUnitScale() const override { return Params.UnitScale; }
-	virtual double GetExtent() const override { return Params.Extent; }
+	virtual double GetUnitScale() const override { return UniverseParams.UnitScale; }
+	virtual double GetExtent() const override { return UniverseParams.Extent; }
 #pragma endregion
 
 #pragma region Data Generation

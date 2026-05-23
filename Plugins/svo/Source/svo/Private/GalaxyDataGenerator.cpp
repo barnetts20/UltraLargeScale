@@ -19,9 +19,9 @@ float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY) co
 	// the arm tube cross-section appears round when viewed edge-on.
 	// =====================================================================
 
-	const double discR = (double)Params.DiscRadius;
-	const double armStart = (double)Params.ArmStartRadius * discR;
-	const int32 N = FMath::Max(Params.ArmCount, 1);
+	const double discR = (double)Params.DensityParams.DiscRadius;
+	const double armStart = (double)Params.DensityParams.ArmStartRadius * discR;
+	const int32 N = FMath::Max(Params.DensityParams.ArmCount, 1);
 
 	if (rXY < 1e-6 || N <= 0)
 		return 10.0f;
@@ -31,9 +31,9 @@ float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY) co
 
 	// --- Un-twist to find angular offset from nearest arm ---
 	const double normalizedR = rXY / discR;
-	const double baseTwist = (double)Params.ArmTwistStrength * normalizedR;
-	const double coreBoost = (double)Params.ArmCoreTwistStrength *
-		-FMath::Exp((double)Params.ArmCoreTwistRadius /
+	const double baseTwist = (double)Params.DensityParams.ArmTwistStrength * normalizedR;
+	const double coreBoost = (double)Params.DensityParams.ArmCoreTwistStrength *
+		-FMath::Exp((double)Params.DensityParams.ArmCoreTwistRadius /
 			FMath::Max(normalizedR, 1e-4));
 	const double twistAngle = baseTwist + coreBoost;
 
@@ -63,13 +63,13 @@ float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY) co
 
 	// Vertical squash lerps from inner to outer value along the arm
 	const double squash = FMath::Lerp(
-		(double)Params.ArmVerticalSquash, (double)Params.ArmVerticalSquashOuter, tRadial);
+		(double)Params.DensityParams.ArmVerticalSquash, (double)Params.DensityParams.ArmVerticalSquashOuter, tRadial);
 	const double scaledZ = InNormPos.Z * squash;
 
 	double dist = FMath::Sqrt(xyDist * xyDist + scaledZ * scaledZ);
 
 	// Fade in from arm start radius
-	const double blendWidth = FMath::Max((double)Params.ArmStartBlendWidth, 1e-6);
+	const double blendWidth = FMath::Max((double)Params.DensityParams.ArmStartBlendWidth, 1e-6);
 	if (rXY < armStart)
 	{
 		dist += (armStart - rXY);
@@ -87,13 +87,13 @@ float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY) co
 float GalaxyDataGenerator::SampleBulgeSDF(const FVector& InNormPos) const
 {
 	// Signed distance to the bulge ellipsoid. Positive inside.
-	const double squashedZ = InNormPos.Z / FMath::Max((double)Params.BulgeVerticalSquash, 0.01);
+	const double squashedZ = InNormPos.Z / FMath::Max((double)Params.DensityParams.BulgeVerticalSquash, 0.01);
 	const double rBulge = FMath::Sqrt(
 		InNormPos.X * InNormPos.X +
 		InNormPos.Y * InNormPos.Y +
 		squashedZ * squashedZ);
 
-	return static_cast<float>((double)Params.BulgeCutoffRadius - rBulge);
+	return static_cast<float>((double)Params.DensityParams.BulgeCutoffRadius - rBulge);
 }
 
 float GalaxyDataGenerator::SampleBulgeDensity(const FVector& InNormPos) const
@@ -117,14 +117,14 @@ float GalaxyDataGenerator::SampleBulgeDensity(const FVector& InNormPos) const
 	// from leaking density into the disc and arm regions.
 	// =====================================================================
 
-	if (Params.BulgePeakDensity <= 0.0f)
+	if (Params.DensityParams.BulgePeakDensity <= 0.0f)
 		return 0.0f;
 
-	const double a = FMath::Max((double)Params.BulgeScaleRadius, 1e-6);
-	const double cutoff = FMath::Max((double)Params.BulgeCutoffRadius, a);
+	const double a = FMath::Max((double)Params.DensityParams.BulgeScaleRadius, 1e-6);
+	const double cutoff = FMath::Max((double)Params.DensityParams.BulgeCutoffRadius, a);
 
 	// Oblate radius
-	const double squashedZ = InNormPos.Z / FMath::Max((double)Params.BulgeVerticalSquash, 1e-4);
+	const double squashedZ = InNormPos.Z / FMath::Max((double)Params.DensityParams.BulgeVerticalSquash, 1e-4);
 	const double r = FMath::Sqrt(
 		InNormPos.X * InNormPos.X +
 		InNormPos.Y * InNormPos.Y +
@@ -159,15 +159,15 @@ float GalaxyDataGenerator::SampleBulgeDensity(const FVector& InNormPos) const
 	}
 
 	return FMath::Clamp(
-		static_cast<float>((double)Params.BulgePeakDensity * normalised * fade),
+		static_cast<float>((double)Params.DensityParams.BulgePeakDensity * normalised * fade),
 		0.0f, 1.0f);
 }
 
 float GalaxyDataGenerator::SampleDiscSDF(const FVector& InNormPos, double rXY, double absZ) const
 {
 	// Signed distance to the disc volume (flat cylinder). Positive inside.
-	const double discR = (double)Params.DiscRadius;
-	const double h = FMath::Max(discR * (double)Params.DiscHeightRatio, 1e-6);
+	const double discR = (double)Params.DensityParams.DiscRadius;
+	const double h = FMath::Max(discR * (double)Params.DensityParams.DiscHeightRatio, 1e-6);
 
 	// Distance to the radial boundary
 	const double radialDist = discR - rXY;
@@ -209,12 +209,12 @@ float GalaxyDataGenerator::SampleDiscDensity(double rXY, double absZ) const
 	// absZ > h) prevents leakage into the arm/bulge regions above/below.
 	// =====================================================================
 
-	if (Params.DiscBaseDensity <= 0.0f)
+	if (Params.DensityParams.DiscBaseDensity <= 0.0f)
 		return 0.0f;
 
-	const double discR = (double)Params.DiscRadius;
-	const double h = discR * FMath::Max((double)Params.DiscHeightRatio, 1e-6);
-	const double scaleL = discR * FMath::Max((double)Params.DiscRadialScaleLength, 1e-6);
+	const double discR = (double)Params.DensityParams.DiscRadius;
+	const double h = discR * FMath::Max((double)Params.DensityParams.DiscHeightRatio, 1e-6);
+	const double scaleL = discR * FMath::Max((double)Params.DensityParams.DiscRadialScaleLength, 1e-6);
 
 	// Hard boundary — outside cylinder contributes nothing
 	if (rXY >= discR || absZ >= h)
@@ -226,10 +226,10 @@ float GalaxyDataGenerator::SampleDiscDensity(double rXY, double absZ) const
 	// Vertical: exp(-(|z|/h)^falloff)
 	// Clamp zNorm to [0,1] — absZ < h is guaranteed above, but float precision guard
 	const double zNorm = FMath::Min(absZ / h, 1.0);
-	const double vExp = FMath::Max((double)Params.DiscVerticalFalloff, 0.1);
+	const double vExp = FMath::Max((double)Params.DensityParams.DiscVerticalFalloff, 0.1);
 	const double verticalProfile = FMath::Exp(-FMath::Pow(zNorm, vExp));
 
-	return static_cast<float>((double)Params.DiscBaseDensity * radialProfile * verticalProfile);
+	return static_cast<float>((double)Params.DensityParams.DiscBaseDensity * radialProfile * verticalProfile);
 }
 
 #pragma endregion
@@ -269,22 +269,22 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 	const float ArmDist = SampleArmSDF(InNormPos, rXY);
 
 	// Radial progress along the arm (same t as in SampleArmSDF)
-	const double discR = (double)Params.DiscRadius;
-	const double armStart = (double)Params.ArmStartRadius * discR;
+	const double discR = (double)Params.DensityParams.DiscRadius;
+	const double armStart = (double)Params.DensityParams.ArmStartRadius * discR;
 	const double tRadial = FMath::Clamp(
 		(rXY - armStart) / FMath::Max(discR - armStart, 1e-6), 0.0, 1.0);
 
 	// Radial growth factor: envelope/core widen as the arm extends outward
-	const double growthFactor = FMath::Lerp(1.0, (double)Params.ArmRadialGrowth, tRadial);
+	const double growthFactor = FMath::Lerp(1.0, (double)Params.DensityParams.ArmRadialGrowth, tRadial);
 
 	// Scale core and envelope by growth
-	const double core = FMath::Max((double)Params.ArmCoreThickness * growthFactor, 0.0);
-	const double envelope = FMath::Max((double)Params.ArmEnvelopeThickness * growthFactor, core + 1e-6);
+	const double core = FMath::Max((double)Params.DensityParams.ArmCoreThickness * growthFactor, 0.0);
+	const double envelope = FMath::Max((double)Params.DensityParams.ArmEnvelopeThickness * growthFactor, core + 1e-6);
 
 	// Peak density drops with growth, controlled by falloff exponent.
 	// Exponent 1.0 = full inverse, 0.5 = sqrt, 0.0 = no drop.
-	const double densityScale = FMath::Pow(growthFactor, (double)Params.ArmDensityFalloffExponent);
-	const double peakDensity = (double)Params.ArmPeakDensity / FMath::Max(densityScale, 1e-6);
+	const double densityScale = FMath::Pow(growthFactor, (double)Params.DensityParams.ArmDensityFalloffExponent);
+	const double peakDensity = (double)Params.DensityParams.ArmPeakDensity / FMath::Max(densityScale, 1e-6);
 
 	double ArmDensity = 0.0;
 	if (ArmDist <= core)
@@ -311,27 +311,27 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 	double Density = SmoothMax(BulgeDensity, DiscDensity, ArmDensity, 6);
 
 	// --- Background halo (not SDF-based) ---
-	if (Params.BackgroundDensity > 0.0f)
+	if (Params.DensityParams.BackgroundDensity > 0.0f)
 	{
-		const double squashedZ = pz / FMath::Max((double)Params.BackgroundVerticalSquash, 0.01);
+		const double squashedZ = pz / FMath::Max((double)Params.DensityParams.BackgroundVerticalSquash, 0.01);
 		const double rBg = FMath::Sqrt(px * px + py * py + squashedZ * squashedZ);
-		const double cutoff = (double)Params.BackgroundCutoffRadius;
+		const double cutoff = (double)Params.DensityParams.BackgroundCutoffRadius;
 
 		if (rBg < cutoff)
 		{
-			const double fadeStart = (double)Params.BackgroundFadeStart * cutoff;
+			const double fadeStart = (double)Params.DensityParams.BackgroundFadeStart * cutoff;
 			double Fade = 1.0;
 			if (rBg > fadeStart)
 			{
 				const double t2 = (rBg - fadeStart) / (cutoff - fadeStart);
 				Fade = 1.0 - t2 * t2 * (3.0 - 2.0 * t2);
 			}
-			Density += (double)Params.BackgroundDensity * Fade;
+			Density += (double)Params.DensityParams.BackgroundDensity * Fade;
 		}
 	}
 
 	// --- Bounds fade — spherical smoothstep to zero approaching r=1.0 ---
-	const double fadeStart = (double)Params.BoundsFadeStart;
+	const double fadeStart = (double)Params.DensityParams.BoundsFadeStart;
 	if (rBounds > fadeStart)
 	{
 		const double t = (rBounds - fadeStart) / (1.0 - fadeStart);
@@ -411,7 +411,7 @@ TArray<uint8> GalaxyDataGenerator::SampleNoiseVolume(int InNoiseResolution) cons
 					const double nx = -1.0 + (x + 0.5) * VoxelSize;
 
 					float Density = SampleDensity(FVector(nx, ny, nz));
-					Density = FMath::Pow(Density, Params.NoisePower);
+					Density = FMath::Pow(Density, Params.DensityParams.NoisePower);
 					uint8 DensityByte = static_cast<uint8>(FMath::Clamp(Density * 255.0f, 0.0f, 255.0f));
 
 					const int64 Idx = ((int64)z * InNoiseResolution * InNoiseResolution

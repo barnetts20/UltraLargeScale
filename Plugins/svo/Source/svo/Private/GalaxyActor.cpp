@@ -166,13 +166,13 @@ void AGalaxyActor::InitializeData()
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
-	TArray<uint8> VolumeData = GalaxyGenerator.SampleNoiseVolume(Params.DensityVolumeResolution);
+	TArray<uint8> VolumeData = GalaxyGenerator.SampleNoiseVolume(Params.MaterialParams.DensityVolumeResolution);
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
 	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(
 		FVolumeTextureUtils::PackToPseudoVolumeLayout(
-			FVolumeTextureUtils::UpscaleVolumeData(VolumeData, Params.DensityVolumeResolution)));
+			FVolumeTextureUtils::UpscaleVolumeData(VolumeData, Params.MaterialParams.DensityVolumeResolution)));
 
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeData took: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
 }
@@ -207,18 +207,18 @@ void AGalaxyActor::InitializeVolumetric()
 				LoadObject<UMaterialInterface>(nullptr, *Self->VolumetricMaterialPath), Self);
 
 			Self->VolumeMaterial->SetTextureParameterValue(FName("VolumeTexture"), Self->PseudoVolumeTexture);
-			Self->VolumeMaterial->SetTextureParameterValue(FName("NoiseTexture"), LoadObject<UVolumeTexture>(nullptr, *Self->Params.VolumeNoise));
-			Self->VolumeMaterial->SetVectorParameterValue(FName("AmbientColor"), Self->Params.VolumeAmbientColor);
-			Self->VolumeMaterial->SetVectorParameterValue(FName("CoolShift"), Self->Params.VolumeCoolShift);
-			Self->VolumeMaterial->SetVectorParameterValue(FName("HotShift"), Self->Params.VolumeHotShift);
-			Self->VolumeMaterial->SetScalarParameterValue(FName("HueVariance"), Self->Params.VolumeHueVariance);
-			Self->VolumeMaterial->SetScalarParameterValue(FName("HueVarianceScale"), Self->Params.VolumeHueVarianceScale);
-			Self->VolumeMaterial->SetScalarParameterValue(FName("SaturationVariance"), Self->Params.VolumeSaturationVariance);
-			Self->VolumeMaterial->SetScalarParameterValue(FName("TemperatureInfluence"), Self->Params.VolumeTemperatureInfluence);
-			Self->VolumeMaterial->SetScalarParameterValue(FName("TemperatureScale"), Self->Params.VolumeTemperatureScale);
-			Self->VolumeMaterial->SetScalarParameterValue(FName("ScaleFactor"), Self->Params.VolumeDensity);
-			Self->VolumeMaterial->SetScalarParameterValue(FName("WarpAmount"), Self->Params.VolumeWarpAmount);
-			Self->VolumeMaterial->SetScalarParameterValue(FName("WarpScale"), Self->Params.VolumeWarpScale);
+			Self->VolumeMaterial->SetTextureParameterValue(FName("NoiseTexture"), LoadObject<UVolumeTexture>(nullptr, *Self->Params.MaterialParams.VolumeNoise));
+			Self->VolumeMaterial->SetVectorParameterValue(FName("AmbientColor"), Self->Params.MaterialParams.VolumeAmbientColor);
+			Self->VolumeMaterial->SetVectorParameterValue(FName("CoolShift"), Self->Params.MaterialParams.VolumeCoolShift);
+			Self->VolumeMaterial->SetVectorParameterValue(FName("HotShift"), Self->Params.MaterialParams.VolumeHotShift);
+			Self->VolumeMaterial->SetScalarParameterValue(FName("HueVariance"), Self->Params.MaterialParams.VolumeHueVariance);
+			Self->VolumeMaterial->SetScalarParameterValue(FName("HueVarianceScale"), Self->Params.MaterialParams.VolumeHueVarianceScale);
+			Self->VolumeMaterial->SetScalarParameterValue(FName("SaturationVariance"), Self->Params.MaterialParams.VolumeSaturationVariance);
+			Self->VolumeMaterial->SetScalarParameterValue(FName("TemperatureInfluence"), Self->Params.MaterialParams.VolumeTemperatureInfluence);
+			Self->VolumeMaterial->SetScalarParameterValue(FName("TemperatureScale"), Self->Params.MaterialParams.VolumeTemperatureScale);
+			Self->VolumeMaterial->SetScalarParameterValue(FName("ScaleFactor"), Self->Params.MaterialParams.VolumeDensity);
+			Self->VolumeMaterial->SetScalarParameterValue(FName("WarpAmount"), Self->Params.MaterialParams.VolumeWarpAmount);
+			Self->VolumeMaterial->SetScalarParameterValue(FName("WarpScale"), Self->Params.MaterialParams.VolumeWarpScale);
 
 			Self->VolumetricComponent->SetMaterial(0, Self->VolumeMaterial);
 			Self->VolumetricComponent->SetVisibility(true);

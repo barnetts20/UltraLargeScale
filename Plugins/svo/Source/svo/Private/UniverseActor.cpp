@@ -19,7 +19,7 @@ AUniverseActor::AUniverseActor()
 	SectorSmallCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorSmall.NG_SectorSmall"));
 	SectorGasCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorGas.NG_SectorGas"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
-	Octree = MakeShared<FOctree>(Params.Extent * PersistentTreeMultiplier, FVector::ZeroVector);
+	Octree = MakeShared<FOctree>(UniverseParams.Extent * PersistentTreeMultiplier, FVector::ZeroVector);
 }
 #pragma endregion
 
@@ -40,14 +40,14 @@ void AUniverseActor::BeginPlay()
 void AUniverseActor::ConfigureCell(FIntVector InCellCoord)
 {
 	CellCoord = InCellCoord;
-	const double FullCellSize = 2.0 * Params.Extent;
+	const double FullCellSize = 2.0 * UniverseParams.Extent;
 	CellOrigin = FVector(
 		CellCoord.X * FullCellSize,
 		CellCoord.Y * FullCellSize,
 		CellCoord.Z * FullCellSize
 	);
 	SetActorLocation(CellOrigin);
-	Octree = MakeShared<FOctree>(Params.Extent * PersistentTreeMultiplier, FVector::ZeroVector);
+	Octree = MakeShared<FOctree>(UniverseParams.Extent * PersistentTreeMultiplier, FVector::ZeroVector);
 }
 
 void AUniverseActor::InitializeChildPool()
@@ -74,7 +74,7 @@ void AUniverseActor::InitializeChildPool()
 void AUniverseActor::InitializeData()
 {
 	double StartTime = FPlatformTime::Seconds();
-	UniverseGenerator.Params = Params;
+	UniverseGenerator.Params = UniverseParams;
 	UniverseGenerator.Initialize();
 	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeData took: %.3f seconds"),
 		FPlatformTime::Seconds() - StartTime);
@@ -97,14 +97,14 @@ void AUniverseActor::BuildTierConfigs()
 {
 	// Derive MinScale/MaxScale for all tiers from MaxEntityScale + depth spacing.
 	// Must be called before any generate callback reads scale ranges.
-	Params.DeriveScaleRanges();
+	UniverseParams.DeriveScaleRanges();
 
 	// --- Large tier (was "Coarse") ---
 	CoarseTierConfig.TierName = TEXT("Large");
 	CoarseTierConfig.TierIndex = 0;
-	CoarseTierConfig.GridDepth = Params.LargeTier.GridDepth;
-	CoarseTierConfig.NeighborhoodRadius = Params.LargeTier.NeighborhoodRadius;
-	CoarseTierConfig.SlotCapacity = Params.LargeTier.MaxParticlesPerSlot;
+	CoarseTierConfig.GridDepth = UniverseParams.LargeTier.GridDepth;
+	CoarseTierConfig.NeighborhoodRadius = UniverseParams.LargeTier.NeighborhoodRadius;
+	CoarseTierConfig.SlotCapacity = UniverseParams.LargeTier.MaxParticlesPerSlot;
 	CoarseTierConfig.NiagaraAssets = { SectorLargeCloud, SectorGasCloud };
 	CoarseTierConfig.bWantRotations = { true, false };
 	CoarseTierConfig.OctreeInsertBufferIndex = 0;
@@ -116,9 +116,9 @@ void AUniverseActor::BuildTierConfigs()
 	// --- Mid tier ---
 	MidTierConfig.TierName = TEXT("Mid");
 	MidTierConfig.TierIndex = 1;
-	MidTierConfig.GridDepth = Params.MidTier.GridDepth;
-	MidTierConfig.NeighborhoodRadius = Params.MidTier.NeighborhoodRadius;
-	MidTierConfig.SlotCapacity = Params.MidTier.MaxParticlesPerSlot;
+	MidTierConfig.GridDepth = UniverseParams.MidTier.GridDepth;
+	MidTierConfig.NeighborhoodRadius = UniverseParams.MidTier.NeighborhoodRadius;
+	MidTierConfig.SlotCapacity = UniverseParams.MidTier.MaxParticlesPerSlot;
 	MidTierConfig.NiagaraAssets = { SectorMidCloud };
 	MidTierConfig.bWantRotations = { true };
 	MidTierConfig.OctreeInsertBufferIndex = 0;
@@ -131,9 +131,9 @@ void AUniverseActor::BuildTierConfigs()
 	// --- Small tier (was "Proximity") ---
 	SmallTierConfig.TierName = TEXT("Small");
 	SmallTierConfig.TierIndex = 2;
-	SmallTierConfig.GridDepth = Params.SmallTier.GridDepth;
-	SmallTierConfig.NeighborhoodRadius = Params.SmallTier.NeighborhoodRadius;
-	SmallTierConfig.SlotCapacity = Params.SmallTier.MaxParticlesPerSlot;
+	SmallTierConfig.GridDepth = UniverseParams.SmallTier.GridDepth;
+	SmallTierConfig.NeighborhoodRadius = UniverseParams.SmallTier.NeighborhoodRadius;
+	SmallTierConfig.SlotCapacity = UniverseParams.SmallTier.MaxParticlesPerSlot;
 	SmallTierConfig.NiagaraAssets = { SectorSmallCloud };
 	SmallTierConfig.bWantRotations = { false };
 	SmallTierConfig.OctreeInsertBufferIndex = 0;
@@ -163,7 +163,7 @@ void AUniverseActor::BuildTierConfigs()
 FTierStreamingContext AUniverseActor::BuildStreamingContext() const
 {
 	FTierStreamingContext Ctx;
-	Ctx.Extent = Params.Extent;
+	Ctx.Extent = UniverseParams.Extent;
 	Ctx.UnitScale = 1.0;  // Universe extents are already in octree-local units.
 	Ctx.GridExtentMultiplier = GridExtentMultiplier;
 	Ctx.VirtualTraversal = VirtualTraversal;
@@ -173,7 +173,7 @@ FTierStreamingContext AUniverseActor::BuildStreamingContext() const
 	Ctx.AttachRoot = GetRootComponent();
 	Ctx.bNiagaraAbsolutePosition = false;
 	Ctx.OwnerName = TEXT("Universe");
-	Ctx.ParentSeed = Params.Seed;
+	Ctx.ParentSeed = UniverseParams.Seed;
 	return Ctx;
 }
 #pragma endregion
@@ -190,7 +190,7 @@ void AUniverseActor::ApplyParallaxOffset()
 	LastFrameOfReferenceLocation = CurrentPlayerPos;
 	CurrentFrameOfReferenceLocation = CurrentPlayerPos;
 
-	const double Ratio = (Params.UnitScale > 0.0) ? (SpeedScale / Params.UnitScale) : 0.0;
+	const double Ratio = (UniverseParams.UnitScale > 0.0) ? (SpeedScale / UniverseParams.UnitScale) : 0.0;
 	VirtualTraversal += PlayerDelta * Ratio;
 
 	SetActorLocation(CurrentPlayerPos);
@@ -314,7 +314,7 @@ FVector AUniverseActor::ComputeChildSpawnLocation(const FVector& NodeCenter, dou
 	// ChildUnitScale encodes the node-to-galaxy size relationship:
 	//   ChildUnitScale = (InNode->Extent * ParentUnitScale) / Galaxy->Params.Extent
 	// So size_galaxy / size_node = ParentUnitScale / ChildUnitScale.
-	const double SizeRatio = Params.UnitScale / ChildUnitScale;
+	const double SizeRatio = UniverseParams.UnitScale / ChildUnitScale;
 
 	// World-space position of the node's sprite:
 	const FVector RenderedPos = GetActorLocation() + NodeCenter - VirtualTraversal;
@@ -369,7 +369,7 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	Galaxy->Params = this->GalaxyParams;
 
 	// Derive UnitScale from the particle extent instead of the node extent.
-	Galaxy->Params.UnitScale = (static_cast<double>(ParticleExtent) * this->Params.UnitScale) / Galaxy->Params.Extent;
+	Galaxy->Params.UnitScale = (static_cast<double>(ParticleExtent) * this->UniverseParams.UnitScale) / Galaxy->Params.Extent;
 	// MaxEntityScale is derived from MaxEntityScaleFraction in GalaxyActor::InitializeData.
 	// No need to set it here — DeriveScaleRanges handles the cascade.
 
@@ -605,17 +605,17 @@ void AUniverseActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) c
 #pragma region Grid Coord Helpers
 FIntVector AUniverseActor::PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const
 {
-	return FTierStreamingSystem::PositionToGridCoord(InPos, InGridDepth, Params.Extent, GridExtentMultiplier);
+	return FTierStreamingSystem::PositionToGridCoord(InPos, InGridDepth, UniverseParams.Extent, GridExtentMultiplier);
 }
 
 FVector AUniverseActor::GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const
 {
-	return FTierStreamingSystem::GridCoordToCenter(InCoord, InGridDepth, Params.Extent, GridExtentMultiplier);
+	return FTierStreamingSystem::GridCoordToCenter(InCoord, InGridDepth, UniverseParams.Extent, GridExtentMultiplier);
 }
 
 double AUniverseActor::GetGridCellExtent(int32 InGridDepth) const
 {
-	return FTierStreamingSystem::GetGridCellExtent(InGridDepth, Params.Extent, GridExtentMultiplier);
+	return FTierStreamingSystem::GetGridCellExtent(InGridDepth, UniverseParams.Extent, GridExtentMultiplier);
 }
 #pragma endregion
 

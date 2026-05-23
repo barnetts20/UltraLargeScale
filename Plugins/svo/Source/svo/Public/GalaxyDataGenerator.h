@@ -11,116 +11,27 @@
 #include "FNiagaraParticleBuffer.h"
 #include "GalaxyDataGenerator.generated.h"
 
-// ============================================================================
-// FGalaxyParams � extends FBaseParams (mirrors FUniverseParams structure)
-// ============================================================================
-
 USTRUCT(BlueprintType)
-struct SVO_API FGalaxyParams : public FBaseParams
+struct SVO_API FGalaxyDensityParams
 {
 	GENERATED_BODY()
-
-	// --- Density volume ---
-
-	/// Voxel resolution per axis for the density pseudo-volume texture.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density Volume")
-	int32 DensityVolumeResolution = 256;
-
-	// --- Tier scale derivation ---
-
-	/// Fixed absolute largest star-system scale in world cm.
-	/// All galaxies generate star particles in the same physical size
-	/// range regardless of parent galaxy size. The tier depth sequence
-	/// (1/3/5, spacing 2, ratio 4) gives a 64x total spread:
-	///
-	///   Large: 3e18 → 7.5e17   (bright giants, wide binaries)
-	///   Mid:   7.5e17 → 1.875e17 (solar-type systems)
-	///   Small: 1.875e17 → ~4.7e16 (compact red dwarf systems)
-	///
-	/// Real references:
-	///   Solar system to Pluto orbit ≈ 1.2e19 cm diameter
-	///   Compact M-dwarf habitable zone ≈ 3e16 cm
-	///   Wide binary separation ≈ 1e18 cm
-	///
-	/// MakePointDataFromWorldScale converts these to octree-local extents
-	/// using the galaxy's UnitScale, so the octree depth adapts to each
-	/// galaxy's coordinate system while the physical size stays constant.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
-	double MaxEntityScale = 3e18;
-
-	// --- Per-tier streaming configs ---
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Large")
-	FTierParams LargeTier;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Mid")
-	FTierParams MidTier;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Small")
-	FTierParams SmallTier;
-
-	// --- Large tier SDF culling grid ---
-
-	/// Grid depth used to subdivide the galaxy volume for SDF-based cell
-	/// culling during large tier generation. Cells whose every corner has
-	/// zero composite density are skipped entirely, concentrating candidate
-	/// sampling on arms/disc/bulge.
-	///
-	/// Depth N produces (2^N)^3 cells over the GridExtentMultiplier-scaled
-	/// volume. Depth 3 = 8^3 = 512 cells. Higher values give finer culling
-	/// at the cost of more corner evaluations (8 * CellCount SDF samples).
-	/// Values of 2–4 are recommended; 5+ rarely improves acceptance rate
-	/// enough to justify the overhead.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Large Tier")
-	int32 LargeTierCullDepth = 2;
-
-	// --- Volume material params (carried over from legacy for volumetric setup) ---
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	FLinearColor VolumeAmbientColor = FLinearColor(1, 1, 1, 1);
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	FLinearColor VolumeCoolShift = FLinearColor(.2, .5, .8);
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	FLinearColor VolumeHotShift = FLinearColor(.5, 1.5, 3);
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	double VolumeHueVariance = .1;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	double VolumeHueVarianceScale = .5;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	double VolumeSaturationVariance = .1;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	double VolumeTemperatureInfluence = 32;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	double VolumeTemperatureScale = 1;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	double VolumeDensity = .5;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	double VolumeWarpAmount = .05;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	double VolumeWarpScale = .13;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	FString VolumeNoise = "/svo/VolumeTextures/VT_PerlinWorley_Balanced";
-
-	// --- Encoded noise graph (kept for future FastNoise swap-in) ---
-	static constexpr const char* EncodedTree = "DQAFAAAAAAAAQAgAAAAAAD8AAAAAAA==";
-
 	// --- Noise power for volume sampling ---
-
 	/// Exponent applied to noise values during volume texture sampling.
 	/// Higher = sharper contrast between dense and empty regions.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density")
 	float NoisePower = 2.0f;
+
+	// --- Bounds Fade ---
+	// A global multiplier applied to the entire composite density to prevent
+	// hard transitions at the volume bounds. The fade is spherical, applied
+	// in normalized space based on distance from the origin.
+	//
+	/// Fraction of the normalized extent [0, 1] at which the bounds fade begins.
+	/// Below this distance, density is unmodified. Above it, density fades
+	/// to zero via smoothstep reaching zero at the cube edge (distance = 1).
+	/// 0.67 = fade starts at 2/3 of the way from center to edge.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density")
+	float BoundsFadeStart = 0.67f;
 
 	// =====================================================================
 	//  Spiral Density Field Parameters
@@ -153,6 +64,12 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bulge")
 	float BulgeScaleRadius = 1.0f;
 
+	/// Hard radial cutoff for the bulge, in normalized space.
+	/// Beyond this the bulge contributes zero density. Prevents the
+	/// Hernquist 1/r^4 tail from polluting the disc/arm region.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bulge")
+	float BulgeCutoffRadius = 1.0f;
+
 	/// Peak density of the bulge at the center (r approaching 0) [0, 1].
 	/// Zeroed for arm/disc iteration — set to 0.8-1.0 when compositing.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bulge")
@@ -164,11 +81,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bulge")
 	float BulgeVerticalSquash = 0.6f;
 
-	/// Hard radial cutoff for the bulge, in normalized space.
-	/// Beyond this the bulge contributes zero density. Prevents the
-	/// Hernquist 1/r^4 tail from polluting the disc/arm region.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bulge")
-	float BulgeCutoffRadius = 1.0f;
+
 
 	// --- Disc ---
 	// The disc uses a separable analytic profile: exponential radial decay
@@ -203,7 +116,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// 1.0 = exponential / isothermal sheet (sharp equatorial peak).
 	/// 2.0 = Gaussian (softer, better for a thick stellar disc).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
-	float DiscVerticalFalloff = 3.0f;
+	float DiscVerticalFalloff = 1.0f;
 
 #pragma region Arm Params
 	// --- Arms (SDF-based) ---
@@ -248,6 +161,13 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
 	float ArmVerticalSquash = 6.0f;
 
+	/// Vertical squash at the OUTER edge (disc rim). Lerped from
+	/// ArmVerticalSquash at the inner edge to this value at the outer edge.
+	/// Should typically be less than ArmVerticalSquash (arms get vertically
+	/// thicker as they widen outward).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
+	float ArmVerticalSquashOuter = 3.0f;
+	
 	// --- Radial Growth ---
 	// As distance along the arm increases (inner → outer edge), three
 	// properties evolve together:
@@ -271,13 +191,6 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// 0.0 = no density drop at all (constant peak everywhere)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
 	float ArmDensityFalloffExponent = 0.333f;
-
-	/// Vertical squash at the OUTER edge (disc rim). Lerped from
-	/// ArmVerticalSquash at the inner edge to this value at the outer edge.
-	/// Should typically be less than ArmVerticalSquash (arms get vertically
-	/// thicker as they widen outward).
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
-	float ArmVerticalSquashOuter = 3.0f;
 
 	// --- SDF → Density Remapping ---
 	// The arm SDF returns distance from the arm centerline (positive = inside
@@ -305,6 +218,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// Peak density at the arm core.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
 	float ArmPeakDensity = 1.0f;
+
 #pragma endregion
 
 	// --- Background / Halo ---
@@ -327,18 +241,117 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// as a fraction of BackgroundCutoffRadius.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Background")
 	float BackgroundFadeStart = 0.7f;
+};
 
-	// --- Bounds Fade ---
-	// A global multiplier applied to the entire composite density to prevent
-	// hard transitions at the volume bounds. The fade is spherical, applied
-	// in normalized space based on distance from the origin.
+USTRUCT(BlueprintType)
+struct SVO_API FGalaxyMaterialParams
+{
+	GENERATED_BODY()
 
-	/// Fraction of the normalized extent [0, 1] at which the bounds fade begins.
-	/// Below this distance, density is unmodified. Above it, density fades
-	/// to zero via smoothstep reaching zero at the cube edge (distance = 1).
-	/// 0.67 = fade starts at 2/3 of the way from center to edge.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bounds")
-	float BoundsFadeStart = 0.67f;
+	/// Voxel resolution per axis for the density pseudo-volume texture.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	int32 DensityVolumeResolution = 256;
+	// --- Volume material params (carried over from legacy for volumetric setup) ---
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	FLinearColor VolumeAmbientColor = FLinearColor(1, 1, 1, 1);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	FLinearColor VolumeCoolShift = FLinearColor(.2, .5, .8);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	FLinearColor VolumeHotShift = FLinearColor(.5, 1.5, 3);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	double VolumeHueVariance = .1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	double VolumeHueVarianceScale = .5;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	double VolumeSaturationVariance = .1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	double VolumeTemperatureInfluence = 32;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	double VolumeTemperatureScale = 1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	double VolumeDensity = .5;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	double VolumeWarpAmount = .05;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	double VolumeWarpScale = .13;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	FString VolumeNoise = "/svo/VolumeTextures/VT_PerlinWorley_Balanced";
+};
+
+// ============================================================================
+// FGalaxyParams � extends FBaseParams (mirrors FUniverseParams structure)
+// ============================================================================
+
+USTRUCT(BlueprintType)
+struct SVO_API FGalaxyParams : public FBaseParams
+{
+	GENERATED_BODY()
+
+	// --- Tier scale derivation ---
+	/// Fixed absolute largest star-system scale in world cm.
+	/// All galaxies generate star particles in the same physical size
+	/// range regardless of parent galaxy size. The tier depth sequence
+	/// (1/3/5, spacing 2, ratio 4) gives a 64x total spread:
+	///
+	///   Large: 3e18 → 7.5e17   (bright giants, wide binaries)
+	///   Mid:   7.5e17 → 1.875e17 (solar-type systems)
+	///   Small: 1.875e17 → ~4.7e16 (compact red dwarf systems)
+	///
+	/// Real references:
+	///   Solar system to Pluto orbit ≈ 1.2e19 cm diameter
+	///   Compact M-dwarf habitable zone ≈ 3e16 cm
+	///   Wide binary separation ≈ 1e18 cm
+	///
+	/// MakePointDataFromWorldScale converts these to octree-local extents
+	/// using the galaxy's UnitScale, so the octree depth adapts to each
+	/// galaxy's coordinate system while the physical size stays constant.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
+	double MaxEntityScale = 3e18;
+	// --- Large tier SDF culling grid ---
+
+	/// Grid depth used to subdivide the galaxy volume for SDF-based cell
+	/// culling during large tier generation. Cells whose every corner has
+	/// zero composite density are skipped entirely, concentrating candidate
+	/// sampling on arms/disc/bulge.
+	///
+	/// Depth N produces (2^N)^3 cells over the GridExtentMultiplier-scaled
+	/// volume. Depth 3 = 8^3 = 512 cells. Higher values give finer culling
+	/// at the cost of more corner evaluations (8 * CellCount SDF samples).
+	/// Values of 2–4 are recommended; 5+ rarely improves acceptance rate
+	/// enough to justify the overhead.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Large Tier")
+	int32 LargeTierCullDepth = 2;
+
+	// --- Per-tier streaming configs ---
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Large")
+	FTierParams LargeTier;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Mid")
+	FTierParams MidTier;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Small")
+	FTierParams SmallTier;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Material")
+	FGalaxyMaterialParams MaterialParams;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density")
+	FGalaxyDensityParams DensityParams;
+	
+	// --- Encoded noise graph (kept for future FastNoise swap-in) ---
+	static constexpr const char* EncodedTree = "DQAFAAAAAAAAQAgAAAAAAD8AAAAAAA==";
 
 	/// Derive MinScale/MaxScale for each tier from MaxEntityScale and the
 	/// depth sequence. Delegates to FTierParams::DeriveTierScaleRanges.
