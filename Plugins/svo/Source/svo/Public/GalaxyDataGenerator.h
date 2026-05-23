@@ -334,6 +334,9 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Large Tier")
 	int32 LargeTierCullDepth = 2;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density")
+	FGalaxyDensityParams DensityParams;
+
 	// --- Per-tier streaming configs ---
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Large")
 	FTierParams LargeTier;
@@ -346,9 +349,6 @@ struct SVO_API FGalaxyParams : public FBaseParams
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Material")
 	FGalaxyMaterialParams MaterialParams;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density")
-	FGalaxyDensityParams DensityParams;
 	
 	// --- Encoded noise graph (kept for future FastNoise swap-in) ---
 	static constexpr const char* EncodedTree = "DQAFAAAAAAAAQAgAAAAAAD8AAAAAAA==";
@@ -373,15 +373,15 @@ struct SVO_API FGalaxyParams : public FBaseParams
 		// NeighborhoodRadius = 0 -> 1x1x1 = 1 slot, exhaustive single-pass.
 		LargeTier.GridDepth = 1;
 		LargeTier.NeighborhoodRadius = 0;
-		LargeTier.MaxParticlesPerSlot = 16000;
+		LargeTier.MaxParticlesPerSlot = 3000;
 
 		MidTier.GridDepth = 3;
 		MidTier.NeighborhoodRadius = 1;
-		MidTier.MaxParticlesPerSlot = 8000;
+		MidTier.MaxParticlesPerSlot = 2000;
 
 		SmallTier.GridDepth = 5;
 		SmallTier.NeighborhoodRadius = 1;
-		SmallTier.MaxParticlesPerSlot = 4000;
+		SmallTier.MaxParticlesPerSlot = 2000;
 
 		DeriveScaleRanges();
 	}
