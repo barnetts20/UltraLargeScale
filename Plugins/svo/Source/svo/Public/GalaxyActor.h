@@ -67,6 +67,7 @@ public:
 	virtual void ResetForSpawn() override;
 #pragma endregion
 
+	virtual void ApplyParallaxOffset(const FVector& InPlayerPos) override;
 	virtual void TickFromParent(float DeltaTime, const FVector& InPlayerPos) override;
 
 protected:

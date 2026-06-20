@@ -370,14 +370,12 @@ void AGalaxyActor::Tick(float DeltaTime)
 	TickFromParent(DeltaTime, CurrentPlayerPos);
 }
 
-void AGalaxyActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
+void AGalaxyActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 {
-	if (InitializationState != ELifecycleState::Ready) return;
-
-	// --- VirtualTraversal accumulation ---
 	const FVector PlayerDelta = InPlayerPos - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = InPlayerPos;
 	CurrentFrameOfReferenceLocation = InPlayerPos;
+
 	const double ActiveSpeedScale = GetParentSpeedScale();
 	const double Ratio = (Params.UnitScale > 0.0) ? (ActiveSpeedScale / Params.UnitScale) : 0.0;
 	VirtualTraversal += PlayerDelta * Ratio;
@@ -387,27 +385,20 @@ void AGalaxyActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
 	if (VolumetricComponent)
 		VolumetricComponent->SetWorldLocation(InPlayerPos - VirtualTraversal);
 
-	// --- Niagara position push ---
-	// Galaxy Niagara components are attached (not absolute-positioned),
-	// so they follow the actor via SetActorLocation above. Only enter
-	// the per-component loop when positions actually need re-pushing.
 	const double DeltaSq = FVector::DistSquared(VirtualTraversal, LastPushedVirtualTraversal);
-	const bool bNeedsPush = (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold);
-	if (bNeedsPush)
+	if (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold)
 	{
-		for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
-		{
-			const int32 FrontIdx = Tier->FrontIdx.load();
-			for (int32 b = 0; b < Tier->NiagaraComponents.Num(); ++b)
-			{
-				UNiagaraComponent* NC = Tier->NiagaraComponents[b];
-				if (!NC || b >= Tier->Buffers.Num()) continue;
-				const TArray<FVector>& RelPos = Tier->Buffers[b][FrontIdx].MakeRelativePositions(VirtualTraversal);
-				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NC, NiagaraBufferParams::Positions, RelPos);
-			}
-		}
+		FTierStreamingSystem::PushTierPositions({ &LargeTierState, &MidTierState, &SmallTierState }, VirtualTraversal);
 		LastPushedVirtualTraversal = VirtualTraversal;
 	}
+}
+
+void AGalaxyActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
+{
+	if (InitializationState != ELifecycleState::Ready) return;
+
+	// --- VirtualTraversal accumulation ---
+	ApplyParallaxOffset(InPlayerPos);
 
 	// --- Process pending spawn-scan results ---
 	// VirtualTraversal is resolved for this frame, so SpawnStarSystemFromPool

@@ -179,42 +179,21 @@ FTierStreamingContext AUniverseActor::BuildStreamingContext() const
 #pragma endregion
 
 #pragma region Parallax
-void AUniverseActor::ApplyParallaxOffset()
+void AUniverseActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 {
-	if (InitializationState != ELifecycleState::Ready) return;
-
-	FVector CurrentPlayerPos;
-	if (!GetPlayerLocation(GetWorld(), CurrentPlayerPos)) return;
-
-	const FVector PlayerDelta = CurrentPlayerPos - LastFrameOfReferenceLocation;
-	LastFrameOfReferenceLocation = CurrentPlayerPos;
-	CurrentFrameOfReferenceLocation = CurrentPlayerPos;
+	const FVector PlayerDelta = InPlayerPos - LastFrameOfReferenceLocation;
+	LastFrameOfReferenceLocation = InPlayerPos;
+	CurrentFrameOfReferenceLocation = InPlayerPos;
 
 	const double Ratio = (UniverseParams.UnitScale > 0.0) ? (SpeedScale / UniverseParams.UnitScale) : 0.0;
 	VirtualTraversal += PlayerDelta * Ratio;
 
-	SetActorLocation(CurrentPlayerPos);
+	SetActorLocation(InPlayerPos);
 
 	const double DeltaSq = FVector::DistSquared(VirtualTraversal, LastPushedVirtualTraversal);
-	const bool bNeedsPush = (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold);
-
-	// Universe Niagara components are attached (not absolute-positioned),
-	// so they follow the actor via SetActorLocation above. Only enter
-	// the per-component loop when positions actually need re-pushing.
-	if (bNeedsPush)
+	if (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold)
 	{
-		for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &SmallTierState })
-		{
-			const int32 FrontIdx = Tier->FrontIdx.load();
-			for (int32 b = 0; b < Tier->NiagaraComponents.Num(); ++b)
-			{
-				UNiagaraComponent* NC = Tier->NiagaraComponents[b];
-				if (!NC || b >= Tier->Buffers.Num()) continue;
-
-				const TArray<FVector>& RelPos = Tier->Buffers[b][FrontIdx].MakeRelativePositions(VirtualTraversal);
-				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(NC, NiagaraBufferParams::Positions, RelPos);
-			}
-		}
+		FTierStreamingSystem::PushTierPositions({ &CoarseTierState, &MidTierState, &SmallTierState }, VirtualTraversal);
 		LastPushedVirtualTraversal = VirtualTraversal;
 	}
 }
@@ -224,7 +203,11 @@ void AUniverseActor::ApplyParallaxOffset()
 void AUniverseActor::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-	ApplyParallaxOffset();
+	FVector CurrentPlayerPos;
+	if (InitializationState == ELifecycleState::Ready && GetPlayerLocation(GetWorld(), CurrentPlayerPos))
+	{
+		ApplyParallaxOffset(CurrentPlayerPos);
+	}
 
 	// Process any pending spawn-scan results now that VirtualTraversal and
 	// CurrentFrameOfReferenceLocation are resolved for this frame.

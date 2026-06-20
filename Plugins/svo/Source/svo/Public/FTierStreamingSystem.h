@@ -289,7 +289,17 @@ struct FTierStreamingSystem
 
 	static void PushTierToNiagara(const FTierStreamingContext& Ctx,
 		const FParticleTierConfig& Config, FParticleTierState& State);
-
+	/**
+	 * Per-frame parallax re-push: writes camera-relative POSITIONS only (not
+	 * extents/colors/rotations/bounds) for each tier in the list. Used by the
+	 * actor parallax overrides when VirtualTraversal moves past the push
+	 * threshold. Distinct from PushTierToNiagara, which does the full push on a
+	 * boundary-cross data swap. The threshold gate and LastPushedVirtualTraversal
+	 * bookkeeping stay with the caller — this only performs the writes.
+	 */
+	static void PushTierPositions(
+		std::initializer_list<FParticleTierState*> Tiers,
+		const FVector& VirtualTraversal);
 	// ========================================================================
 	//  Octree Integration
 	// ========================================================================

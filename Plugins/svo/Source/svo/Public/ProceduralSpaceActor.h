@@ -147,7 +147,7 @@ public:
 
     /** Per-frame parallax update hook. Default is a no-op; overridden by layers
      *  that accumulate VirtualTraversal and push camera-relative positions. */
-    virtual void ApplyParallaxOffset() {};
+    virtual void ApplyParallaxOffset(const FVector& InPlayerPos) {};
 
     virtual void DrawDebugBounds();
 

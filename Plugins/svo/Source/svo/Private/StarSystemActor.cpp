@@ -511,10 +511,8 @@ void AStarSystemActor::Tick(float DeltaTime)
 	TickFromParent(DeltaTime, CurrentPlayerPos);
 }
 
-void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
+void AStarSystemActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 {
-	if (InitializationState != ELifecycleState::Ready) return;
-
 	// --- VirtualTraversal accumulation (mirrors GalaxyActor) ---
 	const FVector PlayerDelta = InPlayerPos - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = InPlayerPos;
@@ -529,28 +527,21 @@ void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPo
 
 	// --- Niagara position push (gated by push threshold) ---
 	// StarSystem Niagara components are attached (not absolute-positioned),
-	// so they follow the actor via SetActorLocation above. Only enter
-	// the per-component loop when positions actually need re-pushing.
+	// so they follow the actor via SetActorLocation above. Only push when
+	// VirtualTraversal has moved enough to matter.
 	const double DeltaSq = FVector::DistSquared(VirtualTraversal, LastPushedVirtualTraversal);
-	const bool bNeedsPush = (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold);
-
-	if (bNeedsPush)
+	if (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold)
 	{
-		for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
-		{
-			const int32 FrontIdx = Tier->FrontIdx.load();
-			for (int32 b = 0; b < Tier->NiagaraComponents.Num(); ++b)
-			{
-				UNiagaraComponent* NC = Tier->NiagaraComponents[b];
-				if (!NC || b >= Tier->Buffers.Num()) continue;
-				const TArray<FVector>& RelPos =
-					Tier->Buffers[b][FrontIdx].MakeRelativePositions(VirtualTraversal);
-				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
-					NC, NiagaraBufferParams::Positions, RelPos);
-			}
-		}
+		FTierStreamingSystem::PushTierPositions({ &LargeTierState, &MidTierState, &SmallTierState }, VirtualTraversal);
 		LastPushedVirtualTraversal = VirtualTraversal;
 	}
+}
+
+void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
+{
+	if (InitializationState != ELifecycleState::Ready) return;
+
+	ApplyParallaxOffset(InPlayerPos);
 
 	// --- Tier streaming ---
 	// Large tier has NeighborhoodRadius=0 so UpdateTier is effectively a no-op

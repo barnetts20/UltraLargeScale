@@ -335,7 +335,7 @@ protected:
 	 * active Niagara components. Must be called before UpdateTier each tick so
 	 * streaming coord checks use the latest VirtualTraversal.
 	 */
-	virtual void ApplyParallaxOffset() override;
+	virtual void ApplyParallaxOffset(const FVector& InPlayerPos) override;
 
 #pragma endregion
 

@@ -409,6 +409,29 @@ void FTierStreamingSystem::PushTierToNiagara(
 }
 
 // ============================================================================
+//  PushTierPositions
+// ============================================================================
+void FTierStreamingSystem::PushTierPositions(
+	std::initializer_list<FParticleTierState*> Tiers,
+	const FVector& VirtualTraversal)
+{
+	for (FParticleTierState* Tier : Tiers)
+	{
+		if (!Tier) continue;
+		const int32 FrontIdx = Tier->FrontIdx.load();
+		for (int32 b = 0; b < Tier->NiagaraComponents.Num(); ++b)
+		{
+			UNiagaraComponent* NC = Tier->NiagaraComponents[b];
+			if (!NC || b >= Tier->Buffers.Num()) continue;
+			const TArray<FVector>& RelPos =
+				Tier->Buffers[b][FrontIdx].MakeRelativePositions(VirtualTraversal);
+			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
+				NC, NiagaraBufferParams::Positions, RelPos);
+		}
+	}
+}
+
+// ============================================================================
 //  Octree Integration
 // ============================================================================
 void FTierStreamingSystem::InsertTierIntoOctree(

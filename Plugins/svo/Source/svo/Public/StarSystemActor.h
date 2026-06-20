@@ -161,6 +161,7 @@ public:
 
 #pragma region Tick
 	virtual void Tick(float DeltaTime) override;
+	virtual void ApplyParallaxOffset(const FVector& InPlayerPos) override;
 	virtual void TickFromParent(float DeltaTime, const FVector& InPlayerPos) override;
 #pragma endregion
 
