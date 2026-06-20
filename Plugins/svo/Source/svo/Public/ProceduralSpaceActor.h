@@ -122,8 +122,8 @@ public:
     /**
      * Accumulated virtual displacement of the player through this actor's
      * local space. Advances by (SpeedScale / UnitScale) * PlayerDelta each
-     * tick. Used by Universe and Galaxy for camera-relative Niagara position
-     * pushes; StarSystem uses it for planet placement. The actor itself is
+     * tick. Used by Universe, Galaxy, StarSystem for camera-relative Niagara position
+     * pushes; StarSystem also uses it for planet placement. The actor itself is
      * pegged to the player so UE rendering stays in a clean numerical range.
      */
     FVector VirtualTraversal = FVector::ZeroVector;
@@ -140,15 +140,13 @@ public:
 
 #pragma region Parallax Spawn Calculation
     /** Computes correct spawn position for a child actor based on parallax
-     *  ratios. Each subclass must implement this — the formula depends on
-     *  whether the actor uses VirtualTraversal (Universe, Galaxy) or
-     *  position-based parallax (StarSystem). */
+     *  ratios. Each subclass implements this using its VirtualTraversal and
+     *  unit-scale ratio; the base provides no default. */
     virtual FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const { return FVector::ZeroVector; };
 #pragma endregion
 
-    /** Per-frame parallax update. Each subclass implements its own model.
-     *  Universe and Galaxy use VirtualTraversal accumulation; StarSystem
-     *  uses position-based offset. Default is a no-op. */
+    /** Per-frame parallax update hook. Default is a no-op; overridden by layers
+     *  that accumulate VirtualTraversal and push camera-relative positions. */
     virtual void ApplyParallaxOffset() {};
 
     virtual void DrawDebugBounds();
@@ -156,11 +154,10 @@ public:
     /** Called by the parent actor (Universe→Galaxy, Galaxy→StarSystem) instead
      *  of UE's per-actor tick dispatch. InPlayerPos is the already-resolved
      *  player world position for this frame — no child needs to query the
-     *  controller. Base implementation applies the standard position-based
-     *  parallax offset (covers StarSystem). Galaxy overrides to also handle
-     *  VirtualTraversal, Niagara pushes, tier streaming, and cascading down
-     *  to its own star systems. */
-    virtual void TickFromParent(float DeltaTime, const FVector& InPlayerPos);
+     *  controller. Each subclass accumulates VirtualTraversal, pushes camera-
+     *  relative Niagara positions, runs tier streaming, and cascades to its
+     *  own children. Pure virtual — no base default. */
+    virtual void TickFromParent(float DeltaTime, const FVector& InPlayerPos) = 0;
 #pragma endregion
 
 #pragma region Hierarchical Spawn Scanning

@@ -364,7 +364,6 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	FGalaxyParams()
 	{
 		Seed = 666;
-		Extent = 274877906944;
 		UnitScale = 1e11;
 		Rotation = FRotator::ZeroRotator;
 		ParentColor = FLinearColor(1, 1, 1, 0);

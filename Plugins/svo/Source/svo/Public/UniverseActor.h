@@ -191,6 +191,11 @@ protected:
 
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+	/** Universe is the root of the tick cascade — it drives itself from Tick and
+	*  is never ticked by a parent. Implemented as a no-op purely to satisfy the
+	*  abstract base contract. */
+	virtual void TickFromParent(float DeltaTime, const FVector& InPlayerPos) override {}
 	virtual void Tick(float DeltaTime) override;
 
 	virtual void InitializeChildPool() override;

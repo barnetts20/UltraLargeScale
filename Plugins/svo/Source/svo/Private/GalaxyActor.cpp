@@ -378,7 +378,7 @@ void AGalaxyActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
 	const FVector PlayerDelta = InPlayerPos - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = InPlayerPos;
 	CurrentFrameOfReferenceLocation = InPlayerPos;
-	const double ActiveSpeedScale = (Universe ? Universe->SpeedScale : SpeedScale);
+	const double ActiveSpeedScale = GetParentSpeedScale();
 	const double Ratio = (Params.UnitScale > 0.0) ? (ActiveSpeedScale / Params.UnitScale) : 0.0;
 	VirtualTraversal += PlayerDelta * Ratio;
 

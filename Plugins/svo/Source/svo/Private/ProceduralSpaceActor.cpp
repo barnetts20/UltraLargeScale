@@ -140,15 +140,3 @@ void AProceduralSpaceActor::DrawDebugBounds()
         }
     }
 }
-
-void AProceduralSpaceActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
-{
-    // Base implementation covers StarSystemActor: apply parallax offset using
-    // the already-resolved player position passed down from the parent galaxy.
-    // No controller lookup needed — InPlayerPos is authoritative for this frame.
-    CurrentFrameOfReferenceLocation = InPlayerPos;
-    const double ParallaxRatio = GetParentSpeedScale() / GetUnitScale();
-    const FVector PlayerOffset = InPlayerPos - LastFrameOfReferenceLocation;
-    LastFrameOfReferenceLocation = InPlayerPos;
-    SetActorLocation(GetActorLocation() + PlayerOffset * (1.0 - ParallaxRatio));
-}

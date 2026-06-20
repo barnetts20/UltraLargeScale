@@ -102,8 +102,6 @@ struct SVO_API FStarSystemParams : public FBaseParams
 
 	FStarSystemParams()
 	{
-		//Extent = 274877906944;
-
 		LargeTier.GridDepth = 1;
 		LargeTier.NeighborhoodRadius = 0;
 		LargeTier.MaxParticlesPerSlot = 64;
