@@ -157,7 +157,7 @@ public:
      *  controller. Each subclass accumulates VirtualTraversal, pushes camera-
      *  relative Niagara positions, runs tier streaming, and cascades to its
      *  own children. Pure virtual — no base default. */
-    virtual void TickFromParent(float DeltaTime, const FVector& InPlayerPos) = 0;
+    virtual void TickFromParent(float DeltaTime, const FVector& InPlayerPos) PURE_VIRTUAL(AProceduralSpaceActor::TickFromParent, );
 #pragma endregion
 
 #pragma region Hierarchical Spawn Scanning

@@ -624,15 +624,61 @@ void AUniverseActor::CheckOctreeBounds()
 {
 	if (!Octree.IsValid() || bRebaseInProgress.load()) return;
 
-	const double OctreeExtent = Octree->Extent;
-	const double Threshold = OctreeExtent * 0.25;
+	// Measure against the tree's ACTUAL center, not origin — after a rebase the
+	// root is centered on the player, so an origin-relative test would re-fire
+	// every tick.
+	const FVector TreeCenter = Octree->Root.IsValid() ? Octree->Root->Center : FVector::ZeroVector;
+	const double  Margin = Octree->Extent * 0.75;
+	const FVector Delta = VirtualTraversal - TreeCenter;
 
-	if (FMath::Abs(VirtualTraversal.X) > OctreeExtent - Threshold ||
-		FMath::Abs(VirtualTraversal.Y) > OctreeExtent - Threshold ||
-		FMath::Abs(VirtualTraversal.Z) > OctreeExtent - Threshold)
+	if (FMath::Abs(Delta.X) <= Margin &&
+		FMath::Abs(Delta.Y) <= Margin &&
+		FMath::Abs(Delta.Z) <= Margin)
+		return;
+
+	// Don't rebase while any tier owns its back buffer / state.
+	if (CoarseTierState.bUpdateInProgress.load() ||
+		MidTierState.bUpdateInProgress.load() ||
+		SmallTierState.bUpdateInProgress.load())
+		return;
+
+	bRebaseInProgress.store(true);
+	const FVector RebaseOrigin = VirtualTraversal;
+	const double  TreeExtent = UniverseParams.Extent * PersistentTreeMultiplier;
+
+	TWeakObjectPtr<AUniverseActor> WeakThis(this);
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, RebaseOrigin, TreeExtent]()
 	{
-		UE_LOG(LogTemp, Warning, TEXT("AUniverseActor::CheckOctreeBounds — VT=(%.0f,%.0f,%.0f) approaching octree bounds (extent=%.0f), rebase needed"),
-			VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z, OctreeExtent);
-	}
+		AUniverseActor* Self = WeakThis.Get();
+		if (!Self) return;
+
+		UE_LOG(LogTemp, Warning, TEXT("AUniverseActor::RebaseOctree -> (%.1f, %.1f, %.1f)"),
+			RebaseOrigin.X, RebaseOrigin.Y, RebaseOrigin.Z);
+
+		// Build + populate the new tree in a LOCAL ptr off the game thread, then
+		// hand the finished tree back for the actual swap. This removes the
+		// torn-read race the original had (it assigned Self->Octree directly on
+		// the background thread while game-thread readers could be mid-copy).
+		TSharedPtr<FOctree> NewTree = MakeShared<FOctree>(TreeExtent, RebaseOrigin);
+
+		FTierStreamingContext Ctx = Self->BuildStreamingContext();
+		Ctx.Octree = NewTree;   // insert into the new tree, not the live one
+
+		FTierStreamingSystem::InsertTierIntoOctree(Ctx, Self->CoarseTierConfig,
+			Self->CoarseTierState, Self->CoarseTierState.FrontIdx.load());
+		FTierStreamingSystem::InsertTierIntoOctree(Ctx, Self->MidTierConfig,
+			Self->MidTierState, Self->MidTierState.FrontIdx.load());
+		FTierStreamingSystem::InsertTierIntoOctree(Ctx, Self->SmallTierConfig,
+			Self->SmallTierState, Self->SmallTierState.FrontIdx.load());
+
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, NewTree]()
+			{
+				if (AUniverseActor* S = WeakThis.Get())
+				{
+					S->Octree = NewTree;                  // swap on game thread
+					S->bRebaseInProgress.store(false);
+				}
+			});
+	});
 }
 #pragma endregion
