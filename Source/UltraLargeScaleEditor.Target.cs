@@ -8,8 +8,10 @@ public class UltraLargeScaleEditorTarget : TargetRules
 	public UltraLargeScaleEditorTarget(TargetInfo Target) : base(Target)
 	{
 		Type = TargetType.Editor;
-		DefaultBuildSettings = BuildSettingsVersion.V5;
 
-		ExtraModuleNames.AddRange( new string[] { "UltraLargeScale" } );
+        DefaultBuildSettings = BuildSettingsVersion.V6;
+        IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_7;
+
+        ExtraModuleNames.AddRange( new string[] { "UltraLargeScale" } );
 	}
 }

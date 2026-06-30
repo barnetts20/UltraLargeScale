@@ -507,13 +507,14 @@ void GalaxyDataGenerator::GenerateTierNode(
 	for (int32 i = 0; i < NumCandidates; ++i)
 	{
 		const float RawDensity = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
-		const float Density = FMath::Clamp(dCurve->Eval(RawDensity), 0.0f, 1.0f);
+		const float Density = FMath::Clamp(RawDensity, 0.0f, 1.0f);
 		if (Stream.FRand() > Density) continue;
 
 		const float ScaleSample = Stream.FRand();
 		const double Scale = FPointData::SampleScaleFromDistribution(
 			InTierParams.MinScale, InTierParams.MaxScale,
 			ScaleSample, InTierParams.ScaleDistribution);
+
 		FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
 		const double ExtentAtDepth = static_cast<double>(Params.Extent) / static_cast<double>(1 << PointData.InsertDepth);
 		const float FinalExtent = static_cast<float>(ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
@@ -522,7 +523,10 @@ void GalaxyDataGenerator::GenerateTierNode(
 
 		const int32 Idx = BufferStart + ActualCount;
 		InBuffer.Positions[Idx] = CandidatePositions[i];
-		InBuffer.Extents[Idx] = FinalExtent;
+		//Scale in this case would be the full size of the star SYSTEM but we want the particle we generate to represent the star...
+		//We need a coefficient to shrink it or it wont look correct... we can use the same coefficient to calculate the size of the eventual star system star object
+		//That replaces the placeholder sprite
+		InBuffer.Extents[Idx] = FinalExtent * .000001;
 		InBuffer.Colors[Idx] = FLinearColor(FMath::Abs(CompVec.X), FMath::Abs(CompVec.Y), FMath::Abs(CompVec.Z));
 
 		ActualCount++;
@@ -769,7 +773,7 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 			if (TotalAccepted >= SlotCapacity) break;
 
 			const float RawDensity = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
-			const float Density = FMath::Clamp(dCurve->Eval(RawDensity), 0.0f, 1.0f);
+			const float Density = FMath::Clamp(RawDensity, 0.0f, 1.0f);
 			if (Stream.FRand() > Density) continue;
 
 			const float ScaleSample = Stream.FRand();

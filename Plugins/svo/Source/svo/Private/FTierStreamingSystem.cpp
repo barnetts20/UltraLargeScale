@@ -379,7 +379,7 @@ void FTierStreamingSystem::UpdateTier(
 			CullTierCache(Config, State, NewCoord);
 			State.bUpdateInProgress.store(false);
 
-			UE_LOG(LogTemp, Verbose,
+			UE_LOG(LogTemp, Log,
 				TEXT("FTierStreamingSystem::UpdateTier [%s] — %d entering (%d cached, %d generated), %d exiting in %.3f sec"),
 				*Config.TierName, EnteringNodes.Num(), CacheHitCount, ToGenerate.Num(),
 				ExitingNodes.Num(), FPlatformTime::Seconds() - StartTime);

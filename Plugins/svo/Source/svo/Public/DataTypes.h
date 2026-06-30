@@ -160,7 +160,8 @@ public:
 
 	static double SampleScaleFromDistribution(double InMinScale, double InMaxScale, double InSample, const FRuntimeFloatCurve& InDistributionCurve) {
 		// Lerp between min and max using the distribution value
-		return FMath::Lerp(InMinScale, InMaxScale, static_cast<double>(FMath::Clamp(InDistributionCurve.GetRichCurveConst()->Eval(FMath::Clamp(InSample, 0.0f, 1.0f)), 0.0f, 1.0f)));
+		return FMath::Lerp(InMinScale, InMaxScale, InSample);
+		//return FMath::Lerp(InMinScale, InMaxScale, static_cast<double>(FMath::Clamp(InDistributionCurve.GetRichCurveConst()->Eval(FMath::Clamp(InSample, 0.0f, 1.0f)), 0.0f, 1.0f)));
 	}
 
 	// Constructors

@@ -772,7 +772,7 @@ public:
 		// Create RHI texture async
 		void* MipDataPtrs[1] = { const_cast<uint8*>(InMipData.GetData()) };
 		FGraphEventRef CompletionEvent;
-		FTexture2DRHIRef RHITex = RHIAsyncCreateTexture2D(
+		FTextureRHIRef RHITex = RHIAsyncCreateTexture2D(
 			OutRes, OutRes, PF_B8G8R8A8, 1,
 			TexCreate_ShaderResource, ERHIAccess::SRVMask,
 			MipDataPtrs, 1, TEXT("PseudoVolumeTexture"), CompletionEvent);
@@ -789,7 +789,7 @@ public:
 		LinkDoneEvent->Reset();
 		ENQUEUE_RENDER_COMMAND(LinkTextureCmd)([PseudoVolumeTexture, RHITexture, LinkDoneEvent](FRHICommandListImmediate& RHICmdList)
 			{
-				RHIUpdateTextureReference(PseudoVolumeTexture->TextureReference.TextureReferenceRHI, static_cast<FTexture2DRHIRef>(RHITexture));
+				RHIUpdateTextureReference(PseudoVolumeTexture->TextureReference.TextureReferenceRHI, RHITexture);
 				PseudoVolumeTexture->RefreshSamplerStates();
 				LinkDoneEvent->Trigger();
 			});

@@ -144,7 +144,7 @@ void UniverseDataGenerator::GenerateLargeTierNode(const FIntVector& InCoord, int
 	for (int32 i = 0; i < NumCandidates; ++i)
 	{
 		const float RawDensity = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
-		const float Density = FMath::Clamp(dCurve->Eval(RawDensity), 0.0f, 1.0f);
+		const float Density = FMath::Clamp(RawDensity, 0.0f, 1.0f); //TODO: POWER CURVE HERE MIGHT BE USEFUL
 		if (Stream.FRand() > Density) continue;
 
 		const float ScaleSample = Stream.FRand();
@@ -246,7 +246,7 @@ void UniverseDataGenerator::GenerateMidTierNode(
 	for (int32 i = 0; i < NumCandidates; ++i)
 	{
 		const float RawDensity = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
-		const float Density = FMath::Clamp(dCurve->Eval(RawDensity), 0.0f, 1.0f);
+		const float Density = FMath::Clamp(RawDensity, 0.0f, 1.0f);
 		if (Stream.FRand() > Density) continue;
 
 		const float ScaleSample = Stream.FRand();
@@ -355,7 +355,7 @@ void UniverseDataGenerator::GenerateSmallTierNode(
 	for (int32 i = 0; i < NumCandidates; ++i)
 	{
 		const float RawDensity = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
-		const float Density = FMath::Clamp(dCurve->Eval(RawDensity), 0.0f, 1.0f);
+		const float Density = FMath::Clamp(RawDensity, 0.0f, 1.0f);
 		if (Stream.FRand() > Density) continue;
 
 		FVector CompVec = Stream.GetUnitVector();
