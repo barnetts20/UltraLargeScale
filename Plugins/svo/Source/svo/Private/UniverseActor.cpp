@@ -1,5 +1,6 @@
 ﻿#pragma region Includes/ForwardDec
 #include "UniverseActor.h"
+#include "svo.h"
 #include "FTierStreamingSystem.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include "FVolumeTextureUtils.h"
@@ -181,6 +182,7 @@ FTierStreamingContext AUniverseActor::BuildStreamingContext() const
 #pragma region Parallax
 void AUniverseActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 {
+	SVO_GT_SCOPE("Universe::ApplyParallaxOffset");
 	const FVector PlayerDelta = InPlayerPos - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = InPlayerPos;
 	CurrentFrameOfReferenceLocation = InPlayerPos;
@@ -193,7 +195,12 @@ void AUniverseActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 	const double DeltaSq = FVector::DistSquared(VirtualTraversal, LastPushedVirtualTraversal);
 	if (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold)
 	{
-		FTierStreamingSystem::PushTierPositions({ &CoarseTierState, &MidTierState, &SmallTierState }, VirtualTraversal);
+		const FVector VT = VirtualTraversal;
+		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, VT]()
+		{
+			FTierStreamingSystem::PushTierPositions({ &CoarseTierState, &MidTierState, &SmallTierState }, VT);
+		});
+		//FTierStreamingSystem::PushTierPositions({ &CoarseTierState, &MidTierState, &SmallTierState }, VirtualTraversal);
 		LastPushedVirtualTraversal = VirtualTraversal;
 	}
 }
@@ -202,6 +209,7 @@ void AUniverseActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 #pragma region Tick
 void AUniverseActor::Tick(float DeltaTime)
 {
+	SVO_GT_SCOPE("Universe::Tick");
 	Super::Tick(DeltaTime);
 	FVector CurrentPlayerPos;
 	if (InitializationState == ELifecycleState::Ready && GetPlayerLocation(GetWorld(), CurrentPlayerPos))
@@ -240,6 +248,9 @@ void AUniverseActor::Tick(float DeltaTime)
 	// Single hierarchical scan — replaces all per-level timers.
 	// Must run after the full tick cascade so all VTs are resolved.
 	DetermineAndDispatchScan();
+
+	// Emit the once-per-second game-thread profile summary. Root tick only.
+	SVO_GT_FLUSH();
 }
 #pragma endregion
 
@@ -313,6 +324,7 @@ FVector AUniverseActor::ComputeChildSpawnLocation(const FVector& NodeCenter, dou
 #pragma region Galaxy Pooled Spawn Hooks
 void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 {
+	SVO_GT_SCOPE("Universe::SpawnGalaxyFromPool");
 	if (!InNode.IsValid() || !GalaxyActorClass || SpawnedGalaxies.Contains(InNode) || InitializationState != ELifecycleState::Ready) return;
 	if (InNode->Data.ParticleIndex < 0) return;
 	if (GalaxyPool.Num() == 0)
@@ -383,6 +395,7 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 
 void AUniverseActor::FinalizeGalaxyPlacement(AGalaxyActor* Galaxy)
 {
+	SVO_GT_SCOPE("Universe::FinalizeGalaxyPlacement");
 	if (!Galaxy || !Galaxy->bPendingPlacement) return;
 
 	const FVector SpawnLoc = ComputeChildSpawnLocation(Galaxy->PendingNodeCenter, Galaxy->Params.UnitScale);
@@ -405,6 +418,7 @@ void AUniverseActor::FinalizeGalaxyPlacement(AGalaxyActor* Galaxy)
 
 void AUniverseActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 {
+	SVO_GT_SCOPE("Universe::ReturnGalaxyToPool");
 	if (!InNode.IsValid()) return;
 	TWeakObjectPtr<AUniverseActor> WeakThis(this);
 	TWeakObjectPtr<AGalaxyActor> WeakGalaxy;
@@ -444,6 +458,7 @@ TArray<TSharedPtr<FOctreeNode>> AUniverseActor::GetNodesByScreenSpace(const FVec
 #pragma region Spawn Range Scanning
 void AUniverseActor::RequestScan()
 {
+	SVO_GT_SCOPE("Universe::RequestScan");
 	if (InitializationState != ELifecycleState::Ready) return;
 	if (!Octree.IsValid()) return;
 	if (bSpawnScanInProgress.load()) return;
@@ -473,6 +488,7 @@ void AUniverseActor::RequestScan()
 
 void AUniverseActor::DetermineAndDispatchScan()
 {
+	SVO_GT_SCOPE("Universe::DetermineAndDispatchScan");
 	if (InitializationState != ELifecycleState::Ready) return;
 
 	// Walk deepest-first: star systems → galaxies → universe.
@@ -509,6 +525,7 @@ void AUniverseActor::DetermineAndDispatchScan()
 
 void AUniverseActor::ProcessPendingScanResults()
 {
+	SVO_GT_SCOPE("Universe::ProcessPendingScanResults");
 	if (!bHasPendingScanResults) return;
 	bHasPendingScanResults = false;
 
@@ -605,6 +622,7 @@ double AUniverseActor::GetGridCellExtent(int32 InGridDepth) const
 #pragma region Octree Bounds Check
 void AUniverseActor::CheckOctreeBounds()
 {
+	SVO_GT_SCOPE("Universe::CheckOctreeBounds");
 	if (!Octree.IsValid() || bRebaseInProgress.load()) return;
 
 	// Measure against the tree's ACTUAL center, not origin — after a rebase the
@@ -631,37 +649,37 @@ void AUniverseActor::CheckOctreeBounds()
 
 	TWeakObjectPtr<AUniverseActor> WeakThis(this);
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, RebaseOrigin, TreeExtent]()
-	{
-		AUniverseActor* Self = WeakThis.Get();
-		if (!Self) return;
+		{
+			AUniverseActor* Self = WeakThis.Get();
+			if (!Self) return;
 
-		UE_LOG(LogTemp, Warning, TEXT("AUniverseActor::RebaseOctree -> (%.1f, %.1f, %.1f)"),
-			RebaseOrigin.X, RebaseOrigin.Y, RebaseOrigin.Z);
+			UE_LOG(LogTemp, Warning, TEXT("AUniverseActor::RebaseOctree -> (%.1f, %.1f, %.1f)"),
+				RebaseOrigin.X, RebaseOrigin.Y, RebaseOrigin.Z);
 
-		// Build + populate the new tree in a LOCAL ptr off the game thread, then
-		// hand the finished tree back for the actual swap. This removes the
-		// torn-read race the original had (it assigned Self->Octree directly on
-		// the background thread while game-thread readers could be mid-copy).
-		TSharedPtr<FOctree> NewTree = MakeShared<FOctree>(TreeExtent, RebaseOrigin);
+			// Build + populate the new tree in a LOCAL ptr off the game thread, then
+			// hand the finished tree back for the actual swap. This removes the
+			// torn-read race the original had (it assigned Self->Octree directly on
+			// the background thread while game-thread readers could be mid-copy).
+			TSharedPtr<FOctree> NewTree = MakeShared<FOctree>(TreeExtent, RebaseOrigin);
 
-		FTierStreamingContext Ctx = Self->BuildStreamingContext();
-		Ctx.Octree = NewTree;   // insert into the new tree, not the live one
+			FTierStreamingContext Ctx = Self->BuildStreamingContext();
+			Ctx.Octree = NewTree;   // insert into the new tree, not the live one
 
-		FTierStreamingSystem::InsertTierIntoOctree(Ctx, Self->CoarseTierConfig,
-			Self->CoarseTierState, Self->CoarseTierState.FrontIdx.load());
-		FTierStreamingSystem::InsertTierIntoOctree(Ctx, Self->MidTierConfig,
-			Self->MidTierState, Self->MidTierState.FrontIdx.load());
-		FTierStreamingSystem::InsertTierIntoOctree(Ctx, Self->SmallTierConfig,
-			Self->SmallTierState, Self->SmallTierState.FrontIdx.load());
+			FTierStreamingSystem::InsertTierIntoOctree(Ctx, Self->CoarseTierConfig,
+				Self->CoarseTierState, Self->CoarseTierState.FrontIdx.load());
+			FTierStreamingSystem::InsertTierIntoOctree(Ctx, Self->MidTierConfig,
+				Self->MidTierState, Self->MidTierState.FrontIdx.load());
+			FTierStreamingSystem::InsertTierIntoOctree(Ctx, Self->SmallTierConfig,
+				Self->SmallTierState, Self->SmallTierState.FrontIdx.load());
 
-		AsyncTask(ENamedThreads::GameThread, [WeakThis, NewTree]()
-			{
-				if (AUniverseActor* S = WeakThis.Get())
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, NewTree]()
 				{
-					S->Octree = NewTree;                  // swap on game thread
-					S->bRebaseInProgress.store(false);
-				}
-			});
-	});
+					if (AUniverseActor* S = WeakThis.Get())
+					{
+						S->Octree = NewTree;                  // swap on game thread
+						S->bRebaseInProgress.store(false);
+					}
+				});
+		});
 }
 #pragma endregion

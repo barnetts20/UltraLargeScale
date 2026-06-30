@@ -7,6 +7,8 @@
 #include "Misc/Paths.h"
 #include "HAL/PlatformProcess.h"
 
+DEFINE_LOG_CATEGORY(LogSVOPerf);
+
 #define LOCTEXT_NAMESPACE "FsvoModule"
 
 void FsvoModule::StartupModule()

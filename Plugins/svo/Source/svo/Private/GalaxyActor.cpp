@@ -3,6 +3,7 @@
 
 #pragma region Includes
 #include "GalaxyActor.h"
+#include "svo.h"
 #include "FTierStreamingSystem.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include "StarSystemActor.h"
@@ -372,6 +373,7 @@ void AGalaxyActor::Tick(float DeltaTime)
 
 void AGalaxyActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 {
+	SVO_GT_SCOPE("Galaxy::ApplyParallaxOffset");
 	const FVector PlayerDelta = InPlayerPos - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = InPlayerPos;
 	CurrentFrameOfReferenceLocation = InPlayerPos;
@@ -388,13 +390,19 @@ void AGalaxyActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 	const double DeltaSq = FVector::DistSquared(VirtualTraversal, LastPushedVirtualTraversal);
 	if (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold)
 	{
-		FTierStreamingSystem::PushTierPositions({ &LargeTierState, &MidTierState, &SmallTierState }, VirtualTraversal);
+		const FVector VT = VirtualTraversal;
+		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, VT]()
+		{
+			FTierStreamingSystem::PushTierPositions({ &LargeTierState, &MidTierState, &SmallTierState }, VT);
+		});
+		//FTierStreamingSystem::PushTierPositions({ &LargeTierState, &MidTierState, &SmallTierState }, VirtualTraversal);
 		LastPushedVirtualTraversal = VirtualTraversal;
 	}
 }
 
 void AGalaxyActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
 {
+	SVO_GT_SCOPE("Galaxy::TickFromParent");
 	if (InitializationState != ELifecycleState::Ready) return;
 
 	// --- VirtualTraversal accumulation ---
@@ -457,6 +465,7 @@ FVector AGalaxyActor::ComputeChildSpawnLocation(const FVector& NodeCenter, doubl
 #pragma region Spawn Range Scanning
 void AGalaxyActor::RequestScan()
 {
+	SVO_GT_SCOPE("Galaxy::RequestScan");
 	if (InitializationState != ELifecycleState::Ready) return;
 	if (!Octree.IsValid()) return;
 	if (bSpawnScanInProgress.load()) return;
@@ -499,6 +508,7 @@ bool AGalaxyActor::IsPlayerInsideBounds() const
 
 void AGalaxyActor::ProcessPendingScanResults()
 {
+	SVO_GT_SCOPE("Galaxy::ProcessPendingScanResults");
 	if (!bHasPendingScanResults) return;
 	bHasPendingScanResults = false;
 
@@ -558,6 +568,7 @@ void AGalaxyActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) con
 #pragma region Star System Pooled Spawn Hooks
 void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 {
+	SVO_GT_SCOPE("Galaxy::SpawnStarSystemFromPool");
 	if (!InNode.IsValid() || !StarSystemActorClass || SpawnedStarSystems.Contains(InNode) ||
 		InitializationState != ELifecycleState::Ready)
 		return;
@@ -626,6 +637,7 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 
 void AGalaxyActor::FinalizeStarSystemPlacement(AStarSystemActor* System)
 {
+	SVO_GT_SCOPE("Galaxy::FinalizeStarSystemPlacement");
 	// Mirrors AUniverseActor::FinalizeGalaxyPlacement exactly.
 	// Called on the first tick after async init completes, so VirtualTraversal
 	// and CurrentFrameOfReferenceLocation are resolved for this frame.
@@ -651,6 +663,7 @@ void AGalaxyActor::FinalizeStarSystemPlacement(AStarSystemActor* System)
 
 void AGalaxyActor::ReturnStarSystemToPool(TSharedPtr<FOctreeNode> InNode)
 {
+	SVO_GT_SCOPE("Galaxy::ReturnStarSystemToPool");
 	if (!InNode.IsValid()) return;
 
 	TWeakObjectPtr<AStarSystemActor> WeakSystem;

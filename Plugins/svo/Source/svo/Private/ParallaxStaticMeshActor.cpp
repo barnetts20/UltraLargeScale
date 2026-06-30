@@ -1,4 +1,5 @@
 #include "ParallaxStaticMeshActor.h"
+#include "svo.h"
 #include "StarSystemActor.h"
 
 AParallaxStaticMeshActor::AParallaxStaticMeshActor()
@@ -19,6 +20,7 @@ AParallaxStaticMeshActor::AParallaxStaticMeshActor()
 
 void AParallaxStaticMeshActor::TickFromStarSystem(const FVector& InPlayerPos)
 {
+	SVO_GT_SCOPE("Planet::TickFromStarSystem");
 	if (!System) return;
 
 	// The mesh lives in real UE world space (UnitScale = 1). To stay visually

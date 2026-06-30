@@ -1,4 +1,5 @@
 ﻿#include "FTierStreamingSystem.h"
+#include "svo.h"
 
 // ============================================================================
 //  InitializeTier
@@ -161,7 +162,7 @@ void FTierStreamingSystem::InitializeTier(
 	Future.Wait();
 
 	State.FrontIdx.store(0);
-	UE_LOG(LogTemp, Log, TEXT("FTierStreamingSystem::InitializeTier [%s] — %d slots, %d capacity, streaming=%d, %.3f sec"),
+	UE_LOG(LogTemp, VeryVerbose, TEXT("FTierStreamingSystem::InitializeTier [%s] — %d slots, %d capacity, streaming=%d, %.3f sec"),
 		*Config.TierName, TotalSlots, Config.SlotCapacity, bIsStreamingTier ? 1 : 0,
 		FPlatformTime::Seconds() - StartTime);
 }
@@ -174,6 +175,7 @@ void FTierStreamingSystem::UpdateTier(
 	FParticleTierConfig& Config,
 	FParticleTierState& State)
 {
+	SVO_GT_SCOPE("Tier::UpdateTier");
 	if (Ctx.InitializationState != ELifecycleState::Ready) return;
 	if (Ctx.bRebaseInProgress) return;
 
@@ -201,7 +203,7 @@ void FTierStreamingSystem::UpdateTier(
 		Ctx.VirtualTraversal, Config.GridDepth, Ctx.Extent, Ctx.GridExtentMultiplier);
 	if (NewCoord == State.CenterCoord) return;
 
-	UE_LOG(LogTemp, Verbose, TEXT("FTierStreamingSystem::UpdateTier [%s] — boundary cross: (%d,%d,%d) → (%d,%d,%d)"),
+	UE_LOG(LogTemp, VeryVerbose, TEXT("FTierStreamingSystem::UpdateTier [%s] — boundary cross: (%d,%d,%d) → (%d,%d,%d)"),
 		*Config.TierName,
 		State.CenterCoord.X, State.CenterCoord.Y, State.CenterCoord.Z,
 		NewCoord.X, NewCoord.Y, NewCoord.Z);
@@ -379,7 +381,7 @@ void FTierStreamingSystem::UpdateTier(
 			CullTierCache(Config, State, NewCoord);
 			State.bUpdateInProgress.store(false);
 
-			UE_LOG(LogTemp, Log,
+			UE_LOG(LogTemp, VeryVerbose,
 				TEXT("FTierStreamingSystem::UpdateTier [%s] — %d entering (%d cached, %d generated), %d exiting in %.3f sec"),
 				*Config.TierName, EnteringNodes.Num(), CacheHitCount, ToGenerate.Num(),
 				ExitingNodes.Num(), FPlatformTime::Seconds() - StartTime);
@@ -394,6 +396,7 @@ void FTierStreamingSystem::PushTierToNiagara(
 	const FParticleTierConfig& Config,
 	FParticleTierState& State)
 {
+	SVO_GT_SCOPE("Tier::PushTierToNiagara");
 	const int32 FrontIdx = State.FrontIdx.load();
 	const FBox BaseBounds = Config.ComputeBounds();
 	for (int32 b = 0; b < Config.NiagaraAssets.Num(); ++b)
@@ -584,7 +587,7 @@ void FTierStreamingSystem::CullTierCache(
 
 	if (ToEvict.Num() > 0)
 	{
-		UE_LOG(LogTemp, Verbose,
+		UE_LOG(LogTemp, VeryVerbose,
 			TEXT("FTierStreamingSystem::CullTierCache [%s] — evicted %d entries, %d remaining"),
 			*Config.TierName, ToEvict.Num(), State.CellCache.Num());
 	}

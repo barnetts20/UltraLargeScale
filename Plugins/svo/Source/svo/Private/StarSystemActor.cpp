@@ -6,6 +6,7 @@
 
 #pragma region Includes
 #include "StarSystemActor.h"
+#include "svo.h"
 #include "GalaxyActor.h"
 #include "ParallaxStaticMeshActor.h"
 #include "FTierStreamingSystem.h"
@@ -513,6 +514,7 @@ void AStarSystemActor::Tick(float DeltaTime)
 
 void AStarSystemActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 {
+	SVO_GT_SCOPE("StarSystem::ApplyParallaxOffset");
 	// --- VirtualTraversal accumulation (mirrors GalaxyActor) ---
 	const FVector PlayerDelta = InPlayerPos - LastFrameOfReferenceLocation;
 	LastFrameOfReferenceLocation = InPlayerPos;
@@ -532,13 +534,19 @@ void AStarSystemActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 	const double DeltaSq = FVector::DistSquared(VirtualTraversal, LastPushedVirtualTraversal);
 	if (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold)
 	{
-		FTierStreamingSystem::PushTierPositions({ &LargeTierState, &MidTierState, &SmallTierState }, VirtualTraversal);
+		const FVector VT = VirtualTraversal;
+		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, VT]()
+		{
+			FTierStreamingSystem::PushTierPositions({ &LargeTierState, &MidTierState, &SmallTierState }, VT);
+		});
+		//FTierStreamingSystem::PushTierPositions({ &LargeTierState, &MidTierState, &SmallTierState }, VirtualTraversal);
 		LastPushedVirtualTraversal = VirtualTraversal;
 	}
 }
 
 void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
 {
+	SVO_GT_SCOPE("StarSystem::TickFromParent");
 	if (InitializationState != ELifecycleState::Ready) return;
 
 	ApplyParallaxOffset(InPlayerPos);
@@ -585,6 +593,7 @@ void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPo
 #pragma region Spawn Range Scanning
 void AStarSystemActor::RequestScan()
 {
+	SVO_GT_SCOPE("StarSystem::RequestScan");
 	if (InitializationState != ELifecycleState::Ready) return;
 	if (!Octree.IsValid()) return;
 	if (bSpawnScanInProgress.load()) return;
@@ -627,6 +636,7 @@ bool AStarSystemActor::IsPlayerInsideBounds() const
 
 void AStarSystemActor::ProcessPendingScanResults()
 {
+	SVO_GT_SCOPE("StarSystem::ProcessPendingScanResults");
 	if (!bHasPendingScanResults) return;
 	bHasPendingScanResults = false;
 
@@ -689,6 +699,7 @@ void AStarSystemActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode)
 #pragma region Planet Spawn Hooks
 void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
 {
+	SVO_GT_SCOPE("StarSystem::SpawnPlanetFromPool");
 	if (!InNode.IsValid() || SpawnedPlanets.Contains(InNode) ||
 		InitializationState != ELifecycleState::Ready)
 		return;
@@ -794,6 +805,7 @@ void AStarSystemActor::FinalizePlanetPlacement(AActor* Planet, TSharedPtr<FOctre
 
 void AStarSystemActor::ReturnPlanetToPool(TSharedPtr<FOctreeNode> InNode)
 {
+	SVO_GT_SCOPE("StarSystem::ReturnPlanetToPool");
 	if (!InNode.IsValid()) return;
 
 	TWeakObjectPtr<AActor> WeakPlanet;

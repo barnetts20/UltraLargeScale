@@ -507,8 +507,12 @@ void GalaxyDataGenerator::GenerateTierNode(
 	for (int32 i = 0; i < NumCandidates; ++i)
 	{
 		const float RawDensity = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
-		const float Density = FMath::Clamp(RawDensity, 0.0f, 1.0f);
-		if (Stream.FRand() > Density) continue;
+		// Density response curve gates spawning only; raw density is used for
+		// particle sizing below and never feeds the pseudovolume texture.
+		const float SpawnDensity = (dCurve && dCurve->GetNumKeys() > 0)
+			? FMath::Clamp(dCurve->Eval(RawDensity), 0.0f, 1.0f)
+			: RawDensity;
+		if (Stream.FRand() > SpawnDensity) continue;
 
 		const float ScaleSample = Stream.FRand();
 		const double Scale = FPointData::SampleScaleFromDistribution(
@@ -773,8 +777,12 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 			if (TotalAccepted >= SlotCapacity) break;
 
 			const float RawDensity = FMath::Clamp(NoiseOut[i], 0.0f, 1.0f);
-			const float Density = FMath::Clamp(RawDensity, 0.0f, 1.0f);
-			if (Stream.FRand() > Density) continue;
+			// Density response curve gates spawning only; raw density is used for
+			// particle sizing below and never feeds the pseudovolume texture.
+			const float SpawnDensity = (dCurve && dCurve->GetNumKeys() > 0)
+				? FMath::Clamp(dCurve->Eval(RawDensity), 0.0f, 1.0f)
+				: RawDensity;
+			if (Stream.FRand() > SpawnDensity) continue;
 
 			const float ScaleSample = Stream.FRand();
 			const double Scale = FPointData::SampleScaleFromDistribution(

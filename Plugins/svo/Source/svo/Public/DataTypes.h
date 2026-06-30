@@ -159,9 +159,14 @@ public:
 	}
 
 	static double SampleScaleFromDistribution(double InMinScale, double InMaxScale, double InSample, const FRuntimeFloatCurve& InDistributionCurve) {
-		// Lerp between min and max using the distribution value
-		return FMath::Lerp(InMinScale, InMaxScale, InSample);
-		//return FMath::Lerp(InMinScale, InMaxScale, static_cast<double>(FMath::Clamp(InDistributionCurve.GetRichCurveConst()->Eval(FMath::Clamp(InSample, 0.0f, 1.0f)), 0.0f, 1.0f)));
+		// Remap the uniform sample through the scale distribution curve, then lerp
+		// between min and max. Falls back to the raw linear sample when the curve is
+		// unconfigured, so an empty curve can't collapse every scale to MinScale.
+		const auto* Curve = InDistributionCurve.GetRichCurveConst();
+		const double T = (Curve && Curve->GetNumKeys() > 0)
+			? static_cast<double>(FMath::Clamp(Curve->Eval(FMath::Clamp(static_cast<float>(InSample), 0.0f, 1.0f)), 0.0f, 1.0f))
+			: InSample;
+		return FMath::Lerp(InMinScale, InMaxScale, T);
 	}
 
 	// Constructors
