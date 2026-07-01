@@ -24,6 +24,8 @@ void FTierStreamingSystem::InitializeTier(
 		bool bRotations = Config.bWantRotations.IsValidIndex(b) && Config.bWantRotations[b];
 		State.Buffers[b][0].Allocate(TotalSlots, Config.SlotCapacity, bRotations);
 		State.Buffers[b][1].Allocate(TotalSlots, Config.SlotCapacity, bRotations);
+		State.Buffers[b][0].bCellAnchored = Config.bUseCellAnchoredVT;
+		State.Buffers[b][1].bCellAnchored = Config.bUseCellAnchoredVT;
 	}
 
 	State.FrontIdx.store(0);
@@ -58,6 +60,12 @@ void FTierStreamingSystem::InitializeTier(
 					FSlotEntry& Entry = State.ActiveSlots.Add(Coord);
 					Entry.SlotIndex = SlotIndex;
 					ToGenerate.Add({ Coord, SlotIndex });
+
+					// Cell-anchored: record this slot's cell center for the GPU VT path.
+					const FVector InitCellCenter = GridCoordToCenter(
+						Coord, Config.GridDepth, Ctx.Extent, Ctx.GridExtentMultiplier);
+					for (int32 bb = 0; bb < NumBuffers; ++bb)
+						State.Buffers[bb][0].SlotCenters[SlotIndex] = InitCellCenter;
 				}
 
 		// Build buffer pointer arrays for the front buffer (index 0 at init).
@@ -133,6 +141,10 @@ void FTierStreamingSystem::InitializeTier(
 					NC->SetSystemFixedBounds(Bounds);
 					NC->TranslucencySortPriority = -1000;
 					NC->SetCustomDepthStencilValue(-1000);
+					if (NC && Config.bUseCellAnchoredVT)
+					{
+						NC->SetVariableInt(NiagaraBufferParams::SlotCapacity, Config.SlotCapacity);
+					}
 				}
 				else
 				{
@@ -162,7 +174,7 @@ void FTierStreamingSystem::InitializeTier(
 	Future.Wait();
 
 	State.FrontIdx.store(0);
-	UE_LOG(LogTemp, VeryVerbose, TEXT("FTierStreamingSystem::InitializeTier [%s] — %d slots, %d capacity, streaming=%d, %.3f sec"),
+	UE_LOG(LogTemp, Log, TEXT("FTierStreamingSystem::InitializeTier [%s] — %d slots, %d capacity, streaming=%d, %.3f sec"),
 		*Config.TierName, TotalSlots, Config.SlotCapacity, bIsStreamingTier ? 1 : 0,
 		FPlatformTime::Seconds() - StartTime);
 }
@@ -190,8 +202,12 @@ void FTierStreamingSystem::UpdateTier(
 	// If async generation completed, push the new front buffer.
 	if (State.bNeedsPush.load())
 	{
-		PushTierToNiagara(Ctx, Config, State);
-		State.bNeedsPush.store(false);
+		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [&Ctx, &Config, &State]()
+			{
+				PushTierToNiagara(Ctx, Config, State); 
+				State.bNeedsPush.store(false);
+			});
+
 	}
 
 	// No streaming for single-cell tiers (e.g. Galaxy Large with radius 0).
@@ -203,7 +219,7 @@ void FTierStreamingSystem::UpdateTier(
 		Ctx.VirtualTraversal, Config.GridDepth, Ctx.Extent, Ctx.GridExtentMultiplier);
 	if (NewCoord == State.CenterCoord) return;
 
-	UE_LOG(LogTemp, VeryVerbose, TEXT("FTierStreamingSystem::UpdateTier [%s] — boundary cross: (%d,%d,%d) → (%d,%d,%d)"),
+	UE_LOG(LogTemp, Verbose, TEXT("FTierStreamingSystem::UpdateTier [%s] — boundary cross: (%d,%d,%d) → (%d,%d,%d)"),
 		*Config.TierName,
 		State.CenterCoord.X, State.CenterCoord.Y, State.CenterCoord.Z,
 		NewCoord.X, NewCoord.Y, NewCoord.Z);
@@ -298,6 +314,12 @@ void FTierStreamingSystem::UpdateTier(
 				Entry.SlotIndex = SlotIndex;
 				AllEnteringSlots.Emplace(Coord, SlotIndex);
 
+				// Cell-anchored: record this slot's cell center for the GPU VT path.
+				const FVector EnterCellCenter = GridCoordToCenter(
+					Coord, Config.GridDepth, CtxExtent, CtxGridExtentMultiplier);
+				for (int32 b = 0; b < NumBuffers; ++b)
+					State.Buffers[b][BackIdx].SlotCenters[SlotIndex] = EnterCellCenter;
+
 				// Optional volume-culling: skip cells entirely outside the
 				// actor's bounded region (e.g. galaxy volume).
 				if (Config.ShouldSkipCell && Config.ShouldSkipCell(Coord))
@@ -381,7 +403,7 @@ void FTierStreamingSystem::UpdateTier(
 			CullTierCache(Config, State, NewCoord);
 			State.bUpdateInProgress.store(false);
 
-			UE_LOG(LogTemp, VeryVerbose,
+			UE_LOG(LogTemp, Log,
 				TEXT("FTierStreamingSystem::UpdateTier [%s] — %d entering (%d cached, %d generated), %d exiting in %.3f sec"),
 				*Config.TierName, EnteringNodes.Num(), CacheHitCount, ToGenerate.Num(),
 				ExitingNodes.Num(), FPlatformTime::Seconds() - StartTime);
@@ -396,7 +418,7 @@ void FTierStreamingSystem::PushTierToNiagara(
 	const FParticleTierConfig& Config,
 	FParticleTierState& State)
 {
-	SVO_GT_SCOPE("Tier::PushTierToNiagara");
+	//SVO_GT_SCOPE("Tier::PushTierToNiagara");
 	const int32 FrontIdx = State.FrontIdx.load();
 	const FBox BaseBounds = Config.ComputeBounds();
 	for (int32 b = 0; b < Config.NiagaraAssets.Num(); ++b)
@@ -426,10 +448,9 @@ void FTierStreamingSystem::PushTierPositions(
 		{
 			UNiagaraComponent* NC = Tier->NiagaraComponents[b];
 			if (!NC || b >= Tier->Buffers.Num()) continue;
-			const TArray<FVector>& RelPos =
-				Tier->Buffers[b][FrontIdx].MakeRelativePositions(VirtualTraversal);
-			UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
-				NC, NiagaraBufferParams::Positions, RelPos);
+			const FNiagaraParticleBuffer& Buf = Tier->Buffers[b][FrontIdx];
+				// Cell-anchored: push only the per-slot (VT - center) array.
+				Buf.PushCellRelativeVT(NC, VirtualTraversal);
 		}
 	}
 }
@@ -587,7 +608,7 @@ void FTierStreamingSystem::CullTierCache(
 
 	if (ToEvict.Num() > 0)
 	{
-		UE_LOG(LogTemp, VeryVerbose,
+		UE_LOG(LogTemp, Verbose,
 			TEXT("FTierStreamingSystem::CullTierCache [%s] — evicted %d entries, %d remaining"),
 			*Config.TierName, ToEvict.Num(), State.CellCache.Num());
 	}

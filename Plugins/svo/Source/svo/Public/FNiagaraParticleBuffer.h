@@ -12,6 +12,11 @@ namespace NiagaraBufferParams
     inline const FName Extents = TEXT("User.Extents");
     inline const FName Colors = TEXT("User.Colors");
     inline const FName Rotations = TEXT("User.Rotations");
+
+    // Cell-anchored VT path: per-slot (VirtualTraversal - cell center), plus the
+    // scalar slot capacity the graph divides particle index by to find its cell.
+    inline const FName CellRelativeVT = TEXT("User.CellRelativeVT");
+    inline const FName SlotCapacity = TEXT("User.SlotCapacity");
 }
 
 // A slot-packed, double-buffer-friendly array of particle data for a single
@@ -32,6 +37,23 @@ struct FNiagaraParticleBuffer
     // Persistent scratch buffer for MakeRelativePositions. Avoids allocating
     // and discarding a large TArray on every PushToNiagara call.
     mutable TArray<FVector> RelativePositionsScratch;
+
+    // --- Cell-anchored VT path (opt-in per tier via bCellAnchored) ---
+    // Per-SLOT cell center in the actor's absolute virtual space (one entry per
+    // slot, not per particle). Written when a cell is assigned to a slot and
+    // carried across the double buffer by CopyFrom/SwapWith so it always matches
+    // the live positions. Used to fold positions to cell-local at push time and
+    // to compute the per-frame (VT - center) array.
+    TArray<FVector> SlotCenters;
+
+    // Persistent scratch for the per-slot (VT - center) push. Size == TotalSlots.
+    mutable TArray<FVector> CellRelVTScratch;
+
+    // When true this buffer uses the cell-anchored GPU compositing path:
+    // cell-local positions pushed once per generation, and only a small per-slot
+    // (VT - center) array pushed per frame. Set at Allocate time from
+    // FParticleTierConfig::bUseCellAnchoredVT. Legacy path used when false.
+    bool bCellAnchored = false;
 
     // Slot geometry � set once in Allocate, read-only after.
     int32 TotalSlots = 0;
@@ -67,6 +89,8 @@ struct FNiagaraParticleBuffer
         Extents.SetNumZeroed(Total);
         Colors.SetNumZeroed(Total);
         RelativePositionsScratch.SetNumUninitialized(Total);
+        SlotCenters.SetNumZeroed(TotalSlots);
+        CellRelVTScratch.SetNumUninitialized(TotalSlots);
 
         if (bWantRotations)
             Rotations.SetNumZeroed(Total);
@@ -82,6 +106,8 @@ struct FNiagaraParticleBuffer
         Extents = Other.Extents;
         Colors = Other.Colors;
         MaxExtent = Other.MaxExtent;
+        SlotCenters = Other.SlotCenters;
+        bCellAnchored = Other.bCellAnchored;
         if (Rotations.Num() > 0 && Other.Rotations.Num() > 0)
             Rotations = Other.Rotations;
     }
@@ -96,6 +122,7 @@ struct FNiagaraParticleBuffer
         Swap(Positions, Other.Positions);
         Swap(Extents, Other.Extents);
         Swap(Colors, Other.Colors);
+        Swap(SlotCenters, Other.SlotCenters);
         if (Rotations.Num() > 0 && Other.Rotations.Num() > 0)
             Swap(Rotations, Other.Rotations);
     }
@@ -150,6 +177,57 @@ struct FNiagaraParticleBuffer
         return RelativePositionsScratch;
     }
 
+    // Cell-anchored: fold absolute positions to cell-local (Position - SlotCenter)
+    // into the scratch buffer. Camera-INDEPENDENT, so this is pushed once per
+    // generation, not per frame. Dead particles collapse to ZeroVector (culled by
+    // Extent==0). Double subtraction happens here before the array is narrowed to
+    // float on upload; the per-cell anchor keeps operands small so there is no
+    // catastrophic cancellation regardless of how large the virtual coords are.
+    const TArray<FVector>& MakeCellLocalPositions() const
+    {
+        const int32 Num = Positions.Num();
+        if (RelativePositionsScratch.Num() != Num)
+            RelativePositionsScratch.SetNumUninitialized(Num);
+        const int32 Cap = FMath::Max(SlotCapacity, 1);
+        for (int32 i = 0; i < Num; ++i)
+        {
+            if (Extents[i] > 0.0f)
+            {
+                const int32 Slot = i / Cap;
+                const FVector Center = SlotCenters.IsValidIndex(Slot)
+                    ? SlotCenters[Slot] : FVector::ZeroVector;
+                RelativePositionsScratch[i] = Positions[i] - Center;
+            }
+            else
+            {
+                RelativePositionsScratch[i] = FVector::ZeroVector;
+            }
+        }
+        return RelativePositionsScratch;
+    }
+
+    // Cell-anchored: build the per-slot (VirtualTraversal - SlotCenter) array,
+    // one entry per slot. Double subtraction, narrowed to float on upload. This
+    // is the ENTIRE per-frame push - TotalSlots entries, not N particles.
+    const TArray<FVector>& MakeCellRelativeVT(const FVector& VirtualTraversal) const
+    {
+        if (CellRelVTScratch.Num() != TotalSlots)
+            CellRelVTScratch.SetNumUninitialized(TotalSlots);
+        for (int32 s = 0; s < TotalSlots; ++s)
+            CellRelVTScratch[s] = SlotCenters[s] - VirtualTraversal;
+        return CellRelVTScratch;
+    }
+
+    // Cell-anchored per-frame push: upload only the per-slot (VT - center) array.
+    // Reads front-buffer data only, so it is safe to call from a worker thread.
+    void PushCellRelativeVT(UNiagaraComponent* Component, const FVector& VirtualTraversal) const
+    {
+        if (!Component) return;
+        const TArray<FVector>& RelVT = MakeCellRelativeVT(VirtualTraversal);
+        UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayVector(
+            Component, NiagaraBufferParams::CellRelativeVT, RelVT);
+    }
+
     // Push all allocated arrays to a Niagara component. Relative positions are
     // computed here so the caller doesn't need to manage the intermediate array.
     // Does NOT call Activate — particle IDs are stable for the system lifetime;
@@ -158,10 +236,28 @@ struct FNiagaraParticleBuffer
     {
         if (!Component) return;
 
-        const TArray<FVector>& RelPos = MakeRelativePositions(VirtualTraversal);
+        // Positions: cell-anchored pushes STATIC cell-local positions (once per
+        // generation); legacy pushes camera-relative positions.
+        if (bCellAnchored)
+        {
+            const TArray<FVector>& CellLocal = MakeCellLocalPositions();
+            UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
+                Component, NiagaraBufferParams::Positions, CellLocal);
 
-        UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
-            Component, NiagaraBufferParams::Positions, RelPos);
+            // Scalar the graph divides particle index by to recover slot -> cell.
+            Component->SetVariableInt(NiagaraBufferParams::SlotCapacity, SlotCapacity);
+
+            // Seed the per-slot (VT - center) array so the first frame is correct
+            // before the per-frame push runs.
+            PushCellRelativeVT(Component, VirtualTraversal);
+        }
+        else
+        {
+            const TArray<FVector>& RelPos = MakeRelativePositions(VirtualTraversal);
+            UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
+                Component, NiagaraBufferParams::Positions, RelPos);
+        }
+
         UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(
             Component, NiagaraBufferParams::Extents, Extents);
         UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayColor(

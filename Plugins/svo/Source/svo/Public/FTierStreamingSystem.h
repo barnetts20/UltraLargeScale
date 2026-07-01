@@ -67,7 +67,7 @@ struct FParticleTierConfig
 	int32 NeighborhoodRadius = 1;
 
 	/** Maximum particles written per slot (candidate count before rejection). */
-	int32 SlotCapacity = 0;
+	int32 SlotCapacity = 7;
 
 	/** Tier index written into octree node TypeId on insert.
 	 *  Used by spawn hooks to identify which tier a node came from
@@ -94,6 +94,16 @@ struct FParticleTierConfig
 	 * Large = 0 (cluster buffer); Mid = 0; Small = 0.
 	 */
 	int32 OctreeInsertBufferIndex = 0;
+
+	/**
+	 * When true this tier uses the cell-anchored GPU VT compositing path:
+	 * positions pushed cell-local once per generation, and only a small per-slot
+	 * (VT - cell center) array pushed per frame. Requires the tier's Niagara
+	 * systems to composite User.CellRelativeVT in-graph. Enable per tier as each
+	 * layer's Niagara assets are migrated; legacy per-frame camera-relative push
+	 * is used when false.
+	 */
+	bool bUseCellAnchoredVT = true;
 
 	/**
 	 * Particle generation callback. Invoked once per entering cell during

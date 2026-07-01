@@ -197,9 +197,9 @@ void AUniverseActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 	{
 		const FVector VT = VirtualTraversal;
 		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, VT]()
-		{
-			FTierStreamingSystem::PushTierPositions({ &CoarseTierState, &MidTierState, &SmallTierState }, VT);
-		});
+			{
+				FTierStreamingSystem::PushTierPositions({ &CoarseTierState, &MidTierState, &SmallTierState }, VT);
+			});
 		//FTierStreamingSystem::PushTierPositions({ &CoarseTierState, &MidTierState, &SmallTierState }, VirtualTraversal);
 		LastPushedVirtualTraversal = VirtualTraversal;
 	}
@@ -210,7 +210,10 @@ void AUniverseActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 void AUniverseActor::Tick(float DeltaTime)
 {
 	SVO_GT_SCOPE("Universe::Tick");
-	Super::Tick(DeltaTime);
+	{
+		SVO_GT_SCOPE("Universe::SuperTick");
+		Super::Tick(DeltaTime);
+	}
 	FVector CurrentPlayerPos;
 	if (InitializationState == ELifecycleState::Ready && GetPlayerLocation(GetWorld(), CurrentPlayerPos))
 	{
@@ -224,18 +227,21 @@ void AUniverseActor::Tick(float DeltaTime)
 	// Drive all active galaxies with the already-resolved player position.
 	// Galaxies have UE tick disabled; this is their only per-frame entry point.
 	// Each galaxy cascades down to its own star systems via TickFromParent.
-	for (auto& Pair : SpawnedGalaxies)
 	{
-		AGalaxyActor* Galaxy = Pair.Value.Get();
-		if (!Galaxy) continue;
-
-		if (Galaxy->InitializationState == ELifecycleState::Ready)
+		SVO_GT_SCOPE("Universe::GalaxyCascade");
+		for (auto& Pair : SpawnedGalaxies)
 		{
-			if (Galaxy->bPendingPlacement)
+			AGalaxyActor* Galaxy = Pair.Value.Get();
+			if (!Galaxy) continue;
+
+			if (Galaxy->InitializationState == ELifecycleState::Ready)
 			{
-				FinalizeGalaxyPlacement(Galaxy);
+				if (Galaxy->bPendingPlacement)
+				{
+					FinalizeGalaxyPlacement(Galaxy);
+				}
+				Galaxy->TickFromParent(DeltaTime, CurrentFrameOfReferenceLocation);
 			}
-			Galaxy->TickFromParent(DeltaTime, CurrentFrameOfReferenceLocation);
 		}
 	}
 
