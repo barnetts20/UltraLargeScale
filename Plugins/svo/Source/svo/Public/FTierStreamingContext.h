@@ -59,4 +59,10 @@ struct FTierStreamingContext
 	 *  output from its parent), forming a chain:
 	 *  UniverseSeed → GalaxySeed → StarSystemSeed → PlanetSeed. */
 	int32 ParentSeed = 0;
+
+	/** Returns the actor's freshest VirtualTraversal in a thread-safe way. Push
+	 *  tasks call this at execution time (under the tier PushCS) so a push always
+	 *  composites against current VT, not a value snapshotted when it was scheduled.
+	 *  Populated by each actor's BuildStreamingContext. */
+	TFunction<FVector()> GetLatestVT;
 };

@@ -1,5 +1,6 @@
 ﻿#include "FTierStreamingSystem.h"
 #include "svo.h"
+#include "Misc/ScopeLock.h"
 
 // ============================================================================
 //  InitializeTier
@@ -231,16 +232,16 @@ void FTierStreamingSystem::UpdateTier(
 	TSharedPtr<FOctree> CtxOctree = Ctx.Octree;
 	const FString CtxOwnerName = Ctx.OwnerName;
 
-	// Snapshot values the tail push needs. ComputeBounds() is a TFunction that may
-	// read game-thread-only actor state, so we evaluate it here on the GT and hand
-	// the resulting FBox to the worker; VirtualTraversal is captured by value.
-	const FVector CtxVT = Ctx.VirtualTraversal;
-	const FBox CtxBaseBounds = Config.ComputeBounds();
+	// The tail push reads the freshest VirtualTraversal at execution time via this
+	// accessor (guarded on the actor), NOT a value captured now -- a generation can
+	// span several frames, and re-seeding the GPU with a stale VT is exactly what
+	// caused the boundary-cross jitter.
+	TFunction<FVector()> GetLatestVT = Ctx.GetLatestVT;
 
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask,
 		[&Config, &State, OldCenter, NewCoord, bIsInitialPopulation,
 		CtxExtent, CtxUnitScale, CtxGridExtentMultiplier, CtxOctree, CtxOwnerName,
-		CtxVT, CtxBaseBounds]()
+		GetLatestVT]()
 		{
 			double StartTime = FPlatformTime::Seconds();
 			const int32 R = Config.NeighborhoodRadius;
@@ -397,12 +398,11 @@ void FTierStreamingSystem::UpdateTier(
 			for (int32 b = 0; b < NumBuffers; ++b)
 				State.Buffers[b][BackIdx].RecomputeMaxExtent();
 
-			// Swap, then push the freshly generated front buffer to Niagara on THIS
-			// worker thread. bUpdateInProgress is still held, so no other generation
-			// can reuse these buffers underneath the upload — the push is race-free
-			// and never touches the game thread.
-			State.FrontIdx.store(BackIdx);
-			PushTierToNiagara(CtxVT, CtxBaseBounds, Config, State);
+			// Publish + push the freshly generated buffer. PushTierToNiagara performs
+			// the FrontIdx swap INSIDE the tier PushCS and reads the freshest VT, so a
+			// concurrent per-frame push can never observe a half-published buffer and the
+			// VT term is never stale. bUpdateInProgress is still held here.
+			PushTierToNiagara(GetLatestVT, BackIdx, Config, State);
 			CullTierCache(Config, State, NewCoord);
 			State.bUpdateInProgress.store(false);
 
@@ -416,27 +416,36 @@ void FTierStreamingSystem::UpdateTier(
 // ============================================================================
 //  PushTierToNiagara
 // ============================================================================
-// Runs on a WORKER THREAD (called from the tail of the generation task). Takes
-// VirtualTraversal and the pre-computed base bounds by value so it touches no
-// game-thread-only context. No SVO_GT_SCOPE here — the profiler accumulator is
-// game-thread only.
+// Publishes the freshly generated back buffer and uploads it. Holds the tier
+// PushCS across the whole swap+upload and reads the freshest VirtualTraversal via
+// GetLatestVT at execution time, so it can neither race the per-frame push nor
+// re-seed the GPU with a stale VT. Bounds are deferred to the game thread. No
+// SVO_GT_SCOPE here -- the profiler accumulator is game-thread only.
 void FTierStreamingSystem::PushTierToNiagara(
-	const FVector& VirtualTraversal,
-	const FBox& BaseBounds,
+	const TFunction<FVector()>& GetLatestVT,
+	int32 BackIdx,
 	const FParticleTierConfig& Config,
 	FParticleTierState& State)
 {
-	const int32 FrontIdx = State.FrontIdx.load();
+	// Serialize against the per-frame VT push and perform the FrontIdx swap under the
+	// same lock, so no per-frame push can slip between "buffer published" and "new
+	// positions uploaded". VT is read here, at execution time, never captured.
+	FScopeLock Lock(&State.PushCS);
+	if (State.bShuttingDown.load()) return;
+
+	State.FrontIdx.store(BackIdx);
+
+	const FVector VirtualTraversal = GetLatestVT();
 	for (int32 b = 0; b < Config.NiagaraAssets.Num(); ++b)
 	{
 		UNiagaraComponent* NC = State.NiagaraComponents[b];
 		if (!NC) continue;
-
-		const FNiagaraParticleBuffer& Buf = State.Buffers[b][FrontIdx];
-		const FBox BufferBounds = BaseBounds.ExpandBy(static_cast<double>(Buf.MaxExtent));
-		NC->SetSystemFixedBounds(BufferBounds);
-		Buf.PushToNiagara(NC, VirtualTraversal);
+		State.Buffers[b][BackIdx].PushToNiagara(NC, VirtualTraversal);
 	}
+
+	// SetSystemFixedBounds is a component render-state touch; defer it to the game
+	// thread (ApplyPendingBounds). MaxExtent is stable by the time we set the flag.
+	State.bBoundsDirty.store(true);
 }
 
 // ============================================================================
@@ -444,12 +453,21 @@ void FTierStreamingSystem::PushTierToNiagara(
 // ============================================================================
 void FTierStreamingSystem::PushTierPositions(
 	std::initializer_list<FParticleTierState*> Tiers,
-	const FVector& VirtualTraversal)
+	const TFunction<FVector()>& GetLatestVT)
 {
 	for (FParticleTierState* Tier : Tiers)
 	{
 		if (!Tier) continue;
+
+		// Same lock the full push holds. The FrontIdx read and the VT read both happen
+		// inside it, so we either see the old buffer (old positions still on the GPU) or
+		// the fully published new one -- never a mix. Reading VT under the lock means
+		// whichever push writes last always wins with fresh VT.
+		FScopeLock Lock(&Tier->PushCS);
+		if (Tier->bShuttingDown.load()) continue;
+
 		const int32 FrontIdx = Tier->FrontIdx.load();
+		const FVector VirtualTraversal = GetLatestVT();
 		for (int32 b = 0; b < Tier->NiagaraComponents.Num(); ++b)
 		{
 			UNiagaraComponent* NC = Tier->NiagaraComponents[b];
@@ -469,6 +487,42 @@ void FTierStreamingSystem::PushTierPositions(
 			}
 		}
 	}
+}
+
+// ============================================================================
+//  ApplyPendingBounds  (game thread)
+// ============================================================================
+// Consumes the bBoundsDirty flag raised by the full push and applies the tight
+// Niagara fixed bounds. Runs on the game thread because SetSystemFixedBounds is a
+// component render-state touch. Only fires the frame after a boundary cross, so it
+// costs nothing steady-state. MaxExtent is stable by the time the flag is set.
+void FTierStreamingSystem::ApplyPendingBounds(
+	FParticleTierConfig& Config, FParticleTierState& State)
+{
+	if (!State.bBoundsDirty.exchange(false)) return;
+
+	const int32 FrontIdx = State.FrontIdx.load();
+	const FBox BaseBounds = Config.ComputeBounds();
+	for (int32 b = 0; b < State.NiagaraComponents.Num(); ++b)
+	{
+		UNiagaraComponent* NC = State.NiagaraComponents[b];
+		if (!NC || b >= State.Buffers.Num()) continue;
+		NC->SetSystemFixedBounds(
+			BaseBounds.ExpandBy(static_cast<double>(State.Buffers[b][FrontIdx].MaxExtent)));
+	}
+}
+
+// ============================================================================
+//  BeginShutdownDrain  (game thread, teardown)
+// ============================================================================
+// Marks the tier as shutting down, then acquires PushCS once to block until any
+// in-flight push has released it. After this returns, every future push bails at
+// the bShuttingDown check before touching a component, so the caller can safely
+// destroy the tier's Niagara components.
+void FTierStreamingSystem::BeginShutdownDrain(FParticleTierState& State)
+{
+	State.bShuttingDown.store(true);
+	FScopeLock Lock(&State.PushCS);
 }
 
 // ============================================================================

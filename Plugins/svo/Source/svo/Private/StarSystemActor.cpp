@@ -90,6 +90,10 @@ void AStarSystemActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 	SpawnedPlanets.Empty();
 
+	// Drain any in-flight pushes before destroying the components they may touch.
+	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
+		FTierStreamingSystem::BeginShutdownDrain(*Tier);
+
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 	{
 		for (UNiagaraComponent*& NC : Tier->NiagaraComponents)
@@ -455,6 +459,7 @@ FTierStreamingContext AStarSystemActor::BuildStreamingContext() const
 	Ctx.bNiagaraAbsolutePosition = false;
 	Ctx.OwnerName = GetName();
 	Ctx.ParentSeed = Params.Seed;
+	Ctx.GetLatestVT = [this] { return ReadLatestVT(); };
 	return Ctx;
 }
 #pragma endregion
@@ -527,21 +532,39 @@ void AStarSystemActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 	// Peg actor to the player so UE's scene graph stays numerically clean.
 	SetActorLocation(InPlayerPos);
 
+	// Publish EVERY frame so a late-completing full push still uses current VT.
+	PublishLatestVT(VirtualTraversal);
+
 	// --- Niagara position push (gated by push threshold) ---
-	// StarSystem Niagara components are attached (not absolute-positioned),
-	// so they follow the actor via SetActorLocation above. Only push when
-	// VirtualTraversal has moved enough to matter.
 	const double DeltaSq = FVector::DistSquared(VirtualTraversal, LastPushedVirtualTraversal);
 	if (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold)
 	{
-		const FVector VT = VirtualTraversal;
-		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, VT]()
-		{
-			FTierStreamingSystem::PushTierPositions({ &LargeTierState, &MidTierState, &SmallTierState }, VT);
-		});
-		//FTierStreamingSystem::PushTierPositions({ &LargeTierState, &MidTierState, &SmallTierState }, VirtualTraversal);
 		LastPushedVirtualTraversal = VirtualTraversal;
+		SchedulePush();
 	}
+}
+
+// Coalesced, single-flight per-frame push (see AUniverseActor::SchedulePush).
+void AStarSystemActor::SchedulePush()
+{
+	bPushDirty.store(true, std::memory_order_release);
+	if (bPushWorkerLive.exchange(true)) return;
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this]()
+		{
+			for (;;)
+			{
+				bPushDirty.store(false, std::memory_order_relaxed);
+				FTierStreamingSystem::PushTierPositions(
+					{ &LargeTierState, &MidTierState, &SmallTierState },
+					[this] { return ReadLatestVT(); });
+				if (!bPushDirty.load(std::memory_order_acquire))
+				{
+					bPushWorkerLive.store(false, std::memory_order_release);
+					if (!bPushDirty.load(std::memory_order_acquire)) return;
+					if (bPushWorkerLive.exchange(true)) return;
+				}
+			}
+		});
 }
 
 void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
@@ -559,6 +582,11 @@ void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPo
 	FTierStreamingSystem::UpdateTier(Ctx, LargeTierConfig, LargeTierState);
 	FTierStreamingSystem::UpdateTier(Ctx, MidTierConfig, MidTierState);
 	FTierStreamingSystem::UpdateTier(Ctx, SmallTierConfig, SmallTierState);
+
+	// Apply any Niagara fixed bounds deferred from a boundary-cross push (GT only).
+	FTierStreamingSystem::ApplyPendingBounds(LargeTierConfig, LargeTierState);
+	FTierStreamingSystem::ApplyPendingBounds(MidTierConfig, MidTierState);
+	FTierStreamingSystem::ApplyPendingBounds(SmallTierConfig, SmallTierState);
 
 	// --- Drive live planets ---
 	// Each planet's world position is recomputed from the current VT every

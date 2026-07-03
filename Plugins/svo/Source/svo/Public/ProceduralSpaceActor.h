@@ -3,6 +3,8 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "FOctree.h"
+#include "Misc/ScopeLock.h"
+#include <atomic>
 #include "ProceduralSpaceActor.generated.h"
 
 /// <summary>
@@ -138,6 +140,29 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parallax Properties")
     double ParallaxPushThreshold = 0.5;
 
+    // --- Thread-safe VirtualTraversal handoff for off-thread Niagara pushes ---
+    // The game thread publishes the freshest VirtualTraversal every frame; the
+    // background push tasks read it at execution time (under the tier PushCS), so a
+    // push always composites against current VT -- never a value captured frames
+    // earlier when the task was scheduled. This is what removes the boundary-cross
+    // jitter: a full push that finishes late no longer re-seeds the GPU with a stale
+    // VT. The guard is held only for the 3-double copy, never during an upload.
+protected:
+    void    PublishLatestVT(const FVector& InVT) { FScopeLock Lock(&LatestVTGuard); LatestVT = InVT; }
+    FVector ReadLatestVT() const { FScopeLock Lock(&LatestVTGuard); return LatestVT; }
+
+    /** Single-flight gate for the coalesced per-frame push worker (SchedulePush in
+     *  each actor): bPushDirty is raised by the game thread; bPushWorkerLive keeps at
+     *  most one draining worker alive. Bursts collapse to one worker that always
+     *  re-reads the freshest VT. */
+    std::atomic<bool> bPushDirty{ false };
+    std::atomic<bool> bPushWorkerLive{ false };
+
+private:
+    mutable FCriticalSection LatestVTGuard;
+    FVector LatestVT = FVector::ZeroVector;
+
+public:
 #pragma region Parallax Spawn Calculation
     /** Computes correct spawn position for a child actor based on parallax
      *  ratios. Each subclass implements this using its VirtualTraversal and

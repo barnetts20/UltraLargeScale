@@ -195,6 +195,21 @@ struct FParticleTierState
 	 *  Cleared by the game thread after PushTierToNiagara completes. */
 	std::atomic<bool> bNeedsPush{ false };
 
+	/** Serializes ALL Niagara writes for this tier (full push + per-frame VT push).
+	 *  The FrontIdx swap happens under this lock, so a per-frame push can never see
+	 *  a half-published buffer. The GAME THREAD must never acquire it -- it would
+	 *  stall behind an upload; the GT hands off via PublishLatestVT and the dirty
+	 *  flags below instead. */
+	FCriticalSection PushCS;
+
+	/** Raised by the full push after it swaps FrontIdx; consumed on the game thread
+	 *  by ApplyPendingBounds to apply SetSystemFixedBounds. */
+	std::atomic<bool> bBoundsDirty{ false };
+
+	/** Set on teardown (BeginShutdownDrain) so in-flight pushes bail before touching
+	 *  a component that is about to be destroyed. */
+	std::atomic<bool> bShuttingDown{ false };
+
 	/** Grid coordinate of the cell currently at the center of the streaming
 	 *  neighborhood. Written on the game thread before the async task starts,
 	 *  then treated as read-only by both sides until the task clears
@@ -297,9 +312,10 @@ struct FTierStreamingSystem
 	//  Niagara Push
 	// ========================================================================
 
-	// Worker-thread full push (called from the generation task tail). VT and the
-	// base bounds are passed by value so it touches no game-thread-only state.
-	static void PushTierToNiagara(const FVector& VirtualTraversal, const FBox& BaseBounds,
+	// Full push (boundary-cross tail, worker thread). Swaps FrontIdx and uploads the
+	// new buffer under the tier PushCS, reading the freshest VT via GetLatestVT at
+	// execution time. Bounds are deferred to ApplyPendingBounds on the game thread.
+	static void PushTierToNiagara(const TFunction<FVector()>& GetLatestVT, int32 BackIdx,
 		const FParticleTierConfig& Config, FParticleTierState& State);
 	/**
 	 * Per-frame parallax re-push: writes camera-relative POSITIONS only (not
@@ -311,7 +327,13 @@ struct FTierStreamingSystem
 	 */
 	static void PushTierPositions(
 		std::initializer_list<FParticleTierState*> Tiers,
-		const FVector& VirtualTraversal);
+		const TFunction<FVector()>& GetLatestVT);
+
+	// Game thread: apply Niagara fixed bounds deferred from a boundary-cross push.
+	static void ApplyPendingBounds(FParticleTierConfig& Config, FParticleTierState& State);
+
+	// Game thread (teardown): block until in-flight pushes drain, then bar new ones.
+	static void BeginShutdownDrain(FParticleTierState& State);
 	// ========================================================================
 	//  Octree Integration
 	// ========================================================================

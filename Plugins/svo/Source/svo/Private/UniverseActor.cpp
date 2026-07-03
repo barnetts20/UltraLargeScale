@@ -175,6 +175,7 @@ FTierStreamingContext AUniverseActor::BuildStreamingContext() const
 	Ctx.bNiagaraAbsolutePosition = false;
 	Ctx.OwnerName = TEXT("Universe");
 	Ctx.ParentSeed = UniverseParams.Seed;
+	Ctx.GetLatestVT = [this] { return ReadLatestVT(); };
 	return Ctx;
 }
 #pragma endregion
@@ -192,17 +193,41 @@ void AUniverseActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 
 	SetActorLocation(InPlayerPos);
 
+	// Publish EVERY frame -- even below the push threshold -- so an in-flight full
+	// push that completes this frame still composites against current VT.
+	PublishLatestVT(VirtualTraversal);
+
 	const double DeltaSq = FVector::DistSquared(VirtualTraversal, LastPushedVirtualTraversal);
 	if (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold)
 	{
-		const FVector VT = VirtualTraversal;
-		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, VT]()
-			{
-				FTierStreamingSystem::PushTierPositions({ &CoarseTierState, &MidTierState, &SmallTierState }, VT);
-			});
-		//FTierStreamingSystem::PushTierPositions({ &CoarseTierState, &MidTierState, &SmallTierState }, VirtualTraversal);
 		LastPushedVirtualTraversal = VirtualTraversal;
+		SchedulePush();
 	}
+}
+
+// Coalesced, single-flight per-frame push. Producers raise bPushDirty; at most one
+// worker drains, re-reading the freshest VT under each tier's PushCS every pass, so
+// out-of-order scheduling is harmless -- the last write always wins with current VT.
+void AUniverseActor::SchedulePush()
+{
+	bPushDirty.store(true, std::memory_order_release);
+	if (bPushWorkerLive.exchange(true)) return;
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this]()
+		{
+			for (;;)
+			{
+				bPushDirty.store(false, std::memory_order_relaxed);
+				FTierStreamingSystem::PushTierPositions(
+					{ &CoarseTierState, &MidTierState, &SmallTierState },
+					[this] { return ReadLatestVT(); });
+				if (!bPushDirty.load(std::memory_order_acquire))
+				{
+					bPushWorkerLive.store(false, std::memory_order_release);
+					if (!bPushDirty.load(std::memory_order_acquire)) return;
+					if (bPushWorkerLive.exchange(true)) return;
+				}
+			}
+		});
 }
 #pragma endregion
 
@@ -249,6 +274,12 @@ void AUniverseActor::Tick(float DeltaTime)
 	FTierStreamingSystem::UpdateTier(Ctx, CoarseTierConfig, CoarseTierState);
 	FTierStreamingSystem::UpdateTier(Ctx, MidTierConfig, MidTierState);
 	FTierStreamingSystem::UpdateTier(Ctx, SmallTierConfig, SmallTierState);
+
+	// Apply any Niagara fixed bounds deferred from a boundary-cross push (GT only).
+	FTierStreamingSystem::ApplyPendingBounds(CoarseTierConfig, CoarseTierState);
+	FTierStreamingSystem::ApplyPendingBounds(MidTierConfig, MidTierState);
+	FTierStreamingSystem::ApplyPendingBounds(SmallTierConfig, SmallTierState);
+
 	CheckOctreeBounds();
 
 	// Single hierarchical scan — replaces all per-level timers.
@@ -273,6 +304,10 @@ void AUniverseActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 	SpawnedGalaxies.Empty();
 	GalaxyPool.Empty();
+
+	// Drain any in-flight pushes before destroying the components they may touch.
+	for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &SmallTierState })
+		FTierStreamingSystem::BeginShutdownDrain(*Tier);
 
 	for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &SmallTierState })
 	{

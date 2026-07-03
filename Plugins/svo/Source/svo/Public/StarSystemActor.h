@@ -162,6 +162,10 @@ public:
 #pragma region Tick
 	virtual void Tick(float DeltaTime) override;
 	virtual void ApplyParallaxOffset(const FVector& InPlayerPos) override;
+
+	/** Schedules a coalesced background per-frame VT push for this actor's tiers.
+	 *  Single-flight: bursts collapse to one worker that re-reads the freshest VT. */
+	void SchedulePush();
 	virtual void TickFromParent(float DeltaTime, const FVector& InPlayerPos) override;
 #pragma endregion
 
