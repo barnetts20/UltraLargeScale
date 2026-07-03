@@ -116,6 +116,7 @@ void AGalaxyActor::ResetForPool()
 		Tier->CenterCoord = FIntVector(INT32_MIN);
 		Tier->StampedCenter = FIntVector(INT32_MIN);
 		Tier->StampedNCenter = FVector::ZeroVector;
+		Tier->AppliedBoundsPad = -1.0;
 		Tier->FrontIdx.store(0);
 		Tier->bUpdateInProgress.store(false);
 		Tier->bNeedsPush.store(false);

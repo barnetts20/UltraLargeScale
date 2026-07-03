@@ -102,7 +102,6 @@ void AUniverseActor::BuildTierConfigs()
 
 	// --- Large tier (was "Coarse") ---
 	CoarseTierConfig.TierName = TEXT("Large");
-	CoarseTierConfig.bUseCellAnchoredVT = true;
 	CoarseTierConfig.TierIndex = 0;
 	CoarseTierConfig.GridDepth = UniverseParams.LargeTier.GridDepth;
 	CoarseTierConfig.NeighborhoodRadius = UniverseParams.LargeTier.NeighborhoodRadius;
@@ -117,7 +116,6 @@ void AUniverseActor::BuildTierConfigs()
 
 	// --- Mid tier ---
 	MidTierConfig.TierName = TEXT("Mid");
-	MidTierConfig.bUseCellAnchoredVT = true;
 	MidTierConfig.TierIndex = 1;
 	MidTierConfig.GridDepth = UniverseParams.MidTier.GridDepth;
 	MidTierConfig.NeighborhoodRadius = UniverseParams.MidTier.NeighborhoodRadius;
@@ -133,7 +131,6 @@ void AUniverseActor::BuildTierConfigs()
 
 	// --- Small tier (was "Proximity") ---
 	SmallTierConfig.TierName = TEXT("Small");
-	SmallTierConfig.bUseCellAnchoredVT = true;
 	SmallTierConfig.TierIndex = 2;
 	SmallTierConfig.GridDepth = UniverseParams.SmallTier.GridDepth;
 	SmallTierConfig.NeighborhoodRadius = UniverseParams.SmallTier.NeighborhoodRadius;

@@ -138,6 +138,7 @@ void AStarSystemActor::ResetForPool()
 		Tier->CenterCoord = FIntVector(INT32_MIN);
 		Tier->StampedCenter = FIntVector(INT32_MIN);
 		Tier->StampedNCenter = FVector::ZeroVector;
+		Tier->AppliedBoundsPad = -1.0;
 		Tier->FrontIdx.store(0);
 		Tier->bUpdateInProgress.store(false);
 		Tier->bNeedsPush.store(false);
@@ -410,6 +411,15 @@ void AStarSystemActor::BuildTierConfigs()
 	MidTierConfig.bWantRotations = { false };
 	MidTierConfig.OctreeInsertBufferIndex = -1; // Skip octree insertion
 
+	// Volume predicate: cull + streaming gate. Zero-capacity today, so the
+	// payoff is purely the gate — no transition churn while crossing this
+	// tier's grid at speed outside the system volume. Bound: the outer-orbit
+	// region, matching the Large tier's planetary coverage; widen when these
+	// tiers gain real content if it should extend past the orbits.
+	MidTierConfig.ShouldSkipCell = [this](const FIntVector& Coord) {
+		return !CellOverlapsVolume(Coord, MidTierConfig.GridDepth);
+		};
+
 	MidTierConfig.GenerateCallback = [this](const FIntVector&, int32, TArray<FNiagaraParticleBuffer*>&) {
 		// No-op: zero-particle tier.
 		};
@@ -429,6 +439,11 @@ void AStarSystemActor::BuildTierConfigs()
 	SmallTierConfig.NiagaraAssets = { StarSystemSmallCloud };
 	SmallTierConfig.bWantRotations = { false };
 	SmallTierConfig.OctreeInsertBufferIndex = -1; // Skip octree insertion
+
+	// Volume predicate: cull + streaming gate (see Mid tier note).
+	SmallTierConfig.ShouldSkipCell = [this](const FIntVector& Coord) {
+		return !CellOverlapsVolume(Coord, SmallTierConfig.GridDepth);
+		};
 
 	SmallTierConfig.GenerateCallback = [this](const FIntVector&, int32, TArray<FNiagaraParticleBuffer*>&) {
 		// No-op: zero-particle tier.
@@ -482,6 +497,16 @@ FVector AStarSystemActor::GridCoordToCenter(const FIntVector& InCoord, int32 InG
 double AStarSystemActor::GetGridCellExtent(int32 InGridDepth) const
 {
 	return FTierStreamingSystem::GetGridCellExtent(InGridDepth, Params.Extent, GridExtentMultiplier);
+}
+
+bool AStarSystemActor::CellOverlapsVolume(const FIntVector& Coord, int32 GridDepth) const
+{
+	const FVector Center = GridCoordToCenter(Coord, GridDepth);
+	const double HalfCell = GetGridCellExtent(GridDepth);
+	const double Ext = Params.Extent * Params.OuterOrbitFraction;
+	return (Center.X + HalfCell > -Ext && Center.X - HalfCell < Ext) &&
+		(Center.Y + HalfCell > -Ext && Center.Y - HalfCell < Ext) &&
+		(Center.Z + HalfCell > -Ext && Center.Z - HalfCell < Ext);
 }
 #pragma endregion
 

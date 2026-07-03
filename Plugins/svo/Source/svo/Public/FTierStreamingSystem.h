@@ -97,16 +97,6 @@ struct FParticleTierConfig
 	int32 OctreeInsertBufferIndex = 0;
 
 	/**
-	 * When true this tier uses the cell-anchored GPU VT compositing path:
-	 * positions pushed cell-local once per generation, and only a small per-slot
-	 * (VT - cell center) array pushed per frame. Requires the tier's Niagara
-	 * systems to composite User.CellRelativeVT in-graph. Enable per tier as each
-	 * layer's Niagara assets are migrated; legacy per-frame camera-relative push
-	 * is used when false.
-	 */
-	bool bUseCellAnchoredVT = true;
-
-	/**
 	 * Particle generation callback. Invoked once per entering cell during
 	 * parallel generation (both InitializeTier and UpdateTier). Writes
 	 * directly into the slot region of each buffer pointer provided.
@@ -138,14 +128,29 @@ struct FParticleTierConfig
 	TFunction<void(const TArray<FIntVector>& Entering, const TArray<FIntVector>& Exiting, const FIntVector& NewCenter)> OnBoundaryCross;
 
 	/**
-	 * Optional per-cell culling predicate evaluated during UpdateTier for each
-	 * entering cell. Returns true if the cell should be skipped (dead-padded
-	 * with zero particles, no generation or cache lookup). Used by bounded
-	 * actors (e.g. GalaxyActor) to skip cells entirely outside their volume.
-	 * Not set for unbounded actors (UniverseActor).
+	 * Optional per-cell culling predicate with two roles:
 	 *
-	 * @param Coord  Grid coordinate of the entering cell.
-	 * @return       True to skip this cell entirely.
+	 * 1. PER-CELL CULL: evaluated during UpdateTier for each entering cell.
+	 *    Returns true if the cell should be skipped (dead-padded with zero
+	 *    particles, no generation or cache lookup).
+	 *
+	 * 2. STREAMING GATE: evaluated against the player's own (new) center
+	 *    cell before any transition is admitted. If the player's cell is
+	 *    itself skippable, the tier does not transition at all — the
+	 *    resident window FREEZES at its last in-bounds center (live edge
+	 *    cells persist as a boundary halo; the per-frame uniform keeps them
+	 *    parallaxing correctly). Streaming resumes on the first in-bounds
+	 *    crossing; multi-cell re-entry deltas fall into the teleport path.
+	 *    Because the gate is a function of the center CELL, it can only
+	 *    change value at a cell boundary — no hysteresis needed.
+	 *
+	 * Used by bounded actors (GalaxyActor, StarSystemActor) to confine both
+	 * generation and boundary-cross tracking to their volume. Not set for
+	 * unbounded actors (UniverseActor) or for radius-0 exhaustive tiers
+	 * (which never stream and must stay resident at any distance).
+	 *
+	 * @param Coord  Grid coordinate of the cell being tested.
+	 * @return       True to skip this cell / suppress streaming from it.
 	 */
 	TFunction<bool(const FIntVector& Coord)> ShouldSkipCell;
 };
@@ -239,6 +244,17 @@ struct FParticleTierState
 	 *  per-frame push needs no grid parameters. Same PushCS discipline as
 	 *  StampedCenter. ZeroVector until the first commit. */
 	FVector StampedNCenter = FVector::ZeroVector;
+
+	/** Grow-only high-water mark for the applied Niagara fixed-bounds pad
+	 *  (largest MaxExtent ever committed to SetSystemFixedBounds). The base
+	 *  box from ComputeBounds is constant per tier — with the cell-anchored
+	 *  reconstruction, rendered positions are bounded by the neighborhood
+	 *  half-extent plus one particle radius regardless of streaming — so
+	 *  bounds only ever need to GROW to admit a bigger particle, never
+	 *  shrink or move. ApplyPendingBounds skips the render-state touch when
+	 *  the candidate pad doesn't exceed this. Converges to zero bounds
+	 *  updates within a few crossings. Game-thread only. -1 = never applied. */
+	double AppliedBoundsPad = -1.0;
 
 	/** Per-slot accepted particle count, written by GenerateCallback.
 	 *  Used by CacheCellFromBuffers and InsertSlotIntoOctree to skip dead

@@ -238,6 +238,13 @@ protected:
 	FVector    GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const;
 	double     GetGridCellExtent(int32 InGridDepth) const;
 
+	/** True if the cell's AABB overlaps the system's orbital volume
+	 *  (±Extent * OuterOrbitFraction cube — the same region the Large tier's
+	 *  bounds cover). Serves as ShouldSkipCell for the streaming tiers: both
+	 *  the per-cell cull and the streaming gate. Mirrors
+	 *  AGalaxyActor::CellOverlapsVolume. */
+	bool CellOverlapsVolume(const FIntVector& Coord, int32 GridDepth) const;
+
 	/** GridExtentMultiplier mirrors GalaxyActor. The star system's spatial grid
 	 *  is sized relative to Params.Extent * this multiplier so the large tier
 	 *  single cell comfortably covers all planetary orbits. */

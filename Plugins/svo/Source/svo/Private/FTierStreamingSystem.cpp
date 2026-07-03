@@ -1,6 +1,7 @@
 ﻿#include "FTierStreamingSystem.h"
 #include "svo.h"
 #include "Misc/ScopeLock.h"
+#include "Misc/ScopeTryLock.h"
 
 // ============================================================================
 //  InitializeTier
@@ -33,8 +34,6 @@ void FTierStreamingSystem::InitializeTier(
 		bool bRotations = Config.bWantRotations.IsValidIndex(b) && Config.bWantRotations[b];
 		State.Buffers[b][0].Allocate(TotalSlots, Config.SlotCapacity, bRotations);
 		State.Buffers[b][1].Allocate(TotalSlots, Config.SlotCapacity, bRotations);
-		State.Buffers[b][0].bCellAnchored = Config.bUseCellAnchoredVT;
-		State.Buffers[b][1].bCellAnchored = Config.bUseCellAnchoredVT;
 	}
 
 	State.FrontIdx.store(0);
@@ -163,10 +162,7 @@ void FTierStreamingSystem::InitializeTier(
 					NC->SetSystemFixedBounds(Bounds);
 					NC->TranslucencySortPriority = -1000;
 					NC->SetCustomDepthStencilValue(-1000);
-					if (NC && Config.bUseCellAnchoredVT)
-					{
-						NC->SetVariableInt(NiagaraBufferParams::SlotCapacity, Config.SlotCapacity);
-					}
+					NC->SetVariableInt(NiagaraBufferParams::SlotCapacity, Config.SlotCapacity);
 				}
 				else
 				{
@@ -233,6 +229,20 @@ void FTierStreamingSystem::UpdateTier(
 	const FIntVector NewCoord = PositionToGridCoord(
 		Ctx.VirtualTraversal, Config.GridDepth, Ctx.Extent, Ctx.GridExtentMultiplier);
 	if (NewCoord == State.CenterCoord) return;
+
+	// STREAMING GATE: if the player's own cell is skippable (outside the
+	// actor's volume), admit no transition — the resident window FREEZES at
+	// its last in-bounds center. Live edge cells persist as a boundary halo
+	// and keep parallaxing via the per-frame uniform (whose StampedNCenter is
+	// likewise frozen, so lattice and uniform stay mutually consistent).
+	// This also suppresses the rapid crossing churn of traversing the grid at
+	// intergalactic speeds outside the volume: the gate runs before any state
+	// mutation or task spawn, so an out-of-bounds crossing costs one AABB
+	// test. Re-entry resumes normally — a multi-cell delta lands in the
+	// teleport path (Entering == whole window). Cell-granular by construction,
+	// so it cannot flap without an actual boundary cross. Radius-0 tiers
+	// never reach this (early-out above) and stay resident at any distance.
+	if (Config.ShouldSkipCell && Config.ShouldSkipCell(NewCoord)) return;
 
 	UE_LOG(LogTemp, Verbose, TEXT("FTierStreamingSystem::UpdateTier [%s] — boundary cross: (%d,%d,%d) → (%d,%d,%d)"),
 		*Config.TierName,
@@ -536,11 +546,17 @@ void FTierStreamingSystem::PushTierPositions(
 	{
 		if (!Tier) continue;
 
-		// Same lock the full push holds. The FrontIdx read and the VT read both happen
-		// inside it, so we either see the old buffer (old positions still on the GPU) or
-		// the fully published new one -- never a mix. Reading VT under the lock means
-		// whichever push writes last always wins with fresh VT.
-		FScopeLock Lock(&Tier->PushCS);
+		// Same lock the transition commit holds — but TRY, don't block. If
+		// it's contended, the holder is the commit itself, which seeds a
+		// fresher (NCenter - VT) uniform (fresh VT read) as part of its
+		// upload; the value we'd have pushed is already superseded. Blocking
+		// here is what convoyed the whole per-frame worker behind one tier's
+		// wholesale array upload and froze motion on EVERY tier in the list
+		// during any transition. Skipping is strictly better: uncontended
+		// tiers get their uniform this pass, the contended tier gets a newer
+		// one from the commit, and the next SchedulePush pass covers it again.
+		FScopeTryLock Lock(&Tier->PushCS);
+		if (!Lock.IsLocked()) continue;
 		if (Tier->bShuttingDown.load()) continue;
 
 		const int32 FrontIdx = Tier->FrontIdx.load();
@@ -549,24 +565,15 @@ void FTierStreamingSystem::PushTierPositions(
 		{
 			UNiagaraComponent* NC = Tier->NiagaraComponents[b];
 			if (!NC || b >= Tier->Buffers.Num()) continue;
-			const FNiagaraParticleBuffer& Buf = Tier->Buffers[b][FrontIdx];
-			if (Buf.bCellAnchored)
-			{
-				// Cell-anchored: ONE FVector uniform — (NCenter - VT). The
-				// stamp is read under the same PushCS the commit wrote it
-				// under (with the same FrontIdx), so this uniform always
-				// matches the live lattice, even on a transition frame.
-				// StampedNCenter is ZeroVector before the first commit, when
-				// every particle is dead — the value is inert.
-				Buf.PushNCenterMinusVT(NC, Tier->StampedNCenter, VirtualTraversal);
-			}
-			else
-			{
-				// Legacy: rebuild and push the full camera-relative position array.
-				const TArray<FVector>& RelPos = Buf.MakeRelativePositions(VirtualTraversal);
-				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
-					NC, NiagaraBufferParams::Positions, RelPos);
-			}
+
+			// ONE FVector uniform — (NCenter - VT) — the entire per-frame
+			// cost. The stamp is read under the same PushCS the commit wrote
+			// it under (with the same FrontIdx), so this uniform always
+			// matches the live lattice, even on a transition frame.
+			// StampedNCenter is ZeroVector before the first commit, when
+			// every particle is dead — the value is inert.
+			Tier->Buffers[b][FrontIdx].PushNCenterMinusVT(
+				NC, Tier->StampedNCenter, VirtualTraversal);
 		}
 	}
 }
@@ -574,23 +581,36 @@ void FTierStreamingSystem::PushTierPositions(
 // ============================================================================
 //  ApplyPendingBounds  (game thread)
 // ============================================================================
-// Consumes the bBoundsDirty flag raised by the full push and applies the tight
-// Niagara fixed bounds. Runs on the game thread because SetSystemFixedBounds is a
-// component render-state touch. Only fires the frame after a boundary cross, so it
-// costs nothing steady-state. MaxExtent is stable by the time the flag is set.
+// Consumes the bBoundsDirty flag raised by the transition commit. GROW-ONLY:
+// the base box from ComputeBounds is constant per tier, and cell-anchored
+// reconstruction bounds every rendered position by the neighborhood half-
+// extent plus one particle radius — streaming never moves the box. The only
+// variable is the MaxExtent pad, and shrinking it buys nothing (culling
+// already can't reject a camera-surrounding box) while re-registering render
+// state costs. So SetSystemFixedBounds fires only when the pad exceeds the
+// tier's high-water mark; steady-state transitions apply nothing at all.
 void FTierStreamingSystem::ApplyPendingBounds(
 	FParticleTierConfig& Config, FParticleTierState& State)
 {
 	if (!State.bBoundsDirty.exchange(false)) return;
 
+	// Pad by the largest particle across ALL buffers so the one shared
+	// high-water mark is valid for every component in the tier.
 	const int32 FrontIdx = State.FrontIdx.load();
-	const FBox BaseBounds = Config.ComputeBounds();
+	double CandidatePad = 0.0;
+	for (int32 b = 0; b < State.Buffers.Num(); ++b)
+		CandidatePad = FMath::Max(CandidatePad,
+			static_cast<double>(State.Buffers[b][FrontIdx].MaxExtent));
+
+	if (CandidatePad <= State.AppliedBoundsPad) return;   // box wouldn't grow
+	State.AppliedBoundsPad = CandidatePad;
+
+	const FBox Bounds = Config.ComputeBounds().ExpandBy(CandidatePad);
 	for (int32 b = 0; b < State.NiagaraComponents.Num(); ++b)
 	{
 		UNiagaraComponent* NC = State.NiagaraComponents[b];
-		if (!NC || b >= State.Buffers.Num()) continue;
-		NC->SetSystemFixedBounds(
-			BaseBounds.ExpandBy(static_cast<double>(State.Buffers[b][FrontIdx].MaxExtent)));
+		if (!NC) continue;
+		NC->SetSystemFixedBounds(Bounds);
 	}
 }
 
