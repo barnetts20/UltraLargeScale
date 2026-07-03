@@ -67,7 +67,7 @@ struct FParticleTierConfig
 	int32 NeighborhoodRadius = 1;
 
 	/** Maximum particles written per slot (candidate count before rejection). */
-	int32 SlotCapacity = 7;
+	int32 SlotCapacity = 0;
 
 	/** Tier index written into octree node TypeId on insert.
 	 *  Used by spawn hooks to identify which tier a node came from
@@ -103,7 +103,7 @@ struct FParticleTierConfig
 	 * layer's Niagara assets are migrated; legacy per-frame camera-relative push
 	 * is used when false.
 	 */
-	bool bUseCellAnchoredVT = true;
+	bool bUseCellAnchoredVT = false;
 
 	/**
 	 * Particle generation callback. Invoked once per entering cell during
@@ -297,7 +297,9 @@ struct FTierStreamingSystem
 	//  Niagara Push
 	// ========================================================================
 
-	static void PushTierToNiagara(const FTierStreamingContext& Ctx,
+	// Worker-thread full push (called from the generation task tail). VT and the
+	// base bounds are passed by value so it touches no game-thread-only state.
+	static void PushTierToNiagara(const FVector& VirtualTraversal, const FBox& BaseBounds,
 		const FParticleTierConfig& Config, FParticleTierState& State);
 	/**
 	 * Per-frame parallax re-push: writes camera-relative POSITIONS only (not

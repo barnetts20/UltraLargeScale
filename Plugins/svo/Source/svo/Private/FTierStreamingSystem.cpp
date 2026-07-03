@@ -199,16 +199,9 @@ void FTierStreamingSystem::UpdateTier(
 	}
 	if (!bHasComponent) return;
 
-	// If async generation completed, push the new front buffer.
-	if (State.bNeedsPush.load())
-	{
-		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [&Ctx, &Config, &State]()
-			{
-				PushTierToNiagara(Ctx, Config, State); 
-				State.bNeedsPush.store(false);
-			});
-
-	}
+	// NOTE: the full boundary-cross push now happens at the tail of the async
+	// generation task (below), on the worker thread, while bUpdateInProgress is
+	// still held. It is never run on the game thread.
 
 	// No streaming for single-cell tiers (e.g. Galaxy Large with radius 0).
 	if (Config.NeighborhoodRadius == 0) return;
@@ -238,9 +231,16 @@ void FTierStreamingSystem::UpdateTier(
 	TSharedPtr<FOctree> CtxOctree = Ctx.Octree;
 	const FString CtxOwnerName = Ctx.OwnerName;
 
+	// Snapshot values the tail push needs. ComputeBounds() is a TFunction that may
+	// read game-thread-only actor state, so we evaluate it here on the GT and hand
+	// the resulting FBox to the worker; VirtualTraversal is captured by value.
+	const FVector CtxVT = Ctx.VirtualTraversal;
+	const FBox CtxBaseBounds = Config.ComputeBounds();
+
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask,
 		[&Config, &State, OldCenter, NewCoord, bIsInitialPopulation,
-		CtxExtent, CtxUnitScale, CtxGridExtentMultiplier, CtxOctree, CtxOwnerName]()
+		CtxExtent, CtxUnitScale, CtxGridExtentMultiplier, CtxOctree, CtxOwnerName,
+		CtxVT, CtxBaseBounds]()
 		{
 			double StartTime = FPlatformTime::Seconds();
 			const int32 R = Config.NeighborhoodRadius;
@@ -397,9 +397,12 @@ void FTierStreamingSystem::UpdateTier(
 			for (int32 b = 0; b < NumBuffers; ++b)
 				State.Buffers[b][BackIdx].RecomputeMaxExtent();
 
-			// Swap and signal.
+			// Swap, then push the freshly generated front buffer to Niagara on THIS
+			// worker thread. bUpdateInProgress is still held, so no other generation
+			// can reuse these buffers underneath the upload — the push is race-free
+			// and never touches the game thread.
 			State.FrontIdx.store(BackIdx);
-			State.bNeedsPush.store(true);
+			PushTierToNiagara(CtxVT, CtxBaseBounds, Config, State);
 			CullTierCache(Config, State, NewCoord);
 			State.bUpdateInProgress.store(false);
 
@@ -413,23 +416,26 @@ void FTierStreamingSystem::UpdateTier(
 // ============================================================================
 //  PushTierToNiagara
 // ============================================================================
+// Runs on a WORKER THREAD (called from the tail of the generation task). Takes
+// VirtualTraversal and the pre-computed base bounds by value so it touches no
+// game-thread-only context. No SVO_GT_SCOPE here — the profiler accumulator is
+// game-thread only.
 void FTierStreamingSystem::PushTierToNiagara(
-	const FTierStreamingContext& Ctx,
+	const FVector& VirtualTraversal,
+	const FBox& BaseBounds,
 	const FParticleTierConfig& Config,
 	FParticleTierState& State)
 {
-	//SVO_GT_SCOPE("Tier::PushTierToNiagara");
 	const int32 FrontIdx = State.FrontIdx.load();
-	const FBox BaseBounds = Config.ComputeBounds();
 	for (int32 b = 0; b < Config.NiagaraAssets.Num(); ++b)
 	{
 		UNiagaraComponent* NC = State.NiagaraComponents[b];
 		if (!NC) continue;
 
-		const auto& Buf = State.Buffers[b][FrontIdx];
+		const FNiagaraParticleBuffer& Buf = State.Buffers[b][FrontIdx];
 		const FBox BufferBounds = BaseBounds.ExpandBy(static_cast<double>(Buf.MaxExtent));
 		NC->SetSystemFixedBounds(BufferBounds);
-		Buf.PushToNiagara(NC, Ctx.VirtualTraversal);
+		Buf.PushToNiagara(NC, VirtualTraversal);
 	}
 }
 
@@ -449,8 +455,18 @@ void FTierStreamingSystem::PushTierPositions(
 			UNiagaraComponent* NC = Tier->NiagaraComponents[b];
 			if (!NC || b >= Tier->Buffers.Num()) continue;
 			const FNiagaraParticleBuffer& Buf = Tier->Buffers[b][FrontIdx];
+			if (Buf.bCellAnchored)
+			{
 				// Cell-anchored: push only the per-slot (VT - center) array.
 				Buf.PushCellRelativeVT(NC, VirtualTraversal);
+			}
+			else
+			{
+				// Legacy: rebuild and push the full camera-relative position array.
+				const TArray<FVector>& RelPos = Buf.MakeRelativePositions(VirtualTraversal);
+				UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(
+					NC, NiagaraBufferParams::Positions, RelPos);
+			}
 		}
 	}
 }
