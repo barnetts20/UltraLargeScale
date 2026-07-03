@@ -23,18 +23,19 @@
 // ============================================================================
 
 /**
- * Maps one active grid cell to its flat-buffer slot and the octree nodes
- * inserted from that slot. Needed for O(1) slot recycling on cell exit and
- * for targeted octree node removal without a full tree scan.
+ * Octree bookkeeping for one flat-buffer slot. Stored slot-indexed in
+ * FParticleTierState::SlotEntries (the slot index IS the array index —
+ * under toroidal addressing coord -> slot is a fixed modular function, so
+ * no coord-keyed map is needed). Needed for targeted octree node removal
+ * without a full tree scan.
  */
 struct FSlotEntry
 {
-	/** Index into the tier's flat particle buffer. -1 = unassigned. */
-	int32 SlotIndex = -1;
-
-	/** Octree nodes inserted from this slot's live particles. Cleared and
-	 *  repopulated on each boundary cross; left persistent on cell exit so
-	 *  the spatial index survives beyond the streaming window. */
+	/** Octree nodes inserted from this slot's live particles. Reset and
+	 *  repopulated when a new cell generates into the slot; the shared
+	 *  refs from the previous occupant are released at that point, so the
+	 *  spatial index survives beyond the streaming window exactly as it
+	 *  did under the old exit-time map removal. */
 	TArray<TSharedPtr<FOctreeNode>> InsertedNodes;
 };
 
@@ -103,7 +104,7 @@ struct FParticleTierConfig
 	 * layer's Niagara assets are migrated; legacy per-frame camera-relative push
 	 * is used when false.
 	 */
-	bool bUseCellAnchoredVT = false;
+	bool bUseCellAnchoredVT = true;
 
 	/**
 	 * Particle generation callback. Invoked once per entering cell during
@@ -159,14 +160,17 @@ struct FParticleTierConfig
  *       (a UPROPERTY TArray) for GC safety. Do not store them elsewhere.
  *
  * Threading contract:
- *   - CenterCoord, ActiveSlots, FreeSlots, SlotCounts, CellCache, and the
- *     back-buffer are written exclusively by the async task spawned from
- *     UpdateTier. The game thread must not read them while bUpdateInProgress
- *     is true.
+ *   - CenterCoord, SlotEntries, SlotCounts, CellCache, and the back-buffer
+ *     are written exclusively by the async task spawned from UpdateTier.
+ *     The game thread must not read them while bUpdateInProgress is true.
  *   - FrontIdx, bUpdateInProgress, and bNeedsPush are std::atomic and safe
  *     for lock-free cross-thread reads.
- *   - The front-buffer (Buffers[b][FrontIdx]) is read-only on the game thread
- *     (ApplyParallaxOffset, PushTierToNiagara). Async tasks must not write it.
+ *   - StampedCenter / StampedNCenter are written only under PushCS by the
+ *     boundary-cross commit and read only under PushCS by the per-frame
+ *     push, so the (NCenter - VT) uniform can never disagree with the live
+ *     lattice — even on a transition frame.
+ *   - The front-buffer (Buffers[b][FrontIdx]) is written only under PushCS
+ *     (the commit mirrors the Entering plane into it after the flip).
  *   - NiagaraComponents are only touched on the game thread.
  */
 struct FParticleTierState
@@ -217,13 +221,24 @@ struct FParticleTierState
 	 *  on the first UpdateTier call. */
 	FIntVector CenterCoord = FIntVector(INT32_MIN);
 
-	/** Maps grid coord → slot entry (index + inserted octree nodes).
-	 *  Written only by the async task while bUpdateInProgress is true. */
-	TMap<FIntVector, FSlotEntry> ActiveSlots;
+	/** Per-slot octree bookkeeping, indexed by (modular) slot index. Sized
+	 *  TotalSlots at InitializeTier. The coord currently resident in a slot
+	 *  lives in the buffers' SlotCoord arrays; this only carries the octree
+	 *  node refs. Written only by the async task while bUpdateInProgress is
+	 *  true. */
+	TArray<FSlotEntry> SlotEntries;
 
-	/** Stack of available slot indices. Popped on cell enter, pushed on exit.
-	 *  Written only by the async task while bUpdateInProgress is true. */
-	TArray<int32> FreeSlots;
+	/** C_stamp: the center coord the LIVE lattice and (NCenter - VT) uniform
+	 *  were built against. Written under PushCS by the boundary-cross commit
+	 *  in the same critical section as the FrontIdx flip and the lattice
+	 *  upload; read under PushCS by the per-frame push. INT32_MIN until the
+	 *  first commit (all particles dead — the uniform is inert). */
+	FIntVector StampedCenter = FIntVector(INT32_MIN);
+
+	/** GridCoordToCenter(StampedCenter), precomputed at commit so the
+	 *  per-frame push needs no grid parameters. Same PushCS discipline as
+	 *  StampedCenter. ZeroVector until the first commit. */
+	FVector StampedNCenter = FVector::ZeroVector;
 
 	/** Per-slot accepted particle count, written by GenerateCallback.
 	 *  Used by CacheCellFromBuffers and InsertSlotIntoOctree to skip dead
@@ -294,6 +309,40 @@ struct FTierStreamingSystem
 	}
 
 	// ========================================================================
+	//  Toroidal (Modular) Slot Addressing
+	// ========================================================================
+	//  slot(coord) is a fixed bijection over any Side-wide window of cells:
+	//  within the window each per-axis residue appears exactly once, so every
+	//  resident coord keeps its slot (and its particle data) when the window
+	//  slides, and the coord entering on the leading face is congruent mod
+	//  Side to the coord exiting on the trailing face — it reuses that slot.
+	//  Side = 1 (radius 0) is the degenerate torus: PosMod(_,1) == 0, one
+	//  slot, no wrapping — same code path, no special case.
+
+	/** Non-negative modulo. UE/C++ '%' is negative for negative operands;
+	 *  this always returns a value in [0, m). m must be > 0. */
+	static FORCEINLINE int32 PosMod(int32 a, int32 m)
+	{
+		return ((a % m) + m) % m;
+	}
+
+	/** Flattens three per-axis residues (each in [0, Side)) to a slot index
+	 *  in [0, Side^3). */
+	static FORCEINLINE int32 FlattenResidues(int32 a, int32 b, int32 c, int32 Side)
+	{
+		return (a * Side + b) * Side + c;
+	}
+
+	/** Modular slot index for a cell coordinate. Side = 2*NeighborhoodRadius+1
+	 *  (odd by construction — asserted at InitializeTier). Bijective over any
+	 *  Side-wide window; NEVER changes for a resident coord. */
+	static FORCEINLINE int32 SlotOf(const FIntVector& Coord, int32 Side)
+	{
+		return FlattenResidues(
+			PosMod(Coord.X, Side), PosMod(Coord.Y, Side), PosMod(Coord.Z, Side), Side);
+	}
+
+	// ========================================================================
 	//  Tier Initialization
 	// ========================================================================
 
@@ -312,18 +361,34 @@ struct FTierStreamingSystem
 	//  Niagara Push
 	// ========================================================================
 
-	// Full push (boundary-cross tail, worker thread). Swaps FrontIdx and uploads the
-	// new buffer under the tier PushCS, reading the freshest VT via GetLatestVT at
-	// execution time. Bounds are deferred to ApplyPendingBounds on the game thread.
+	// Boundary-cross transition COMMIT (worker thread, tail of UpdateTier's
+	// async task). Under the tier PushCS, atomically:
+	//   1. flips FrontIdx to BackIdx (publishes the buffer whose Entering
+	//      plane was generated off-lock),
+	//   2. stamps StampedCenter/StampedNCenter with the center the new
+	//      lattice derives from (§ C_stamp),
+	//   3. uploads the published buffer — cell-local positions, per-slot
+	//      lattice (User.CellRelativeVT), and the (NCenter - VT) uniform,
+	//      reading the freshest VT via GetLatestVT at execution time,
+	//   4. mirrors exactly the Entering slots into the other buffer, keeping
+	//      the double-buffer identical incrementally with no full copy.
+	// Because the per-frame push takes the same lock and reads the same
+	// stamp, no push can ever observe a half-published buffer or a
+	// lattice/uniform pair built against different centers. Bounds are
+	// deferred to ApplyPendingBounds on the game thread.
 	static void PushTierToNiagara(const TFunction<FVector()>& GetLatestVT, int32 BackIdx,
+		const TArray<int32>& EnteringSlots, const FIntVector& NewCenter,
+		const FVector& NewNCenter,
 		const FParticleTierConfig& Config, FParticleTierState& State);
 	/**
-	 * Per-frame parallax re-push: writes camera-relative POSITIONS only (not
-	 * extents/colors/rotations/bounds) for each tier in the list. Used by the
-	 * actor parallax overrides when VirtualTraversal moves past the push
-	 * threshold. Distinct from PushTierToNiagara, which does the full push on a
-	 * boundary-cross data swap. The threshold gate and LastPushedVirtualTraversal
-	 * bookkeeping stay with the caller — this only performs the writes.
+	 * Per-frame parallax re-push. Cell-anchored tiers: a SINGLE FVector
+	 * uniform per component — (StampedNCenter - VT) — no array traffic at
+	 * all. Legacy tiers: rebuild and push the full camera-relative position
+	 * array as before. Used by the actor parallax overrides when
+	 * VirtualTraversal moves past the push threshold. Distinct from
+	 * PushTierToNiagara, which commits a boundary-cross data swap. The
+	 * threshold gate and LastPushedVirtualTraversal bookkeeping stay with
+	 * the caller — this only performs the writes.
 	 */
 	static void PushTierPositions(
 		std::initializer_list<FParticleTierState*> Tiers,

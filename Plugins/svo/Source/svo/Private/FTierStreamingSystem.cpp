@@ -17,6 +17,14 @@ void FTierStreamingSystem::InitializeTier(
 	const int32 Side = 2 * Config.NeighborhoodRadius + 1;
 	const int32 TotalSlots = Side * Side * Side;
 
+	// Toroidal addressing invariant: Side must be odd on every axis so the
+	// window has a well-defined center cell and Side==1 is a clean degenerate
+	// subset. Trivially true with a scalar radius — asserted so a future
+	// per-axis radius can't silently break the bijection.
+	checkf((Side % 2) == 1 && Config.NeighborhoodRadius >= 0,
+		TEXT("InitializeTier [%s]: Side (=2R+1) must be odd and positive, got %d"),
+		*Config.TierName, Side);
+
 	// Allocate double-buffered particle data — one pair per Niagara asset.
 	State.Buffers.SetNum(NumBuffers);
 	for (int32 b = 0; b < NumBuffers; ++b)
@@ -31,10 +39,10 @@ void FTierStreamingSystem::InitializeTier(
 
 	State.FrontIdx.store(0);
 	State.SlotCounts.SetNumZeroed(TotalSlots);
-	State.FreeSlots.Empty(TotalSlots);
-	for (int32 i = TotalSlots - 1; i >= 0; --i)
-		State.FreeSlots.Add(i);
-	State.ActiveSlots.Empty();
+	State.SlotEntries.Empty(TotalSlots);
+	State.SlotEntries.SetNum(TotalSlots);
+	State.StampedCenter = FIntVector(INT32_MIN);
+	State.StampedNCenter = FVector::ZeroVector;
 
 	// Streaming tiers (NeighborhoodRadius > 0) defer initial population to the
 	// first UpdateTier call by setting CenterCoord = INT32_MIN. Exhaustive tiers
@@ -47,9 +55,15 @@ void FTierStreamingSystem::InitializeTier(
 	}
 	else
 	{
-		// Exhaustive tier: generate the single cell at origin.
+		// Exhaustive tier: generate the full (usually 1x1x1) window immediately.
 		State.CenterCoord = PositionToGridCoord(
 			Ctx.VirtualTraversal, Config.GridDepth, Ctx.Extent, Ctx.GridExtentMultiplier);
+
+		// Stamp the center the lattice/uniform derive from. Radius-0 tiers
+		// never stream, so this stamp is permanent for the actor's lifetime.
+		State.StampedCenter = State.CenterCoord;
+		State.StampedNCenter = GridCoordToCenter(
+			State.CenterCoord, Config.GridDepth, Ctx.Extent, Ctx.GridExtentMultiplier);
 
 		TArray<TPair<FIntVector, int32>> ToGenerate;
 		for (int32 dz = -Config.NeighborhoodRadius; dz <= Config.NeighborhoodRadius; ++dz)
@@ -57,16 +71,19 @@ void FTierStreamingSystem::InitializeTier(
 				for (int32 dx = -Config.NeighborhoodRadius; dx <= Config.NeighborhoodRadius; ++dx)
 				{
 					const FIntVector Coord = State.CenterCoord + FIntVector(dx, dy, dz);
-					const int32 SlotIndex = State.FreeSlots.Pop();
-					FSlotEntry& Entry = State.ActiveSlots.Add(Coord);
-					Entry.SlotIndex = SlotIndex;
+					const int32 SlotIndex = SlotOf(Coord, Side);
 					ToGenerate.Add({ Coord, SlotIndex });
 
-					// Cell-anchored: record this slot's cell center for the GPU VT path.
+					// Record the resident coord + derived center for the slot.
+					// Written into buffer[0]; the CopyFrom below mirrors both
+					// into buffer[1] so either buffer is a valid start state.
 					const FVector InitCellCenter = GridCoordToCenter(
 						Coord, Config.GridDepth, Ctx.Extent, Ctx.GridExtentMultiplier);
 					for (int32 bb = 0; bb < NumBuffers; ++bb)
+					{
+						State.Buffers[bb][0].SlotCoord[SlotIndex] = Coord;
 						State.Buffers[bb][0].SlotCenters[SlotIndex] = InitCellCenter;
+					}
 				}
 
 		// Build buffer pointer arrays for the front buffer (index 0 at init).
@@ -111,8 +128,12 @@ void FTierStreamingSystem::InitializeTier(
 	USceneComponent* AttachRoot = Ctx.AttachRoot;
 	const bool bAbsolutePos = Ctx.bNiagaraAbsolutePosition;
 	const FVector VT = Ctx.VirtualTraversal;
+	// Radius-0 tiers stamped their permanent center above; streaming tiers are
+	// still at the sentinel (ZeroVector NCenter) — all their particles are dead
+	// until the first UpdateTier commit, so the seed uniform is inert.
+	const FVector NCenterSeed = State.StampedNCenter;
 
-	AsyncTask(ENamedThreads::GameThread, [AttachRoot, bAbsolutePos, VT,
+	AsyncTask(ENamedThreads::GameThread, [AttachRoot, bAbsolutePos, VT, NCenterSeed,
 		&Config, &State, &OutComponents, NumBuffers,
 		Promise = MoveTemp(Promise)]() mutable
 		{
@@ -166,7 +187,7 @@ void FTierStreamingSystem::InitializeTier(
 				if (NC)
 				{
 					NC->SetSystemFixedBounds(Bounds);
-					State.Buffers[b][FrontIdx].ActivateOnce(NC, VT);
+					State.Buffers[b][FrontIdx].ActivateOnce(NC, VT, NCenterSeed);
 				}
 			}
 
@@ -245,13 +266,18 @@ void FTierStreamingSystem::UpdateTier(
 		{
 			double StartTime = FPlatformTime::Seconds();
 			const int32 R = Config.NeighborhoodRadius;
+			const int32 Side = 2 * R + 1;
 			const int32 NumBuffers = Config.NiagaraAssets.Num();
 			const int32 FrontIdx = State.FrontIdx.load();
 			const int32 BackIdx = 1 - FrontIdx;
 
-			// Copy front → back; unchanged slots carry over untouched.
-			for (int32 b = 0; b < NumBuffers; ++b)
-				State.Buffers[b][BackIdx].CopyFrom(State.Buffers[b][FrontIdx]);
+			// NO front → back CopyFrom. Every prior commit mirrored its
+			// Entering plane into both buffers (PushTierToNiagara step 4), so
+			// the back buffer's resident slots are already byte-identical to
+			// the front's. The back buffer serves as the off-lock scratch the
+			// Entering plane is generated into; nothing observes it until the
+			// FrontIdx flip inside the commit. Resident cells are never
+			// copied or regenerated — that is the point of the torus.
 
 			// Diff old and new neighborhoods.
 			TSet<FIntVector> OldSet;
@@ -277,49 +303,59 @@ void FTierStreamingSystem::UpdateTier(
 				if (!OldSet.Contains(Coord)) EnteringNodes.Add(Coord);
 			}
 
-			// Free exiting slots.
+			// Exiting cells need no slot bookkeeping: each exiting coord is
+			// congruent mod Side to exactly one entering coord (the residue
+			// sets of any two Side-wide windows are identical), so its slot is
+			// fully overwritten by that entering cell below — generation,
+			// cache-restore, and skip paths all write or dead-pad the whole
+			// slot. Octree node refs from the previous occupant are released
+			// when InsertSlotIntoOctree resets the slot's entry. ExitingNodes
+			// is still computed for the OnBoundaryCross hook and cache
+			// semantics, mirroring the old pipeline.
 			const FVector DeadPos(CtxExtent * 10.0);
-			for (const FIntVector& Coord : ExitingNodes)
-			{
-				FSlotEntry* Entry = State.ActiveSlots.Find(Coord);
-				if (!Entry) continue;
-				for (int32 b = 0; b < NumBuffers; ++b)
-					State.Buffers[b][BackIdx].ClearSlot(Entry->SlotIndex, DeadPos);
-				State.FreeSlots.Add(Entry->SlotIndex);
-				State.ActiveSlots.Remove(Coord);
-			}
 
 			// Fire optional boundary-cross hook (e.g. streaming volumetric).
 			if (Config.OnBoundaryCross)
 				Config.OnBoundaryCross(EnteringNodes, ExitingNodes, NewCoord);
 
-			// Generate entering cells.
+			// Generate entering cells into their MODULAR slots. slot(coord) is
+			// a bijection over the new window, so no free-list is needed and
+			// no cell can ever be dropped for lack of a slot.
 			int32 CacheHitCount = 0;
 			TArray<TPair<FIntVector, int32>> ToGenerate;
 			TArray<TPair<FIntVector, int32>> AllEnteringSlots;
+			TArray<int32> EnteringSlots;
 			ToGenerate.Reserve(EnteringNodes.Num());
 			AllEnteringSlots.Reserve(EnteringNodes.Num());
+			EnteringSlots.Reserve(EnteringNodes.Num());
+
+#if DO_CHECK
+			TArray<bool> SlotClaimed;
+			SlotClaimed.Init(false, Side * Side * Side);
+#endif
 
 			for (const FIntVector& Coord : EnteringNodes)
 			{
-				if (State.FreeSlots.Num() == 0)
-				{
-					UE_LOG(LogTemp, Warning,
-						TEXT("FTierStreamingSystem::UpdateTier [%s] — no free slots; dropping cell (%d,%d,%d)"),
-						*Config.TierName, Coord.X, Coord.Y, Coord.Z);
-					continue;
-				}
-
-				const int32 SlotIndex = State.FreeSlots.Pop();
-				FSlotEntry& Entry = State.ActiveSlots.Add(Coord);
-				Entry.SlotIndex = SlotIndex;
+				const int32 SlotIndex = SlotOf(Coord, Side);
+#if DO_CHECK
+				checkf(!SlotClaimed[SlotIndex],
+					TEXT("UpdateTier [%s]: modular slot collision at slot %d for cell (%d,%d,%d) — bijection violated"),
+					*Config.TierName, SlotIndex, Coord.X, Coord.Y, Coord.Z);
+				SlotClaimed[SlotIndex] = true;
+#endif
 				AllEnteringSlots.Emplace(Coord, SlotIndex);
+				EnteringSlots.Add(SlotIndex);
 
-				// Cell-anchored: record this slot's cell center for the GPU VT path.
+				// Record the new resident coord + derived cell center in the
+				// back (scratch) buffers. The commit mirrors these into the
+				// other buffer together with the particle data.
 				const FVector EnterCellCenter = GridCoordToCenter(
 					Coord, Config.GridDepth, CtxExtent, CtxGridExtentMultiplier);
 				for (int32 b = 0; b < NumBuffers; ++b)
+				{
+					State.Buffers[b][BackIdx].SlotCoord[SlotIndex] = Coord;
 					State.Buffers[b][BackIdx].SlotCenters[SlotIndex] = EnterCellCenter;
+				}
 
 				// Optional volume-culling: skip cells entirely outside the
 				// actor's bounded region (e.g. galaxy volume).
@@ -398,11 +434,16 @@ void FTierStreamingSystem::UpdateTier(
 			for (int32 b = 0; b < NumBuffers; ++b)
 				State.Buffers[b][BackIdx].RecomputeMaxExtent();
 
-			// Publish + push the freshly generated buffer. PushTierToNiagara performs
-			// the FrontIdx swap INSIDE the tier PushCS and reads the freshest VT, so a
-			// concurrent per-frame push can never observe a half-published buffer and the
-			// VT term is never stale. bUpdateInProgress is still held here.
-			PushTierToNiagara(GetLatestVT, BackIdx, Config, State);
+			// Commit: publish the buffer, stamp the new center, upload
+			// lattice + uniform + arrays, and mirror the Entering plane into
+			// the other buffer — all inside the tier PushCS, so a concurrent
+			// per-frame push can never observe a half-published buffer, a
+			// stale VT, or a lattice/uniform pair from different centers.
+			// bUpdateInProgress is still held here.
+			const FVector NewNCenter = GridCoordToCenter(
+				NewCoord, Config.GridDepth, CtxExtent, CtxGridExtentMultiplier);
+			PushTierToNiagara(GetLatestVT, BackIdx, EnteringSlots, NewCoord, NewNCenter,
+				Config, State);
 			CullTierCache(Config, State, NewCoord);
 			State.bUpdateInProgress.store(false);
 
@@ -414,33 +455,69 @@ void FTierStreamingSystem::UpdateTier(
 }
 
 // ============================================================================
-//  PushTierToNiagara
+//  PushTierToNiagara  (transition commit)
 // ============================================================================
-// Publishes the freshly generated back buffer and uploads it. Holds the tier
-// PushCS across the whole swap+upload and reads the freshest VirtualTraversal via
-// GetLatestVT at execution time, so it can neither race the per-frame push nor
-// re-seed the GPU with a stale VT. Bounds are deferred to the game thread. No
-// SVO_GT_SCOPE here -- the profiler accumulator is game-thread only.
+// Publishes the back buffer whose Entering plane was generated off-lock, and
+// makes the whole transition atomic with respect to every other Niagara write.
+// Holds the tier PushCS across flip + stamp + upload + mirror and reads the
+// freshest VirtualTraversal via GetLatestVT at execution time, so it can
+// neither race the per-frame push nor re-seed the GPU with a stale VT.
+//
+// Atomicity contract: a slot's particle data (cell-local positions) and its
+// lattice entry go live TOGETHER, and the (NCenter - VT) uniform always
+// derives from the same stamped center as the live lattice. If the GPU ever
+// saw a wrapped slot's new cellLocal with its old lattice (or a uniform from
+// a different center), that slot would teleport by ~Side*CellSize for a
+// frame. Everything below the lock acquisition exists to make that state
+// unrepresentable. Bounds are deferred to the game thread. No SVO_GT_SCOPE
+// here -- the profiler accumulator is game-thread only.
 void FTierStreamingSystem::PushTierToNiagara(
 	const TFunction<FVector()>& GetLatestVT,
 	int32 BackIdx,
+	const TArray<int32>& EnteringSlots,
+	const FIntVector& NewCenter,
+	const FVector& NewNCenter,
 	const FParticleTierConfig& Config,
 	FParticleTierState& State)
 {
-	// Serialize against the per-frame VT push and perform the FrontIdx swap under the
-	// same lock, so no per-frame push can slip between "buffer published" and "new
-	// positions uploaded". VT is read here, at execution time, never captured.
+	// Serialize against the per-frame push and perform the FrontIdx swap under
+	// the same lock, so no per-frame push can slip between "buffer published"
+	// and "new data uploaded". VT is read here, at execution time, never captured.
 	FScopeLock Lock(&State.PushCS);
 	if (State.bShuttingDown.load()) return;
 
+	// 1. Publish: the freshly written buffer becomes the front.
 	State.FrontIdx.store(BackIdx);
 
+	// 2. C_stamp: record the center the published lattice derives from. The
+	//    per-frame push reads these under the same lock, so its uniform can
+	//    never disagree with the lattice uploaded below.
+	State.StampedCenter = NewCenter;
+	State.StampedNCenter = NewNCenter;
+
+	// 3. Upload. Cell-anchored buffers push cell-local positions, the per-slot
+	//    lattice (vs NewNCenter), and the seeded (NCenter - VT) uniform; legacy
+	//    buffers push camera-relative positions as before.
 	const FVector VirtualTraversal = GetLatestVT();
 	for (int32 b = 0; b < Config.NiagaraAssets.Num(); ++b)
 	{
 		UNiagaraComponent* NC = State.NiagaraComponents[b];
 		if (!NC) continue;
-		State.Buffers[b][BackIdx].PushToNiagara(NC, VirtualTraversal);
+		State.Buffers[b][BackIdx].PushToNiagara(NC, VirtualTraversal, NewNCenter);
+	}
+
+	// 4. Mirror exactly the Entering plane into the other buffer so the two
+	//    buffers stay identical incrementally — this is what lets the next
+	//    transition skip the full CopyFrom. Resident slots are never written
+	//    on either buffer. Writing this one small plane twice per transition
+	//    is the entire cost of keeping the double buffer.
+	const int32 OtherIdx = 1 - BackIdx;
+	for (int32 b = 0; b < Config.NiagaraAssets.Num(); ++b)
+	{
+		FNiagaraParticleBuffer& Dst = State.Buffers[b][OtherIdx];
+		const FNiagaraParticleBuffer& Src = State.Buffers[b][BackIdx];
+		for (const int32 SlotIndex : EnteringSlots)
+			Dst.MirrorSlotFrom(Src, SlotIndex);
 	}
 
 	// SetSystemFixedBounds is a component render-state touch; defer it to the game
@@ -475,8 +552,13 @@ void FTierStreamingSystem::PushTierPositions(
 			const FNiagaraParticleBuffer& Buf = Tier->Buffers[b][FrontIdx];
 			if (Buf.bCellAnchored)
 			{
-				// Cell-anchored: push only the per-slot (VT - center) array.
-				Buf.PushCellRelativeVT(NC, VirtualTraversal);
+				// Cell-anchored: ONE FVector uniform — (NCenter - VT). The
+				// stamp is read under the same PushCS the commit wrote it
+				// under (with the same FrontIdx), so this uniform always
+				// matches the live lattice, even on a transition frame.
+				// StampedNCenter is ZeroVector before the first commit, when
+				// every particle is dead — the value is inert.
+				Buf.PushNCenterMinusVT(NC, Tier->StampedNCenter, VirtualTraversal);
 			}
 			else
 			{
@@ -539,14 +621,15 @@ void FTierStreamingSystem::InsertTierIntoOctree(
 	const FNiagaraParticleBuffer& InsertBuffer = State.Buffers[Config.OctreeInsertBufferIndex][BufferIdx];
 	const double TreeExtent = Ctx.Octree->Extent;
 
-	for (auto& Pair : State.ActiveSlots)
+	for (int32 SlotIndex = 0; SlotIndex < InsertBuffer.TotalSlots; ++SlotIndex)
 	{
-		FSlotEntry& Entry = Pair.Value;
-		const FIntVector& Coord = Pair.Key;
+		if (!InsertBuffer.IsSlotOccupied(SlotIndex)) continue;
+		const FIntVector Coord = InsertBuffer.SlotCoord[SlotIndex];
+		FSlotEntry& Entry = State.SlotEntries[SlotIndex];
 		Entry.InsertedNodes.Reset();
-		const int32 Count = State.SlotCounts[Entry.SlotIndex];
+		const int32 Count = State.SlotCounts[SlotIndex];
 		Entry.InsertedNodes.Reserve(Count);
-		const int32 BufferStart = Entry.SlotIndex * Config.SlotCapacity;
+		const int32 BufferStart = SlotIndex * Config.SlotCapacity;
 		for (int32 i = 0; i < Count; ++i)
 		{
 			const int32 Idx = BufferStart + i;
@@ -565,22 +648,30 @@ void FTierStreamingSystem::InsertSlotIntoOctree(
 {
 	if (Config.OctreeInsertBufferIndex < 0 || !Ctx.Octree.IsValid()) return;
 
-	FSlotEntry* Entry = State.ActiveSlots.Find(Coord);
-	if (!Entry || Entry->SlotIndex != SlotIndex) return;
-
 	const FNiagaraParticleBuffer& InsertBuffer = State.Buffers[Config.OctreeInsertBufferIndex][BufferIdx];
+
+	// Residency check replaces the old ActiveSlots map lookup: the buffer's
+	// SlotCoord is the per-slot source of truth for which cell owns the slot.
+	if (!InsertBuffer.SlotCoord.IsValidIndex(SlotIndex) ||
+		InsertBuffer.SlotCoord[SlotIndex] != Coord) return;
+	if (!State.SlotEntries.IsValidIndex(SlotIndex)) return;
+
 	const double TreeExtent = Ctx.Octree->Extent;
 	const int32 LiveCount = State.SlotCounts[SlotIndex];
 	const int32 BufferStart = SlotIndex * Config.SlotCapacity;
 
-	Entry->InsertedNodes.Reset();
-	Entry->InsertedNodes.Reserve(LiveCount);
+	// Resetting here releases the shared node refs held for the slot's
+	// PREVIOUS occupant (the congruent exiting cell) — the exit-time release
+	// the old pipeline did via ActiveSlots.Remove.
+	FSlotEntry& Entry = State.SlotEntries[SlotIndex];
+	Entry.InsertedNodes.Reset();
+	Entry.InsertedNodes.Reserve(LiveCount);
 
 	for (int32 i = 0; i < LiveCount; ++i)
 	{
 		const int32 Idx = BufferStart + i;
 		if (InsertBuffer.Extents[Idx] <= 0.0f) continue;
-		InsertParticleIntoOctree(Ctx, *Entry, InsertBuffer.Positions[Idx],
+		InsertParticleIntoOctree(Ctx, Entry, InsertBuffer.Positions[Idx],
 			InsertBuffer.Extents[Idx], Coord, i, Idx, TreeExtent, Config.TierIndex);
 	}
 }

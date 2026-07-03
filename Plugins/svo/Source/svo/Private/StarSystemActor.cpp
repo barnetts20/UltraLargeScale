@@ -132,11 +132,12 @@ void AStarSystemActor::ResetForPool()
 		}
 		Tier->NiagaraComponents.Empty();
 		Tier->Buffers.Empty();
-		Tier->ActiveSlots.Empty();
-		Tier->FreeSlots.Empty();
+		Tier->SlotEntries.Empty();
 		Tier->SlotCounts.Empty();
 		Tier->CellCache.Empty();
 		Tier->CenterCoord = FIntVector(INT32_MIN);
+		Tier->StampedCenter = FIntVector(INT32_MIN);
+		Tier->StampedNCenter = FVector::ZeroVector;
 		Tier->FrontIdx.store(0);
 		Tier->bUpdateInProgress.store(false);
 		Tier->bNeedsPush.store(false);
