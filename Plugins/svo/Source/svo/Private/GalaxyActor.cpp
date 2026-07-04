@@ -117,7 +117,6 @@ void AGalaxyActor::ResetForPool()
 		Tier->StampedCenter = FIntVector(INT32_MIN);
 		Tier->StampedNCenter = FVector::ZeroVector;
 		Tier->AppliedBoundsPad = -1.0;
-		Tier->FrontIdx.store(0);
 		Tier->bUpdateInProgress.store(false);
 	}
 	TierNiagaraComponents.Empty();
@@ -624,13 +623,19 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 	float    ParticleExtent = static_cast<float>(InNode->Extent);
 
 	// ParticleIndex is the absolute buffer index. Direct lookup.
+	// SINGLE-BUFFER READ GUARD: the transition task overwrites entering
+	// slots in place, so only read the CPU arrays while no task is in
+	// flight. On the GT this check is race-free (the flag is set on the GT
+	// before the task spawns), and if a transition IS in flight the matched
+	// node's slot may be mid-rewrite anyway — the octree fallback above
+	// (node center/extent) is the correct answer in that case.
 	const int32 AbsIdx = InNode->Data.ParticleIndex;
-	const int32 FrontIdx = MatchedState.FrontIdx.load();
-	if (AbsIdx >= 0 && MatchedState.Buffers.Num() > 0)
+	if (AbsIdx >= 0 && MatchedState.Buffers.Num() > 0 &&
+		!MatchedState.bUpdateInProgress.load())
 	{
-		const FNiagaraParticleBuffer& Front = MatchedState.Buffers[0][FrontIdx];
-		ParticlePos = Front.Positions[AbsIdx];
-		ParticleExtent = Front.Extents[AbsIdx];
+		const FNiagaraParticleBuffer& Buf = MatchedState.Buffers[0];
+		ParticlePos = Buf.Positions[AbsIdx];
+		ParticleExtent = Buf.Extents[AbsIdx];
 	}
 
 	AStarSystemActor* System = StarSystemPool.Pop();

@@ -536,8 +536,7 @@ void GalaxyDataGenerator::GenerateTierNode(
 		ActualCount++;
 	}
 
-	const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
-	InBuffer.PadSlotDead(InSlotIndex, ActualCount, DeadPos);
+	InBuffer.PadSlotDead(InSlotIndex, ActualCount);
 	OutSlotCount = ActualCount;
 }
 
@@ -668,11 +667,10 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 
 	const int32 SlotCapacity = InBuffer.SlotCapacity;
 	const int32 BufferStart = InSlotIndex * SlotCapacity;
-	const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
 
 	if (ActiveCells.Num() == 0)
 	{
-		InBuffer.PadSlotDead(InSlotIndex, 0, DeadPos);
+		InBuffer.PadSlotDead(InSlotIndex, 0);
 		OutSlotCount = 0;
 		UE_LOG(LogTemp, Warning, TEXT("GalaxyDataGenerator::GenerateLargeTierSlot — no active cells found (check SDF params)"));
 		return;
@@ -807,7 +805,7 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 		}
 	}
 
-	InBuffer.PadSlotDead(InSlotIndex, TotalAccepted, DeadPos);
+	InBuffer.PadSlotDead(InSlotIndex, TotalAccepted);
 	OutSlotCount = TotalAccepted;
 
 	UE_LOG(LogTemp, Log,

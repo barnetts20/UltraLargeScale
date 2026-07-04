@@ -27,11 +27,10 @@ namespace NiagaraBufferParams
     inline const FName SlotCapacity = TEXT("User.SlotCapacity");
 }
 
-// A slot-packed, double-buffer-friendly array of particle data for a single
+// A slot-packed array of particle data for a single
 // Niagara component. Arrays are optional — only allocate what the tier needs.
-// Dead particles are written with Extent == 0; the Niagara graph culls on
-// that (cell-local positions for dead entries are zeroed at push time, so
-// the CPU-side DeadPos value never reaches the GPU and is vestigial).
+// Dead particles are written with Extent == 0 (zeroed position); the
+// Niagara graph culls on Extent, and every CPU consumer skips Extent <= 0.
 //
 // Slot packing convention: slot S owns indices [S * SlotCapacity, (S+1) * SlotCapacity).
 // The SlotCapacity is fixed at Allocate time and shared across all arrays.
@@ -59,8 +58,7 @@ struct FNiagaraParticleBuffer
     // Per-SLOT grid coordinate of the cell currently resident in that slot
     // (one entry per slot, not per particle). EmptySlotCoord() = unoccupied.
     // Written by the streaming system when a cell (re)generates into a slot,
-    // always together with SlotCenters and the slot's particle data, and
-    // carried across the double buffer by CopyFrom / MirrorSlotFrom so the
+    // always together with SlotCenters and the slot's particle data, so the
     // coord identity always matches the live positions.
     TArray<FIntVector> SlotCoord;
 
@@ -139,64 +137,28 @@ struct FNiagaraParticleBuffer
             Rotations.Empty();
     }
 
-    // Deep copy from another buffer. Only copies arrays that are allocated in
-    // this buffer. Used for initial front-to-back mirroring at init time.
-    void CopyFrom(const FNiagaraParticleBuffer& Other)
-    {
-        Positions = Other.Positions;
-        Extents = Other.Extents;
-        Colors = Other.Colors;
-        MaxExtent = Other.MaxExtent;
-        SlotCoord = Other.SlotCoord;
-        SlotCenters = Other.SlotCenters;
-        if (Rotations.Num() > 0 && Other.Rotations.Num() > 0)
-            Rotations = Other.Rotations;
-    }
-
-    // Copy ONE slot's particle range plus its SlotCoord/SlotCenters entries
-    // from another buffer of identical shape. This is the primitive that keeps
-    // the two double-buffers identical incrementally: each boundary-cross
-    // commit writes the Entering plane into the freshly published buffer, then
-    // mirrors exactly those slots into the other buffer — resident slots are
-    // never touched on either side, and no full CopyFrom ever runs again.
-    void MirrorSlotFrom(const FNiagaraParticleBuffer& Other, int32 SlotIndex)
-    {
-        checkSlow(SlotCapacity == Other.SlotCapacity && TotalSlots == Other.TotalSlots);
-        if (SlotIndex < 0 || SlotIndex >= TotalSlots) return;
-
-        const int32 Start = SlotStart(SlotIndex);
-        if (SlotCapacity > 0)
-        {
-            FMemory::Memcpy(&Positions[Start], &Other.Positions[Start], SlotCapacity * sizeof(FVector));
-            FMemory::Memcpy(&Extents[Start], &Other.Extents[Start], SlotCapacity * sizeof(float));
-            FMemory::Memcpy(&Colors[Start], &Other.Colors[Start], SlotCapacity * sizeof(FLinearColor));
-            if (Rotations.Num() > 0 && Other.Rotations.Num() > 0)
-                FMemory::Memcpy(&Rotations[Start], &Other.Rotations[Start], SlotCapacity * sizeof(FVector));
-        }
-        SlotCoord[SlotIndex] = Other.SlotCoord[SlotIndex];
-        SlotCenters[SlotIndex] = Other.SlotCenters[SlotIndex];
-        MaxExtent = Other.MaxExtent;
-    }
-
     // --- Slot helpers ---
 
     int32 SlotStart(int32 SlotIndex) const { return SlotIndex * SlotCapacity; }
 
-    // Write one dead particle entry at absolute index Idx.
-    void WriteDeadParticle(int32 Idx, const FVector& DeadPos)
+    // Write one dead particle entry at absolute index Idx. Extent == 0 is
+    // the liveness flag every consumer keys on (graph cull, octree skip,
+    // cache skip); the position value is irrelevant for dead entries and is
+    // simply zeroed.
+    void WriteDeadParticle(int32 Idx)
     {
-        if (Positions.IsValidIndex(Idx)) Positions[Idx] = DeadPos;
+        if (Positions.IsValidIndex(Idx)) Positions[Idx] = FVector::ZeroVector;
         if (Extents.IsValidIndex(Idx))   Extents[Idx] = 0.0f;
         if (Colors.IsValidIndex(Idx))    Colors[Idx] = FLinearColor::Black;
         if (Rotations.IsValidIndex(Idx)) Rotations[Idx] = FVector::ZeroVector;
     }
 
     // Fill trailing dead particles after ActualCount accepted particles.
-    void PadSlotDead(int32 SlotIndex, int32 ActualCount, const FVector& DeadPos)
+    void PadSlotDead(int32 SlotIndex, int32 ActualCount)
     {
         const int32 Start = SlotStart(SlotIndex);
         for (int32 i = ActualCount; i < SlotCapacity; ++i)
-            WriteDeadParticle(Start + i, DeadPos);
+            WriteDeadParticle(Start + i);
     }
 
     // --- Push helpers ---

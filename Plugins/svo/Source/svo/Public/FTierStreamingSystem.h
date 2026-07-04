@@ -165,53 +165,55 @@ struct FParticleTierConfig
  *       (a UPROPERTY TArray) for GC safety. Do not store them elsewhere.
  *
  * Threading contract:
- *   - CenterCoord, SlotEntries, SlotCounts, CellCache, and the back-buffer
- *     are written exclusively by the async task spawned from UpdateTier.
- *     The game thread must not read them while bUpdateInProgress is true.
- *   - FrontIdx and bUpdateInProgress are std::atomic and safe
- *     for lock-free cross-thread reads.
+ *   - CenterCoord, SlotEntries, SlotCounts, CellCache, and the Buffers'
+ *     CPU arrays are written exclusively by the async task spawned from
+ *     UpdateTier, IN PLACE (single buffer — entering slots are overwritten
+ *     directly; nothing reads them mid-write, see below). Anything outside
+ *     the pipeline that reads Buffers must hold bUpdateInProgress == false;
+ *     on the game thread that read is race-free, because the flag is set on
+ *     the game thread before the task spawns and cleared by the worker
+ *     after the commit — a false read on the GT means no task is running
+ *     and none can start within the current GT scope.
+ *   - The per-frame uniform push reads NO CPU arrays — only the stamps —
+ *     which is what makes in-place generation safe without a back buffer.
+ *   - bUpdateInProgress is std::atomic and safe for lock-free reads.
  *   - StampedCenter / StampedNCenter are written only under PushCS by the
  *     boundary-cross commit and read only under PushCS by the per-frame
  *     push, so the (NCenter - VT) uniform can never disagree with the live
  *     lattice — even on a transition frame.
- *   - The front-buffer (Buffers[b][FrontIdx]) is written only under PushCS
- *     (the commit mirrors the Entering plane into it after the flip).
  *   - NiagaraComponents are only touched on the game thread.
  */
 struct FParticleTierState
 {
 	/**
-	 * Double-buffered particle data, one pair per Niagara asset.
-	 * Outer index = asset/buffer index. Inner index is always 2:
-	 * [FrontIdx] = live data read by game thread.
-	 * [1-FrontIdx] = back buffer written by async generation.
+	 * Particle data, ONE buffer per Niagara asset (index parallel to
+	 * FParticleTierConfig::NiagaraAssets). Single-buffered: the transition
+	 * task overwrites entering slots in place. This is safe because the GPU
+	 * holds its own copy of every array between pushes, the per-frame push
+	 * reads no CPU arrays, and all other readers gate on bUpdateInProgress
+	 * (see the threading contract above).
 	 */
-	TArray<TArray<FNiagaraParticleBuffer>> Buffers;
+	TArray<FNiagaraParticleBuffer> Buffers;
 
 	/** Raw component pointers aliasing TierNiagaraComponents. Parallel to
 	 *  FParticleTierConfig::NiagaraAssets. Game-thread only. */
 	TArray<UNiagaraComponent*> NiagaraComponents;
 
-	/** Index of the currently live buffer (0 or 1). Swapped atomically by
-	 *  the async task after generation completes. */
-	std::atomic<int32> FrontIdx{ 0 };
-
-	/** True while an async boundary-cross task owns the back-buffer and state.
-	 *  Game thread must not begin a new update while this is set. */
+	/** True while an async boundary-cross task owns the tier's buffers and
+	 *  state. Game thread must not begin a new update — nor read the CPU
+	 *  buffer arrays — while this is set. */
 	std::atomic<bool> bUpdateInProgress{ false };
 
-	/** Set by the async task when a new back-buffer is ready to push.
-	 *  Cleared by the game thread after PushTierToNiagara completes. */
-
-	 /** Serializes ALL Niagara writes for this tier (full push + per-frame VT push).
-	  *  The FrontIdx swap happens under this lock, so a per-frame push can never see
-	  *  a half-published buffer. The GAME THREAD must never acquire it -- it would
-	  *  stall behind an upload; the GT hands off via PublishLatestVT and the dirty
-	  *  flags below instead. */
+	/** Serializes ALL Niagara writes for this tier (transition commit +
+	 *  per-frame uniform push). The stamp write and upload happen under this
+	 *  lock, so a per-frame push can never pair a stale stamp with fresh
+	 *  data or vice versa. The GAME THREAD must never acquire it -- it would
+	 *  stall behind an upload; the GT hands off via PublishLatestVT and the
+	 *  dirty flags below instead. */
 	FCriticalSection PushCS;
 
-	/** Raised by the full push after it swaps FrontIdx; consumed on the game thread
-	 *  by ApplyPendingBounds to apply SetSystemFixedBounds. */
+	/** Raised by the transition commit; consumed on the game thread by
+	 *  ApplyPendingBounds to apply SetSystemFixedBounds (grow-only). */
 	std::atomic<bool> bBoundsDirty{ false };
 
 	/** Set on teardown (BeginShutdownDrain) so in-flight pushes bail before touching
@@ -234,7 +236,7 @@ struct FParticleTierState
 
 	/** C_stamp: the center coord the LIVE lattice and (NCenter - VT) uniform
 	 *  were built against. Written under PushCS by the boundary-cross commit
-	 *  in the same critical section as the FrontIdx flip and the lattice
+	 *  in the same critical section as the lattice
 	 *  upload; read under PushCS by the per-frame push. INT32_MIN until the
 	 *  first commit (all particles dead — the uniform is inert). */
 	FIntVector StampedCenter = FIntVector(INT32_MIN);
@@ -378,28 +380,26 @@ struct FTierStreamingSystem
 
 	// Boundary-cross transition COMMIT (worker thread, tail of UpdateTier's
 	// async task). Under the tier PushCS, atomically:
-	//   1. flips FrontIdx to BackIdx (publishes the buffer whose Entering
-	//      plane was generated off-lock),
-	//   2. stamps StampedCenter/StampedNCenter with the center the new
+	//   1. stamps StampedCenter/StampedNCenter with the center the new
 	//      lattice derives from (§ C_stamp),
-	//   3. uploads the published buffer — cell-local positions, per-slot
-	//      lattice (User.CellRelativeVT), and the (NCenter - VT) uniform,
-	//      reading the freshest VT via GetLatestVT at execution time,
-	//   4. mirrors exactly the Entering slots into the other buffer, keeping
-	//      the double-buffer identical incrementally with no full copy.
-	// Because the per-frame push takes the same lock and reads the same
-	// stamp, no push can ever observe a half-published buffer or a
-	// lattice/uniform pair built against different centers. Bounds are
-	// deferred to ApplyPendingBounds on the game thread.
-	static void PushTierToNiagara(const TFunction<FVector()>& GetLatestVT, int32 BackIdx,
-		const TArray<int32>& EnteringSlots, const FIntVector& NewCenter,
-		const FVector& NewNCenter,
+	//   2. uploads the buffer — cell-local positions, per-slot lattice
+	//      (User.CellRelativeVT), and the (NCenter - VT) uniform, reading
+	//      the freshest VT via GetLatestVT at execution time.
+	// The GPU flips atomically at the upload: it keeps rendering its own
+	// prior copy of every array until these sets land, so in-place CPU
+	// generation is never visible mid-write. Because the per-frame push
+	// takes the same lock and reads the same stamp, no push can pair a
+	// lattice/uniform built against different centers. Bounds are deferred
+	// to ApplyPendingBounds on the game thread.
+	static void PushTierToNiagara(const TFunction<FVector()>& GetLatestVT,
+		const FIntVector& NewCenter, const FVector& NewNCenter,
 		const FParticleTierConfig& Config, FParticleTierState& State);
 	/**
-	 * Per-frame parallax re-push. Cell-anchored tiers: a SINGLE FVector
-	 * uniform per component — (StampedNCenter - VT) — no array traffic at
-	 * all. Legacy tiers: rebuild and push the full camera-relative position
-	 * array as before. Used by the actor parallax overrides when
+	 * Per-frame parallax re-push: a SINGLE FVector uniform per component —
+	 * (StampedNCenter - VT) — no array traffic at all. Skips (rather than
+	 * blocks on) a tier whose PushCS is contended, since the holder is the
+	 * commit, which seeds a fresher uniform itself. Used by the actor
+	 * parallax overrides when
 	 * VirtualTraversal moves past the push threshold. Distinct from
 	 * PushTierToNiagara, which commits a boundary-cross data swap. The
 	 * threshold gate and LastPushedVirtualTraversal bookkeeping stay with
@@ -419,11 +419,11 @@ struct FTierStreamingSystem
 	// ========================================================================
 
 	static void InsertTierIntoOctree(const FTierStreamingContext& Ctx,
-		const FParticleTierConfig& Config, FParticleTierState& State, int32 BufferIdx);
+		const FParticleTierConfig& Config, FParticleTierState& State);
 
 	static void InsertSlotIntoOctree(const FTierStreamingContext& Ctx,
 		const FParticleTierConfig& Config, FParticleTierState& State,
-		const FIntVector& Coord, int32 SlotIndex, int32 BufferIdx);
+		const FIntVector& Coord, int32 SlotIndex);
 
 	static void InsertParticleIntoOctree(const FTierStreamingContext& Ctx,
 		FSlotEntry& Entry, const FVector& Position, float Extent,
@@ -436,7 +436,7 @@ struct FTierStreamingSystem
 
 	static void CacheCellFromBuffers(const FParticleTierConfig& Config,
 		FParticleTierState& State, const FIntVector& Coord,
-		int32 SlotIndex, int32 BufferIdx);
+		int32 SlotIndex);
 
 	static void CullTierCache(const FParticleTierConfig& Config,
 		FParticleTierState& State, const FIntVector& NewCenter);

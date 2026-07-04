@@ -388,16 +388,21 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	FParticleTierState& MatchedState = *TierStates[TierIndex];
 
 	// ParticleIndex is the absolute buffer index. Direct lookup — no slot math needed.
-	const int32 FrontIdx = MatchedState.FrontIdx.load();
-	const FNiagaraParticleBuffer& Front = MatchedState.Buffers[0][FrontIdx];
-
+	// SINGLE-BUFFER READ GUARD: the transition task overwrites entering
+	// slots in place, so only read the CPU arrays while no task is in
+	// flight. On the GT this check is race-free (the flag is set on the GT
+	// before the task spawns), and if a transition IS in flight the matched
+	// node's slot may be mid-rewrite anyway — the octree fallback (node
+	// center/extent) is the correct answer in that case.
 	FVector ParticlePos = InNode->Center;
 	float ParticleExtent = static_cast<float>(InNode->Extent);
 	const int32 AbsIdx = InNode->Data.ParticleIndex;
-	if (AbsIdx >= 0)
+	if (AbsIdx >= 0 && MatchedState.Buffers.Num() > 0 &&
+		!MatchedState.bUpdateInProgress.load())
 	{
-		ParticlePos = Front.Positions[AbsIdx];
-		ParticleExtent = Front.Extents[AbsIdx];
+		const FNiagaraParticleBuffer& Buf = MatchedState.Buffers[0];
+		ParticlePos = Buf.Positions[AbsIdx];
+		ParticleExtent = Buf.Extents[AbsIdx];
 	}
 
 	// Start with the universe-level galaxy params (editor-tunable template),
@@ -611,15 +616,16 @@ void AUniverseActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) co
 		case 2: Config = &SmallTierConfig;  State = &SmallTierState;  TierLabel = TEXT("small");  break;
 		default: break;
 		}
-		if (Config && State && State->Buffers.Num() > 0 && AbsIdx >= 0)
+		if (Config && State && State->Buffers.Num() > 0 && AbsIdx >= 0 &&
+			!State->bUpdateInProgress.load()) // single-buffer read guard (GT)
 		{
 			const int32 SlotId = AbsIdx / Config->SlotCapacity;
-			const FNiagaraParticleBuffer& Front = State->Buffers[0][State->FrontIdx.load()];
+			const FNiagaraParticleBuffer& Buf = State->Buffers[0];
 			const int32 Start = SlotId * Config->SlotCapacity;
 			int32 LiveCount = 0;
 			for (int32 i = 0; i < Config->SlotCapacity; ++i)
 			{
-				if (Front.Extents[Start + i] > 0.0f) ++LiveCount;
+				if (Buf.Extents[Start + i] > 0.0f) ++LiveCount;
 			}
 			UE_LOG(LogTemp, Log, TEXT("  %s slot %d: %d live particles of %d capacity"), TierLabel, SlotId, LiveCount, Config->SlotCapacity);
 		}
@@ -706,12 +712,17 @@ void AUniverseActor::CheckOctreeBounds()
 			FTierStreamingContext Ctx = Self->BuildStreamingContext();
 			Ctx.Octree = NewTree;   // insert into the new tree, not the live one
 
+			// Tiers are guaranteed idle for this whole task: CheckOctreeBounds
+			// refused to start the rebase while any tier had a transition in
+			// flight (checked on the GT), and UpdateTier gates on
+			// bRebaseInProgress, so no new transition can start until the
+			// swap below completes. Safe to read every tier buffer wholesale.
 			FTierStreamingSystem::InsertTierIntoOctree(Ctx, Self->CoarseTierConfig,
-				Self->CoarseTierState, Self->CoarseTierState.FrontIdx.load());
+				Self->CoarseTierState);
 			FTierStreamingSystem::InsertTierIntoOctree(Ctx, Self->MidTierConfig,
-				Self->MidTierState, Self->MidTierState.FrontIdx.load());
+				Self->MidTierState);
 			FTierStreamingSystem::InsertTierIntoOctree(Ctx, Self->SmallTierConfig,
-				Self->SmallTierState, Self->SmallTierState.FrontIdx.load());
+				Self->SmallTierState);
 
 			AsyncTask(ENamedThreads::GameThread, [WeakThis, NewTree]()
 				{

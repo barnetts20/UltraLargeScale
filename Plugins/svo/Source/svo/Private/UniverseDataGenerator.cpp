@@ -180,9 +180,8 @@ void UniverseDataGenerator::GenerateLargeTierNode(const FIntVector& InCoord, int
 		ActualCount++;
 	}
 
-	const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
-	InClusterBuffer.PadSlotDead(InSlotIndex, ActualCount, DeadPos);
-	InGasBuffer.PadSlotDead(InSlotIndex, ActualCount, DeadPos);
+	InClusterBuffer.PadSlotDead(InSlotIndex, ActualCount);
+	InGasBuffer.PadSlotDead(InSlotIndex, ActualCount);
 
 	OutSlotCount = ActualCount;
 }
@@ -276,8 +275,7 @@ void UniverseDataGenerator::GenerateMidTierNode(
 		ActualCount++;
 	}
 
-	const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
-	InBuffer.PadSlotDead(InSlotIndex, ActualCount, DeadPos);
+	InBuffer.PadSlotDead(InSlotIndex, ActualCount);
 	OutSlotCount = ActualCount;
 }
 
@@ -390,8 +388,7 @@ void UniverseDataGenerator::GenerateSmallTierNode(
 		ActualCount++;
 	}
 
-	const FVector DeadPos(Params.Extent * 10.0, Params.Extent * 10.0, Params.Extent * 10.0);
-	InBuffer.PadSlotDead(InSlotIndex, ActualCount, DeadPos);
+	InBuffer.PadSlotDead(InSlotIndex, ActualCount);
 
 	OutSlotCount = ActualCount;
 }
