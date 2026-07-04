@@ -29,8 +29,9 @@ namespace NiagaraBufferParams
 
 // A slot-packed, double-buffer-friendly array of particle data for a single
 // Niagara component. Arrays are optional — only allocate what the tier needs.
-// Dead particles are written with Extent == 0 and an off-screen DeadPos so
-// Niagara culls them regardless of which arrays are active.
+// Dead particles are written with Extent == 0; the Niagara graph culls on
+// that (cell-local positions for dead entries are zeroed at push time, so
+// the CPU-side DeadPos value never reaches the GPU and is vestigial).
 //
 // Slot packing convention: slot S owns indices [S * SlotCapacity, (S+1) * SlotCapacity).
 // The SlotCapacity is fixed at Allocate time and shared across all arrays.
@@ -71,7 +72,7 @@ struct FNiagaraParticleBuffer
     TArray<FVector> SlotCenters;
 
     // Persistent scratch for the per-slot lattice push. Size == TotalSlots.
-    mutable TArray<FVector> CellRelVTScratch;
+    mutable TArray<FVector> LatticeScratch;
 
 
     // Slot geometry — set once in Allocate, read-only after.
@@ -91,15 +92,27 @@ struct FNiagaraParticleBuffer
         return SlotCoord.IsValidIndex(SlotIndex) && SlotCoord[SlotIndex].X != INT32_MIN;
     }
 
-    // Scans the Extents array and caches the result in MaxExtent.
-    // Called on the async thread at the end of UpdateTier, after all
-    // generation and cache restores are done.
+    // Full scan of the Extents array, cached in MaxExtent. Init-time only:
+    // transitions grow MaxExtent incrementally from the entering plane via
+    // SlotMaxExtent, since bounds are grow-only and never need it to shrink.
     void RecomputeMaxExtent()
     {
         float Max = 0.f;
         for (int32 i = 0; i < Extents.Num(); ++i)
             Max = FMath::Max(Max, Extents[i]);
         MaxExtent = Max;
+    }
+
+    // Largest extent within one slot's range. Lets the transition path grow
+    // MaxExtent from just the entering plane instead of rescanning the
+    // whole buffer.
+    float SlotMaxExtent(int32 SlotIndex) const
+    {
+        const int32 Start = SlotStart(SlotIndex);
+        float Max = 0.f;
+        for (int32 i = 0; i < SlotCapacity; ++i)
+            Max = FMath::Max(Max, Extents[Start + i]);
+        return Max;
     }
 
     // --- Lifecycle ---
@@ -118,7 +131,7 @@ struct FNiagaraParticleBuffer
         CellLocalScratch.SetNumUninitialized(Total);
         SlotCoord.Init(EmptySlotCoord(), TotalSlots);
         SlotCenters.SetNumZeroed(TotalSlots);
-        CellRelVTScratch.SetNumUninitialized(TotalSlots);
+        LatticeScratch.SetNumUninitialized(TotalSlots);
 
         if (bWantRotations)
             Rotations.SetNumZeroed(Total);
@@ -138,20 +151,6 @@ struct FNiagaraParticleBuffer
         SlotCenters = Other.SlotCenters;
         if (Rotations.Num() > 0 && Other.Rotations.Num() > 0)
             Rotations = Other.Rotations;
-    }
-
-    // Swap array storage with another buffer. O(1) pointer swap instead of
-    // O(N) memcpy. Both buffers must have the same allocation shape (same
-    // TotalSlots, SlotCapacity, and Rotations presence).
-    void SwapWith(FNiagaraParticleBuffer& Other)
-    {
-        Swap(Positions, Other.Positions);
-        Swap(Extents, Other.Extents);
-        Swap(Colors, Other.Colors);
-        Swap(SlotCoord, Other.SlotCoord);
-        Swap(SlotCenters, Other.SlotCenters);
-        if (Rotations.Num() > 0 && Other.Rotations.Num() > 0)
-            Swap(Rotations, Other.Rotations);
     }
 
     // Copy ONE slot's particle range plus its SlotCoord/SlotCenters entries
@@ -192,14 +191,6 @@ struct FNiagaraParticleBuffer
         if (Rotations.IsValidIndex(Idx)) Rotations[Idx] = FVector::ZeroVector;
     }
 
-    // Zero out an entire slot.
-    void ClearSlot(int32 SlotIndex, const FVector& DeadPos)
-    {
-        const int32 Start = SlotStart(SlotIndex);
-        for (int32 i = 0; i < SlotCapacity; ++i)
-            WriteDeadParticle(Start + i, DeadPos);
-    }
-
     // Fill trailing dead particles after ActualCount accepted particles.
     void PadSlotDead(int32 SlotIndex, int32 ActualCount, const FVector& DeadPos)
     {
@@ -222,19 +213,17 @@ struct FNiagaraParticleBuffer
         const int32 Num = Positions.Num();
         if (CellLocalScratch.Num() != Num)
             CellLocalScratch.SetNumUninitialized(Num);
-        const int32 Cap = FMath::Max(SlotCapacity, 1);
-        for (int32 i = 0; i < Num; ++i)
+        // Slot-major: hoists the center load per slot and drops the per-
+        // particle divide + bounds check.
+        for (int32 Slot = 0; Slot < TotalSlots; ++Slot)
         {
-            if (Extents[i] > 0.0f)
+            const FVector Center = SlotCenters[Slot];
+            const int32 Start = SlotStart(Slot);
+            for (int32 i = Start; i < Start + SlotCapacity; ++i)
             {
-                const int32 Slot = i / Cap;
-                const FVector Center = SlotCenters.IsValidIndex(Slot)
-                    ? SlotCenters[Slot] : FVector::ZeroVector;
-                CellLocalScratch[i] = Positions[i] - Center;
-            }
-            else
-            {
-                CellLocalScratch[i] = FVector::ZeroVector;
+                CellLocalScratch[i] = (Extents[i] > 0.0f)
+                    ? (Positions[i] - Center)
+                    : FVector::ZeroVector;
             }
         }
         return CellLocalScratch;
@@ -252,15 +241,15 @@ struct FNiagaraParticleBuffer
     // Changes ONLY on boundary crosses, never per frame.
     const TArray<FVector>& MakeLattice(const FVector& NCenter) const
     {
-        if (CellRelVTScratch.Num() != TotalSlots)
-            CellRelVTScratch.SetNumUninitialized(TotalSlots);
+        if (LatticeScratch.Num() != TotalSlots)
+            LatticeScratch.SetNumUninitialized(TotalSlots);
         for (int32 s = 0; s < TotalSlots; ++s)
         {
-            CellRelVTScratch[s] = IsSlotOccupied(s)
+            LatticeScratch[s] = IsSlotOccupied(s)
                 ? (SlotCenters[s] - NCenter)
                 : FVector::ZeroVector;
         }
-        return CellRelVTScratch;
+        return LatticeScratch;
     }
 
     // Cell-anchored boundary-cross push: upload the per-slot lattice into the

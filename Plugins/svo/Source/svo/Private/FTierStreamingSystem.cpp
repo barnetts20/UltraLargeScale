@@ -191,7 +191,6 @@ void FTierStreamingSystem::InitializeTier(
 		});
 	Future.Wait();
 
-	State.FrontIdx.store(0);
 	UE_LOG(LogTemp, Log, TEXT("FTierStreamingSystem::InitializeTier [%s] — %d slots, %d capacity, streaming=%d, %.3f sec"),
 		*Config.TierName, TotalSlots, Config.SlotCapacity, bIsStreamingTier ? 1 : 0,
 		FPlatformTime::Seconds() - StartTime);
@@ -261,7 +260,6 @@ void FTierStreamingSystem::UpdateTier(
 	const double CtxUnitScale = Ctx.UnitScale;
 	const double CtxGridExtentMultiplier = Ctx.GridExtentMultiplier;
 	TSharedPtr<FOctree> CtxOctree = Ctx.Octree;
-	const FString CtxOwnerName = Ctx.OwnerName;
 
 	// The tail push reads the freshest VirtualTraversal at execution time via this
 	// accessor (guarded on the actor), NOT a value captured now -- a generation can
@@ -271,7 +269,7 @@ void FTierStreamingSystem::UpdateTier(
 
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask,
 		[&Config, &State, OldCenter, NewCoord, bIsInitialPopulation,
-		CtxExtent, CtxUnitScale, CtxGridExtentMultiplier, CtxOctree, CtxOwnerName,
+		CtxExtent, CtxUnitScale, CtxGridExtentMultiplier, CtxOctree,
 		GetLatestVT]()
 		{
 			double StartTime = FPlatformTime::Seconds();
@@ -290,8 +288,11 @@ void FTierStreamingSystem::UpdateTier(
 			// copied or regenerated — that is the point of the torus.
 
 			// Diff old and new neighborhoods.
+			const int32 TotalSlots = Side * Side * Side;
 			TSet<FIntVector> OldSet;
 			TSet<FIntVector> NewSet;
+			OldSet.Reserve(TotalSlots);
+			NewSet.Reserve(TotalSlots);
 			for (int32 dz = -R; dz <= R; ++dz)
 				for (int32 dy = -R; dy <= R; ++dy)
 					for (int32 dx = -R; dx <= R; ++dx)
@@ -341,7 +342,7 @@ void FTierStreamingSystem::UpdateTier(
 
 #if DO_CHECK
 			TArray<bool> SlotClaimed;
-			SlotClaimed.Init(false, Side * Side * Side);
+			SlotClaimed.Init(false, TotalSlots);
 #endif
 
 			for (const FIntVector& Coord : EnteringNodes)
@@ -377,9 +378,12 @@ void FTierStreamingSystem::UpdateTier(
 					continue;
 				}
 
-				// Cache-hit path.
+				// Cache-hit path. NOTE: a cached cell with ZERO particles is
+				// still a HIT — legitimately-empty cells must not re-run
+				// generation (noise sampling for nothing) on every re-entry;
+				// the slot is simply dead-padded from the cached count of 0.
 				const FCachedCellData* Cached = State.CellCache.Find(Coord);
-				if (Cached && Cached->ParticleCount > 0)
+				if (Cached)
 				{
 					const int32 LiveCount = Cached->ParticleCount;
 					State.SlotCounts[SlotIndex] = LiveCount;
@@ -387,18 +391,19 @@ void FTierStreamingSystem::UpdateTier(
 					{
 						FNiagaraParticleBuffer& Buf = State.Buffers[b][BackIdx];
 						const int32 Start = SlotIndex * Config.SlotCapacity;
-						const TArray<FVector>& CPos = Cached->PerBufferPositions[b];
-						const TArray<float>& CExt = Cached->PerBufferExtents[b];
-						const TArray<FLinearColor>& CCol = Cached->PerBufferColors[b];
-						const TArray<FVector>& CRot = Cached->PerBufferRotations[b];
-						for (int32 i = 0; i < LiveCount; ++i)
+						if (LiveCount > 0)
 						{
-							const int32 Idx = Start + i;
-							Buf.Positions[Idx] = CPos[i];
-							Buf.Extents[Idx] = CExt[i];
-							Buf.Colors[Idx] = CCol[i];
-							if (Buf.Rotations.Num() > 0 && CRot.Num() > 0)
-								Buf.Rotations[Idx] = CRot[i];
+							// Element types are trivially copyable — blit the
+							// contiguous ranges instead of copying element-wise.
+							const TArray<FVector>& CPos = Cached->PerBufferPositions[b];
+							const TArray<float>& CExt = Cached->PerBufferExtents[b];
+							const TArray<FLinearColor>& CCol = Cached->PerBufferColors[b];
+							const TArray<FVector>& CRot = Cached->PerBufferRotations[b];
+							FMemory::Memcpy(&Buf.Positions[Start], CPos.GetData(), LiveCount * sizeof(FVector));
+							FMemory::Memcpy(&Buf.Extents[Start], CExt.GetData(), LiveCount * sizeof(float));
+							FMemory::Memcpy(&Buf.Colors[Start], CCol.GetData(), LiveCount * sizeof(FLinearColor));
+							if (Buf.Rotations.Num() > 0 && CRot.Num() >= LiveCount)
+								FMemory::Memcpy(&Buf.Rotations[Start], CRot.GetData(), LiveCount * sizeof(FVector));
 						}
 						Buf.PadSlotDead(SlotIndex, LiveCount, DeadPos);
 					}
@@ -440,9 +445,16 @@ void FTierStreamingSystem::UpdateTier(
 			for (const auto& EnteringPair : AllEnteringSlots)
 				InsertSlotIntoOctree(InsertCtx, Config, State, EnteringPair.Key, EnteringPair.Value, BackIdx);
 
-			// Cache MaxExtent so PushTierToNiagara doesn't need a full scan.
+			// Grow MaxExtent from the ENTERING plane only. Bounds are
+			// grow-only (ApplyPendingBounds), so the pad never needs to
+			// shrink, and resident slots cannot raise a max they already
+			// contributed to — a full-buffer rescan per transition is waste.
 			for (int32 b = 0; b < NumBuffers; ++b)
-				State.Buffers[b][BackIdx].RecomputeMaxExtent();
+			{
+				FNiagaraParticleBuffer& Buf = State.Buffers[b][BackIdx];
+				for (const int32 EnterSlot : EnteringSlots)
+					Buf.MaxExtent = FMath::Max(Buf.MaxExtent, Buf.SlotMaxExtent(EnterSlot));
+			}
 
 			// Commit: publish the buffer, stamp the new center, upload
 			// lattice + uniform + arrays, and mirror the Entering plane into
@@ -505,9 +517,8 @@ void FTierStreamingSystem::PushTierToNiagara(
 	State.StampedCenter = NewCenter;
 	State.StampedNCenter = NewNCenter;
 
-	// 3. Upload. Cell-anchored buffers push cell-local positions, the per-slot
-	//    lattice (vs NewNCenter), and the seeded (NCenter - VT) uniform; legacy
-	//    buffers push camera-relative positions as before.
+	// 3. Upload: cell-local positions, the per-slot lattice (vs NewNCenter),
+	//    and the seeded (NCenter - VT) uniform.
 	const FVector VirtualTraversal = GetLatestVT();
 	for (int32 b = 0; b < Config.NiagaraAssets.Num(); ++b)
 	{
@@ -733,7 +744,6 @@ void FTierStreamingSystem::CacheCellFromBuffers(
 
 	FCachedCellData& Cache = State.CellCache.FindOrAdd(Coord);
 	Cache.ParticleCount = LiveCount;
-	Cache.CenterOffset = FVector::ZeroVector;
 	Cache.PerBufferPositions.SetNum(NumBuffers);
 	Cache.PerBufferExtents.SetNum(NumBuffers);
 	Cache.PerBufferColors.SetNum(NumBuffers);

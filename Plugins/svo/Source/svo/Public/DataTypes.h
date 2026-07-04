@@ -205,11 +205,6 @@ struct SVO_API FCachedCellData
 	TArray<TArray<FLinearColor>>   PerBufferColors;
 	TArray<TArray<FVector>>        PerBufferRotations; // Empty inner array if tier doesn't use rotations.
 
-	// The procedural center offset used when this cell was generated.
-	// Final position = NodeCenter + CenterOffset + local offsets.
-	// Persisting this avoids re-quantization artifacts on cache restore.
-	FVector CenterOffset = FVector::ZeroVector;
-
 	// Number of accepted (live) particles this cell produced.
 	int32 ParticleCount = 0;
 };

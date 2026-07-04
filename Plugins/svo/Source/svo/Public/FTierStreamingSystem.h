@@ -168,7 +168,7 @@ struct FParticleTierConfig
  *   - CenterCoord, SlotEntries, SlotCounts, CellCache, and the back-buffer
  *     are written exclusively by the async task spawned from UpdateTier.
  *     The game thread must not read them while bUpdateInProgress is true.
- *   - FrontIdx, bUpdateInProgress, and bNeedsPush are std::atomic and safe
+ *   - FrontIdx and bUpdateInProgress are std::atomic and safe
  *     for lock-free cross-thread reads.
  *   - StampedCenter / StampedNCenter are written only under PushCS by the
  *     boundary-cross commit and read only under PushCS by the per-frame
@@ -202,13 +202,12 @@ struct FParticleTierState
 
 	/** Set by the async task when a new back-buffer is ready to push.
 	 *  Cleared by the game thread after PushTierToNiagara completes. */
-	std::atomic<bool> bNeedsPush{ false };
 
-	/** Serializes ALL Niagara writes for this tier (full push + per-frame VT push).
-	 *  The FrontIdx swap happens under this lock, so a per-frame push can never see
-	 *  a half-published buffer. The GAME THREAD must never acquire it -- it would
-	 *  stall behind an upload; the GT hands off via PublishLatestVT and the dirty
-	 *  flags below instead. */
+	 /** Serializes ALL Niagara writes for this tier (full push + per-frame VT push).
+	  *  The FrontIdx swap happens under this lock, so a per-frame push can never see
+	  *  a half-published buffer. The GAME THREAD must never acquire it -- it would
+	  *  stall behind an upload; the GT hands off via PublishLatestVT and the dirty
+	  *  flags below instead. */
 	FCriticalSection PushCS;
 
 	/** Raised by the full push after it swaps FrontIdx; consumed on the game thread
