@@ -78,7 +78,7 @@ public:
 	/** Multiplier applied to Params.Extent for octree root size.
 	 *  Must be a power of 2. 64 = 2^6, tree covers +/-32x the sector extent
 	 *  per axis, giving ~2^37 units of traversal range before a rebase. */
-	static constexpr double PersistentTreeMultiplier = 64.0;
+	static constexpr double PersistentTreeMultiplier = 128.0;
 
 	/** TypeId tag written into every octree node inserted by the tier system.
 	 *  Allows spatial queries to filter for galaxy/sector content vs. other

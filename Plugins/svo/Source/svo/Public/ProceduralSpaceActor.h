@@ -17,11 +17,37 @@ struct SVO_API FBaseParams {
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
     int Seed = 0;
 
+    /** LOCAL half-extent of this actor's virtual space.
+     *  DERIVED AT SPAWN for pooled children: the spawning parent sets
+     *  Extent = (parent particle's real size) / UnitScale, so real scale
+     *  expresses itself as model size (and therefore content COUNT), while
+     *  content sizes stay perceptually identical across instances. The
+     *  template/CDO value below is used only by level-placed standalone
+     *  actors and as the placeholder until first spawn. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
     double Extent = 274877906944; // 2^38
 
-    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Generation")
-    double UnitScale = 1.0;  // Derived - set by spawning actor
+    /** PER-LAYER DESIGN CONSTANT: real-world cm per one local unit of this
+     *  layer. This is the single bridge between authored real-unit content
+     *  sizes and local space, and it is deliberately NEVER derived per
+     *  instance — a constant UnitScale is what makes star systems (and
+     *  planets, and their precision budgets) identical in perceived and
+     *  virtual scale across parents of every size. Set on the spawning
+     *  parent's template (e.g. UniverseActor.GalaxyParams.UnitScale,
+     *  FGalaxyParams.StarSystemUnitScale) and copied at spawn. Layers below
+     *  the star system transition to real space (UnitScale = 1). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
+    double UnitScale = 1.0;
+
+    /** Safety clamps for the spawn-time Extent derivation, protecting
+     *  against outlier parent particles or a mistuned layer UnitScale.
+     *  A spawn hitting either bound logs a warning — treat that as a
+     *  signal to retune the layer constant, not as normal operation. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
+    double MinDerivedExtent = 1048576.0;        // 2^20
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
+    double MaxDerivedExtent = 4398046511104.0;  // 2^42
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
     FRotator Rotation = FRotator::ZeroRotator;

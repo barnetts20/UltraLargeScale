@@ -158,8 +158,13 @@ void UniverseDataGenerator::GenerateLargeTierNode(const FIntVector& InCoord, int
 			ScaleSample, Params.LargeTier.ScaleDistribution);
 
 		FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
-		const double ExtentAtDepth = (double)Params.Extent / (double)(1 << PointData.InsertDepth);
-		const float ClusterExtent = static_cast<float>(ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
+		// AUTHORED SIZE IS TRUTH: convert the real-unit Scale through the
+		// layer's constant UnitScale exactly once. InsertDepth stays octree
+		// bookkeeping only — never reconstruct size from the quantized depth
+		// (the old reconstruction always floored ScaleFactor's non-positive
+		// residual and inflated every particle to its power-of-two node
+		// extent, which is what made sprite sizes octave-step with UnitScale).
+		const float ClusterExtent = static_cast<float>(Scale / Params.UnitScale);
 
 		const FVector CompVec = Stream.GetUnitVector();
 		const FVector NodeRotation = Stream.GetUnitVector();
@@ -261,8 +266,8 @@ void UniverseDataGenerator::GenerateMidTierNode(
 			Params.MidTier.MinScale, Params.MidTier.MaxScale,
 			ScaleSample, Params.MidTier.ScaleDistribution);
 		FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
-		const double ExtentAtDepth = (double)Params.Extent / (double)(1 << PointData.InsertDepth);
-		const float ClusterExtent = static_cast<float>(ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
+		// Authored size is truth (see the Large-tier note above).
+		const float ClusterExtent = static_cast<float>(Scale / Params.UnitScale);
 
 		const FVector CompVec = Stream.GetUnitVector();
 		const FVector NodeRotation = Stream.GetUnitVector();
@@ -377,8 +382,8 @@ void UniverseDataGenerator::GenerateSmallTierNode(
 			ScaleSample, Params.SmallTier.ScaleDistribution);
 
 		FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
-		const double ExtentAtDepth = (double)Params.Extent / (double)(1 << PointData.InsertDepth);
-		const float FinalExtent = static_cast<float>(ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
+		// Authored size is truth (see the Large-tier note above).
+		const float FinalExtent = static_cast<float>(Scale / Params.UnitScale);
 
 		const int32 Idx = BufferStart + ActualCount;
 		InBuffer.Positions[Idx] = CandidatePositions[i];

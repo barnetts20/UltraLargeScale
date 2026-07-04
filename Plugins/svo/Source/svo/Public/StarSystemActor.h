@@ -47,14 +47,16 @@ struct SVO_API FStarSystemParams : public FBaseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Star")
 	FLinearColor StarColor = FLinearColor(1, 1, 1, 1);
 
-	/** How much larger the star system bounds are relative to the star sprite.
-	 *  The star's world radius = ParticleExtent * Galaxy.UnitScale.
-	 *  The star system's virtual space covers BoundsScaleMultiplier times that,
-	 *  so planets can orbit well outside the star sprite's footprint.
-	 *  Tune this until planets are visibly spread out when approaching the star.
-	 *  1000 is a good starting point for a solar-system-scale first pass. */
+	/** How much larger the star system's real span is than the star
+	 *  particle's real size. NOTE: MaxEntityScale already authors a full
+	 *  system DIAMETER (orbits included — Pluto-orbit class at the top of
+	 *  the range), so this multiplier only needs to clear the star glyph
+	 *  plus margin. Over-provisioning here directly burns the system's
+	 *  integer-lattice and float-precision budget: span/smallest-feature
+	 *  must stay within ~2^41, which with the current planet scale ranges
+	 *  caps this near 4 (30 left NO valid StarSystemUnitScale window). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Star")
-	double BoundsScaleMultiplier = 30.0;
+	double BoundsScaleMultiplier = 1.0;
 
 	/** Maximum number of planet sprites to generate (line layout). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets")
@@ -102,6 +104,7 @@ struct SVO_API FStarSystemParams : public FBaseParams
 
 	FStarSystemParams()
 	{
+		UnitScale = 1.2e7;
 		LargeTier.GridDepth = 1;
 		LargeTier.NeighborhoodRadius = 0;
 		LargeTier.MaxParticlesPerSlot = 64;

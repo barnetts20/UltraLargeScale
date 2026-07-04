@@ -167,7 +167,7 @@ struct SVO_API FGalaxyDensityParams
 	/// thicker as they widen outward).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
 	float ArmVerticalSquashOuter = 3.0f;
-	
+
 	// --- Radial Growth ---
 	// As distance along the arm increases (inner → outer edge), three
 	// properties evolve together:
@@ -319,6 +319,22 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// galaxy's coordinate system while the physical size stays constant.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
 	double MaxEntityScale = 3e18;
+
+	/** PER-LAYER DESIGN CONSTANT for spawned star systems: real-world cm
+	 *  per star-system local unit (see FBaseParams::UnitScale). Carried on
+	 *  the galaxy params so it flows from the UniverseActor template to
+	 *  every galaxy and is applied at star-system spawn.
+	 *
+	 *  Default derivation (with MaxEntityScale 1.1553e19, tier spread 64x,
+	 *  BoundsScaleMultiplier 4):
+	 *    floor:   TerrestrialMinScale 1e8 cm / 8 units  -> <= 1.25e7
+	 *             (smallest planet spans >= ~8 local units, keeping it
+	 *              clear of the SVO integer lattice's 2-unit floor)
+	 *    ceiling: largest span 1.1553e19 * 4 within 2^42 -> >= 1.05e7
+	 *  1.2e7 sits inside that window: Earth ~106 local units, Jupiter
+	 *  ~1200, largest system extent ~3.85e12 (under the 2^42 clamp). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
+	double StarSystemUnitScale = 1.2e7;
 	// --- Large tier SDF culling grid ---
 
 	/// Grid depth used to subdivide the galaxy volume for SDF-based cell
@@ -349,7 +365,7 @@ struct SVO_API FGalaxyParams : public FBaseParams
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Material")
 	FGalaxyMaterialParams MaterialParams;
-	
+
 	// --- Encoded noise graph (kept for future FastNoise swap-in) ---
 	static constexpr const char* EncodedTree = "DQAFAAAAAAAAQAgAAAAAAD8AAAAAAA==";
 
@@ -364,7 +380,11 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	FGalaxyParams()
 	{
 		Seed = 666;
-		UnitScale = 1e11;
+		// Galaxy-layer design constant (see FBaseParams::UnitScale): a
+		// Milky-Way-class galaxy (~1.26e23 cm) renders near the legacy 2^38
+		// template extent; derived extents span ~3.2e10 (dwarfs) to ~2.0e12
+		// (giants) with universe MaxEntityScale ~1e24 and 64x tier spread.
+		UnitScale = 5e11;
 		Rotation = FRotator::ZeroRotator;
 		ParentColor = FLinearColor(1, 1, 1, 0);
 

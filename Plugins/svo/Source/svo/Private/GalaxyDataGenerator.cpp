@@ -520,8 +520,13 @@ void GalaxyDataGenerator::GenerateTierNode(
 			ScaleSample, InTierParams.ScaleDistribution);
 
 		FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
-		const double ExtentAtDepth = static_cast<double>(Params.Extent) / static_cast<double>(1 << PointData.InsertDepth);
-		const float FinalExtent = static_cast<float>(ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
+		// AUTHORED SIZE IS TRUTH: convert the real-unit Scale through the
+		// layer's constant UnitScale exactly once. InsertDepth stays octree
+		// bookkeeping only — never reconstruct size from the quantized depth
+		// (the old reconstruction always floored ScaleFactor's non-positive
+		// residual and inflated every particle to its power-of-two node
+		// extent, which is what made sprite sizes octave-step with UnitScale).
+		const float FinalExtent = static_cast<float>(Scale / Params.UnitScale);
 
 		const FVector CompVec = Stream.GetUnitVector();
 
@@ -788,10 +793,8 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 				ScaleSample, Params.LargeTier.ScaleDistribution);
 			FPointData PointData = FPointData::MakePointDataFromWorldScale(
 				Scale, Params.UnitScale, Params.Extent);
-			const double ExtentAtDepth = static_cast<double>(Params.Extent)
-				/ static_cast<double>(1 << PointData.InsertDepth);
-			const float FinalExtent = static_cast<float>(
-				ExtentAtDepth * (1.0 + PointData.Data.ScaleFactor));
+			// Authored size is truth (see the tier note above).
+			const float FinalExtent = static_cast<float>(Scale / Params.UnitScale);
 
 			const FVector CompVec = Stream.GetUnitVector();
 

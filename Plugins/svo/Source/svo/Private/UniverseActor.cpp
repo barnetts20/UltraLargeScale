@@ -409,8 +409,29 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	// then override per-instance fields (seed, color, rotation, scale).
 	Galaxy->Params = this->GalaxyParams;
 
-	// Derive UnitScale from the particle extent instead of the node extent.
-	Galaxy->Params.UnitScale = (static_cast<double>(ParticleExtent) * this->UniverseParams.UnitScale) / Galaxy->Params.Extent;
+	// INVERTED DERIVATION: UnitScale is the per-layer design constant
+	// (carried in from the GalaxyParams template copy above); the galaxy's
+	// LOCAL Extent is what varies — derived from the particle's real size.
+	// Real galaxy size therefore expresses itself as model size and star
+	// COUNT, while every authored real-unit content size converts through
+	// the same constant to identical local (= perceived) sizes in every
+	// galaxy. (Previously Extent was the template constant and UnitScale
+	// was derived, which made star sprites scale inversely with host
+	// galaxy size.)
+	{
+		const double DerivedExtent =
+			(static_cast<double>(ParticleExtent) * this->UniverseParams.UnitScale)
+			/ Galaxy->Params.UnitScale;
+		Galaxy->Params.Extent = FMath::Clamp(DerivedExtent,
+			Galaxy->Params.MinDerivedExtent, Galaxy->Params.MaxDerivedExtent);
+		if (Galaxy->Params.Extent != DerivedExtent)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("AUniverseActor::SpawnGalaxy — derived extent %.3e clamped to %.3e; ")
+				TEXT("retune GalaxyParams.UnitScale (layer constant) or the clamp bounds."),
+				DerivedExtent, Galaxy->Params.Extent);
+		}
+	}
 	// MaxEntityScale is derived from MaxEntityScaleFraction in GalaxyActor::InitializeData.
 	// No need to set it here — DeriveScaleRanges handles the cascade.
 
@@ -432,11 +453,11 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 
 	UE_LOG(LogTemp, Log,
 		TEXT("AUniverseActor::SpawnGalaxyFromPool — pool=%d node=(%.1f,%.1f,%.1f) extent=%.1f "
-			"particlePos=(%.1f,%.1f,%.1f) particleExtent=%.3f derivedUnitScale=%.6e seed=%d"),
+			"particlePos=(%.1f,%.1f,%.1f) particleExtent=%.3f unitScale(const)=%.6e derivedExtent=%.6e seed=%d"),
 		GalaxyPool.Num(),
 		InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent,
 		ParticlePos.X, ParticlePos.Y, ParticlePos.Z, ParticleExtent,
-		Galaxy->Params.UnitScale, Galaxy->Params.Seed);
+		Galaxy->Params.UnitScale, Galaxy->Params.Extent, Galaxy->Params.Seed);
 }
 
 void AUniverseActor::FinalizeGalaxyPlacement(AGalaxyActor* Galaxy)

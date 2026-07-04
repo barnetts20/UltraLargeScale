@@ -642,17 +642,33 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 	SpawnedStarSystems.Add(InNode, TWeakObjectPtr<AStarSystemActor>(System));
 	System->ResetForSpawn();
 
-	// UnitScale: scale the system so its virtual space is BoundsScaleMultiplier
-	// times larger than the star sprite's world radius.
-	//
-	// Base (no multiplier): UnitScale = (ParticleExtent * Galaxy.UnitScale) / Extent
-	//   → Extent octree units == one star sprite radius in world space.
-	//   → All planets orbit within the star glyph itself. Wrong.
-	//
-	// With multiplier:  UnitScale = (ParticleExtent * Galaxy.UnitScale * BoundsScaleMultiplier) / Extent
-	//   → Extent octree units == BoundsScaleMultiplier star radii in world space.
-	//   → OuterOrbitFraction * Extent octree units == a comfortable orbital distance.
-	System->Params.UnitScale = (static_cast<double>(ParticleExtent) * Params.UnitScale) / System->Params.Extent;
+	// INVERTED DERIVATION: UnitScale is the per-layer design constant
+	// (FGalaxyParams::StarSystemUnitScale, flowing from the universe
+	// template through every galaxy); the system's LOCAL Extent is what
+	// varies. The system's real span is the star sprite's real size times
+	// BoundsScaleMultiplier (clearing the star glyph — MaxEntityScale
+	// already authors the full orbital diameter); dividing by the constant
+	// UnitScale converts that to local units. Because star sprite sizes
+	// are themselves invariant (authored real sizes through the constant
+	// galaxy UnitScale), system extents — and therefore planet local sizes
+	// and the planet-sprite precision budget — are a single global range
+	// rather than per-instance quantities.
+	System->Params.UnitScale = Params.StarSystemUnitScale;
+	{
+		const double DerivedExtent =
+			(static_cast<double>(ParticleExtent) * Params.UnitScale
+				* System->Params.BoundsScaleMultiplier)
+			/ System->Params.UnitScale;
+		System->Params.Extent = FMath::Clamp(DerivedExtent,
+			System->Params.MinDerivedExtent, System->Params.MaxDerivedExtent);
+		if (System->Params.Extent != DerivedExtent)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("AGalaxyActor::SpawnStarSystemFromPool — derived extent %.3e clamped to %.3e; ")
+				TEXT("retune FGalaxyParams::StarSystemUnitScale or the clamp bounds."),
+				DerivedExtent, System->Params.Extent);
+		}
+	}
 	System->SpeedScale = Universe ? Universe->SpeedScale : SpeedScale;
 	// ObjectId is the deterministic hierarchical seed composed from
 	// (GalaxySeed, GridCoord, GenerationIndex) during octree insertion.
@@ -665,9 +681,9 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 	System->bPendingPlacement = true;
 
 	UE_LOG(LogTemp, Log,
-		TEXT("AGalaxyActor::SpawnStarSystemFromPool — particle=(%.1f,%.1f,%.1f) extent=%.2f unitScale=%.4e seed=%d (deferred)"),
+		TEXT("AGalaxyActor::SpawnStarSystemFromPool — particle=(%.1f,%.1f,%.1f) extent=%.2f unitScale(const)=%.4e derivedExtent=%.4e seed=%d (deferred)"),
 		ParticlePos.X, ParticlePos.Y, ParticlePos.Z,
-		ParticleExtent, System->Params.UnitScale, System->Params.Seed);
+		ParticleExtent, System->Params.UnitScale, System->Params.Extent, System->Params.Seed);
 
 	System->Initialize();
 }
