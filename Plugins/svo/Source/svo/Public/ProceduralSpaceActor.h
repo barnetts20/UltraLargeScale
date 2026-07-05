@@ -25,7 +25,7 @@ struct SVO_API FBaseParams {
      *  template/CDO value below is used only by level-placed standalone
      *  actors and as the placeholder until first spawn. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
-    double Extent = 2147483648.0; // 2^38
+    double Extent = 2147483648.0;
 
     /** PER-LAYER DESIGN CONSTANT: real-world cm per one local unit of this
      *  layer. This is the single bridge between authored real-unit content

@@ -167,7 +167,7 @@ struct SVO_API FUniverseParams : public FBaseParams {
 	//   Tier[1].MaxScale = Tier[0].MinScale
 	//   ... and so on.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
-	double MaxEntityScale = 1e23;
+	double MaxEntityScale = 1e22;
 
 	// --- Per-tier streaming configs ---
 
@@ -186,10 +186,10 @@ struct SVO_API FUniverseParams : public FBaseParams {
 	// GasExtent = ClusterExtent * Lerp(GasExtentMinMultiplier, GasExtentMaxMultiplier, Density).
 	// Keeps gas automatically in the same coordinate space as cluster sprites.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gas")
-	float GasExtentMinMultiplier = 500.0f;
+	float GasExtentMinMultiplier = 2000.0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gas")
-	float GasExtentMaxMultiplier = 1000.0f;
+	float GasExtentMaxMultiplier = 20000.0;
 
 	static constexpr const char* EncodedTree = "EAAAAIA/GQAbABsAEwAAAEBAJAAgAAAAFwAAAAAAAACAP8UggD8AAAAADQADAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAAEXAAAAAAAAAIA/zcxMvQAAgD8kAAIAAAD//wEAAAAASEIB//8GAAAAAIA+";
 
@@ -203,7 +203,7 @@ struct SVO_API FUniverseParams : public FBaseParams {
 
 	FUniverseParams() {
 		Seed = 69;
-		UnitScale = 2e17;
+		UnitScale = 1.6e17;
 		Rotation = FRotator::ZeroRotator;
 		ParentColor = FLinearColor(1, 1, 1);
 
