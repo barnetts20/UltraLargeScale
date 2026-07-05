@@ -64,7 +64,7 @@ struct SVO_API FTierParams
 	// Use evenly-spaced depths (e.g. 1, 4, 7 → spacing of 3).
 	// Scale ratio between adjacent tiers = 2^spacing (spacing 3 → ratio 8).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming")
-	int32 GridDepth = 1;
+	int32 GridDepth = 6;
 
 	// Half-width of the 3D neighborhood streamed around the player.
 	// 1 -> 3x3x3 = 27 slots.

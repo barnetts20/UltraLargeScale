@@ -38,7 +38,7 @@ public:
 DECLARE_LOG_CATEGORY_EXTERN(LogSVOPerf, Log, All);
 
 #ifndef SVO_GT_PROFILING
-#define SVO_GT_PROFILING 1
+#define SVO_GT_PROFILING 0
 #endif
 
 #if SVO_GT_PROFILING

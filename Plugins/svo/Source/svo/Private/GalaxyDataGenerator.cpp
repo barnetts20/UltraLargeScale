@@ -532,10 +532,7 @@ void GalaxyDataGenerator::GenerateTierNode(
 
 		const int32 Idx = BufferStart + ActualCount;
 		InBuffer.Positions[Idx] = CandidatePositions[i];
-		//Scale in this case would be the full size of the star SYSTEM but we want the particle we generate to represent the star...
-		//We need a coefficient to shrink it or it wont look correct... we can use the same coefficient to calculate the size of the eventual star system star object
-		//That replaces the placeholder sprite
-		InBuffer.Extents[Idx] = FinalExtent * .000001;
+		InBuffer.Extents[Idx] = FinalExtent;
 		InBuffer.Colors[Idx] = FLinearColor(FMath::Abs(CompVec.X), FMath::Abs(CompVec.Y), FMath::Abs(CompVec.Z));
 
 		ActualCount++;
