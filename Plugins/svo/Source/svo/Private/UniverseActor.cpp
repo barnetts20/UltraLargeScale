@@ -146,6 +146,17 @@ void AUniverseActor::BuildTierConfigs()
 
 	// Applied to each tier after its GridDepth/NeighborhoodRadius are set.
 	// Captures Config by ref — safe since Config outlives all lambda calls.
+	//
+	// Bounds derivation (actor-relative; the actor is pegged to the player).
+	// Rendered offset = cellLocal + lattice + (NCenter - VT), where
+	//   |cellLocal| + |lattice| <= (2R+1) * CellHalfExtent   (neighborhood half-span)
+	//   |NCenter - VT|          <= CellHalfExtent            (VT resides in the center cell)
+	// so the tight half-bound is (2R+2) * CellHalfExtent plus one particle
+	// radius (added later by ApplyPendingBounds). We provision 2 * (2R+1),
+	// which exceeds the tight bound for all R >= 0 and leaves slack for
+	// transition frames. This is the SHARED convention — GalaxyActor's
+	// MakeBounds must match (it previously used (2R+1), which can clip edge
+	// cells by up to one half-cell when VT sits near a cell boundary).
 	auto MakeBoundsLambda = [this](const FParticleTierConfig& Cfg) -> TFunction<FBox()>
 		{
 			return [this, &Cfg]() -> FBox
@@ -176,6 +187,7 @@ FTierStreamingContext AUniverseActor::BuildStreamingContext() const
 	Ctx.OwnerName = TEXT("Universe");
 	Ctx.ParentSeed = UniverseParams.Seed;
 	Ctx.GetLatestVT = [this] { return ReadLatestVT(); };
+	Ctx.GetLiveState = [this] { return InitializationState; };
 	return Ctx;
 }
 #pragma endregion
@@ -382,9 +394,7 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	// TypeId carries the tier index (0=Large, 1=Mid, 2=Small),
 	// written during InsertParticleIntoOctree.
 	const int32 TierIndex = FMath::Clamp(InNode->Data.TypeId, 0, 2);
-	FParticleTierConfig* TierConfigs[] = { &CoarseTierConfig, &MidTierConfig, &SmallTierConfig };
 	FParticleTierState* TierStates[] = { &CoarseTierState, &MidTierState, &SmallTierState };
-	FParticleTierConfig& MatchedConfig = *TierConfigs[TierIndex];
 	FParticleTierState& MatchedState = *TierStates[TierIndex];
 
 	// ParticleIndex is the absolute buffer index. Direct lookup — no slot math needed.
@@ -536,12 +546,17 @@ void AUniverseActor::RequestScan()
 
 	bSpawnScanInProgress.store(true);
 	const FVector LocalPlayerPos = VirtualTraversal;
+	// Snapshot the tree ref ON THE GAME THREAD (one atomic ref-count bump).
+	// The rebase completion swaps this->Octree on the GT; reading the member
+	// from the worker below would be a torn read of a TSharedPtr. The snapshot
+	// also keeps the pre-rebase tree alive until this scan finishes.
+	TSharedPtr<FOctree> TreeSnapshot = Octree;
 	TWeakObjectPtr<AUniverseActor> WeakThis(this);
-	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, LocalPlayerPos]()
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, LocalPlayerPos, TreeSnapshot]()
 		{
 			AUniverseActor* Self = WeakThis.Get();
-			if (!Self) return;
-			const TArray<TSharedPtr<FOctreeNode>> NearbyArray = Self->GetNodesByScreenSpace(LocalPlayerPos, Self->SpawnScreenSpaceThreshold, -1);
+			if (!Self || !TreeSnapshot.IsValid()) return;
+			const TArray<TSharedPtr<FOctreeNode>> NearbyArray = TreeSnapshot->GetNodesByScreenSpace(LocalPlayerPos, Self->SpawnScreenSpaceThreshold);
 			AsyncTask(ENamedThreads::GameThread, [WeakThis, NearbyArray]()
 				{
 					AUniverseActor* InnerSelf = WeakThis.Get();

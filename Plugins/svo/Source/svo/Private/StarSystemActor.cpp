@@ -123,6 +123,19 @@ void AStarSystemActor::ResetForPool()
 	}
 	SpawnedPlanets.Empty();
 
+	// DRAIN BEFORE FREE — mirrors AGalaxyActor::ResetForPool. An async
+	// boundary-cross task may still be writing this tier's buffers; bar new
+	// pushes, wait out any in-flight push, then wait for the task to clear
+	// bUpdateInProgress before freeing the arrays it writes.
+	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
+	{
+		FTierStreamingSystem::BeginShutdownDrain(*Tier);
+		while (Tier->bUpdateInProgress.load())
+		{
+			FPlatformProcess::Sleep(0.0005f);
+		}
+	}
+
 	// Tear down tier Niagara components.
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 	{
@@ -140,6 +153,9 @@ void AStarSystemActor::ResetForPool()
 		Tier->StampedNCenter = FVector::ZeroVector;
 		Tier->AppliedBoundsPad = -1.0;
 		Tier->bUpdateInProgress.store(false);
+		// Pooled actors are re-initialized — clear the shutdown bar so pushes
+		// work again on the next spawn.
+		Tier->bShuttingDown.store(false);
 	}
 	TierNiagaraComponents.Empty();
 	DiagTickCount = 0;
@@ -341,7 +357,8 @@ void AStarSystemActor::InitializeNiagara()
 	FTierStreamingSystem::InitializeTier(Ctx, SmallTierConfig, SmallTierState, TierNiagaraComponents);
 	if (InitializationState == ELifecycleState::Pooling) return;
 
-	InitializationState = ELifecycleState::Ready;
+	// NOTE: do NOT set Ready here — AProceduralSpaceActor::Initialize() sets
+	// it after this returns; setting it early let the actor tick mid-init.
 
 	// No timer start needed — Universe::DetermineAndDispatchScan drives scans.
 
@@ -474,6 +491,7 @@ FTierStreamingContext AStarSystemActor::BuildStreamingContext() const
 	Ctx.OwnerName = GetName();
 	Ctx.ParentSeed = Params.Seed;
 	Ctx.GetLatestVT = [this] { return ReadLatestVT(); };
+	Ctx.GetLiveState = [this] { return InitializationState; };
 	return Ctx;
 }
 #pragma endregion
@@ -657,14 +675,17 @@ void AStarSystemActor::RequestScan()
 	bSpawnScanInProgress.store(true);
 	const FVector LocalPlayerPos = VirtualTraversal;
 
+	// GT snapshot of the tree ref — ReturnStarSystemToPool's flush task
+	// reassigns Octree off-thread; see AGalaxyActor::RequestScan.
+	TSharedPtr<FOctree> TreeSnapshot = Octree;
 	TWeakObjectPtr<AStarSystemActor> WeakThis(this);
-	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, LocalPlayerPos]()
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, LocalPlayerPos, TreeSnapshot]()
 		{
 			AStarSystemActor* Self = WeakThis.Get();
-			if (!Self) return;
+			if (!Self || !TreeSnapshot.IsValid()) return;
 
 			const TArray<TSharedPtr<FOctreeNode>> NearbyArray =
-				Self->Octree->GetNodesByScreenSpace(LocalPlayerPos, Self->SpawnScreenSpaceThreshold);
+				TreeSnapshot->GetNodesByScreenSpace(LocalPlayerPos, Self->SpawnScreenSpaceThreshold);
 
 			AsyncTask(ENamedThreads::GameThread, [WeakThis, NearbyArray]()
 				{

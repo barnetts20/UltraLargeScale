@@ -14,6 +14,15 @@ void FTierStreamingSystem::InitializeTier(
 {
 	double StartTime = FPlatformTime::Seconds();
 
+	// A by-value Ctx snapshot can never observe the actor flipping to Pooling
+	// mid-init, so abort checks read the live state through GetLiveState when
+	// the actor provides it (all three actors do).
+	auto IsPooling = [&Ctx]()
+		{
+			return (Ctx.GetLiveState ? Ctx.GetLiveState() : Ctx.InitializationState)
+				== ELifecycleState::Pooling;
+		};
+
 	const int32 NumBuffers = Config.NiagaraAssets.Num();
 	const int32 Side = 2 * Config.NeighborhoodRadius + 1;
 	const int32 TotalSlots = Side * Side * Side;
@@ -95,7 +104,7 @@ void FTierStreamingSystem::InitializeTier(
 			Config.GenerateCallback(ToGenerate[i].Key, ToGenerate[i].Value, PerSlotBufferPtrs[i]);
 			}, EParallelForFlags::BackgroundPriority);
 
-		if (Ctx.InitializationState == ELifecycleState::Pooling) return;
+		if (IsPooling()) return;
 
 		// Insert into octree.
 		InsertTierIntoOctree(Ctx, Config, State);
@@ -110,7 +119,7 @@ void FTierStreamingSystem::InitializeTier(
 			State.Buffers[b].RecomputeMaxExtent();
 	}
 
-	if (Ctx.InitializationState == ELifecycleState::Pooling) return;
+	if (IsPooling()) return;
 
 	// GT rendezvous: spawn Niagara components and activate.
 	TPromise<void> Promise;

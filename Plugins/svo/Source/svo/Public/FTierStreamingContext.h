@@ -65,4 +65,11 @@ struct FTierStreamingContext
 	 *  composites against current VT, not a value snapshotted when it was scheduled.
 	 *  Populated by each actor's BuildStreamingContext. */
 	TFunction<FVector()> GetLatestVT;
+
+	/** Returns the actor's LIVE lifecycle state. InitializationState above is
+	 *  a by-value snapshot taken in BuildStreamingContext, so it can never
+	 *  observe a mid-init flip to Pooling — the pipeline's abort checks read
+	 *  this instead. Optional: when unset, the snapshot is used (no abort).
+	 *  Populated by each actor's BuildStreamingContext. */
+	TFunction<ELifecycleState()> GetLiveState;
 };

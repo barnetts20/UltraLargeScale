@@ -91,9 +91,6 @@ void AGalaxyActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 }
 #pragma endregion
 
-#pragma region Parallax
-#pragma endregion
-
 #pragma region Pool Lifecycle
 void AGalaxyActor::ResetForPool()
 {
@@ -101,6 +98,22 @@ void AGalaxyActor::ResetForPool()
 	PendingScanResults.Empty();
 	TrackedSpawnNodes.Empty();
 	bSpawnScanInProgress.store(false);
+
+	// DRAIN BEFORE FREE: an async boundary-cross task may still own this
+	// tier's buffers (it writes Buffers/SlotCounts/SlotEntries and its tail
+	// commit touches NiagaraComponents under PushCS). Bar new pushes and wait
+	// out any in-flight push (BeginShutdownDrain), then wait for the task
+	// itself to clear bUpdateInProgress — its commit bails on bShuttingDown,
+	// so the wait is bounded by the remaining generation work. Only EndPlay
+	// did this previously; the pool path freed live buffers under a worker.
+	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
+	{
+		FTierStreamingSystem::BeginShutdownDrain(*Tier);
+		while (Tier->bUpdateInProgress.load())
+		{
+			FPlatformProcess::Sleep(0.0005f);
+		}
+	}
 
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 	{
@@ -118,6 +131,9 @@ void AGalaxyActor::ResetForPool()
 		Tier->StampedNCenter = FVector::ZeroVector;
 		Tier->AppliedBoundsPad = -1.0;
 		Tier->bUpdateInProgress.store(false);
+		// Pooled actors are re-initialized — clear the shutdown bar so pushes
+		// work again on the next spawn (EndPlay leaves it set; we must not).
+		Tier->bShuttingDown.store(false);
 	}
 	TierNiagaraComponents.Empty();
 	DiagTickCount = 0;
@@ -333,8 +349,14 @@ void AGalaxyActor::BuildTierConfigs()
 			CellExt, Params.SmallTier, 23, SmallTierState.SlotCounts[SlotIndex]);
 		};
 
+	// Shared bounds convention — see the derivation in
+	// AUniverseActor::BuildTierConfigs. Tight half-bound is
+	// (2R+2) * CellHalfExtent (+ particle radius via ApplyPendingBounds);
+	// we provision 2 * (2R+1) to match the universe tiers. The previous
+	// (2R+1) * CellHalfExtent under-bounded by up to one half-cell when VT
+	// sat near a cell boundary, risking edge-cell culling pops.
 	auto MakeBounds = [this](const FParticleTierConfig& Config) {
-		const double HalfExt = GetGridCellExtent(Config.GridDepth) * (2 * Config.NeighborhoodRadius + 1);
+		const double HalfExt = GetGridCellExtent(Config.GridDepth) * (2 * Config.NeighborhoodRadius + 1) * 2.0;
 		return FBox(FVector(-HalfExt), FVector(HalfExt));
 		};
 
@@ -360,6 +382,7 @@ FTierStreamingContext AGalaxyActor::BuildStreamingContext() const
 	Ctx.OwnerName = GetName();
 	Ctx.ParentSeed = Params.Seed;
 	Ctx.GetLatestVT = [this] { return ReadLatestVT(); };
+	Ctx.GetLiveState = [this] { return InitializationState; };
 	return Ctx;
 }
 #pragma endregion
@@ -508,14 +531,18 @@ void AGalaxyActor::RequestScan()
 	bSpawnScanInProgress.store(true);
 	const FVector LocalPlayerPos = VirtualTraversal;
 
+	// GT snapshot of the tree ref (one atomic ref-count bump) —
+	// ReturnGalaxyToPool's flush task reassigns Octree off-thread; reading
+	// the member from this worker would be a torn read of a TSharedPtr.
+	TSharedPtr<FOctree> TreeSnapshot = Octree;
 	TWeakObjectPtr<AGalaxyActor> WeakThis(this);
-	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, LocalPlayerPos]()
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, LocalPlayerPos, TreeSnapshot]()
 		{
 			AGalaxyActor* Self = WeakThis.Get();
-			if (!Self) return;
+			if (!Self || !TreeSnapshot.IsValid()) return;
 
 			const TArray<TSharedPtr<FOctreeNode>> NearbyArray =
-				Self->Octree->GetNodesByScreenSpace(LocalPlayerPos, Self->SpawnScreenSpaceThreshold);
+				TreeSnapshot->GetNodesByScreenSpace(LocalPlayerPos, Self->SpawnScreenSpaceThreshold);
 
 			AsyncTask(ENamedThreads::GameThread, [WeakThis, NearbyArray]()
 				{
@@ -614,9 +641,7 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 	// The octree node center is a quantized approximation; the real rendered
 	// position lives in the Niagara buffer. Mirrors UniverseActor::SpawnGalaxyFromPool.
 	const int32 TierIndex = FMath::Clamp(InNode->Data.TypeId, 0, 2);
-	FParticleTierConfig* TierConfigs[] = { &LargeTierConfig, &MidTierConfig, &SmallTierConfig };
 	FParticleTierState* TierStates[] = { &LargeTierState,  &MidTierState,  &SmallTierState };
-	FParticleTierConfig& MatchedConfig = *TierConfigs[TierIndex];
 	FParticleTierState& MatchedState = *TierStates[TierIndex];
 
 	FVector  ParticlePos = InNode->Center;  // fallback
@@ -704,6 +729,9 @@ void AGalaxyActor::FinalizeStarSystemPlacement(AStarSystemActor* System)
 	//   Rendered pos = PlayerPos + (LocalPos - VT) = SpawnLoc + LocalPos
 	// matches the galaxy's particle sprite position.
 	System->VirtualTraversal = CurrentFrameOfReferenceLocation - SpawnLoc;
+	// Seed the push threshold baseline too, mirroring FinalizeGalaxyPlacement,
+	// so the first tick doesn't fire a spurious full-delta push.
+	System->LastPushedVirtualTraversal = System->VirtualTraversal;
 
 	System->SetActorHiddenInGame(false);
 	System->bPendingPlacement = false;

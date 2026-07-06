@@ -7,7 +7,7 @@
 #include "CoreMinimal.h"
 
 /**
- * 
+ *
  */
 class SVO_API PointCloudGenerator
 {
@@ -28,7 +28,7 @@ public:
 	// Applies noise derivative based point shifting
 	FInt64Vector ApplyNoiseDerivative(FastNoise::SmartNode<> InNoise, double InDomainScale, int64 InExtent, FInt64Vector InSamplePosition, float& OutDensity);
 	bool ApplyNoiseSelective(FastNoise::SmartNode<> InNoise, double InDensity, double InDomainScale, int64 InExtent, FVector InSamplePosition);
-	
+
 	FInt64Vector RotateCoordinate(FInt64Vector InCoordinate, FRotator InAxes);
 
 	FVector RotateCoordinate(FVector InCoordinate, FRotator InRotation);
@@ -54,6 +54,20 @@ public:
 		 1,  1,  1,  1,  1,  1,  1,  1,  1
 	};
 };
+
+// ============================================================================
+// LEGACY EXAMPLE GENERATORS — RETIRED
+// ----------------------------------------------------------------------------
+// These predate the tier streaming pipeline and use the defunct
+// GenerateData(TSharedPtr<FOctree>) framework (insert-everything-up-front).
+// Nothing in the active generation schemes references them. Disabled rather
+// than deleted because several remain useful as point-distribution / noise
+// composition examples (spiral math, gradient warping, globular falloff).
+// Delete this block once the useful patterns have been absorbed elsewhere.
+// The PointCloudGenerator base class above stays live —
+// StarSystemDataGenerator still derives from it.
+// ============================================================================
+#if 0	// SVO_LEGACY_EXAMPLE_GENERATORS
 
 //Basic Generators (No Noise)
 class SVO_API SimpleRandomGenerator : public PointCloudGenerator
@@ -177,3 +191,5 @@ public:
 
 	const char* EncodedTree = "EABSuD5ADQAIAAAAAAAAQAcAAAAAAD8AAAAAAAH//wAA";
 };
+
+#endif	// SVO_LEGACY_EXAMPLE_GENERATORS

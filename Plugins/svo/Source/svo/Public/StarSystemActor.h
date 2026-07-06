@@ -263,7 +263,7 @@ protected:
 private:
 #pragma region Spawn Scan - Internal
 	std::atomic<bool> bSpawnScanInProgress{ false };
-	double LastScanDispatchTime = 0.0;
+	// NOTE: LastScanDispatchTime lives on AProceduralSpaceActor.
 	TSet<TSharedPtr<FOctreeNode>> TrackedPlanetNodes;
 	bool bHasPendingScanResults = false;
 	TArray<TSharedPtr<FOctreeNode>> PendingScanResults;

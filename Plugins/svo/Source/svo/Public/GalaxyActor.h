@@ -158,8 +158,7 @@ private:
 	/** Guards against overlapping spawn-scan background tasks. */
 	std::atomic<bool> bSpawnScanInProgress{ false };
 
-	/** Time of last scan dispatch. Used for interval throttling. */
-	double LastScanDispatchTime = 0.0;
+	// NOTE: LastScanDispatchTime lives on AProceduralSpaceActor.
 
 	/** Nodes currently inside the spawn threshold. Diffed each interval. */
 	TSet<TSharedPtr<FOctreeNode>> TrackedSpawnNodes;

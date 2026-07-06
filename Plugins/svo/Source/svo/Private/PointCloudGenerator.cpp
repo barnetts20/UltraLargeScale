@@ -46,7 +46,7 @@ FInt64Vector PointCloudGenerator::ApplyNoiseDerivative(FastNoise::SmartNode<> In
 	FZ = FMath::Clamp(FZ, -InExtent, InExtent);
 
 	//Back to int64 octree coordinates
-	OutDensity = (Output[13] + 1)/2;
+	OutDensity = (Output[13] + 1) / 2;
 	auto InsertPosition = FInt64Vector(FX, FY, FZ);
 	return InsertPosition;
 }
@@ -88,6 +88,9 @@ FVector PointCloudGenerator::RotateCoordinate(FVector InCoordinate, FRotator InR
 #pragma endregion
 
 #pragma region ExampleGenerators
+// LEGACY EXAMPLE GENERATORS — RETIRED. See the matching #if 0 block in
+// PointCloudGenerator.h for rationale.
+#if 0	// SVO_LEGACY_EXAMPLE_GENERATORS
 void SimpleRandomGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {
 	if (!InOctree) return;
@@ -469,4 +472,5 @@ void BurstNoiseGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 			InOctree->InsertPosition(FVector(InsertPosition), InsertDepth, Data);
 		});
 }
+#endif	// SVO_LEGACY_EXAMPLE_GENERATORS
 #pragma endregion

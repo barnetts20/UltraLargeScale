@@ -302,21 +302,22 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	// --- Tier scale derivation ---
 	/// Fixed absolute largest star-system scale in world cm.
 	/// All galaxies generate star particles in the same physical size
-	/// range regardless of parent galaxy size. The tier depth sequence
-	/// (1/3/5, spacing 2, ratio 4) gives a 64x total spread:
+	/// range regardless of parent galaxy size. With the current value (4e16)
+	/// and the tier depth sequence (1/3/5, spacing 2, ratio 4, 64x total
+	/// spread) DeriveScaleRanges produces:
 	///
-	///   Large: 3e18 → 7.5e17   (bright giants, wide binaries)
-	///   Mid:   7.5e17 → 1.875e17 (solar-type systems)
-	///   Small: 1.875e17 → ~4.7e16 (compact red dwarf systems)
+	///   Large: 1e16    → 4e16      (largest systems in the population)
+	///   Mid:   2.5e15  → 1e16
+	///   Small: 6.25e14 → 2.5e15    (compact systems)
 	///
-	/// Real references:
+	/// Real references (for retuning context):
 	///   Solar system to Pluto orbit ≈ 1.2e19 cm diameter
 	///   Compact M-dwarf habitable zone ≈ 3e16 cm
 	///   Wide binary separation ≈ 1e18 cm
 	///
-	/// MakePointDataFromWorldScale converts these to octree-local extents
-	/// using the galaxy's UnitScale, so the octree depth adapts to each
-	/// galaxy's coordinate system while the physical size stays constant.
+	/// The octree insert path converts these to octree-local extents using
+	/// the galaxy's UnitScale, so insert depth adapts to each galaxy's
+	/// coordinate system while the physical size stays constant.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
 	double MaxEntityScale = 4e16;
 
@@ -325,14 +326,17 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	 *  the galaxy params so it flows from the UniverseActor template to
 	 *  every galaxy and is applied at star-system spawn.
 	 *
-	 *  Default derivation (with MaxEntityScale 1.1553e19, tier spread 64x,
-	 *  BoundsScaleMultiplier 4):
-	 *    floor:   TerrestrialMinScale 1e8 cm / 8 units  -> <= 1.25e7
-	 *             (smallest planet spans >= ~8 local units, keeping it
-	 *              clear of the SVO integer lattice's 2-unit floor)
-	 *    ceiling: largest span 1.1553e19 * 4 within 2^42 -> >= 1.05e7
+	 *  Valid window (recompute when retuning — shown for the current
+	 *  MaxEntityScale 4e16 and BoundsScaleMultiplier 1):
+	 *    floor:   TerrestrialMinScale 1e8 cm must span >= ~8 local units
+	 *             (clear of the SVO integer lattice's 2-unit floor)
+	 *             -> UnitScale <= 1e8 / 8 = 1.25e7
+	 *    ceiling: largest system span (MaxEntityScale * BoundsScaleMultiplier
+	 *             = 4e16) must fit within 2^42 local units
+	 *             -> UnitScale >= 4e16 / 2^42 ≈ 9.1e3
 	 *  1.2e7 sits inside that window: Earth ~106 local units, Jupiter
-	 *  ~1200, largest system extent ~3.85e12 (under the 2^42 clamp). */
+	 *  ~1200, largest system extent ~3.3e9 local units (well under the
+	 *  2^42 clamp). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
 	double StarSystemUnitScale = 1.2e7;
 	// --- Large tier SDF culling grid ---
@@ -380,10 +384,13 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	FGalaxyParams()
 	{
 		Seed = 666;
-		// Galaxy-layer design constant (see FBaseParams::UnitScale): a
-		// Milky-Way-class galaxy (~1.26e23 cm) renders near the legacy 2^38
-		// template extent; derived extents span ~3.2e10 (dwarfs) to ~2.0e12
-		// (giants) with universe MaxEntityScale ~1e24 and 64x tier spread.
+		// Galaxy-layer design constant (see FBaseParams::UnitScale).
+		// Derived galaxy extent = particle real size / UnitScale. With the
+		// current universe MaxEntityScale (1e22) and its 64x tier spread
+		// (1.5625e20 .. 1e22 cm), derived extents span ~6.5e6 (smallest
+		// small-tier galaxies) to ~4.2e8 (largest large-tier galaxies).
+		// For reference, a Milky-Way-class galaxy (~1.26e23 cm) would map
+		// to ~5.2e9 local units at this constant.
 		UnitScale = 2.4e13;
 		Rotation = FRotator::ZeroRotator;
 		ParentColor = FLinearColor(1, 1, 1, 0);

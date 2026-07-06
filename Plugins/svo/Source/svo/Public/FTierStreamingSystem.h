@@ -54,9 +54,11 @@ struct FParticleTierConfig
 	/**
 	 * Octree depth that defines this tier's streaming cell size.
 	 * Cell half-extent = (Params.Extent * GridExtentMultiplier) / (1 << (GridDepth + 1)).
-	 *   Large = 1  →  cell half-extent = 2 * Extent
-	 *   Mid   = 4  →  cell half-extent = Extent / 8
-	 *   Small = 7  →  cell half-extent = Extent / 64
+	 * With the standard GridExtentMultiplier = 4 and the current depth
+	 * sequence (Large = 1, Mid = 3, Small = 5):
+	 *   depth 1  →  cell half-extent = Extent
+	 *   depth 3  →  cell half-extent = Extent / 4
+	 *   depth 5  →  cell half-extent = Extent / 16
 	 */
 	int32 GridDepth = 1;
 

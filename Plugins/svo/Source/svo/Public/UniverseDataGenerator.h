@@ -60,9 +60,9 @@ struct SVO_API FTierParams
 	GENERATED_BODY()
 
 	// Octree grid depth that defines this tier's cell size.
-	// Cell extent = TreeExtent / (1 << GridDepth).
-	// Use evenly-spaced depths (e.g. 1, 4, 7 → spacing of 3).
-	// Scale ratio between adjacent tiers = 2^spacing (spacing 3 → ratio 8).
+	// Cell half-extent = (Extent * GridExtentMultiplier) / (1 << (GridDepth + 1)).
+	// Use evenly-spaced depths (current scheme: 1, 3, 5 → spacing of 2).
+	// Scale ratio between adjacent tiers = 2^spacing (spacing 2 → ratio 4).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming")
 	int32 GridDepth = 6;
 
@@ -115,10 +115,11 @@ struct SVO_API FTierParams
 	///   ratio = 2 ^ (nextDepth - thisDepth)
 	/// The last tier mirrors the spacing of the previous pair.
 	///
-	/// Example with depths 1, 4, 7 and MaxEntityScale = 1e23:
-	///   Large: 1.25e22 → 1e23    (ratio 8, spacing 3)
-	///   Mid:   1.5625e21 → 1.25e22 (ratio 8, spacing 3)
-	///   Small: 1.953125e20 → 1.5625e21 (ratio 8, mirrors spacing 3)
+	/// Example with depths 1, 3, 5 and MaxEntityScale = 1e22 (current
+	/// universe defaults):
+	///   Large: 2.5e21    → 1e22    (ratio 4, spacing 2)
+	///   Mid:   6.25e20   → 2.5e21  (ratio 4, spacing 2)
+	///   Small: 1.5625e20 → 6.25e20 (ratio 4, mirrors spacing 2)
 	static void DeriveTierScaleRanges(double MaxEntityScale, TArrayView<FTierParams*> Tiers)
 	{
 		const int32 NumTiers = Tiers.Num();
@@ -207,7 +208,7 @@ struct SVO_API FUniverseParams : public FBaseParams {
 		Rotation = FRotator::ZeroRotator;
 		ParentColor = FLinearColor(1, 1, 1);
 
-		// Tier streaming params — depths evenly spaced by 3.
+		// Tier streaming params — depths evenly spaced by 2 (ratio 4 per tier).
 		LargeTier.GridDepth = 1;
 		LargeTier.NeighborhoodRadius = 1;
 		LargeTier.MaxParticlesPerSlot = 8000;
@@ -220,11 +221,11 @@ struct SVO_API FUniverseParams : public FBaseParams {
 		SmallTier.NeighborhoodRadius = 1;
 		SmallTier.MaxParticlesPerSlot = 2000;
 
-		// Scale ranges derived from MaxEntityScale (1e23) + depth spacing (3).
-		// 2^3 = 8, so each tier covers one octave of scale:
-		//   Large: 1.25e22 → 1e23
-		//   Mid:   1.5625e21 → 1.25e22
-		//   Small: 1.953125e20 → 1.5625e21
+		// Scale ranges derived from MaxEntityScale (1e22) + depth spacing (2).
+		// 2^2 = 4, so each tier covers two octaves of scale (64x total spread):
+		//   Large: 2.5e21    → 1e22
+		//   Mid:   6.25e20   → 2.5e21
+		//   Small: 1.5625e20 → 6.25e20
 		DeriveScaleRanges();
 
 		// Per-tier ScaleDistribution and DensityResponse curves default to

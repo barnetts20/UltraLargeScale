@@ -220,7 +220,7 @@ public:
 				TArray<uint8> ChildIndexArray = Current->Index;
 				ChildIndexArray.Add(ChildIndex);
 
-				Current->Children[ChildIndex] = MakeShared<FOctreeNode, ESPMode::ThreadSafe>(
+				Current->Children[ChildIndex] = MakeShared<FOctreeNode>(
 					ChildCenter, CurrentExtent, ChildIndexArray, Current
 				);
 			}
@@ -257,35 +257,6 @@ public:
 		return Current;
 	}
 
-	// Remove a specific ObjectId from a node. If it was the primary
-	// ObjectId, promote the next AdditionalObjectIds entry into the slot.
-	// Used by streaming code on cell-exit to retire one cell's slot from
-	// nodes that may still hold other cells' slots after collisions.
-	// Returns true if the node has no remaining ObjectIds (caller may want
-	// to also clear TypeId / mark the node empty).
-	bool RemoveObjectIdFromNode(const TSharedPtr<FOctreeNode>& InNode, int32 InObjectId) {
-		if (!InNode.IsValid()) return false;
-
-		if (InNode->Data.ObjectId == InObjectId)
-		{
-			if (InNode->Data.AdditionalObjectIds.Num() > 0)
-			{
-				InNode->Data.ObjectId = InNode->Data.AdditionalObjectIds[0];
-				InNode->Data.AdditionalObjectIds.RemoveAt(0);
-			}
-			else
-			{
-				InNode->Data.ObjectId = -1;
-				InNode->Data.TypeId = -1;
-				return true;
-			}
-		}
-		else
-		{
-			InNode->Data.AdditionalObjectIds.RemoveSingle(InObjectId);
-		}
-		return false;
-	}
 #pragma endregion
 
 #pragma region Fetch Operations
@@ -528,13 +499,10 @@ public:
 		Root = MakeShared<FOctreeNode>(FVector::ZeroVector, Extent, TArray<uint8>(), nullptr);
 	}
 
-	// Center-aware overload. Used by ASectorActor to corner-align the tree
-	// so the sector's 3x3x3 coarse-cell neighborhood occupies a 3-of-4
-	// segment of the tree's depth-2 grid (the 4th cell being the buffer
-	// ring on each axis). With InCenter = (Sector::Extent, Sector::Extent,
-	// Sector::Extent) and InExtent = 4 * Sector::Extent the tree spans
-	// [-3*SE, +5*SE] and depth-2 node centers fall on coarse cell centers.
-	// InCenter defaults to ZeroVector for legacy callers.
+	// Center-aware overload: builds the tree around an arbitrary root center
+	// instead of the origin. Current callers: AUniverseActor's octree rebase
+	// (root re-centered on the player's VirtualTraversal) and the initial
+	// universe tree (ZeroVector).
 	FOctree(double InExtent, FVector InCenter) {
 		Extent = InExtent;
 		MaxDepth = static_cast<int>(FMath::Log2(Extent));

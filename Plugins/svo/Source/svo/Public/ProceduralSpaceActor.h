@@ -80,6 +80,10 @@ public:
 #pragma region Shared State
     TSharedPtr<FOctree> Octree;
     ELifecycleState InitializationState = ELifecycleState::Uninitialized;
+
+    /** Enables debug drawing and periodic verbose diagnostics on this actor.
+     *  (Was a plain member — unsettable outside C++.) */
+    UPROPERTY(EditAnywhere, Category = "Debug")
     bool IsDebug = false;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parallax Properties")

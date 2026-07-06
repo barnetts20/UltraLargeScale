@@ -519,13 +519,14 @@ void GalaxyDataGenerator::GenerateTierNode(
 			InTierParams.MinScale, InTierParams.MaxScale,
 			ScaleSample, InTierParams.ScaleDistribution);
 
-		FPointData PointData = FPointData::MakePointDataFromWorldScale(Scale, Params.UnitScale, Params.Extent);
 		// AUTHORED SIZE IS TRUTH: convert the real-unit Scale through the
-		// layer's constant UnitScale exactly once. InsertDepth stays octree
-		// bookkeeping only — never reconstruct size from the quantized depth
-		// (the old reconstruction always floored ScaleFactor's non-positive
-		// residual and inflated every particle to its power-of-two node
-		// extent, which is what made sprite sizes octave-step with UnitScale).
+		// layer's constant UnitScale exactly once. Octree insert depth is
+		// derived later, at insert time, by InsertParticleIntoOctree — no
+		// FPointData is needed here. (The old code built and discarded one
+		// per accepted particle: a wasted per-particle depth-search loop.)
+		// Never reconstruct size from the quantized depth — that inflated
+		// every particle to its power-of-two node extent and made sprite
+		// sizes octave-step with UnitScale.
 		const float FinalExtent = static_cast<float>(Scale / Params.UnitScale);
 
 		const FVector CompVec = Stream.GetUnitVector();
@@ -788,9 +789,8 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 			const double Scale = FPointData::SampleScaleFromDistribution(
 				Params.LargeTier.MinScale, Params.LargeTier.MaxScale,
 				ScaleSample, Params.LargeTier.ScaleDistribution);
-			FPointData PointData = FPointData::MakePointDataFromWorldScale(
-				Scale, Params.UnitScale, Params.Extent);
-			// Authored size is truth (see the tier note above).
+			// Authored size is truth (see the tier note above). No FPointData
+			// here — insert depth is derived at octree-insert time.
 			const float FinalExtent = static_cast<float>(Scale / Params.UnitScale);
 
 			const FVector CompVec = Stream.GetUnitVector();

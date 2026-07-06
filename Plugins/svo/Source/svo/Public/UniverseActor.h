@@ -76,14 +76,10 @@ public:
 	static constexpr double GridExtentMultiplier = 4.0;
 
 	/** Multiplier applied to Params.Extent for octree root size.
-	 *  Must be a power of 2. 64 = 2^6, tree covers +/-32x the sector extent
-	 *  per axis, giving ~2^37 units of traversal range before a rebase. */
+	 *  Must be a power of 2. 128 = 2^7: the tree covers +/-128x the sector
+	 *  extent per axis (~2^38 local units with the default 2^31 extent);
+	 *  CheckOctreeBounds triggers a rebase at 75% of that. */
 	static constexpr double PersistentTreeMultiplier = 128.0;
-
-	/** TypeId tag written into every octree node inserted by the tier system.
-	 *  Allows spatial queries to filter for galaxy/sector content vs. other
-	 *  future node types. */
-	static constexpr int32 GalaxyTypeId = 0;
 
 #pragma endregion
 
@@ -244,15 +240,18 @@ protected:
 
 #pragma region Tier System - Config / State
 
-	/** Large-tier config (cluster + gas, GridDepth = 1, NeighborhoodRadius = 1). */
+	/** Large-tier config (cluster + gas). Depth/radius/capacity come from
+	 *  UniverseParams.LargeTier (defaults: GridDepth 1, NeighborhoodRadius 1). */
 	FParticleTierConfig CoarseTierConfig;
 	FParticleTierState  CoarseTierState;
 
-	/** Mid-tier config (GridDepth = 4, NeighborhoodRadius = 1). */
+	/** Mid-tier config. From UniverseParams.MidTier (defaults: GridDepth 3,
+	 *  NeighborhoodRadius 1). */
 	FParticleTierConfig MidTierConfig;
 	FParticleTierState  MidTierState;
 
-	/** Small-tier config (GridDepth = 7, NeighborhoodRadius = 1). */
+	/** Small-tier config. From UniverseParams.SmallTier (defaults: GridDepth 5,
+	 *  NeighborhoodRadius 1). */
 	FParticleTierConfig SmallTierConfig;
 	FParticleTierState  SmallTierState;
 
@@ -377,8 +376,8 @@ private:
 	 *  is updated. */
 	std::atomic<bool> bSpawnScanInProgress{ false };
 
-	/** Time of last scan dispatch. Used for interval throttling. */
-	double LastScanDispatchTime = 0.0;
+	// NOTE: LastScanDispatchTime lives on AProceduralSpaceActor (shared by all
+	// scan-capable layers) — previously shadowed here.
 
 	/** Set of nodes currently inside the spawn threshold. Diffed each scan
 	 *  interval to produce enter/exit events. Game-thread only. */
@@ -395,7 +394,7 @@ private:
 	/** Dispatches an async octree scan if enough time has elapsed
 	 *  since the last dispatch and no scan is already in flight.
 	 *  Called by DetermineAndDispatchScan — not by a timer. */
-	void RequestScan();
+	virtual void RequestScan() override;
 
 	/**
 	 * Walks the active hierarchy deepest-first (star systems → galaxies →
