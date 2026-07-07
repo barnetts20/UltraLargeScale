@@ -1,5 +1,6 @@
 ﻿// ProceduralSpaceActor.cpp
 #include "ProceduralSpaceActor.h"
+#include "Misc/ScopeExit.h"
 #include <Kismet/GameplayStatics.h>
 
 AProceduralSpaceActor::AProceduralSpaceActor()
@@ -24,6 +25,13 @@ void AProceduralSpaceActor::Initialize()
 {
     InitializationState = ELifecycleState::Initializing;
 
+    // Raised HERE (before dispatch) rather than inside the task so a
+    // teardown that runs between dispatch and task start can never observe
+    // a false flag while the chain is pending. For pool-managed actors
+    // Initialize() runs on the GT, which is what makes the fast-path check
+    // in ReturnGalaxyToPool / ReturnStarSystemToPool race-free.
+    bInitInProgress.store(true);
+
     FVector PlayerPos;
     if (GetPlayerLocation(GetWorld(), PlayerPos))
     {
@@ -36,6 +44,11 @@ void AProceduralSpaceActor::Initialize()
         {
             AProceduralSpaceActor* Self = WeakThis.Get();
             if (!Self) return;
+
+            // Cleared on EVERY exit path — Pooling aborts included. The
+            // deferred pool-return worker waits on this before freeing the
+            // buffers the phases below write.
+            ON_SCOPE_EXIT{ Self->bInitInProgress.store(false); };
 
             double StartTime = FPlatformTime::Seconds();
 
@@ -84,6 +97,13 @@ void AProceduralSpaceActor::ResetForPool()
         VolumetricComponent->DestroyComponent();
         VolumetricComponent = nullptr;
     }
+
+    // Release the transient pseudo-volume texture + its MID so GC can
+    // reclaim them while pooled — the texture is large (~67MB at 256^3)
+    // and otherwise stays pinned by these UPROPERTYs until the next init
+    // overwrites the pointers.
+    PseudoVolumeTexture = nullptr;
+    VolumeMaterial = nullptr;
 
     double Duration = FPlatformTime::Seconds() - StartTime;
     UE_LOG(LogTemp, Log, TEXT("%s::ResetForPool took: %.3f seconds"),

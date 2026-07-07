@@ -79,6 +79,17 @@ void AGalaxyActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 		FTierStreamingSystem::BeginShutdownDrain(*Tier);
 
+	// Mirror ResetForPool: also wait out an in-flight boundary-cross task —
+	// it writes Buffers/SlotEntries/CellCache through teardown otherwise.
+	// Safe on the GT (the transition task has no game-thread rendezvous).
+	// The async INIT chain is NOT waited here — it rendezvouses with the GT
+	// (would deadlock); it aborts on the Pooling state set above.
+	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
+	{
+		while (Tier->bUpdateInProgress.load())
+			FPlatformProcess::Sleep(0.0005f);
+	}
+
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 	{
 		for (UNiagaraComponent*& NC : Tier->NiagaraComponents)
@@ -94,6 +105,19 @@ void AGalaxyActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 #pragma region Pool Lifecycle
 void AGalaxyActor::ResetForPool()
 {
+	// Return any live star systems BEFORE clearing scan state. Without this
+	// they are orphaned on galaxy pool-return (still spawned, never ticked,
+	// never returned) and InitializeChildPool's next top-up leaks actors.
+	// Key snapshot first — ReturnStarSystemToPool mutates the map.
+	// (PseudoVolumeTexture / VolumeMaterial are released in
+	// Super::ResetForPool alongside the VolumetricComponent destroy.)
+	{
+		TArray<TSharedPtr<FOctreeNode>> LiveNodes;
+		SpawnedStarSystems.GetKeys(LiveNodes);
+		for (const TSharedPtr<FOctreeNode>& Node : LiveNodes)
+			ReturnStarSystemToPool(Node);
+	}
+
 	bHasPendingScanResults = false;
 	PendingScanResults.Empty();
 	TrackedSpawnNodes.Empty();
@@ -162,7 +186,14 @@ void AGalaxyActor::InitializeChildPool()
 		{
 			AGalaxyActor* Self = WeakThis.Get();
 			if (!Self) { CompletionPromise.SetValue(); return; }
-			for (int i = 0; i < Self->StarSystemPoolSize; i++) {
+			// TOP-UP to the target size rather than blind-spawning: pooled
+			// galaxies re-run the init chain on every spawn and the pool
+			// survives ResetForPool, so an unconditional spawn loop grows
+			// the world by StarSystemPoolSize actors per cycle. (Deferred
+			// star-system returns can land after this runs, briefly leaving
+			// the pool above target — harmless.)
+			const int32 ToSpawn = Self->StarSystemPoolSize - Self->StarSystemPool.Num();
+			for (int i = 0; i < ToSpawn; i++) {
 				AStarSystemActor* System = Self->GetWorld()->SpawnActor<AStarSystemActor>(
 					Self->StarSystemActorClass, FVector::ZeroVector, FRotator::ZeroRotator);
 				System->Galaxy = Self;
@@ -531,9 +562,10 @@ void AGalaxyActor::RequestScan()
 	bSpawnScanInProgress.store(true);
 	const FVector LocalPlayerPos = VirtualTraversal;
 
-	// GT snapshot of the tree ref (one atomic ref-count bump) —
-	// ReturnGalaxyToPool's flush task reassigns Octree off-thread; reading
-	// the member from this worker would be a torn read of a TSharedPtr.
+	// GT snapshot of the tree ref (one atomic ref-count bump). The Octree
+	// member is now only ever reassigned on the GT (FinishGalaxyPoolReturn /
+	// rebase), but the worker below must still read a snapshot rather than
+	// the member — the member can be swapped between dispatch and execution.
 	TSharedPtr<FOctree> TreeSnapshot = Octree;
 	TWeakObjectPtr<AGalaxyActor> WeakThis(this);
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, LocalPlayerPos, TreeSnapshot]()
@@ -747,30 +779,76 @@ void AGalaxyActor::ReturnStarSystemToPool(TSharedPtr<FOctreeNode> InNode)
 	SVO_GT_SCOPE("Galaxy::ReturnStarSystemToPool");
 	if (!InNode.IsValid()) return;
 
+	TWeakObjectPtr<AGalaxyActor> WeakThis(this);
 	TWeakObjectPtr<AStarSystemActor> WeakSystem;
-	if (SpawnedStarSystems.RemoveAndCopyValue(InNode, WeakSystem))
+	if (!SpawnedStarSystems.RemoveAndCopyValue(InNode, WeakSystem)) return;
+	AStarSystemActor* PoolSystem = WeakSystem.Get();
+	if (!PoolSystem) return;
+
+	// Abort signal for an in-flight async init chain — checked between
+	// phases and live (via GetLiveState) inside InitializeTier.
+	PoolSystem->InitializationState = ELifecycleState::Pooling;
+
+	if (!PoolSystem->bInitInProgress.load())
 	{
-		AStarSystemActor* PoolSystem = WeakSystem.Get();
-		if (PoolSystem)
-		{
-			PoolSystem->ResetForPool();
-			TWeakObjectPtr<AGalaxyActor> WeakThis(this);
-			AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, WeakSystem]()
-				{
-					AStarSystemActor* AsyncSystem = WeakSystem.Get();
-					if (!AsyncSystem) return;
-					AsyncSystem->Octree->bIsResetting.store(true);
-					FPlatformProcess::Yield();
-					AsyncSystem->Octree = MakeShared<FOctree>(AsyncSystem->Params.Extent);
-					AsyncSystem->Octree->bIsResetting.store(false);
-					AsyncTask(ENamedThreads::GameThread, [WeakThis, WeakSystem]()
-						{
-							AGalaxyActor* Self = WeakThis.Get();
-							AStarSystemActor* InnerSystem = WeakSystem.Get();
-							if (Self && InnerSystem) Self->StarSystemPool.Insert(InnerSystem, 0);
-						});
-				});
-		}
+		// FAST PATH: no init chain in flight. Race-free on the GT — the
+		// flag is raised on the GT in Initialize() before dispatch.
+		PoolSystem->ResetForPool();
+		FinishStarSystemPoolReturn(WeakSystem);
+		return;
 	}
+
+	// DEFERRED RETURN: the init chain still owns the tier buffers — its
+	// generation writes are not covered by bUpdateInProgress, so
+	// ResetForPool would free live arrays under the workers. We also
+	// cannot wait on the GAME THREAD: the chain rendezvouses with the GT
+	// (component spawns), so a GT spin deadlocks. Wait it out on a worker,
+	// then finish teardown through the normal GT path. The system cannot
+	// be re-spawned meanwhile — it re-enters StarSystemPool only at the
+	// end of FinishStarSystemPoolReturn.
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, WeakSystem]()
+		{
+			while (true)
+			{
+				AStarSystemActor* S = WeakSystem.Get();
+				if (!S) return;
+				if (!S->bInitInProgress.load()) break;
+				FPlatformProcess::Sleep(0.001f);
+			}
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, WeakSystem]()
+				{
+					AGalaxyActor* Self = WeakThis.Get();
+					AStarSystemActor* S = WeakSystem.Get();
+					if (!Self || !S) return;
+					S->ResetForPool();
+					Self->FinishStarSystemPoolReturn(WeakSystem);
+				});
+		});
+}
+
+void AGalaxyActor::FinishStarSystemPoolReturn(TWeakObjectPtr<AStarSystemActor> WeakSystem)
+{
+	TWeakObjectPtr<AGalaxyActor> WeakThis(this);
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, WeakSystem]()
+		{
+			AStarSystemActor* AsyncSystem = WeakSystem.Get();
+			if (!AsyncSystem) return;
+			AsyncSystem->Octree->bIsResetting.store(true);
+			FPlatformProcess::Yield();
+			// Build the fresh tree in a LOCAL; the MEMBER swap happens on
+			// the game thread below — a background assign races GT readers
+			// of the TSharedPtr (BuildStreamingContext, spawn-scan snapshot).
+			// The old tree keeps bIsResetting raised and dies with its last
+			// shared ref.
+			TSharedPtr<FOctree> FreshTree = MakeShared<FOctree>(AsyncSystem->Params.Extent);
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, WeakSystem, FreshTree]()
+				{
+					AGalaxyActor* Self = WeakThis.Get();
+					AStarSystemActor* InnerSystem = WeakSystem.Get();
+					if (!InnerSystem) return;
+					InnerSystem->Octree = FreshTree;   // swap on game thread
+					if (Self) Self->StarSystemPool.Insert(InnerSystem, 0);
+				});
+		});
 }
 #pragma endregion

@@ -94,6 +94,17 @@ void AStarSystemActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 		FTierStreamingSystem::BeginShutdownDrain(*Tier);
 
+	// Mirror ResetForPool: also wait out an in-flight boundary-cross task —
+	// it writes Buffers/SlotEntries/CellCache through teardown otherwise.
+	// Safe on the GT (the transition task has no game-thread rendezvous).
+	// The async INIT chain is NOT waited here — it rendezvouses with the GT
+	// (would deadlock); it aborts on the Pooling state set above.
+	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
+	{
+		while (Tier->bUpdateInProgress.load())
+			FPlatformProcess::Sleep(0.0005f);
+	}
+
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 	{
 		for (UNiagaraComponent*& NC : Tier->NiagaraComponents)
@@ -313,10 +324,13 @@ void AStarSystemActor::InitializeNiagara()
 
 	BuildTierConfigs();
 
-	// Insert planet data into the octree once before InitializeTier so the
-	// large tier's neighbor scanning has nodes to discover.
-	// We do a direct octree insert (no tier pipeline insert) here because the
-	// large tier has NeighborhoodRadius=0 — it is always fully loaded.
+	// Insert planet data into the octree so the spawn scan has nodes to
+	// discover. This is THE insert for planets: it carries Composition
+	// (planet color) and the semantic EObjectType TypeId, which the tier
+	// pipeline's InsertParticleIntoOctree does not write. The Large tier's
+	// pipeline insert is disabled (OctreeInsertBufferIndex = -1 in
+	// BuildTierConfigs) — the radius-0 exhaustive branch would otherwise
+	// insert every planet a second time.
 	for (int32 i = 0; i < PlanetPositions.Num(); i++)
 	{
 		if (InitializationState == ELifecycleState::Pooling) return;
@@ -380,7 +394,16 @@ void AStarSystemActor::BuildTierConfigs()
 	LargeTierConfig.SlotCapacity = FMath::Max(Params.LargeTier.MaxParticlesPerSlot, Params.MaxPlanets);
 	LargeTierConfig.NiagaraAssets = { StarSystemLargeCloud };
 	LargeTierConfig.bWantRotations = { false };
-	LargeTierConfig.OctreeInsertBufferIndex = 0; // Insert planet nodes for spawn scanning
+	// Planets are inserted into the octree DIRECTLY in InitializeNiagara —
+	// that insert carries Composition (planet color) and the semantic
+	// EObjectType TypeId, neither of which the tier-pipeline insert writes.
+	// -1 disables InsertTierIntoOctree here: InitializeTier's radius-0
+	// exhaustive branch DOES run the pipeline insert when this is >= 0,
+	// which double-inserted every planet. That was only benign because both
+	// depth heuristics happened to agree (the collision path kept the direct
+	// insert's data); if they ever diverged, each planet would get two nodes
+	// and spawn two mesh actors.
+	LargeTierConfig.OctreeInsertBufferIndex = -1;
 
 	LargeTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex,
 		TArray<FNiagaraParticleBuffer*>& Buffers)
@@ -675,8 +698,9 @@ void AStarSystemActor::RequestScan()
 	bSpawnScanInProgress.store(true);
 	const FVector LocalPlayerPos = VirtualTraversal;
 
-	// GT snapshot of the tree ref — ReturnStarSystemToPool's flush task
-	// reassigns Octree off-thread; see AGalaxyActor::RequestScan.
+	// GT snapshot of the tree ref. The Octree member is now only reassigned
+	// on the GT (FinishStarSystemPoolReturn), but the worker must still read
+	// a snapshot — the member can be swapped between dispatch and execution.
 	TSharedPtr<FOctree> TreeSnapshot = Octree;
 	TWeakObjectPtr<AStarSystemActor> WeakThis(this);
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, LocalPlayerPos, TreeSnapshot]()

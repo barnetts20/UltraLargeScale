@@ -23,7 +23,7 @@ public:
 	TSharedPtr<FOctreeNode> Children[8];
 	FVector Center;
 	double Extent;
-	FVoxelData Data = FVoxelData(); //Default constructor with 0 ScaleFactor -1 ObectId
+	FVoxelData Data = FVoxelData();
 #pragma endregion
 
 #pragma region Constructor/Destructor
@@ -478,6 +478,25 @@ public:
 
 		if (bPassesFilter)
 			OutNodes.Add(InNode);
+	}
+
+	// Deepest existing node containing InPosition, stopping at InMaxDepth.
+	// Pure read — creates nothing (contrast InsertPosition). Returns null
+	// only when the tree has no root. Current caller: the universe octree
+	// rebase, which remaps live spawn bookkeeping (SpawnedGalaxies /
+	// TrackedSpawnNodes) from old-tree nodes to their new-tree counterparts.
+	TSharedPtr<FOctreeNode> FindNodeAtPosition(const FVector& InPosition, int InMaxDepth) const {
+		TSharedPtr<FOctreeNode> Current = Root;
+		if (!Current.IsValid()) return nullptr;
+		while (Current->Depth < InMaxDepth) {
+			uint8 ChildIndex = 0;
+			if (InPosition.X >= Current->Center.X) ChildIndex |= 1;
+			if (InPosition.Y >= Current->Center.Y) ChildIndex |= 2;
+			if (InPosition.Z >= Current->Center.Z) ChildIndex |= 4;
+			if (!Current->Children[ChildIndex].IsValid()) break;
+			Current = Current->Children[ChildIndex];
+		}
+		return Current;
 	}
 
 	TArray<TSharedPtr<FOctreeNode>> GetNodesByScreenSpace(const FVector& InCenter, double ScreenSpaceThreshold, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {

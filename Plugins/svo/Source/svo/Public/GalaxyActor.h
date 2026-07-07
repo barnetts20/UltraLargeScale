@@ -56,6 +56,16 @@ public:
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AStarSystemActor>> SpawnedStarSystems;
 	void SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode);
 	void ReturnStarSystemToPool(TSharedPtr<FOctreeNode> InNode);
+
+	/**
+	 * Tail of ReturnStarSystemToPool: background octree flush (fresh tree
+	 * built in a local), then a game-thread hop that swaps the system's
+	 * Octree member and re-inserts it into the pool. Split out so the
+	 * deferred (init-draining) return path can share it. The Octree member
+	 * swap must stay on the game thread — a background assign races GT
+	 * readers of the TSharedPtr.
+	 */
+	void FinishStarSystemPoolReturn(TWeakObjectPtr<AStarSystemActor> WeakSystem);
 #pragma endregion
 
 #pragma region Initialization

@@ -120,6 +120,16 @@ public:
 	 */
 	void ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode);
 
+	/**
+	 * Tail of ReturnGalaxyToPool: background octree flush (fresh tree built
+	 * in a local), then a game-thread hop that swaps the galaxy's Octree
+	 * member and re-inserts the galaxy into the pool. Split out so the
+	 * deferred (init-draining) return path can share it. The Octree member
+	 * swap MUST stay on the game thread — a background assign races GT
+	 * readers of the TSharedPtr (BuildStreamingContext, IsPlayerInsideBounds).
+	 */
+	void FinishGalaxyPoolReturn(TWeakObjectPtr<AGalaxyActor> WeakGalaxy);
+
 #pragma endregion
 
 #pragma region Sector Grid Identity

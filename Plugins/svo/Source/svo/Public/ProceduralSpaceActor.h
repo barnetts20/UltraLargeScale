@@ -114,6 +114,21 @@ public:
      *  to re-derive the correct world-space spawn position at placement time.
      *  Only meaningful while bPendingPlacement is true. */
     FVector PendingNodeCenter = FVector::ZeroVector;
+
+    /** True while the async Initialize() chain owns this actor's generation
+     *  state (tier buffers, octree, volumetric). Set on the game thread in
+     *  Initialize() BEFORE the chain dispatches; cleared by the chain task on
+     *  every exit path (ON_SCOPE_EXIT). Teardown must not free tier buffers
+     *  while this is set — the init-time generation ParallelFors write them
+     *  and never raise bUpdateInProgress, so the transition-drain in
+     *  ResetForPool does not cover them.
+     *
+     *  NEVER spin-wait on this from the GAME THREAD: the init chain
+     *  rendezvouses with the game thread (Niagara component spawns via
+     *  AsyncTask(GameThread) + Future.Wait()), so a GT wait deadlocks.
+     *  Wait it out on a worker instead — see the deferred path in
+     *  AUniverseActor::ReturnGalaxyToPool / AGalaxyActor::ReturnStarSystemToPool. */
+    std::atomic<bool> bInitInProgress{ false };
 #pragma endregion
 
 #pragma region Lifecycle (overrideable)

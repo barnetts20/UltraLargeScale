@@ -321,6 +321,19 @@ void AUniverseActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &SmallTierState })
 		FTierStreamingSystem::BeginShutdownDrain(*Tier);
 
+	// Mirror ResetForPool: also wait out an in-flight boundary-cross task —
+	// it writes Buffers/SlotEntries/CellCache (actor members) and would keep
+	// doing so through teardown. Safe on the GT: the transition task has no
+	// game-thread rendezvous. The async INIT chain is deliberately NOT
+	// waited here — it rendezvouses with the GT (would deadlock a GT wait);
+	// it aborts on the Pooling state set above, and actor memory outlives
+	// EndPlay until GC.
+	for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &SmallTierState })
+	{
+		while (Tier->bUpdateInProgress.load())
+			FPlatformProcess::Sleep(0.0005f);
+	}
+
 	for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &SmallTierState })
 	{
 		for (UNiagaraComponent*& NC : Tier->NiagaraComponents)
@@ -503,7 +516,55 @@ void AUniverseActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 	AGalaxyActor* Galaxy = WeakGalaxy.Get();
 	if (!Galaxy) return;
 	UE_LOG(LogTemp, Log, TEXT("Returning galaxy to pool for node seed: %d"), InNode->Data.ObjectId);
-	Galaxy->ResetForPool();
+
+	// Abort signal for an in-flight async init chain — checked between
+	// phases and live (via GetLiveState) inside InitializeTier.
+	Galaxy->InitializationState = ELifecycleState::Pooling;
+
+	if (!Galaxy->bInitInProgress.load())
+	{
+		// FAST PATH: no init chain in flight (the normal case — the galaxy
+		// finished initializing long before it left the spawn threshold).
+		// Race-free on the GT: the flag is raised on the GT in Initialize()
+		// before the chain dispatches, so a false read here means the chain
+		// fully exited or never ran.
+		Galaxy->ResetForPool();
+		FinishGalaxyPoolReturn(WeakGalaxy);
+		return;
+	}
+
+	// DEFERRED RETURN: the init chain still owns the tier buffers — its
+	// generation ParallelFors write Buffers/SlotCounts and never raise
+	// bUpdateInProgress, so ResetForPool's transition-drain would free
+	// live arrays under the workers (use-after-free). We also cannot wait
+	// for the chain on the GAME THREAD: it rendezvouses with the GT
+	// (Niagara component spawns), so a GT spin here deadlocks. Park a
+	// worker to wait it out, then finish teardown through the normal GT
+	// path. The galaxy cannot be re-spawned meanwhile — it re-enters
+	// GalaxyPool only at the end of FinishGalaxyPoolReturn.
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, WeakGalaxy]()
+		{
+			while (true)
+			{
+				AGalaxyActor* G = WeakGalaxy.Get();
+				if (!G) return;
+				if (!G->bInitInProgress.load()) break;
+				FPlatformProcess::Sleep(0.001f);
+			}
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, WeakGalaxy]()
+				{
+					AUniverseActor* Self = WeakThis.Get();
+					AGalaxyActor* G = WeakGalaxy.Get();
+					if (!Self || !G) return;
+					G->ResetForPool();
+					Self->FinishGalaxyPoolReturn(WeakGalaxy);
+				});
+		});
+}
+
+void AUniverseActor::FinishGalaxyPoolReturn(TWeakObjectPtr<AGalaxyActor> WeakGalaxy)
+{
+	TWeakObjectPtr<AUniverseActor> WeakThis(this);
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, WeakGalaxy]()
 		{
 			AGalaxyActor* AsyncGalaxy = WeakGalaxy.Get();
@@ -511,14 +572,18 @@ void AUniverseActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 			double StartTime = FPlatformTime::Seconds();
 			AsyncGalaxy->Octree->bIsResetting.store(true);
 			FPlatformProcess::Yield();  // Let in-flight octree ops see the flag and bail.
-			AsyncGalaxy->Octree = MakeShared<FOctree>(AsyncGalaxy->Params.Extent);
-			AsyncGalaxy->Octree->bIsResetting.store(false);
+			// Build the fresh tree in a LOCAL; the MEMBER swap happens on the
+			// game thread below. The old tree keeps bIsResetting raised and
+			// dies when its last shared ref drops.
+			TSharedPtr<FOctree> FreshTree = MakeShared<FOctree>(AsyncGalaxy->Params.Extent);
 			UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::Flushing Octree took: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
-			AsyncTask(ENamedThreads::GameThread, [WeakThis, WeakGalaxy]()
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, WeakGalaxy, FreshTree]()
 				{
 					AUniverseActor* Self = WeakThis.Get();
 					AGalaxyActor* InnerGalaxy = WeakGalaxy.Get();
-					if (Self && InnerGalaxy) Self->GalaxyPool.Insert(InnerGalaxy, 0);
+					if (!InnerGalaxy) return;
+					InnerGalaxy->Octree = FreshTree;   // swap on game thread
+					if (Self) Self->GalaxyPool.Insert(InnerGalaxy, 0);
 				});
 		});
 }
@@ -557,13 +622,19 @@ void AUniverseActor::RequestScan()
 			AUniverseActor* Self = WeakThis.Get();
 			if (!Self || !TreeSnapshot.IsValid()) return;
 			const TArray<TSharedPtr<FOctreeNode>> NearbyArray = TreeSnapshot->GetNodesByScreenSpace(LocalPlayerPos, Self->SpawnScreenSpaceThreshold);
-			AsyncTask(ENamedThreads::GameThread, [WeakThis, NearbyArray]()
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, NearbyArray, TreeSnapshot]()
 				{
 					AUniverseActor* InnerSelf = WeakThis.Get();
 					if (!InnerSelf) return;
+					InnerSelf->bSpawnScanInProgress.store(false);
+					// A rebase swapped the tree while this scan was in
+					// flight: these nodes belong to the retired tree and
+					// would diff against the remapped tracking as all-new /
+					// all-exited. Drop them; the next interval rescans the
+					// live tree.
+					if (InnerSelf->Octree != TreeSnapshot) return;
 					InnerSelf->PendingScanResults = NearbyArray;
 					InnerSelf->bHasPendingScanResults = true;
-					InnerSelf->bSpawnScanInProgress.store(false);
 				});
 		});
 }
@@ -762,11 +833,75 @@ void AUniverseActor::CheckOctreeBounds()
 
 			AsyncTask(ENamedThreads::GameThread, [WeakThis, NewTree]()
 				{
-					if (AUniverseActor* S = WeakThis.Get())
+					AUniverseActor* S = WeakThis.Get();
+					if (!S) return;
+
+					// REMAP live spawn bookkeeping onto the new tree BEFORE
+					// clearing bRebaseInProgress. SpawnedGalaxies and
+					// TrackedSpawnNodes are keyed on node IDENTITY, and every
+					// node instance just changed — without this remap the
+					// first post-rebase scan sees all-new pointers, despawns
+					// EVERY live galaxy and respawns it from the pool (full
+					// re-init hitch + 2x pool headroom on the worst frame).
+					// ObjectId survives the rebase (ComposeSeed is
+					// deterministic), so counterparts are matched by particle
+					// position + seed. Tiers are provably idle while the flag
+					// is up, so the buffer position reads below are safe.
+					auto FindCounterpart = [S, &NewTree](const TSharedPtr<FOctreeNode>& Old) -> TSharedPtr<FOctreeNode>
+						{
+							if (!Old.IsValid()) return nullptr;
+							// Descend by the PARTICLE position, not the old
+							// node center: the new lattice is offset by the
+							// rebase origin, so the old center and the
+							// particle it quantized can straddle a new-cell
+							// boundary and land in different nodes.
+							FVector P = Old->Center;
+							FParticleTierState* States[] = { &S->CoarseTierState, &S->MidTierState, &S->SmallTierState };
+							const int32 TierIndex = Old->Data.TypeId;
+							const int32 AbsIdx = Old->Data.ParticleIndex;
+							if (TierIndex >= 0 && TierIndex <= 2 && AbsIdx >= 0 &&
+								States[TierIndex]->Buffers.Num() > 0 &&
+								States[TierIndex]->Buffers[0].Positions.IsValidIndex(AbsIdx))
+							{
+								P = States[TierIndex]->Buffers[0].Positions[AbsIdx];
+							}
+							TSharedPtr<FOctreeNode> Candidate = NewTree->FindNodeAtPosition(P, Old->Depth);
+							return (Candidate.IsValid() && Candidate->Data.ObjectId == Old->Data.ObjectId)
+								? Candidate : nullptr;
+						};
+
+					TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> RemappedGalaxies;
+					RemappedGalaxies.Reserve(S->SpawnedGalaxies.Num());
+					for (auto& Pair : S->SpawnedGalaxies)
 					{
-						S->Octree = NewTree;                  // swap on game thread
-						S->bRebaseInProgress.store(false);
+						TSharedPtr<FOctreeNode> NewNode = FindCounterpart(Pair.Key);
+						// Fall back to the old key on a miss: that one galaxy
+						// despawns on the next scan (pre-remap behavior for a
+						// single entry), nothing worse.
+						RemappedGalaxies.Add(NewNode.IsValid() ? NewNode : Pair.Key, Pair.Value);
 					}
+
+					TSet<TSharedPtr<FOctreeNode>> RemappedTracked;
+					RemappedTracked.Reserve(S->TrackedSpawnNodes.Num());
+					for (const TSharedPtr<FOctreeNode>& Old : S->TrackedSpawnNodes)
+					{
+						TSharedPtr<FOctreeNode> NewNode = FindCounterpart(Old);
+						RemappedTracked.Add(NewNode.IsValid() ? NewNode : Old);
+					}
+
+					S->SpawnedGalaxies = MoveTemp(RemappedGalaxies);
+					S->TrackedSpawnNodes = MoveTemp(RemappedTracked);
+
+					// Drop results from any scan snapshotted against the old
+					// tree — diffing old-tree nodes against the remapped set
+					// would re-introduce the churn this remap removes.
+					// (RequestScan's completion also drops stale-tree results
+					// for a scan still in flight.)
+					S->bHasPendingScanResults = false;
+					S->PendingScanResults.Empty();
+
+					S->Octree = NewTree;                  // swap on game thread
+					S->bRebaseInProgress.store(false);
 				});
 		});
 }
