@@ -352,6 +352,11 @@ void AStarSystemActor::InitializeNiagara()
 		VD.ObjectId = FVoxelData::ComposeSeed(Params.Seed, FIntVector::ZeroValue, i);
 		VD.TypeId = static_cast<int32>(StarSystemDataGenerator::EObjectType::TerrestrialPlanet);
 		VD.ParticleIndex = i;
+		// Exact particle capture — the spawn scan tests against this, giving
+		// planets the same 1:1 angular-size behavior as the sprite material
+		// (previously the scan used the quantized node extent).
+		VD.ParticlePosition = PlanetPositions[i];
+		VD.ParticleExtent = PlanetExtents[i];
 
 		// FOctree exposes InsertPosition (not Insert).
 		Octree->InsertPosition(PlanetPositions[i], BestDepth, VD);
@@ -711,13 +716,19 @@ void AStarSystemActor::RequestScan()
 			const TArray<TSharedPtr<FOctreeNode>> NearbyArray =
 				TreeSnapshot->GetNodesByScreenSpace(LocalPlayerPos, Self->SpawnScreenSpaceThreshold);
 
-			AsyncTask(ENamedThreads::GameThread, [WeakThis, NearbyArray]()
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, NearbyArray, TreeSnapshot]()
 				{
 					AStarSystemActor* InnerSelf = WeakThis.Get();
 					if (!InnerSelf) return;
+					InnerSelf->bSpawnScanInProgress.store(false);
+					// Same guard as AUniverseActor::RequestScan: results from
+					// a scan whose tree was swapped mid-flight (pool return
+					// installs a fresh tree) are the previous identity's
+					// nodes — processing them would spawn ghost planets with
+					// old seeds. Drop them; the next interval rescans.
+					if (InnerSelf->Octree != TreeSnapshot) return;
 					InnerSelf->PendingScanResults = NearbyArray;
 					InnerSelf->bHasPendingScanResults = true;
-					InnerSelf->bSpawnScanInProgress.store(false);
 				});
 		});
 }

@@ -440,16 +440,31 @@ public:
 		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) return;
 
 		const double DistSq = FVector::DistSquared(InNode->Center, InCenter);
-		const double ExtentSq = InNode->Extent * InNode->Extent;
 
-		// Subtree prune: if this node's extent is too small relative to its
-		// distance to ever pass the screen space test, skip the whole subtree.
-		// Uses DistSq directly as a conservative (looser) bound — avoids sqrt
-		// at the cost of slightly less aggressive pruning vs the exact
-		// (Distance - Extent) formulation.
-		if (DistSq > ExtentSq)
+		// Subtree prune — strictly conservative. Every particle in this
+		// subtree lies inside the node's AABB (insert descends by position),
+		// and no particle's tested extent can exceed 2x the node extent:
+		// captured ParticleExtent <= node extent at the depth the particle
+		// fit (MakePointDataFromWorldScale picks the deepest depth with
+		// size <= extent), and the legacy fallback below is bounded by
+		// Extent * (1 + ScaleFactor) <= 2 * Extent. Closest possible
+		// particle sits at the AABB corner: Dist - sqrt(3) * Extent. Prune
+		// only when even that best case fails the threshold.
+		// (The previous form ignored ScaleFactor and the corner distance
+		// entirely and could cull nodes whose own test passed — e.g. the
+		// direct planet inserts with ScaleFactor = 0.5 lost ~1/3 of their
+		// intended spawn range.)
 		{
-			if (ExtentSq < ScreenSpaceThresholdSq * DistSq) return;
+			constexpr double Sqrt3 = 1.7320508075688772;   // AABB corner distance factor
+			const double MinPossibleDist =
+				FMath::Sqrt(DistSq) - Sqrt3 * InNode->Extent;
+			if (MinPossibleDist > 0.0)
+			{
+				const double MaxSubtreeExtent = 2.0 * InNode->Extent;
+				if (MaxSubtreeExtent * MaxSubtreeExtent <
+					ScreenSpaceThresholdSq * MinPossibleDist * MinPossibleDist)
+					return;
+			}
 		}
 
 		// Recurse into children before testing this node.
@@ -462,12 +477,22 @@ public:
 			}
 		}
 
-		// Per-node screen space test — squared form of:
-		// (Extent * (1 + ScaleFactor)) / Distance >= Threshold
-		if (DistSq > 0.0)
+		// Per-node test — squared form of (Extent / Distance) >= Threshold,
+		// using the EXACT particle position/extent captured at insert so the
+		// scan maps 1:1 to the sprite the material renders. Legacy fallback
+		// for nodes without captured data (ParticleExtent == 0): the old
+		// quantized-node approximation, Extent * (1 + ScaleFactor) against
+		// the node center.
+		const bool bHasParticle = InNode->Data.ParticleExtent > 0.0f;
+		const double TestExtent = bHasParticle
+			? static_cast<double>(InNode->Data.ParticleExtent)
+			: InNode->Extent * (1.0 + InNode->Data.ScaleFactor);
+		const double TestDistSq = bHasParticle
+			? FVector::DistSquared(InNode->Data.ParticlePosition, InCenter)
+			: DistSq;
+		if (TestDistSq > 0.0)
 		{
-			const double ScaledExtent = InNode->Extent * (1.0 + InNode->Data.ScaleFactor);
-			if (ScaledExtent * ScaledExtent < ScreenSpaceThresholdSq * DistSq) return;
+			if (TestExtent * TestExtent < ScreenSpaceThresholdSq * TestDistSq) return;
 		}
 
 		bool bPassesFilter = true;

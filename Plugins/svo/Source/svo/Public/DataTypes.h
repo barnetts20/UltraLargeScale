@@ -8,8 +8,8 @@
 
 struct SVO_API FVoxelData {
 public:
-	FVoxelData() : ScaleFactor(0.0), Density(0.0), Composition(0, 0, 0), ObjectId(-1), TypeId(-1), ParticleIndex(-1) {};
-	FVoxelData(float InDensity, float InGasDensity, FVector InComposition, int InObjectId, int InTypeId = -1) : ScaleFactor(InDensity), Density(InGasDensity), Composition(InComposition), ObjectId(InObjectId), TypeId(InTypeId), ParticleIndex(-1) {};
+	FVoxelData() : ScaleFactor(0.0), Density(0.0), Composition(0, 0, 0), ObjectId(-1), TypeId(-1), ParticleIndex(-1), ParticlePosition(FVector::ZeroVector), ParticleExtent(0.0f) {};
+	FVoxelData(float InDensity, float InGasDensity, FVector InComposition, int InObjectId, int InTypeId = -1) : ScaleFactor(InDensity), Density(InGasDensity), Composition(InComposition), ObjectId(InObjectId), TypeId(InTypeId), ParticleIndex(-1), ParticlePosition(FVector::ZeroVector), ParticleExtent(0.0f) {};
 
 	float ScaleFactor;
 	float Density;
@@ -30,6 +30,20 @@ public:
 	 *  Slot can be recovered as ParticleIndex / SlotCapacity when needed.
 	 *  -1 if not set (e.g. manually inserted nodes outside the tier system). */
 	int ParticleIndex;
+
+	/** EXACT particle position (actor-local virtual space) captured at insert
+	 *  time — the same value the sprite material renders. Nodes are immutable
+	 *  after insert, so this is race-free for scan workers, unlike the tier
+	 *  buffers (whose slots are recycled in place by transitions) and unlike
+	 *  ParticleIndex (which can point at a recycled slot on a stale node).
+	 *  Consumers: the screen-space spawn scan (1:1 angular-size test) and the
+	 *  universe rebase remap. ZeroVector when ParticleExtent == 0. */
+	FVector ParticlePosition;
+
+	/** EXACT particle extent captured at insert time (actor-local units).
+	 *  0 = no particle data captured (prepopulated chunk nodes, legacy
+	 *  inserts) — consumers fall back to the quantized node geometry. */
+	float ParticleExtent;
 
 	// Collision overflow for nodes that receive multiple inserts at the same
 	// quantized depth/position. ObjectId carries the first inserter's seed;

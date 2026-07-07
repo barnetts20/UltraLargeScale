@@ -117,6 +117,13 @@ void FTierStreamingSystem::InitializeTier(
 		// transitions grow it incrementally from the entering plane.
 		for (int32 b = 0; b < NumBuffers; ++b)
 			State.Buffers[b].RecomputeMaxExtent();
+
+		// Radius-0 tiers never transition, so PushTierToNiagara (which is
+		// what normally raises this) never runs for them — without this,
+		// ApplyPendingBounds never fires and the MaxExtent particle-radius
+		// pad is never applied, letting edge particles clip the fixed
+		// bounds. Consumed on the GT once the actor starts ticking.
+		State.bBoundsDirty.store(true);
 	}
 
 	if (IsPooling()) return;
@@ -697,6 +704,12 @@ void FTierStreamingSystem::InsertParticleIntoOctree(
 	PD.Data.ObjectId = FVoxelData::ComposeSeed(Ctx.ParentSeed, GridCoord, GenerationIndex);
 	PD.Data.TypeId = TierIndex;
 	PD.Data.ParticleIndex = AbsoluteBufferIndex;
+	// Capture the EXACT particle position/extent on the node. Immutable after
+	// insert, so the spawn scan and rebase remap can consume them race-free —
+	// no tier-buffer read, no bUpdateInProgress gating, and correct even for
+	// stale nodes whose ParticleIndex points at a recycled slot.
+	PD.Data.ParticlePosition = Position;
+	PD.Data.ParticleExtent = Extent;
 
 	TSharedPtr<FOctreeNode> Node = Ctx.Octree->InsertPosition(
 		PD.GetPosition(), PD.InsertDepth, PD.Data);

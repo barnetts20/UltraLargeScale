@@ -391,7 +391,7 @@ void AGalaxyActor::BuildTierConfigs()
 		return FBox(FVector(-HalfExt), FVector(HalfExt));
 		};
 
-	LargeTierConfig.ComputeBounds = [this, MakeBounds]() { return FBox(FVector(-Params.Extent), FVector(Params.Extent)); };
+	LargeTierConfig.ComputeBounds = [this]() { return FBox(FVector(-Params.Extent), FVector(Params.Extent)); };
 	MidTierConfig.ComputeBounds = [this, MakeBounds]() { return MakeBounds(MidTierConfig); };
 	SmallTierConfig.ComputeBounds = [this, MakeBounds]() { return MakeBounds(SmallTierConfig); };
 }
@@ -576,13 +576,21 @@ void AGalaxyActor::RequestScan()
 			const TArray<TSharedPtr<FOctreeNode>> NearbyArray =
 				TreeSnapshot->GetNodesByScreenSpace(LocalPlayerPos, Self->SpawnScreenSpaceThreshold);
 
-			AsyncTask(ENamedThreads::GameThread, [WeakThis, NearbyArray]()
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, NearbyArray, TreeSnapshot]()
 				{
 					AGalaxyActor* InnerSelf = WeakThis.Get();
 					if (!InnerSelf) return;
+					InnerSelf->bSpawnScanInProgress.store(false);
+					// Same guard as AUniverseActor::RequestScan: if the tree
+					// was swapped while this scan was in flight (pool return
+					// installs a fresh tree), these nodes belong to a retired
+					// tree — for a pooled-and-respawned galaxy they are the
+					// PREVIOUS identity's nodes, and processing them would
+					// spawn ghost star systems with the old seeds. Drop them;
+					// the next interval rescans the live tree.
+					if (InnerSelf->Octree != TreeSnapshot) return;
 					InnerSelf->PendingScanResults = NearbyArray;
 					InnerSelf->bHasPendingScanResults = true;
-					InnerSelf->bSpawnScanInProgress.store(false);
 				});
 		});
 }

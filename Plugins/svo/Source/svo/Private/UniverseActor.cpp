@@ -844,27 +844,22 @@ void AUniverseActor::CheckOctreeBounds()
 					// EVERY live galaxy and respawns it from the pool (full
 					// re-init hitch + 2x pool headroom on the worst frame).
 					// ObjectId survives the rebase (ComposeSeed is
-					// deterministic), so counterparts are matched by particle
-					// position + seed. Tiers are provably idle while the flag
-					// is up, so the buffer position reads below are safe.
-					auto FindCounterpart = [S, &NewTree](const TSharedPtr<FOctreeNode>& Old) -> TSharedPtr<FOctreeNode>
+					// deterministic), so counterparts are matched by the
+					// node-captured particle position + seed.
+					auto FindCounterpart = [&NewTree](const TSharedPtr<FOctreeNode>& Old) -> TSharedPtr<FOctreeNode>
 						{
 							if (!Old.IsValid()) return nullptr;
-							// Descend by the PARTICLE position, not the old
-							// node center: the new lattice is offset by the
-							// rebase origin, so the old center and the
-							// particle it quantized can straddle a new-cell
-							// boundary and land in different nodes.
-							FVector P = Old->Center;
-							FParticleTierState* States[] = { &S->CoarseTierState, &S->MidTierState, &S->SmallTierState };
-							const int32 TierIndex = Old->Data.TypeId;
-							const int32 AbsIdx = Old->Data.ParticleIndex;
-							if (TierIndex >= 0 && TierIndex <= 2 && AbsIdx >= 0 &&
-								States[TierIndex]->Buffers.Num() > 0 &&
-								States[TierIndex]->Buffers[0].Positions.IsValidIndex(AbsIdx))
-							{
-								P = States[TierIndex]->Buffers[0].Positions[AbsIdx];
-							}
+							// Descend by the CAPTURED particle position (set
+							// at insert, immutable — no tier-buffer read
+							// needed), not the old node center: the new
+							// lattice is offset by the rebase origin, so the
+							// old center and the particle it quantized can
+							// straddle a new-cell boundary and land in
+							// different nodes. Center fallback only for
+							// legacy nodes without captured data.
+							const FVector P = (Old->Data.ParticleExtent > 0.0f)
+								? Old->Data.ParticlePosition
+								: Old->Center;
 							TSharedPtr<FOctreeNode> Candidate = NewTree->FindNodeAtPosition(P, Old->Depth);
 							return (Candidate.IsValid() && Candidate->Data.ObjectId == Old->Data.ObjectId)
 								? Candidate : nullptr;
