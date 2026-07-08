@@ -200,7 +200,7 @@ public:
 };
 
 // ---------------------------------------------------------------------------
-// Cached cell data � stores all generated particle data for a single
+// Cached cell data - stores all generated particle data for a single
 // streaming cell so it can be restored on re-entry without re-running
 // procgen. Used by the persistent-cache refactor; the streaming pipeline
 // writes one of these on first generation (cache-miss) and reads it back
