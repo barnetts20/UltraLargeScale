@@ -105,7 +105,7 @@ void AUniverseActor::BuildTierConfigs()
 	CoarseTierConfig.TierIndex = 0;
 	CoarseTierConfig.GridDepth = UniverseParams.LargeTier.GridDepth;
 	CoarseTierConfig.NeighborhoodRadius = UniverseParams.LargeTier.NeighborhoodRadius;
-	CoarseTierConfig.SlotCapacity = UniverseParams.LargeTier.MaxParticlesPerSlot;
+	CoarseTierConfig.SlotCapacity = UniverseParams.LargeTier.SlotCapacity;
 	CoarseTierConfig.NiagaraAssets = { SectorLargeCloud, SectorGasCloud };
 	CoarseTierConfig.bWantRotations = { true, false };
 	CoarseTierConfig.OctreeInsertBufferIndex = 0;
@@ -119,7 +119,7 @@ void AUniverseActor::BuildTierConfigs()
 	MidTierConfig.TierIndex = 1;
 	MidTierConfig.GridDepth = UniverseParams.MidTier.GridDepth;
 	MidTierConfig.NeighborhoodRadius = UniverseParams.MidTier.NeighborhoodRadius;
-	MidTierConfig.SlotCapacity = UniverseParams.MidTier.MaxParticlesPerSlot;
+	MidTierConfig.SlotCapacity = UniverseParams.MidTier.SlotCapacity;
 	MidTierConfig.NiagaraAssets = { SectorMidCloud };
 	MidTierConfig.bWantRotations = { true };
 	MidTierConfig.OctreeInsertBufferIndex = 0;
@@ -134,7 +134,7 @@ void AUniverseActor::BuildTierConfigs()
 	SmallTierConfig.TierIndex = 2;
 	SmallTierConfig.GridDepth = UniverseParams.SmallTier.GridDepth;
 	SmallTierConfig.NeighborhoodRadius = UniverseParams.SmallTier.NeighborhoodRadius;
-	SmallTierConfig.SlotCapacity = UniverseParams.SmallTier.MaxParticlesPerSlot;
+	SmallTierConfig.SlotCapacity = UniverseParams.SmallTier.SlotCapacity;
 	SmallTierConfig.NiagaraAssets = { SectorSmallCloud };
 	SmallTierConfig.bWantRotations = { false };
 	SmallTierConfig.OctreeInsertBufferIndex = 0;

@@ -1,19 +1,30 @@
 ﻿// FTierStreamingSystem.h
-// Owns the tier system data structures (FSlotEntry, FParticleTierConfig,
-// FParticleTierState) and the stateless utility pipeline that operates on them.
-// Both AUniverseActor and AGalaxyActor include this header and delegate here.
+// Owns the tier system's authored config (FTierParams), runtime data
+// structures (FSlotEntry, FParticleTierConfig, FParticleTierState), the
+// per-call actor context (FTierStreamingContext), and the stateless utility
+// pipeline that operates on them. Both AUniverseActor and AGalaxyActor (and
+// AStarSystemActor) include this header and delegate here.
+//
+// FTierParams and FTierStreamingContext previously lived in
+// UniverseDataGenerator.h and FTierStreamingContext.h respectively; they were
+// consolidated here so every consumer of the tier pipeline pulls a single
+// header and no longer cross-includes a generator or a one-struct file.
 
 #pragma once
 
 #include "CoreMinimal.h"
-#include "FTierStreamingContext.h"
 #include "FNiagaraParticleBuffer.h"
 #include "FOctree.h"
 #include "DataTypes.h"
+#include "Curves/CurveFloat.h"          // FRuntimeFloatCurve (used by FTierParams)
 #include "NiagaraComponent.h"
 #include "NiagaraSystem.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
+#include "FTierStreamingSystem.generated.h"  // must be last: this header now declares a USTRUCT
+
+// FTierStreamingContext uses this only as a pointer (see below).
+class USceneComponent;
 
 // ============================================================================
 //  Tier System — Data Structures
@@ -21,6 +32,112 @@
 //  They live here (not in either actor header) so any consumer of the tier
 //  pipeline can include a single header without pulling in actor definitions.
 // ============================================================================
+
+/// Per-tier streaming parameters exposed in the editor. This is the AUTHORED
+/// counterpart to the runtime FParticleTierConfig below: each layer's params
+/// struct (FUniverseParams, FGalaxyParams, FStarSystemParams) holds one of
+/// these per tier, and BuildTierConfigs() reads them to populate the runtime
+/// FParticleTierConfig.
+///
+/// Scale ranges (MinScale / MaxScale) are NOT edited directly — they are
+/// derived at runtime by each params struct's DeriveScaleRanges(), which
+/// delegates to DeriveTierScaleRanges() below, from MaxEntityScale and the
+/// tier depth sequence.
+USTRUCT(BlueprintType)
+struct SVO_API FTierParams
+{
+	GENERATED_BODY()
+
+	// Octree grid depth that defines this tier's cell size.
+	// Cell half-extent = (Extent * GridExtentMultiplier) / (1 << (GridDepth + 1)).
+	// Use evenly-spaced depths (current scheme: 1, 3, 5 → spacing of 2).
+	// Scale ratio between adjacent tiers = 2^spacing (spacing 2 → ratio 4).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming")
+	int32 GridDepth = 6;
+
+	// Half-width of the 3D neighborhood streamed around the player.
+	// 1 -> 3x3x3 = 27 slots.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming")
+	int32 NeighborhoodRadius = 1;
+
+	// Max particles per slot (candidate count before rejection).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming")
+	int32 SlotCapacity = 500;
+
+	// Maps a uniform [0,1] sample to a [0,1] t-value that lerps between
+	// MinScale and MaxScale. Controls the size distribution of particles
+	// within this tier. Defaults to identity (linear).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distribution")
+	FRuntimeFloatCurve ScaleDistribution;
+
+	// Maps the raw noise density [0,1] to a modified density [0,1] before
+	// the rejection gate. Controls how aggressively the noise field is
+	// interpreted — e.g. a steep curve concentrates particles in high-density
+	// regions, a flat curve makes them more uniform. Defaults to identity.
+	// Values > 1.0 are clamped, allowing the curve to sharpen features.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distribution")
+	FRuntimeFloatCurve DensityResponse;
+
+	// --- Derived at runtime — not directly editable ---
+
+	// Largest entity scale this tier represents.
+	double MaxScale = 0.0;
+
+	// Smallest entity scale this tier represents.
+	double MinScale = 0.0;
+
+	// Initialize both curves to identity: f(x) = x.
+	FTierParams()
+	{
+		ScaleDistribution.GetRichCurve()->AddKey(0.0f, 0.0f);
+		ScaleDistribution.GetRichCurve()->AddKey(1.0f, 1.0f);
+
+		DensityResponse.GetRichCurve()->AddKey(0.0f, 0.0f);
+		DensityResponse.GetRichCurve()->AddKey(1.0f, 1.0f);
+	}
+
+	/// Derive MinScale/MaxScale for an ordered array of tiers from a single
+	/// MaxEntityScale value and the depth sequence between tiers.
+	///
+	/// Tiers must be ordered shallowest-first (Large → Mid → Small).
+	/// The depth spacing between adjacent tiers determines the scale ratio:
+	///   ratio = 2 ^ (nextDepth - thisDepth)
+	/// The last tier mirrors the spacing of the previous pair.
+	///
+	/// Example with depths 1, 3, 5 and MaxEntityScale = 1e22 (current
+	/// universe defaults):
+	///   Large: 2.5e21    → 1e22    (ratio 4, spacing 2)
+	///   Mid:   6.25e20   → 2.5e21  (ratio 4, spacing 2)
+	///   Small: 1.5625e20 → 6.25e20 (ratio 4, mirrors spacing 2)
+	static void DeriveTierScaleRanges(double MaxEntityScale, TArrayView<FTierParams*> Tiers)
+	{
+		const int32 NumTiers = Tiers.Num();
+		if (NumTiers == 0) return;
+
+		Tiers[0]->MaxScale = MaxEntityScale;
+
+		for (int32 i = 0; i < NumTiers; ++i)
+		{
+			int32 DepthDelta;
+			if (i + 1 < NumTiers)
+			{
+				DepthDelta = Tiers[i + 1]->GridDepth - Tiers[i]->GridDepth;
+			}
+			else
+			{
+				DepthDelta = Tiers[i]->GridDepth - Tiers[i - 1]->GridDepth;
+			}
+
+			const double Ratio = static_cast<double>(1 << FMath::Clamp(DepthDelta, 1, 20));
+			Tiers[i]->MinScale = Tiers[i]->MaxScale / Ratio;
+
+			if (i + 1 < NumTiers)
+			{
+				Tiers[i + 1]->MaxScale = Tiers[i]->MinScale;
+			}
+		}
+	}
+};
 
 /**
  * Octree bookkeeping for one flat-buffer slot. Stored slot-indexed in
@@ -273,6 +390,75 @@ struct FParticleTierState
 	 * (Chebyshev) are evicted by CullTierCache after each boundary cross.
 	 */
 	TMap<FIntVector, FCachedCellData> CellCache;
+};
+
+/**
+ * Read-only context supplied by the owning actor to the tier pipeline.
+ * Passed by pointer into every FTierStreamingSystem call so the pipeline
+ * can read spatial parameters without knowing the concrete actor type.
+ *
+ * The owning actor populates this once per tick (or once per call) via its
+ * BuildStreamingContext() and hands it in. The pipeline never writes through
+ * this pointer.
+ */
+struct FTierStreamingContext
+{
+	/** Sector/galaxy extent — drives grid cell sizing and dead-pos parking. */
+	double Extent = 0.0;
+
+	/** UnitScale of the owning actor. Used by InsertParticleIntoOctree to
+	 *  compute octree insert depth. Universe passes 1.0 (extents already
+	 *  local); Galaxy passes its actual UnitScale. */
+	double UnitScale = 1.0;
+
+	/** Multiplier applied to Extent for grid cell size computation.
+	 *  CellSize = (Extent * GridExtentMultiplier) / (1 << GridDepth). */
+	double GridExtentMultiplier = 4.0;
+
+	/** The actor's current virtual traversal vector. Drives grid coord
+	 *  derivation and camera-relative position computation. */
+	FVector VirtualTraversal = FVector::ZeroVector;
+
+	/** The actor's persistent spatial index. Octree insert calls go here. */
+	TSharedPtr<FOctree> Octree;
+
+	/** Current lifecycle state. Pipeline early-outs if not Ready. */
+	ELifecycleState InitializationState = ELifecycleState::Uninitialized;
+
+	/** True while an octree rebase is in progress (Universe only).
+	 *  UpdateTier must not proceed while this is set. */
+	bool bRebaseInProgress = false;
+
+	/** Root component to attach spawned Niagara components to. */
+	USceneComponent* AttachRoot = nullptr;
+
+	/** When true, spawned Niagara components use absolute world position
+	 *  (decoupled from actor transform). Used by Galaxy where the actor
+	 *  is pegged to the player but Niagara positions are galaxy-local. */
+	bool bNiagaraAbsolutePosition = false;
+
+	/** Owning actor name for log output. */
+	FString OwnerName;
+
+	/** The owning actor's Params.Seed. Used by the octree insertion pipeline
+	 *  to compose deterministic child seeds via FVoxelData::ComposeSeed.
+	 *  Each hierarchy level passes its own seed (which is itself a ComposeSeed
+	 *  output from its parent), forming a chain:
+	 *  UniverseSeed → GalaxySeed → StarSystemSeed → PlanetSeed. */
+	int32 ParentSeed = 0;
+
+	/** Returns the actor's freshest VirtualTraversal in a thread-safe way. Push
+	 *  tasks call this at execution time (under the tier PushCS) so a push always
+	 *  composites against current VT, not a value snapshotted when it was scheduled.
+	 *  Populated by each actor's BuildStreamingContext. */
+	TFunction<FVector()> GetLatestVT;
+
+	/** Returns the actor's LIVE lifecycle state. InitializationState above is
+	 *  a by-value snapshot taken in BuildStreamingContext, so it can never
+	 *  observe a mid-init flip to Pooling — the pipeline's abort checks read
+	 *  this instead. Optional: when unset, the snapshot is used (no abort).
+	 *  Populated by each actor's BuildStreamingContext. */
+	TFunction<ELifecycleState()> GetLiveState;
 };
 
 // ============================================================================

@@ -10,8 +10,9 @@
 #include "NiagaraComponent.h"
 #include "DataTypes.h"
 #include "FNiagaraParticleBuffer.h"
-#include "FTierStreamingContext.h"
-#include "FTierStreamingSystem.h"
+#include "FTierStreamingSystem.h"     // FTierStreamingContext now lives here
+#include "UniverseParams.h"           // FUniverseParams (member)
+#include "GalaxyParams.h"             // FGalaxyParams (member: galaxy template)
 #include "UniverseActor.generated.h"
 class AGalaxyActor;
 #pragma endregion

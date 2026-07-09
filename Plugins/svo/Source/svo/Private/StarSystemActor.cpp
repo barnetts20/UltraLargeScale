@@ -396,7 +396,7 @@ void AStarSystemActor::BuildTierConfigs()
 	LargeTierConfig.TierIndex = 0;
 	LargeTierConfig.GridDepth = Params.LargeTier.GridDepth;
 	LargeTierConfig.NeighborhoodRadius = Params.LargeTier.NeighborhoodRadius;
-	LargeTierConfig.SlotCapacity = FMath::Max(Params.LargeTier.MaxParticlesPerSlot, Params.MaxPlanets);
+	LargeTierConfig.SlotCapacity = FMath::Max(Params.LargeTier.SlotCapacity, Params.MaxPlanets);
 	LargeTierConfig.NiagaraAssets = { StarSystemLargeCloud };
 	LargeTierConfig.bWantRotations = { false };
 	// Planets are inserted into the octree DIRECTLY in InitializeNiagara —

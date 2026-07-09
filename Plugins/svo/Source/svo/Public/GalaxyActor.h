@@ -10,6 +10,7 @@
 #include "CoreMinimal.h"
 #include "ProceduralSpaceActor.h"
 #include "GalaxyDataGenerator.h"
+#include "GalaxyParams.h"             // FGalaxyParams (member)
 #include "FTierStreamingSystem.h"
 #include "UniverseActor.h"
 #include "GalaxyActor.generated.h"

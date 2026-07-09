@@ -333,7 +333,7 @@ void AGalaxyActor::BuildTierConfigs()
 	LargeTierConfig.TierName = TEXT("Large");
 	LargeTierConfig.GridDepth = Params.LargeTier.GridDepth;
 	LargeTierConfig.NeighborhoodRadius = 0;
-	LargeTierConfig.SlotCapacity = Params.LargeTier.MaxParticlesPerSlot;
+	LargeTierConfig.SlotCapacity = Params.LargeTier.SlotCapacity;
 	LargeTierConfig.NiagaraAssets = { GalaxyLargeCloud };
 	LargeTierConfig.bWantRotations = { false };
 	LargeTierConfig.OctreeInsertBufferIndex = 0;
@@ -346,7 +346,7 @@ void AGalaxyActor::BuildTierConfigs()
 	MidTierConfig.TierName = TEXT("Mid");
 	MidTierConfig.GridDepth = Params.MidTier.GridDepth;
 	MidTierConfig.NeighborhoodRadius = Params.MidTier.NeighborhoodRadius;
-	MidTierConfig.SlotCapacity = Params.MidTier.MaxParticlesPerSlot;
+	MidTierConfig.SlotCapacity = Params.MidTier.SlotCapacity;
 	MidTierConfig.NiagaraAssets = { GalaxyMidCloud };
 	MidTierConfig.bWantRotations = { false };
 	MidTierConfig.OctreeInsertBufferIndex = 0;
@@ -365,7 +365,7 @@ void AGalaxyActor::BuildTierConfigs()
 	SmallTierConfig.TierName = TEXT("Small");
 	SmallTierConfig.GridDepth = Params.SmallTier.GridDepth;
 	SmallTierConfig.NeighborhoodRadius = Params.SmallTier.NeighborhoodRadius;
-	SmallTierConfig.SlotCapacity = Params.SmallTier.MaxParticlesPerSlot;
+	SmallTierConfig.SlotCapacity = Params.SmallTier.SlotCapacity;
 	SmallTierConfig.NiagaraAssets = { GalaxySmallCloud };
 	SmallTierConfig.bWantRotations = { false };
 	SmallTierConfig.OctreeInsertBufferIndex = 0;

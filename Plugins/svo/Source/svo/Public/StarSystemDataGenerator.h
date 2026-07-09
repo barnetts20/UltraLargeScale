@@ -1,7 +1,7 @@
 ﻿// StarSystemDataGenerator.h
 // Data generator for star system content.
-// FStarSystemParams has moved to StarSystemActor.h to keep params close to
-// the tier config that uses them, mirroring how FGalaxyParams lives in GalaxyActor.h.
+// FStarSystemParams lives in StarSystemParams.h,
+// mirroring FUniverseParams (UniverseParams.h) and FGalaxyParams (GalaxyParams.h).
 // This class is retained for future use (full orbit/noise generation).
 // First-pass actor uses analytic line layout and never calls GenerateData().
 
@@ -23,12 +23,10 @@ public:
 	double Extent = 0.0;
 	double UnitScale = 1.0;
 
-	// Retained because StarSystemDataGenerator.cpp::GenerateData reads StarColor.
-	// Will be cleaned up when GenerateData is replaced by the analytic pipeline.
-	struct FLegacySystemParams
-	{
-		FLinearColor StarColor = FLinearColor(1, 1, 1, 1);
-	} SystemParams;
+	// Parent star particle's color, set by the owning actor before generation
+	// from FStarSystemParams::ParentColor (FBaseParams). GenerateData tints the
+	// central star with this. (GenerateData is unused in the first pass.)
+	FLinearColor ParentColor = FLinearColor(1, 1, 1, 1);
 
 	// --- Object type enum (used as TypeId in octree nodes) ---
 	enum EObjectType

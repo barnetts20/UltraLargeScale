@@ -8,7 +8,7 @@ void StarSystemDataGenerator::GenerateData(TSharedPtr<FOctree> InOctree)
 {
 	// TODO: Star at center with massive scale (We should base this on actual math, just jamming in depth 9 for now
 	FPointData StarData(FVector::ZeroVector, 9,
-		FVoxelData(1, 0, FVector(SystemParams.StarColor.R, SystemParams.StarColor.G, SystemParams.StarColor.B) * 10, 1, EObjectType::Star));
+		FVoxelData(1, 0, FVector(ParentColor.R, ParentColor.G, ParentColor.B) * 10, 1, EObjectType::Star));
 	GeneratedData.Add(StarData);
 	Extent = InOctree->Extent;
 
