@@ -145,10 +145,6 @@ protected:
 	int32 StarSystemPoolSize = 5;
 	TArray<AStarSystemActor*> StarSystemPool;
 
-	/// Mirrors AUniverseActor::ComputeChildSpawnLocation, accounts for VT.
-	// TODO: IS THIS A CONSISTENT FUNCTION ACROSS ALL LAYERS, SEEMS LIKE IT MIGHT BE - HOIST?
-	virtual FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const override;
-
 	/** Deferred placement: finalizes world position and VirtualTraversal for a
 	 *  star system on the first tick after async init completes, mirroring
 	 *  AUniverseActor::FinalizeGalaxyPlacement. */

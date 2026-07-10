@@ -172,3 +172,26 @@ void AProceduralSpaceActor::DrawDebugBounds()
         }
     }
 }
+
+FVector AProceduralSpaceActor::ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const
+{
+    // A child actor is physically larger than the node it spawns from (this
+    // actor's Extent vs the node's Extent). To subtend the same angular size
+    // from the camera, the child is placed proportionally further along the
+    // same view vector:
+    //
+    //   distance_child / size_child = distance_node / size_node
+    //   distance_child = distance_node * (size_child / size_node)
+    //
+    // ChildUnitScale encodes the node-to-child size relationship, so
+    // size_child / size_node = GetUnitScale() / ChildUnitScale.
+    const double SizeRatio = GetUnitScale() / ChildUnitScale;
+
+    // World-space position of the node's sprite.
+    const FVector RenderedPos = GetActorLocation() + NodeCenter - VirtualTraversal;
+
+    // Vector from camera to the sprite, scaled by the size ratio to give the
+    // child spawn position.
+    const FVector CameraToNode = RenderedPos - CurrentFrameOfReferenceLocation;
+    return CurrentFrameOfReferenceLocation + CameraToNode * SizeRatio;
+}

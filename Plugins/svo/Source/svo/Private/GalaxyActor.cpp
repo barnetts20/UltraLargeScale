@@ -532,16 +532,6 @@ void AGalaxyActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
 }
 #pragma endregion
 
-#pragma region Child Spawn Location
-FVector AGalaxyActor::ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const
-{
-	const double SizeRatio = Params.UnitScale / ChildUnitScale;
-	const FVector RenderedPos = GetActorLocation() + NodeCenter - VirtualTraversal;
-	const FVector CameraToNode = RenderedPos - CurrentFrameOfReferenceLocation;
-	return CurrentFrameOfReferenceLocation + CameraToNode * SizeRatio;
-}
-#pragma endregion
-
 #pragma region Spawn Range Scanning
 void AGalaxyActor::RequestScan()
 {

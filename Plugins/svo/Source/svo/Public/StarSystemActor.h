@@ -92,7 +92,6 @@ protected:
 	// COMPLEX ACTORS SUCH AS PLANETS WOULD BE POOLED, SIMPLE ACTORS (STATIC MESHES ETC) MAY JUST SPAWN WITH NO POOL
 	// No InitializeChildPool — star systems manage individual actor spawns, not a pool.
 
-	virtual FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const override;
 #pragma endregion
 
 #pragma region Data Generation

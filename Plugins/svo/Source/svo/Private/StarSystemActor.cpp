@@ -550,23 +550,6 @@ bool AStarSystemActor::CellOverlapsVolume(const FIntVector& Coord, int32 GridDep
 #pragma endregion
 
 // ---------------------------------------------------------------------------
-//  ComputeChildSpawnLocation
-// ---------------------------------------------------------------------------
-#pragma region Child Spawn Location
-FVector AStarSystemActor::ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const
-{
-	// Mirrors GalaxyActor::ComputeChildSpawnLocation exactly.
-	// Rendered position = ActorLocation + NodeCenter - VirtualTraversal.
-	// Scale the camera-to-node vector proportionally to place the (physically
-	// larger) child actor at the same angular size.
-	const double SizeRatio = Params.UnitScale / ChildUnitScale;
-	const FVector RenderedPos = GetActorLocation() + NodeCenter - VirtualTraversal;
-	const FVector CameraToNode = RenderedPos - CurrentFrameOfReferenceLocation;
-	return CurrentFrameOfReferenceLocation + CameraToNode * SizeRatio;
-}
-#pragma endregion
-
-// ---------------------------------------------------------------------------
 //  Tick
 // ---------------------------------------------------------------------------
 #pragma region Tick

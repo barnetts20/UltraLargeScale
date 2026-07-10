@@ -358,35 +358,6 @@ void AUniverseActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 }
 #pragma endregion
 
-#pragma region Child Spawn Location
-FVector AUniverseActor::ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const
-{
-	// The debug box renders at: ActorLocation + NodeCenter - VirtualTraversal
-	// That's where the node's particle sprite appears in world space.
-	//
-	// The galaxy actor is physically larger than the node (Params.Extent vs
-	// InNode->Extent). To subtend the same angular size from the camera,
-	// it must be placed proportionally further along the same view vector.
-	//
-	// distance_galaxy / size_galaxy = distance_node / size_node
-	// distance_galaxy = distance_node * (size_galaxy / size_node)
-	//
-	// ChildUnitScale encodes the node-to-galaxy size relationship:
-	//   ChildUnitScale = (InNode->Extent * ParentUnitScale) / Galaxy->Params.Extent
-	// So size_galaxy / size_node = ParentUnitScale / ChildUnitScale.
-	const double SizeRatio = UniverseParams.UnitScale / ChildUnitScale;
-
-	// World-space position of the node's sprite:
-	const FVector RenderedPos = GetActorLocation() + NodeCenter - VirtualTraversal;
-
-	// Vector from camera to the sprite:
-	const FVector CameraToNode = RenderedPos - CurrentFrameOfReferenceLocation;
-
-	// Scale by the size ratio → galaxy spawn position.
-	return CurrentFrameOfReferenceLocation + CameraToNode * SizeRatio;
-}
-#pragma endregion
-
 #pragma region Galaxy Pooled Spawn Hooks
 void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 {

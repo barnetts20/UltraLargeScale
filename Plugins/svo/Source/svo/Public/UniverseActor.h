@@ -367,20 +367,6 @@ protected:
 	/** Available galaxy actors ready for spawn. Managed as a stack (Pop/Insert). */
 	TArray<AGalaxyActor*> GalaxyPool;
 
-	//TODO: AGAIN... IF THIS LOGIC IS ALWAYS THE SAME IT COULD POTENTIALLY BE HOISTED INSTEAD OF REPLICATING, NEED TO INVESTIGATE
-	/**
-	 * Computes the world-space spawn position for a child actor at a given
-	 * unit scale, accounting for the parallax depth ratio between this sector
-	 * and the child.
-	 *
-	 * SpawnPos = CurrentPlayerPos + (NodeCenter - CellOrigin) * (ThisUnitScale / ChildUnitScale)
-	 *
-	 * @param NodeCenter     Octree node center in sector-local space.
-	 * @param ChildUnitScale The child actor's UnitScale (determines parallax depth).
-	 * @return               World-space spawn position.
-	 */
-	virtual FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const override;
-
 #pragma endregion
 
 private:

@@ -18,7 +18,7 @@ struct SVO_API FBaseParams {
     int Seed = 0;
 
     //TODO: NOT SURE ABOUT ACCURACY OF BELOW COMMENT... THE EXTENT I THOUGHT WAS RELATED TO THE OCTREE BOUNDS (AND POTENTIALLY THE PARTICLE SYSTEM) NO? THATS NOT THE SAME AS THE VIRTUAL SPACE
-    /** LOCAL half-extent of this actor's virtual space. 
+    /** LOCAL half-extent of this actor's virtual space.
      *  DERIVED AT SPAWN for pooled children: the spawning parent sets
      *  Extent = (parent particle's real size) / UnitScale, so real scale
      *  expresses itself as model size (and therefore content COUNT), while
@@ -212,10 +212,11 @@ private:
 
 public:
 #pragma region Parallax Spawn Calculation
-    /** Computes correct spawn position for a child actor based on parallax
-     *  ratios. Each subclass implements this using its VirtualTraversal and
-     *  unit-scale ratio; the base provides no default. */
-    virtual FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const { return FVector::ZeroVector; };
+    /** Computes the world-space spawn position for a child actor at the given
+     *  child UnitScale, accounting for the parallax depth ratio between this
+     *  actor and the child. Uniform across all layers: reads this actor's unit
+     *  scale through GetUnitScale(), so subclasses no longer override it. */
+    virtual FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const;
 #pragma endregion
 
     /** Per-frame parallax update hook. Default is a no-op; overridden by layers
