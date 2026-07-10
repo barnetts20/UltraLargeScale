@@ -1,5 +1,5 @@
 // Fill out your copyright notice in the Description page of Project Settings.
-
+#if 0	// SVO_LEGACY_EXAMPLE_GENERATORS
 #pragma once
 #include <DataTypes.h>
 #include <FOctree.h>
@@ -68,7 +68,6 @@ public:
 // The PointCloudGenerator base class above stays live —
 // StarSystemDataGenerator still derives from it.
 // ============================================================================
-#if 0	// SVO_LEGACY_EXAMPLE_GENERATORS
 
 //Basic Generators (No Noise)
 class SVO_API SimpleRandomGenerator : public PointCloudGenerator
