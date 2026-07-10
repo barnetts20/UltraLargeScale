@@ -81,6 +81,18 @@ void AProceduralSpaceActor::ResetForSpawn()
     InitializationState = ELifecycleState::Uninitialized;
     bPendingPlacement = false;
     PendingNodeCenter = FVector::ZeroVector;
+
+    // Virtual-traversal cluster. All five live on this base, so they reset
+    // here — resetting base state from a subclass is what let LatestVT get
+    // orphaned across the pool round-trip. LatestVT is the lock-guarded
+    // snapshot async push / boundary-cross tasks read via GetLatestVT; if it
+    // survives reuse, a re-acquired actor composites its first frames against
+    // the PREVIOUS occupant's traversal, offsetting the streaming window.
+    VirtualTraversal = FVector::ZeroVector;
+    LastPushedVirtualTraversal = FVector::ZeroVector;
+    LastFrameOfReferenceLocation = FVector::ZeroVector;
+    CurrentFrameOfReferenceLocation = FVector::ZeroVector;
+    PublishLatestVT(FVector::ZeroVector);   // clear the async snapshot under LatestVTGuard
 }
 
 void AProceduralSpaceActor::ResetForPool()

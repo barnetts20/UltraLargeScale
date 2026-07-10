@@ -390,6 +390,27 @@ struct FParticleTierState
 	 * (Chebyshev) are evicted by CullTierCache after each boundary cross.
 	 */
 	TMap<FIntVector, FCachedCellData> CellCache;
+
+	/// Resets all PLAIN STATE DATA to the freshly-constructed baseline so a
+	/// pooled owner can reuse this tier as if new. Does NOT touch
+	/// NiagaraComponents — those are UObjects the owning actor destroys
+	/// (resource lifetime); it destroys them and empties that container, then
+	/// calls this. Call only AFTER the push worker has exited and any in-flight
+	/// tier task has drained (both read the fields cleared here).
+	void ResetState()
+	{
+		Buffers.Empty();
+		SlotEntries.Empty();
+		SlotCounts.Empty();
+		CellCache.Empty();
+		CenterCoord = FIntVector(INT32_MIN);
+		StampedCenter = FIntVector(INT32_MIN);
+		StampedNCenter = FVector::ZeroVector;
+		AppliedBoundsPad = -1.0;
+		bUpdateInProgress.store(false);
+		bBoundsDirty.store(false);   // was orphaned — ResetForPool never cleared it
+		bShuttingDown.store(false);  // clear the shutdown bar for the next spawn
+	}
 };
 
 /**

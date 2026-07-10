@@ -139,25 +139,24 @@ void AGalaxyActor::ResetForPool()
 		}
 	}
 
+	// The push worker is single-flight and actor-level. BeginShutdownDrain
+	// makes its pushes bail (bShuttingDown) but does NOT stop the worker's
+	// loop — it can still be alive here. Wait for it to exit (it clears
+	// bPushWorkerLive on exit) BEFORE we clear bShuttingDown and free Buffers
+	// below: a live worker would otherwise resume on freed memory, and a stale
+	// 'live' flag would block the next occupant's push dispatch.
+	while (bPushWorkerLive.load(std::memory_order_acquire))
+	{
+		FPlatformProcess::Sleep(0.0005f);
+	}
+
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 	{
 		for (UNiagaraComponent*& NC : Tier->NiagaraComponents)
 		{
 			if (NC) { NC->Deactivate(); NC->DestroyComponent(); NC = nullptr; }
 		}
-		Tier->NiagaraComponents.Empty();
-		Tier->Buffers.Empty();
-		Tier->SlotEntries.Empty();
-		Tier->SlotCounts.Empty();
-		Tier->CellCache.Empty();
-		Tier->CenterCoord = FIntVector(INT32_MIN);
-		Tier->StampedCenter = FIntVector(INT32_MIN);
-		Tier->StampedNCenter = FVector::ZeroVector;
-		Tier->AppliedBoundsPad = -1.0;
-		Tier->bUpdateInProgress.store(false);
-		// Pooled actors are re-initialized — clear the shutdown bar so pushes
-		// work again on the next spawn (EndPlay leaves it set; we must not).
-		Tier->bShuttingDown.store(false);
+		Tier->ResetState();   // plain state data + sentinels + atomics (incl. bBoundsDirty)
 	}
 	TierNiagaraComponents.Empty();
 	DiagTickCount = 0;
@@ -167,11 +166,7 @@ void AGalaxyActor::ResetForPool()
 
 void AGalaxyActor::ResetForSpawn()
 {
-	Super::ResetForSpawn();
-	VirtualTraversal = FVector::ZeroVector;
-	LastPushedVirtualTraversal = FVector::ZeroVector;
-	LastFrameOfReferenceLocation = FVector::ZeroVector;
-	CurrentFrameOfReferenceLocation = FVector::ZeroVector;
+	Super::ResetForSpawn();   // resets the VT cluster (incl. LatestVT)
 	DiagTickCount = 0;
 }
 #pragma endregion
