@@ -592,7 +592,7 @@ struct FTierStreamingSystem
 	//   1. stamps StampedCenter/StampedNCenter with the center the new
 	//      lattice derives from (§ C_stamp),
 	//   2. uploads the buffer — cell-local positions, per-slot lattice
-	//      (User.CellRelativeVT), and the (NCenter - VT) uniform, reading
+	//      (User.CellOffsets), and the (NCenter - VT) uniform, reading
 	//      the freshest VT via GetLatestVT at execution time.
 	// The GPU flips atomically at the upload: it keeps rendering its own
 	// prior copy of every array until these sets land, so in-place CPU

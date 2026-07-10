@@ -1,6 +1,4 @@
-﻿// Fill out your copyright notice in the Description page of Project Settings.
-
-#pragma once
+﻿#pragma once
 
 #pragma region Includes/ForwardDec
 #include "CoreMinimal.h"
@@ -15,65 +13,34 @@ public:
 	float Density;
 	FVector Composition;
 
-	/** Deterministic hierarchical seed for this node. Composed via ComposeSeed
-	 *  from the parent actor's seed, the tier grid coordinate, and the particle's
-	 *  generation index. Always >= 0; -1 is reserved as the "empty node" sentinel
-	 *  in the octree collision logic. Passed down as Params.Seed when spawning
-	 *  child actors (galaxies, star systems, planets). */
+	/** Deterministic hierarchical seed for this node. */
+	//TODO: If this is truly the hashed seed and not a human discernable index may be worth changing to be named Seed
 	int ObjectId;
 
+	//TypeId allows insertion of different classes of objects in the same tree. Type mapping framework must be externally managed.
 	int TypeId;
 
-	/** Absolute index into the tier's flat particle buffer. Set during octree
-	 *  insertion: AbsoluteIndex = SlotIndex * SlotCapacity + ParticleOffset.
-	 *  Spawn hooks read positions/extents directly at Buffer[ParticleIndex].
-	 *  Slot can be recovered as ParticleIndex / SlotCapacity when needed.
-	 *  -1 if not set (e.g. manually inserted nodes outside the tier system). */
+	/** Absolute index into the tier's flat particle buffer.  */
 	int ParticleIndex;
 
-	/** EXACT particle position (actor-local virtual space) captured at insert
-	 *  time — the same value the sprite material renders. Nodes are immutable
-	 *  after insert, so this is race-free for scan workers, unlike the tier
-	 *  buffers (whose slots are recycled in place by transitions) and unlike
-	 *  ParticleIndex (which can point at a recycled slot on a stale node).
-	 *  Consumers: the screen-space spawn scan (1:1 angular-size test) and the
-	 *  universe rebase remap. ZeroVector when ParticleExtent == 0. */
+	/** EXACT particle position (actor-local virtual space) captured at insert time*/
 	FVector ParticlePosition;
 
-	/** EXACT particle extent captured at insert time (actor-local units).
-	 *  0 = no particle data captured (prepopulated chunk nodes, legacy
-	 *  inserts) — consumers fall back to the quantized node geometry. */
+	/** EXACT particle extent captured at insert time (actor-local units). */
 	float ParticleExtent;
 
 	// Collision overflow for nodes that receive multiple inserts at the same
-	// quantized depth/position. ObjectId carries the first inserter's seed;
-	// any subsequent inserts at the same node append to AdditionalObjectIds.
-	// Empty for the non-collision case (vast majority of nodes), so the
-	// per-node memory cost is just the empty TArray header.
+	// quantized depth/position. 
+	// TODO: NOT SURE THIS IS STILL RELEVANT
 	TArray<int32> AdditionalObjectIds;
 
 	/**
-	 * Composes a deterministic, always-positive seed from a parent seed,
-	 * a grid coordinate, and a particle index within that cell. The result
-	 * is globally unique across the hierarchy when each level passes its
-	 * own Params.Seed (itself a ComposeSeed output) as InParentSeed.
-	 *
-	 * The sign bit is masked off so the result is always >= 0, preserving
-	 * the ObjectId == -1 "empty node" sentinel in the octree.
-	 *
-	 * @param InParentSeed     The owning actor's Params.Seed.
-	 * @param InCoord          Tier grid coordinate of the cell.
-	 * @param InParticleIndex  Generation-order index within the cell.
-	 * @return                 Positive int32 seed, never -1.
+	 * Composes a deterministic, always-positive seed from a parent seed, a grid coordinate, and a particle index within that cell.
 	 */
 	static int32 ComposeSeed(int32 InParentSeed, const FIntVector& InCoord, int32 InParticleIndex)
 	{
-		const uint32 CoordHash = HashCombine(
-			HashCombine(GetTypeHash(InCoord.X), GetTypeHash(InCoord.Y)),
-			GetTypeHash(InCoord.Z));
-		const uint32 Raw = HashCombine(
-			static_cast<uint32>(InParentSeed),
-			HashCombine(CoordHash, static_cast<uint32>(InParticleIndex)));
+		const uint32 CoordHash = HashCombine(HashCombine(GetTypeHash(InCoord.X), GetTypeHash(InCoord.Y)), GetTypeHash(InCoord.Z));
+		const uint32 Raw = HashCombine(static_cast<uint32>(InParentSeed), HashCombine(CoordHash, static_cast<uint32>(InParticleIndex)));
 		return static_cast<int32>(Raw & 0x7FFFFFFF);
 	}
 };
@@ -88,67 +55,33 @@ public:
 	int InsertDepth;
 	FVoxelData Data;
 
-	// Accessors
 	const FVector& GetPosition() const { return PositionInternal; }
 	const FInt64Vector& GetInt64Position() const { return Int64PositionInternal; }
 
-	// Setters (keep values in sync)
 	void SetPosition(const FVector& InPosition)
 	{
 		PositionInternal = InPosition;
-		Int64PositionInternal = FInt64Vector(
-			FMath::RoundToInt64(InPosition.X),
-			FMath::RoundToInt64(InPosition.Y),
-			FMath::RoundToInt64(InPosition.Z));
+		Int64PositionInternal = FInt64Vector(FMath::RoundToInt64(InPosition.X), FMath::RoundToInt64(InPosition.Y), FMath::RoundToInt64(InPosition.Z));
 	}
 
 	void SetInt64Position(const FInt64Vector& InInt64)
 	{
 		Int64PositionInternal = InInt64;
-		PositionInternal = FVector(
-			static_cast<double>(InInt64.X),
-			static_cast<double>(InInt64.Y),
-			static_cast<double>(InInt64.Z));
+		PositionInternal = FVector(static_cast<double>(InInt64.X), static_cast<double>(InInt64.Y), static_cast<double>(InInt64.Z));
 	}
 
-	// Unified depth calculation from real-world scale
-	// InScaleWorldUnits: Size in centimeters (real world)
-	// InUnitScale: The octree's unit scale (cm per octree unit)
-	// InExtent: The octree's extent (must be power of 2)
-	static FPointData MakePointDataFromWorldScale(
-		const double InScaleWorldUnits,
-		const double InUnitScale,
-		const int64 InExtent)
+	//TODO: Should probably just do the scale calculation and manage the data struct creation a level up
+	static FPointData MakePointDataFromWorldScale(const double InScaleWorldUnits, const double InUnitScale, const int64 InExtent)
 	{
-		// Convert world scale to octree local units
 		double LocalSize = InScaleWorldUnits / InUnitScale;
-
-		// Calculate max depth based on extent
-		// Extent is power of 2, minimum node size is 2 units
-		// At depth d: NodeExtent = InExtent >> d
-		// We want: InExtent >> MaxDepth = 2
-		// So: MaxDepth = log2(InExtent) - 1
-		int MinDepth = 1;
-		int MaxDepth = static_cast<int>(FMath::Log2(static_cast<double>(InExtent)));
-
-		// Find the deepest depth where this object still fits
-		int BestDepth = MinDepth;
+		int MinDepth = 1, BestDepth = 1, MaxDepth = static_cast<int>(FMath::Log2(static_cast<double>(InExtent)));
 		int64 BestNodeExtent = InExtent >> MinDepth;
 		double BestRatio = FMath::Abs(1.0 - LocalSize / static_cast<double>(BestNodeExtent));
-
 		for (int d = MinDepth; d <= MaxDepth; d++)
 		{
 			int64 ExtentAtDepth = InExtent >> d;
-
-			// Object must fit within node (LocalSize <= ExtentAtDepth)
-			if (LocalSize > ExtentAtDepth)
-			{
-				// Too deep, object doesn't fit anymore
-				break;
-			}
-
+			if (LocalSize > ExtentAtDepth) break;
 			double Ratio = FMath::Abs(1.0 - LocalSize / static_cast<double>(ExtentAtDepth));
-
 			if (Ratio < BestRatio)
 			{
 				BestRatio = Ratio;
@@ -156,70 +89,38 @@ public:
 				BestNodeExtent = ExtentAtDepth;
 			}
 		}
-
-		// Calculate density to encode sub-node precision
-		// Actual object size = NodeExtent * (1 + ScaleFactor)
-		// ScaleFactor = (LocalSize / BestNodeExtent) - 1
-		float ScaleFactor = FMath::Clamp(
-			static_cast<float>((LocalSize / static_cast<double>(BestNodeExtent)) - 1.0),
-			0.0001f,
-			1.0f
-		);
-
+		float ScaleFactor = FMath::Clamp(static_cast<float>((LocalSize / static_cast<double>(BestNodeExtent)) - 1.0), 0.0001f, 1.0f);
 		FVoxelData Data;
 		Data.ScaleFactor = ScaleFactor;
-
 		return FPointData(FInt64Vector::ZeroValue, BestDepth, Data);
 	}
 
 	static double SampleScaleFromDistribution(double InMinScale, double InMaxScale, double InSample, const FRuntimeFloatCurve& InDistributionCurve) {
-		// Remap the uniform sample through the scale distribution curve, then lerp
-		// between min and max. Falls back to the raw linear sample when the curve is
-		// unconfigured, so an empty curve can't collapse every scale to MinScale.
 		const auto* Curve = InDistributionCurve.GetRichCurveConst();
-		const double T = (Curve && Curve->GetNumKeys() > 0)
-			? static_cast<double>(FMath::Clamp(Curve->Eval(FMath::Clamp(static_cast<float>(InSample), 0.0f, 1.0f)), 0.0f, 1.0f))
-			: InSample;
+		const double T = (Curve && Curve->GetNumKeys() > 0) ? static_cast<double>(FMath::Clamp(Curve->Eval(FMath::Clamp(static_cast<float>(InSample), 0.0f, 1.0f)), 0.0f, 1.0f)) : InSample;
 		return FMath::Lerp(InMinScale, InMaxScale, T);
 	}
 
-	// Constructors
 	FPointData() : InsertDepth(0), Data() {}
 
-	FPointData(const FVector& InPosition, int InDepth, const FVoxelData& InData)
-		: InsertDepth(InDepth), Data(InData)
+	FPointData(const FVector& InPosition, int InDepth, const FVoxelData& InData) : InsertDepth(InDepth), Data(InData)
 	{
 		SetPosition(InPosition);
 	}
 
-	FPointData(const FInt64Vector& InInt64, int InDepth, const FVoxelData& InData)
-		: InsertDepth(InDepth), Data(InData)
+	//TODO: Check if we are even using int64 or if we have swapped to double octree bounds... if its double we could strip the whole 64 bit stack
+	FPointData(const FInt64Vector& InInt64, int InDepth, const FVoxelData& InData) : InsertDepth(InDepth), Data(InData)
 	{
 		SetInt64Position(InInt64);
 	}
 };
 
-// ---------------------------------------------------------------------------
-// Cached cell data - stores all generated particle data for a single
-// streaming cell so it can be restored on re-entry without re-running
-// procgen. Used by the persistent-cache refactor; the streaming pipeline
-// writes one of these on first generation (cache-miss) and reads it back
-// on subsequent entries (cache-hit).
-//
-// Each tier may have multiple Niagara buffers (e.g. Large = cluster + gas).
-// PerBufferPositions / PerBufferExtents / etc. are outer-indexed by buffer
-// index (parallel to FParticleTierConfig::NiagaraAssets).
-// ---------------------------------------------------------------------------
 struct SVO_API FCachedCellData
 {
-	// Per-buffer particle arrays. Outer index = buffer index within the tier.
-	// Inner arrays hold exactly ParticleCount elements (no dead padding).
 	TArray<TArray<FVector>>        PerBufferPositions;
 	TArray<TArray<float>>          PerBufferExtents;
 	TArray<TArray<FLinearColor>>   PerBufferColors;
-	TArray<TArray<FVector>>        PerBufferRotations; // Empty inner array if tier doesn't use rotations.
-
-	// Number of accepted (live) particles this cell produced.
+	TArray<TArray<FVector>>        PerBufferRotations;
 	int32 ParticleCount = 0;
 };
 
