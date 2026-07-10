@@ -53,7 +53,6 @@ public:
 #pragma endregion
 
 #pragma region Public Octree Queries
-	//TODO: IS THIS DUPLICATED BETWEEN LAYERS. PRETTY MUCH ALL LAYERS SHOULD BE DOING SCREENSPACE BASED SPAWNING SO THIS IS CANIDATE TO HOIST TO PROCEDURAL SPACE ACTOR LEVEL
 	/**
 	 * Returns all octree nodes whose screen-space angular size
 	 * (Extent * (1 + ScaleFactor))^2 / DistSq exceeds InScreenSpaceThreshold^2.
