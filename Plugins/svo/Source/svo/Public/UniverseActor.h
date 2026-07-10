@@ -156,22 +156,6 @@ public:
 
 #pragma region Spawn Range Scanning
 
-	//TODO: LIKE THE OTHER LAYERS, WE SHOULD DECIDE WHAT TO DO WITH THIS
-	/** Interval in seconds between spawn-scan dispatches. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
-	float SpawnScanInterval = 0.1f;
-
-	/** Minimum screen-space angular size (Extent / Distance) for a node to
-	 *  trigger a spawn event. Lower values allow smaller/more-distant objects
-	 *  to pass. Squared internally before traversal for performance. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
-	double SpawnScreenSpaceThreshold = 0.02;
-
-	/** When true, draws a debug box around each node that passes the
-	 *  spawn-scan threshold each interval. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
-	bool bDebugDrawSpawnNodes = false;
-
 	/** When true, logs the live particle count for each entering node's
 	 *  buffer slot. Useful for generation tuning; noisy in normal play. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")

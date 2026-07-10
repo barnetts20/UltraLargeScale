@@ -37,23 +37,6 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 #pragma endregion
 
-#pragma region Spawn Range Scanning (public - tunable in editor)
-	//TODO: SCAN INTERVAL SHOULD PROBABLY BE MANAGED CENTRALLY FOR ALL LAYERS... NEED TO CHECK WHATS GOING ON WITH THIS AND POTENTIALLY HOIST. SIMILAR TO TICK, THIS SHOULD PROBABLY BE ORCHESTRATED TOP DOWN (MAYBE IT ALREADY IS)
-	/** Interval in seconds between planet spawn-scan dispatches. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
-	float SpawnScanInterval = 0.1f;
-
-	//TODO: HOIST?
-	/** Screen-space threshold for planet spawn/despawn.
-	 *  Smaller = spawn from further away. Try 0.01-0.05. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
-	double SpawnScreenSpaceThreshold = 0.02;
-
-	/** Draw debug boxes around nodes that pass the spawn threshold. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
-	bool bDebugDrawSpawnNodes = false;
-#pragma endregion
-
 #pragma region Pool Lifecycle
 	virtual void ResetForPool() override;
 	virtual void ResetForSpawn() override;

@@ -37,22 +37,6 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 #pragma endregion
 
-#pragma region Spawn Range Scanning (public - tunable in editor)
-	//TODO: SHOULD THESE SPAWN SCAN PARAMS BE HOISTED TO PROCEDURAL SPACE ACTOR? ALSO, SHOULD OUR SCAN INTERVAL BE CONTROLLED TOP DOWN INSTEAD OF EACH ENTITY TRACKING A SEPERATE TIMER?
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
-	float SpawnScanInterval = 0.1f;
-
-	/** Minimum screen-space angular size (Extent / Distance) for a node to
-	 *  trigger a star system spawn. Squared internally before traversal.
-	 *  Lower values = spawn/despawn from further away. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
-	double SpawnScreenSpaceThreshold = 0.01;
-
-	/** When true, draws a debug box around each node that passes the threshold. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
-	bool bDebugDrawSpawnNodes = false;
-#pragma endregion
-
 #pragma region Pooled Spawn/Despawn Hooks
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AStarSystemActor>> SpawnedStarSystems;
 	void SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode);

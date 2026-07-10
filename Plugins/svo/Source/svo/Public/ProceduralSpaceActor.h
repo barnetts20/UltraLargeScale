@@ -253,6 +253,23 @@ public:
 #pragma endregion
 
 #pragma region Hierarchical Spawn Scanning
+    /** Interval in seconds between spawn-scan dispatches for this actor.
+     *  Shared default across all layers; scans are still orchestrated top-down
+     *  by AUniverseActor::DetermineAndDispatchScan, which throttles each layer
+     *  against LastScanDispatchTime rather than a per-actor timer. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
+    float SpawnScanInterval = 0.1f;
+
+    /** Minimum screen-space angular size (Extent / Distance) for a node to
+     *  trigger a child spawn. Squared internally before traversal.
+     *  Lower values = spawn/despawn from further away. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
+    double SpawnScreenSpaceThreshold = 0.02;
+
+    /** When true, draws a debug box around each node that passes the threshold. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
+    bool bDebugDrawSpawnNodes = false;
+
     /** Time of last scan dispatch. Used for interval throttling
      *  now that scans are driven from the tick chain instead of timers. */
     double LastScanDispatchTime = 0.0;
