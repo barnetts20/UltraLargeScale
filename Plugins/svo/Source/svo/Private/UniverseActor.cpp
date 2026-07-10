@@ -679,8 +679,7 @@ void AUniverseActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) co
 	if (!InNode.IsValid()) return;
 	const int32 Seed = InNode->Data.ObjectId;
 	const int32 AbsIdx = InNode->Data.ParticleIndex;
-	const int32 ExtraCount = InNode->Data.AdditionalObjectIds.Num();
-	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::SpawnScan ENTER — node center=(%.1f, %.1f, %.1f) extent=%.2f depth=%d seed=%d bufIdx=%d extras=%d scale=%.3f tier=%d"), InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Depth, Seed, AbsIdx, ExtraCount, InNode->Data.ScaleFactor, InNode->Data.TypeId);
+	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::SpawnScan ENTER — node center=(%.1f, %.1f, %.1f) extent=%.2f depth=%d seed=%d bufIdx=%d scale=%.3f tier=%d"), InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Depth, Seed, AbsIdx, InNode->Data.ScaleFactor, InNode->Data.TypeId);
 	if (bLogSpawnEnterExitBuffers)
 	{
 		// Use TypeId (set by InsertParticleIntoOctree) to identify the source tier.

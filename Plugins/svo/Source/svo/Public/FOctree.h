@@ -231,33 +231,15 @@ public:
 			Current = Current->Children[ChildIndex];
 		}
 
-		// Collision-aware write. Existing convention: ObjectId == -1 means
-		// "node has no payload yet". First insert lands in ObjectId; later
-		// inserts at the same node append to AdditionalObjectIds. Other
-		// fields (ScaleFactor, Density, Composition, TypeId) take the first
-		// inserter's values — this matches the legacy single-ObjectId
-		// readers' expectations and avoids a meaningless "merge" of
-		// per-particle aux data. If you need full provenance for collision
-		// cases, walk the indices and look the data up in your own buffers.
+		// First-writer-wins payload. ObjectId == -1 means the node has no
+		// payload yet; the first insert claims it and later inserts at the same
+		// quantized node are dropped. Collided inserts are not tracked: the node
+		// stores full per-particle data (density, composition, particle index),
+		// which a bare ObjectId cannot reconstruct, so multi-hit aggregation had
+		// no consumer.
 		if (Current->Data.ObjectId == -1)
 		{
 			Current->Data = InData;
-		}
-		//TODO: INSERT COLLISIONS MAY NOT MAKE SENSE FOR THE USE CASE ANYMORE... WE STORE MORE THAN AN OBJECT ID IN THE NODE
-		//TODO: SO ANY COLLIDED OBJECTS WOULD HAVE INCOMPLETE DATA/COULDN'T BE RECONSTRUCTED. IF WE WANT TO KEEP THIS FUNCTIONALITY, WE WOULD NEED TO MOVE THE DATA PAYLOAD OUT OF THE NODE INTO A MAP OR SOMETHING KEYED ON OBJECT ID
-		else if (InData.ObjectId != -1 && InData.ObjectId != Current->Data.ObjectId)
-		{
-			Current->Data.AdditionalObjectIds.Add(InData.ObjectId);
-		}
-		// Carry over any AdditionalObjectIds the incoming InData itself was
-		// already aggregating (re-inserts of merged data, etc.).
-		for (int32 ExtraId : InData.AdditionalObjectIds)
-		{
-			if (ExtraId != Current->Data.ObjectId
-				&& !Current->Data.AdditionalObjectIds.Contains(ExtraId))
-			{
-				Current->Data.AdditionalObjectIds.Add(ExtraId);
-			}
 		}
 		return Current;
 	}
@@ -452,7 +434,7 @@ public:
 			if (MinPossibleDist > 0.0)
 			{
 				const double MaxSubtreeExtent = 2.0 * InNode->Extent;
-				if (MaxSubtreeExtent * MaxSubtreeExtent < ScreenSpaceThresholdSq * MinPossibleDist * MinPossibleDist) return;
+				if (MaxSubtreeExtent* MaxSubtreeExtent < ScreenSpaceThresholdSq* MinPossibleDist* MinPossibleDist) return;
 			}
 		}
 

@@ -29,11 +29,6 @@ public:
 	/** EXACT particle extent captured at insert time (actor-local units). */
 	float ParticleExtent;
 
-	// Collision overflow for nodes that receive multiple inserts at the same
-	// quantized depth/position. 
-	// TODO: NOT SURE THIS IS STILL RELEVANT
-	TArray<int32> AdditionalObjectIds;
-
 	/**
 	 * Composes a deterministic, always-positive seed from a parent seed, a grid coordinate, and a particle index within that cell.
 	 */
@@ -49,25 +44,16 @@ struct SVO_API FPointData
 {
 private:
 	FVector PositionInternal;
-	FInt64Vector Int64PositionInternal;
 
 public:
 	int InsertDepth;
 	FVoxelData Data;
 
 	const FVector& GetPosition() const { return PositionInternal; }
-	const FInt64Vector& GetInt64Position() const { return Int64PositionInternal; }
 
 	void SetPosition(const FVector& InPosition)
 	{
 		PositionInternal = InPosition;
-		Int64PositionInternal = FInt64Vector(FMath::RoundToInt64(InPosition.X), FMath::RoundToInt64(InPosition.Y), FMath::RoundToInt64(InPosition.Z));
-	}
-
-	void SetInt64Position(const FInt64Vector& InInt64)
-	{
-		Int64PositionInternal = InInt64;
-		PositionInternal = FVector(static_cast<double>(InInt64.X), static_cast<double>(InInt64.Y), static_cast<double>(InInt64.Z));
 	}
 
 	//TODO: Should probably just do the scale calculation and manage the data struct creation a level up
@@ -92,7 +78,7 @@ public:
 		float ScaleFactor = FMath::Clamp(static_cast<float>((LocalSize / static_cast<double>(BestNodeExtent)) - 1.0), 0.0001f, 1.0f);
 		FVoxelData Data;
 		Data.ScaleFactor = ScaleFactor;
-		return FPointData(FInt64Vector::ZeroValue, BestDepth, Data);
+		return FPointData(FVector::ZeroVector, BestDepth, Data);
 	}
 
 	static double SampleScaleFromDistribution(double InMinScale, double InMaxScale, double InSample, const FRuntimeFloatCurve& InDistributionCurve) {
@@ -106,12 +92,6 @@ public:
 	FPointData(const FVector& InPosition, int InDepth, const FVoxelData& InData) : InsertDepth(InDepth), Data(InData)
 	{
 		SetPosition(InPosition);
-	}
-
-	//TODO: Check if we are even using int64 or if we have swapped to double octree bounds... if its double we could strip the whole 64 bit stack
-	FPointData(const FInt64Vector& InInt64, int InDepth, const FVoxelData& InData) : InsertDepth(InDepth), Data(InData)
-	{
-		SetInt64Position(InInt64);
 	}
 };
 

@@ -8,13 +8,13 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "PointCloudGenerator.h"
+#include <FOctree.h>
 
-class SVO_API StarSystemDataGenerator : public PointCloudGenerator
+class SVO_API StarSystemDataGenerator
 {
 public:
-	StarSystemDataGenerator() : PointCloudGenerator(8647) {}
-	StarSystemDataGenerator(int InSeed) : PointCloudGenerator(InSeed) {}
+	StarSystemDataGenerator() : Seed(8647) {}
+	StarSystemDataGenerator(int InSeed) : Seed(InSeed) {}
 
 	// Seeded so callers can reproduce the same system.
 	int Seed = 0;
@@ -27,6 +27,11 @@ public:
 	// from FStarSystemParams::ParentColor (FBaseParams). GenerateData tints the
 	// central star with this. (GenerateData is unused in the first pass.)
 	FLinearColor ParentColor = FLinearColor(1, 1, 1, 1);
+
+	// Ported from the former PointCloudGenerator base; used only by GenerateData.
+	FRotator Rotation = FRotator(0.0, 0.0, 0.0);
+	int MinInsertionDepth = 1;
+	int MaxInsertionDepth = 1;
 
 	// --- Object type enum (used as TypeId in octree nodes) ---
 	enum EObjectType
@@ -66,7 +71,7 @@ public:
 
 	// --- Full generation (future use) ---
 	// Not called during the first-pass analytic implementation.
-	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
+	void GenerateData(TSharedPtr<FOctree> InOctree);
 	void GenerateOrbits();
 	void GeneratePlanet(const FOrbit& InPlanetOrbit, int32 InOrbitIndex);
 	void GenerateDebris(const FOrbit& InDebrisOrbit, int32 InOrbitIndex);
