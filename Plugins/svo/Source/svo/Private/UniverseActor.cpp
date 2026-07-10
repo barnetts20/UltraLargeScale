@@ -727,23 +727,6 @@ void AUniverseActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) c
 }
 #pragma endregion
 
-#pragma region Grid Coord Helpers
-FIntVector AUniverseActor::PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const
-{
-	return FTierStreamingSystem::PositionToGridCoord(InPos, InGridDepth, UniverseParams.Extent, GridExtentMultiplier);
-}
-
-FVector AUniverseActor::GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const
-{
-	return FTierStreamingSystem::GridCoordToCenter(InCoord, InGridDepth, UniverseParams.Extent, GridExtentMultiplier);
-}
-
-double AUniverseActor::GetGridCellExtent(int32 InGridDepth) const
-{
-	return FTierStreamingSystem::GetGridCellExtent(InGridDepth, UniverseParams.Extent, GridExtentMultiplier);
-}
-#pragma endregion
-
 #pragma region Octree Bounds Check
 void AUniverseActor::CheckOctreeBounds()
 {

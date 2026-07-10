@@ -73,10 +73,6 @@ public:
 
 #pragma region Spatial Index
 
-	/** Multiplier applied to Params.Extent for streaming cell size computation.
-	 *  CellSize = (Params.Extent * GridExtentMultiplier) / (1 << GridDepth). */
-	static constexpr double GridExtentMultiplier = 4.0;
-
 	/** Multiplier applied to Params.Extent for octree root size.
 	 *  Must be a power of 2. 128 = 2^7: the tree covers +/-128x the sector
 	 *  extent per axis (~2^38 local units with the default 2^31 extent);
@@ -305,38 +301,6 @@ protected:
 	 * Called from Tick after all tier updates.
 	 */
 	void CheckOctreeBounds();
-
-#pragma endregion
-
-#pragma region Tier System - Grid Coord Helpers
-	//TODO: IF THESE ARE GENERICALLY APPLICABLE THEY MAY BE BETTER IN THE TEIR STACK SOMEWHERE, WORTH A LOOK
-	/**
-	 * Converts a sector-local position to a grid coordinate at the given depth.
-	 * Uses a center-aligned lattice: coord (0,0,0) maps to the origin cell.
-	 *
-	 * @param InPos       Position in sector-local space.
-	 * @param InGridDepth Tier grid depth (determines cell size).
-	 * @return            Integer grid coordinate.
-	 */
-	FIntVector PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const;
-
-	/**
-	 * Converts a grid coordinate back to the world-local cell center position.
-	 *
-	 * @param InCoord     Integer grid coordinate.
-	 * @param InGridDepth Tier grid depth.
-	 * @return            Cell center in sector-local space.
-	 */
-	FVector GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const;
-
-	/**
-	 * Returns the half-extent of a grid cell at the given depth.
-	 * Full cell size = 2 * GetGridCellExtent(depth).
-	 *
-	 * @param InGridDepth Tier grid depth.
-	 * @return            Cell half-extent in sector-local units.
-	 */
-	double GetGridCellExtent(int32 InGridDepth) const;
 
 #pragma endregion
 

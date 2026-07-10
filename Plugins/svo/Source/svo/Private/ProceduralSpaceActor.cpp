@@ -2,6 +2,7 @@
 #include "ProceduralSpaceActor.h"
 #include "Misc/ScopeExit.h"
 #include <Kismet/GameplayStatics.h>
+#include "FTierStreamingSystem.h"
 
 AProceduralSpaceActor::AProceduralSpaceActor()
 {
@@ -194,4 +195,19 @@ FVector AProceduralSpaceActor::ComputeChildSpawnLocation(const FVector& NodeCent
     // child spawn position.
     const FVector CameraToNode = RenderedPos - CurrentFrameOfReferenceLocation;
     return CurrentFrameOfReferenceLocation + CameraToNode * SizeRatio;
+}
+
+FIntVector AProceduralSpaceActor::PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const
+{
+    return FTierStreamingSystem::PositionToGridCoord(InPos, InGridDepth, GetExtent(), GridExtentMultiplier);
+}
+
+FVector AProceduralSpaceActor::GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const
+{
+    return FTierStreamingSystem::GridCoordToCenter(InCoord, InGridDepth, GetExtent(), GridExtentMultiplier);
+}
+
+double AProceduralSpaceActor::GetGridCellExtent(int32 InGridDepth) const
+{
+    return FTierStreamingSystem::GetGridCellExtent(InGridDepth, GetExtent(), GridExtentMultiplier);
 }

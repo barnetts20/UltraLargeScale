@@ -154,6 +154,24 @@ public:
     virtual double GetParentSpeedScale() const { return 1; }
 #pragma endregion
 
+#pragma region Tier System - Grid Coord Helpers
+    /** Multiplier applied to this actor's Extent for streaming cell-size
+     *  computation. Uniform across all layers.
+     *  CellSize = (GetExtent() * GridExtentMultiplier) / (1 << GridDepth). */
+    static constexpr double GridExtentMultiplier = 4.0;
+
+    /** Converts a sector-local position to a grid coordinate at the given
+     *  depth. Center-aligned lattice: coord (0,0,0) maps to the origin cell. */
+    FIntVector PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const;
+
+    /** Converts a grid coordinate back to the sector-local cell center. */
+    FVector GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const;
+
+    /** Half-extent of a grid cell at the given depth.
+     *  Full cell size = 2 * GetGridCellExtent(depth). */
+    double GetGridCellExtent(int32 InGridDepth) const;
+#pragma endregion
+
 #pragma region Shared Volumetric
     UPROPERTY()
     UTexture2D* PseudoVolumeTexture;

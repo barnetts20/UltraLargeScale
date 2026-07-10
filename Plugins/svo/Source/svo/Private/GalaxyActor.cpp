@@ -293,21 +293,6 @@ void AGalaxyActor::InitializeNiagara()
 #pragma endregion
 
 #pragma region Grid Coord Helpers
-FIntVector AGalaxyActor::PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const
-{
-	return FTierStreamingSystem::PositionToGridCoord(InPos, InGridDepth, Params.Extent, GridExtentMultiplier);
-}
-
-FVector AGalaxyActor::GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const
-{
-	return FTierStreamingSystem::GridCoordToCenter(InCoord, InGridDepth, Params.Extent, GridExtentMultiplier);
-}
-
-double AGalaxyActor::GetGridCellExtent(int32 InGridDepth) const
-{
-	return FTierStreamingSystem::GetGridCellExtent(InGridDepth, Params.Extent, GridExtentMultiplier);
-}
-
 bool AGalaxyActor::CellOverlapsVolume(const FIntVector& Coord, int32 GridDepth) const
 {
 	const FVector Center = GridCoordToCenter(Coord, GridDepth);

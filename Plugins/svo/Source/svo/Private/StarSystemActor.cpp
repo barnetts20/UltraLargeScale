@@ -523,21 +523,6 @@ FTierStreamingContext AStarSystemActor::BuildStreamingContext() const
 //  Grid Coord Helpers
 // ---------------------------------------------------------------------------
 #pragma region Grid Coord Helpers
-FIntVector AStarSystemActor::PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const
-{
-	return FTierStreamingSystem::PositionToGridCoord(InPos, InGridDepth, Params.Extent, GridExtentMultiplier);
-}
-
-FVector AStarSystemActor::GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const
-{
-	return FTierStreamingSystem::GridCoordToCenter(InCoord, InGridDepth, Params.Extent, GridExtentMultiplier);
-}
-
-double AStarSystemActor::GetGridCellExtent(int32 InGridDepth) const
-{
-	return FTierStreamingSystem::GetGridCellExtent(InGridDepth, Params.Extent, GridExtentMultiplier);
-}
-
 bool AStarSystemActor::CellOverlapsVolume(const FIntVector& Coord, int32 GridDepth) const
 {
 	const FVector Center = GridCoordToCenter(Coord, GridDepth);

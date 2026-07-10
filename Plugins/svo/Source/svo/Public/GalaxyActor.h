@@ -129,13 +129,6 @@ protected:
 	bool CellOverlapsVolume(const FIntVector& Coord, int32 GridDepth) const;
 #pragma endregion
 
-#pragma region Tier System - Grid Coord Helpers
-	FIntVector PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const;
-	FVector GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth) const;
-	double GetGridCellExtent(int32 InGridDepth) const;
-	static constexpr double GridExtentMultiplier = 4.0;
-#pragma endregion
-
 #pragma region Volumetric
 	FString VolumetricMaterialPath = FString("/svo/Galaxy/MT_GalaxyRaymarchPseudoVolume_Inst.MT_GalaxyRaymarchPseudoVolume_Inst");
 #pragma endregion
