@@ -10,9 +10,9 @@
 #include "NiagaraComponent.h"
 #include "DataTypes.h"
 #include "FNiagaraParticleBuffer.h"
-#include "FTierStreamingSystem.h"     // FTierStreamingContext now lives here
-#include "UniverseParams.h"           // FUniverseParams (member)
-#include "GalaxyParams.h"             // FGalaxyParams (member: galaxy template)
+#include "FTierStreamingSystem.h"
+#include "UniverseParams.h"
+#include "GalaxyParams.h"
 #include "UniverseActor.generated.h"
 class AGalaxyActor;
 #pragma endregion
@@ -25,7 +25,7 @@ class AGalaxyActor;
  * traversal model, and the galaxy spawn-scan pipeline.
  *
  * Initialization is fully asynchronous: BeginPlay kicks off a background
- * chain (InitializeData → InitializeNiagara) with game-thread rendezvous
+ * chain (InitializeData -> InitializeNiagara) with game-thread rendezvous
  * only where Niagara component creation requires it. After initialization the
  * actor runs entirely from Tick with no blocking calls.
  *
@@ -53,6 +53,7 @@ public:
 #pragma endregion
 
 #pragma region Public Octree Queries
+	//TODO: IS THIS DUPLICATED BETWEEN LAYERS. PRETTY MUCH ALL LAYERS SHOULD BE DOING SCREENSPACE BASED SPAWNING SO THIS IS CANIDATE TO HOIST TO PROCEDURAL SPACE ACTOR LEVEL
 	/**
 	 * Returns all octree nodes whose screen-space angular size
 	 * (Extent * (1 + ScaleFactor))^2 / DistSq exceeds InScreenSpaceThreshold^2.
@@ -159,6 +160,7 @@ public:
 
 #pragma region Spawn Range Scanning
 
+	//TODO: LIKE THE OTHER LAYERS, WE SHOULD DECIDE WHAT TO DO WITH THIS
 	/** Interval in seconds between spawn-scan dispatches. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
 	float SpawnScanInterval = 0.1f;
@@ -167,7 +169,7 @@ public:
 	 *  trigger a spawn event. Lower values allow smaller/more-distant objects
 	 *  to pass. Squared internally before traversal for performance. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
-	double SpawnScreenSpaceThreshold = 0.033;
+	double SpawnScreenSpaceThreshold = 0.02;
 
 	/** When true, draws a debug box around each node that passes the
 	 *  spawn-scan threshold each interval. */
@@ -185,7 +187,7 @@ public:
 
 	/**
 	 * Kicks off the async initialization chain:
-	 * InitializeChildPool → InitializeData → InitializeNiagara.
+	 * InitializeChildPool -> InitializeData -> InitializeNiagara.
 	 * Each step checks InitializationState and bails if Pooling or Destroying
 	 * is set. Safe to call from BeginPlay or externally before FinishSpawning.
 	 */
@@ -199,7 +201,7 @@ protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
-	/** Universe is the root of the tick cascade — it drives itself from Tick and
+	/** Universe is the root of the tick cascade - it drives itself from Tick and
 	*  is never ticked by a parent. Implemented as a no-op purely to satisfy the
 	*  abstract base contract. */
 	virtual void TickFromParent(float DeltaTime, const FVector& InPlayerPos) override {}
@@ -226,7 +228,8 @@ protected:
 #pragma endregion
 
 #pragma region Niagara Assets
-
+	//TODO: VALIDATE NAMING SCHEME ACROSS LAYERS, FOLLOW CONSISTENT NAMING PARADIGM FOR TIER/TIER CONFIGS/PARTICLE SYSTEMS
+	//TODO: WE MAY ALSO BE ABLE TO MOVE TO 1 PARTICLE SYSTEM PER LAYER - currently we just use it to easily divide up sprite materials, the logic is generally the same with the potential exception of pushing galaxy alignment normals
 	/** Large-tier galaxy sprite system. Renders galaxy cluster positions with
 	 *  face-normal rotation data for non-billboard shading. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
@@ -306,7 +309,7 @@ protected:
 #pragma endregion
 
 #pragma region Tier System - Grid Coord Helpers
-
+	//TODO: IF THESE ARE GENERICALLY APPLICABLE THEY MAY BE BETTER IN THE TEIR STACK SOMEWHERE, WORTH A LOOK
 	/**
 	 * Converts a sector-local position to a grid coordinate at the given depth.
 	 * Uses a center-aligned lattice: coord (0,0,0) maps to the origin cell.
@@ -364,6 +367,7 @@ protected:
 	/** Available galaxy actors ready for spawn. Managed as a stack (Pop/Insert). */
 	TArray<AGalaxyActor*> GalaxyPool;
 
+	//TODO: AGAIN... IF THIS LOGIC IS ALWAYS THE SAME IT COULD POTENTIALLY BE HOISTED INSTEAD OF REPLICATING, NEED TO INVESTIGATE
 	/**
 	 * Computes the world-space spawn position for a child actor at a given
 	 * unit scale, accounting for the parallax depth ratio between this sector

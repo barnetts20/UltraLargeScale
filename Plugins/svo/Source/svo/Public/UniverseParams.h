@@ -111,25 +111,22 @@ struct SVO_API FUniverseParams : public FBaseParams {
 		// Tier streaming params — depths evenly spaced by 2 (ratio 4 per tier).
 		LargeTier.GridDepth = 1;
 		LargeTier.NeighborhoodRadius = 1;
-		LargeTier.SlotCapacity = 8000;
+		LargeTier.SlotCapacity = 1000;
 
 		MidTier.GridDepth = 3;
 		MidTier.NeighborhoodRadius = 1;
-		MidTier.SlotCapacity = 4000;
+		MidTier.SlotCapacity = 500;
 
 		SmallTier.GridDepth = 5;
 		SmallTier.NeighborhoodRadius = 1;
-		SmallTier.SlotCapacity = 2000;
+		SmallTier.SlotCapacity = 500;
 
+		// TODO: DO WE NEED IF THIS IS JUST WRAPPING THE SHARED FUNCTION? 
 		// Scale ranges derived from MaxEntityScale (1e22) + depth spacing (2).
 		// 2^2 = 4, so each tier covers two octaves of scale (64x total spread):
-		//   Large: 2.5e21    → 1e22
-		//   Mid:   6.25e20   → 2.5e21
-		//   Small: 1.5625e20 → 6.25e20
+		//   Large: 2.5e21    -> 1e22
+		//   Mid:   6.25e20   -> 2.5e21
+		//   Small: 1.5625e20 -> 6.25e20
 		DeriveScaleRanges();
-
-		// Per-tier ScaleDistribution and DensityResponse curves default to
-		// identity (linear) via FTierParams(). Override in BP defaults or
-		// editor if a non-linear distribution is desired.
 	}
 };

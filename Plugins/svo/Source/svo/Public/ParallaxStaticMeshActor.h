@@ -6,6 +6,7 @@
 
 class AStarSystemActor;
 
+//TODO: DESCRIPTION - THIS FORMS A VERY BASIC WRAPPER TO APPLY PARALLAX TO STATIC MESHES
 UCLASS()
 class SVO_API AParallaxStaticMeshActor : public AActor
 {

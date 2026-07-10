@@ -5,17 +5,17 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "DataTypes.h"                // FPointData (used in .cpp)
-#include "FastNoise/FastNoise.h"      // FastNoise::SmartNode
+#include "DataTypes.h"
+#include "FastNoise/FastNoise.h"
 #include "ProceduralSpaceActor.h"
-#include "GalaxyParams.h"             // FGalaxyParams (moved out of this header)
-#include "FTierStreamingSystem.h"     // FTierParams (GenerateTierNode signature)
+#include "GalaxyParams.h"
+#include "FTierStreamingSystem.h"
 #include "FVolumeTextureUtils.h"
 #include "FNiagaraParticleBuffer.h"
 
 
 // ============================================================================
-// GalaxyDataGenerator � owns noise composition and tier generation callbacks
+// GalaxyDataGenerator - owns noise composition and tier generation callbacks
 // ============================================================================
 //
 // Mirrors UniverseDataGenerator structure. The galaxy actor wires tier
@@ -104,15 +104,11 @@ public:
 	float SampleDensity(const FVector& InNormPos) const;
 
 	/// Batch-evaluate the density field for an array of positions.
-	void SampleDensityBatch(
-		float* OutDensity,
-		int32 InCount,
-		const float* InX,
-		const float* InY,
-		const float* InZ) const;
+	void SampleDensityBatch(float* OutDensity, int32 InCount, const float* InX, const float* InY, const float* InZ) const;
 
+	// TODO - THESE TYPE OF "REGION" COMMENTS WOULD BE BETTER OFF AS ACTUAL pragma regions SO THEY CAN BE COLLAPSED
 	// -----------------------------------------------------------------------
-	// Initialization
+	// Initialization 
 	// -----------------------------------------------------------------------
 
 	/// Build the encoded noise graph (kept for future use) and mark ready.
@@ -159,15 +155,7 @@ public:
 	/// @param InTierParams   Tier config (scale range, density curve, etc).
 	/// @param InSeedOffset   Added to Params.Seed for stream isolation between tiers.
 	/// @param OutSlotCount   Receives the number of accepted particles.
-	void GenerateTierNode(
-		const FIntVector& InCoord,
-		int32 InSlotIndex,
-		FNiagaraParticleBuffer& InBuffer,
-		const FVector& InNodeCenter,
-		double InCellExtent,
-		const FTierParams& InTierParams,
-		int32 InSeedOffset,
-		int32& OutSlotCount) const;
+	void GenerateTierNode(const FIntVector& InCoord, int32 InSlotIndex, FNiagaraParticleBuffer& InBuffer, const FVector& InNodeCenter, double InCellExtent, const FTierParams& InTierParams, int32 InSeedOffset, int32& OutSlotCount) const;
 
 	// -----------------------------------------------------------------------
 	// Large Tier — SDF-culled grid generation

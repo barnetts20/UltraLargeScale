@@ -8,7 +8,7 @@
 #include "ProceduralSpaceActor.h"
 #include "StarSystemDataGenerator.h"
 #include "FTierStreamingSystem.h"
-#include "StarSystemParams.h"         // FStarSystemParams
+#include "StarSystemParams.h"
 #include "StarSystemActor.generated.h"
 
 class AGalaxyActor;
@@ -38,10 +38,12 @@ public:
 #pragma endregion
 
 #pragma region Spawn Range Scanning (public - tunable in editor)
+	//TODO: SCAN INTERVAL SHOULD PROBABLY BE MANAGED CENTRALLY FOR ALL LAYERS... NEED TO CHECK WHATS GOING ON WITH THIS AND POTENTIALLY HOIST. SIMILAR TO TICK, THIS SHOULD PROBABLY BE ORCHESTRATED TOP DOWN (MAYBE IT ALREADY IS)
 	/** Interval in seconds between planet spawn-scan dispatches. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
 	float SpawnScanInterval = 0.1f;
 
+	//TODO: HOIST?
 	/** Screen-space threshold for planet spawn/despawn.
 	 *  Smaller = spawn from further away. Try 0.01-0.05. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
@@ -68,7 +70,6 @@ public:
 #pragma endregion
 
 #pragma region Planet Pooled Spawn/Despawn Hooks
-	/** Maps each live octree node (planet) to its spawned placeholder actor. */
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AActor>> SpawnedPlanets;
 
 	void SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode);
@@ -87,6 +88,8 @@ protected:
 	virtual void InitializeData() override;
 	virtual void InitializeVolumetric() override;
 	virtual void InitializeNiagara() override;
+	// TOOD: COMMENT BELOW IS ONLY ACCURATE CURRENTLY... THIS WILL EVENTUALLY BE MERGED WITH OUR PLANET PROJECT AND THEN IT WOULD LIKELY BE USING A HYRBID POOL APPROACH
+	// COMPLEX ACTORS SUCH AS PLANETS WOULD BE POOLED, SIMPLE ACTORS (STATIC MESHES ETC) MAY JUST SPAWN WITH NO POOL
 	// No InitializeChildPool — star systems manage individual actor spawns, not a pool.
 
 	virtual FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const override;
@@ -95,7 +98,6 @@ protected:
 #pragma region Data Generation
 	StarSystemDataGenerator SystemGenerator;
 
-	/** Analytically generated planet positions (line layout, no noise). */
 	TArray<FVector>       PlanetPositions;
 	TArray<float>         PlanetExtents;
 	TArray<FLinearColor>  PlanetColors;
@@ -103,13 +105,13 @@ protected:
 
 #pragma region Niagara Assets
 	UPROPERTY()
-	UNiagaraSystem* StarSystemLargeCloud; // Planet sprite system
+	UNiagaraSystem* StarSystemLargeCloud;
 
 	UPROPERTY()
-	UNiagaraSystem* StarSystemMidCloud;   // Placeholder
+	UNiagaraSystem* StarSystemMidCloud;
 
 	UPROPERTY()
-	UNiagaraSystem* StarSystemSmallCloud; // Placeholder
+	UNiagaraSystem* StarSystemSmallCloud;
 #pragma endregion
 
 #pragma region Tier System - Config / State
@@ -143,6 +145,7 @@ protected:
 	 *  AGalaxyActor::CellOverlapsVolume. */
 	bool CellOverlapsVolume(const FIntVector& Coord, int32 GridDepth) const;
 
+	//TODO: IS THIS ALWAYS THE SAME FOR ALL LAYERS? IF SO WE COULD HOIST
 	/** GridExtentMultiplier mirrors GalaxyActor. The star system's spatial grid
 	 *  is sized relative to Params.Extent * this multiplier so the large tier
 	 *  single cell comfortably covers all planetary orbits. */
@@ -158,7 +161,6 @@ protected:
 private:
 #pragma region Spawn Scan - Internal
 	std::atomic<bool> bSpawnScanInProgress{ false };
-	// NOTE: LastScanDispatchTime lives on AProceduralSpaceActor.
 	TSet<TSharedPtr<FOctreeNode>> TrackedPlanetNodes;
 	bool bHasPendingScanResults = false;
 	TArray<TSharedPtr<FOctreeNode>> PendingScanResults;

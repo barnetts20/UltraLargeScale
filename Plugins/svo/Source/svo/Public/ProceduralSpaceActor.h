@@ -17,7 +17,8 @@ struct SVO_API FBaseParams {
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
     int Seed = 0;
 
-    /** LOCAL half-extent of this actor's virtual space.
+    //TODO: NOT SURE ABOUT ACCURACY OF BELOW COMMENT... THE EXTENT I THOUGHT WAS RELATED TO THE OCTREE BOUNDS (AND POTENTIALLY THE PARTICLE SYSTEM) NO? THATS NOT THE SAME AS THE VIRTUAL SPACE
+    /** LOCAL half-extent of this actor's virtual space. 
      *  DERIVED AT SPAWN for pooled children: the spawning parent sets
      *  Extent = (parent particle's real size) / UnitScale, so real scale
      *  expresses itself as model size (and therefore content COUNT), while
@@ -39,6 +40,7 @@ struct SVO_API FBaseParams {
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
     double UnitScale = 1.0;
 
+    //TODO: THESE NEED A LOOK... STILL VALID? FOR ALL LAYERS?
     /** Safety clamps for the spawn-time Extent derivation, protecting
      *  against outlier parent particles or a mistuned layer UnitScale.
      *  A spawn hitting either bound logs a warning — treat that as a
@@ -81,6 +83,7 @@ public:
     TSharedPtr<FOctree> Octree;
     ELifecycleState InitializationState = ELifecycleState::Uninitialized;
 
+    //TODO: ISDEBUG FLAG AUDIT - MAKE SURE DEBUG STUFF IS GATED, COULD ALSO IMPACT OR BE INCOPRORATED INTO LOGGING
     /** Enables debug drawing and periodic verbose diagnostics on this actor.
      *  (Was a plain member — unsettable outside C++.) */
     UPROPERTY(EditAnywhere, Category = "Debug")

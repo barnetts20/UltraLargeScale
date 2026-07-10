@@ -4,26 +4,30 @@
 // per-call actor context (FTierStreamingContext), and the stateless utility
 // pipeline that operates on them. Both AUniverseActor and AGalaxyActor (and
 // AStarSystemActor) include this header and delegate here.
-//
+// 
+// TODO: LEAVING THE NEXT BLOCK EVEN THOUGH I WAS ABOUT TO DELETE IT - IT FORMS A GREAT EXAMPLE OF THE TYPE OF COMMENT I WANT TO CULL
+// TODO: A COMMENT TALKING ABOUT THE WAY THINGS "USED" TO BE IN A CODE BASE WHERE IT IS NO LONGER LIKE THAT, IS WORSE THAN USELESS - ITS BLOAT
+// TODO: COMMENTS SHOULD BE STATELESS/TIME UNAWARE - I WANT COMMENTS THAT TELL ME HOW THINGS WORK, NOT HOW IT USED TO WORK AND WHAT WE CHANGED - WE SHOULD KEEP AN EYE OUT FOR SIMILAR COMMENTS IN THE CODE BASE TO CLEAN THEM UP
 // FTierParams and FTierStreamingContext previously lived in
 // UniverseDataGenerator.h and FTierStreamingContext.h respectively; they were
 // consolidated here so every consumer of the tier pipeline pulls a single
 // header and no longer cross-includes a generator or a one-struct file.
 
+// TODO: PROJECT WIDE - CONSISTENT DOCUMENTATION COMMENT FORMATTING. WE ALSO WANT TO BE AS TERSE AS POSSIBLE WHILE MAINTAINING CURRENT ARCHITECHTURE DOCUMENTATION SPECIFICS (LESS VERBOSE, WHILE MAINTAINING FUNCTIONAL DOCUMENTATION OF BEHAVIOR)
 #pragma once
 
+//TODO: NITPICKY, AND ONLY LEAVING ONE COMMENT BUT WE COULD USE AN INCLUDE ORDERING AUDIT TO ORDER ALL THE INCLUDES ACROSS THE PROJECT ALPHABETICALLY UNLESS THEY REQUIRE A SPECIFIC ORDERING (.generated)
 #include "CoreMinimal.h"
 #include "FNiagaraParticleBuffer.h"
 #include "FOctree.h"
 #include "DataTypes.h"
-#include "Curves/CurveFloat.h"          // FRuntimeFloatCurve (used by FTierParams)
+#include "Curves/CurveFloat.h"
 #include "NiagaraComponent.h"
 #include "NiagaraSystem.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
-#include "FTierStreamingSystem.generated.h"  // must be last: this header now declares a USTRUCT
+#include "FTierStreamingSystem.generated.h"
 
-// FTierStreamingContext uses this only as a pointer (see below).
 class USceneComponent;
 
 // ============================================================================
@@ -38,11 +42,6 @@ class USceneComponent;
 /// struct (FUniverseParams, FGalaxyParams, FStarSystemParams) holds one of
 /// these per tier, and BuildTierConfigs() reads them to populate the runtime
 /// FParticleTierConfig.
-///
-/// Scale ranges (MinScale / MaxScale) are NOT edited directly — they are
-/// derived at runtime by each params struct's DeriveScaleRanges(), which
-/// delegates to DeriveTierScaleRanges() below, from MaxEntityScale and the
-/// tier depth sequence.
 USTRUCT(BlueprintType)
 struct SVO_API FTierParams
 {
@@ -57,6 +56,7 @@ struct SVO_API FTierParams
 
 	// Half-width of the 3D neighborhood streamed around the player.
 	// 1 -> 3x3x3 = 27 slots.
+	// TODO: I WOULD BE INTERESTED TO VALIDATE WHAT HAPPENS WITH A RADIUS > 1 - WOULD OUR SYSTEM WORK, OR FALL TO PEICES
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming")
 	int32 NeighborhoodRadius = 1;
 
@@ -78,8 +78,7 @@ struct SVO_API FTierParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distribution")
 	FRuntimeFloatCurve DensityResponse;
 
-	// --- Derived at runtime — not directly editable ---
-
+	//TODO: THESE ARE DERIVED... IF WE DONT MAKE USE OF THEM EXTERNALLY WE COULD POTENTIALLY MAKE PRIVATE
 	// Largest entity scale this tier represents.
 	double MaxScale = 0.0;
 
@@ -115,26 +114,14 @@ struct SVO_API FTierParams
 		if (NumTiers == 0) return;
 
 		Tiers[0]->MaxScale = MaxEntityScale;
-
 		for (int32 i = 0; i < NumTiers; ++i)
 		{
 			int32 DepthDelta;
-			if (i + 1 < NumTiers)
-			{
-				DepthDelta = Tiers[i + 1]->GridDepth - Tiers[i]->GridDepth;
-			}
-			else
-			{
-				DepthDelta = Tiers[i]->GridDepth - Tiers[i - 1]->GridDepth;
-			}
-
+			if (i + 1 < NumTiers) DepthDelta = Tiers[i + 1]->GridDepth - Tiers[i]->GridDepth;
+			else DepthDelta = Tiers[i]->GridDepth - Tiers[i - 1]->GridDepth;
 			const double Ratio = static_cast<double>(1 << FMath::Clamp(DepthDelta, 1, 20));
 			Tiers[i]->MinScale = Tiers[i]->MaxScale / Ratio;
-
-			if (i + 1 < NumTiers)
-			{
-				Tiers[i + 1]->MaxScale = Tiers[i]->MinScale;
-			}
+			if (i + 1 < NumTiers) Tiers[i + 1]->MaxScale = Tiers[i]->MinScale;
 		}
 	}
 };
@@ -381,22 +368,20 @@ struct FParticleTierState
 	 *  padding without iterating the full SlotCapacity. */
 	TArray<int32> SlotCounts;
 
-	/**
-	 * Persistent procgen cache keyed by grid coord. On first visit a cell is
-	 * generated and its output stored here (cache-miss). On re-entry the
-	 * stored data is blitted directly into the back-buffer, skipping all noise
-	 * and rejection sampling (cache-hit). The slot is recycled on exit but the
-	 * cache entry survives. Entries beyond NeighborhoodRadius + 4 cells
-	 * (Chebyshev) are evicted by CullTierCache after each boundary cross.
-	 */
+	/** Persistent procgen cache keyed by grid coord. On first visit a cell is
+	 *  generated and its output stored here (cache-miss). On re-entry the
+	 *  stored data is blitted directly into the back-buffer, skipping all noise
+	 *  and rejection sampling (cache-hit). The slot is recycled on exit but the
+	 *  cache entry survives. Entries beyond NeighborhoodRadius + 4 cells
+	 *  (Chebyshev) are evicted by CullTierCache after each boundary cross. */
 	TMap<FIntVector, FCachedCellData> CellCache;
 
-	/// Resets all PLAIN STATE DATA to the freshly-constructed baseline so a
-	/// pooled owner can reuse this tier as if new. Does NOT touch
-	/// NiagaraComponents — those are UObjects the owning actor destroys
-	/// (resource lifetime); it destroys them and empties that container, then
-	/// calls this. Call only AFTER the push worker has exited and any in-flight
-	/// tier task has drained (both read the fields cleared here).
+	/** Resets all PLAIN STATE DATA to the freshly - constructed baseline so a
+	 *  pooled owner can reuse this tier as if new. Does NOT touch
+	 *  NiagaraComponents — those are UObjects the owning actor destroys
+	 *  (resource lifetime); it destroys them and empties that container, then
+	 *  calls this. Call only AFTER the push worker has exited and any in-flight
+	 *  tier task has drained (both read the fields cleared here). */
 	void ResetState()
 	{
 		Buffers.Empty();
@@ -408,8 +393,8 @@ struct FParticleTierState
 		StampedNCenter = FVector::ZeroVector;
 		AppliedBoundsPad = -1.0;
 		bUpdateInProgress.store(false);
-		bBoundsDirty.store(false);   // was orphaned — ResetForPool never cleared it
-		bShuttingDown.store(false);  // clear the shutdown bar for the next spawn
+		bBoundsDirty.store(false);
+		bShuttingDown.store(false);
 	}
 };
 
@@ -510,26 +495,18 @@ struct FTierStreamingSystem
 		double Extent, double GridExtentMultiplier)
 	{
 		const double CellSize = (Extent * GridExtentMultiplier) / (1 << InGridDepth);
-		return FIntVector(
-			FMath::FloorToInt32(InPos.X / CellSize + 0.5),
-			FMath::FloorToInt32(InPos.Y / CellSize + 0.5),
-			FMath::FloorToInt32(InPos.Z / CellSize + 0.5));
+		return FIntVector(FMath::FloorToInt32(InPos.X / CellSize + 0.5), FMath::FloorToInt32(InPos.Y / CellSize + 0.5), FMath::FloorToInt32(InPos.Z / CellSize + 0.5));
 	}
 
 	/** Converts a grid coordinate back to the cell center position. */
-	static FVector GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth,
-		double Extent, double GridExtentMultiplier)
+	static FVector GridCoordToCenter(const FIntVector& InCoord, int32 InGridDepth, double Extent, double GridExtentMultiplier)
 	{
 		const double CellSize = (Extent * GridExtentMultiplier) / (1 << InGridDepth);
-		return FVector(
-			static_cast<double>(InCoord.X) * CellSize,
-			static_cast<double>(InCoord.Y) * CellSize,
-			static_cast<double>(InCoord.Z) * CellSize);
+		return FVector(static_cast<double>(InCoord.X) * CellSize, static_cast<double>(InCoord.Y) * CellSize, static_cast<double>(InCoord.Z) * CellSize);
 	}
 
 	/** Returns the half-extent of a grid cell at the given depth. */
-	static double GetGridCellExtent(int32 InGridDepth,
-		double Extent, double GridExtentMultiplier)
+	static double GetGridCellExtent(int32 InGridDepth, double Extent, double GridExtentMultiplier)
 	{
 		return (Extent * GridExtentMultiplier) / (1 << (InGridDepth + 1));
 	}
@@ -564,45 +541,41 @@ struct FTierStreamingSystem
 	 *  Side-wide window; NEVER changes for a resident coord. */
 	static FORCEINLINE int32 SlotOf(const FIntVector& Coord, int32 Side)
 	{
-		return FlattenResidues(
-			PosMod(Coord.X, Side), PosMod(Coord.Y, Side), PosMod(Coord.Z, Side), Side);
+		return FlattenResidues(PosMod(Coord.X, Side), PosMod(Coord.Y, Side), PosMod(Coord.Z, Side), Side);
 	}
 
 	// ========================================================================
 	//  Tier Initialization
 	// ========================================================================
 
-	static void InitializeTier(const FTierStreamingContext& Ctx,
-		FParticleTierConfig& Config, FParticleTierState& State,
-		TArray<UNiagaraComponent*>& OutComponents);
+	static void InitializeTier(const FTierStreamingContext& Ctx, FParticleTierConfig& Config, FParticleTierState& State, TArray<UNiagaraComponent*>& OutComponents);
 
 	// ========================================================================
 	//  Tier Streaming Update
 	// ========================================================================
 
-	static void UpdateTier(const FTierStreamingContext& Ctx,
-		FParticleTierConfig& Config, FParticleTierState& State);
+	static void UpdateTier(const FTierStreamingContext& Ctx, FParticleTierConfig& Config, FParticleTierState& State);
 
 	// ========================================================================
 	//  Niagara Push
 	// ========================================================================
 
-	// Boundary-cross transition COMMIT (worker thread, tail of UpdateTier's
-	// async task). Under the tier PushCS, atomically:
-	//   1. stamps StampedCenter/StampedNCenter with the center the new
-	//      lattice derives from (§ C_stamp),
-	//   2. uploads the buffer — cell-local positions, per-slot lattice
-	//      (User.CellOffsets), and the (NCenter - VT) uniform, reading
-	//      the freshest VT via GetLatestVT at execution time.
-	// The GPU flips atomically at the upload: it keeps rendering its own
-	// prior copy of every array until these sets land, so in-place CPU
-	// generation is never visible mid-write. Because the per-frame push
-	// takes the same lock and reads the same stamp, no push can pair a
-	// lattice/uniform built against different centers. Bounds are deferred
-	// to ApplyPendingBounds on the game thread.
-	static void PushTierToNiagara(const TFunction<FVector()>& GetLatestVT,
-		const FIntVector& NewCenter, const FVector& NewNCenter,
-		const FParticleTierConfig& Config, FParticleTierState& State);
+	/** Boundary - cross transition COMMIT(worker thread, tail of UpdateTier's
+	 * async task). Under the tier PushCS, atomically:
+	 *   1. stamps StampedCenter/StampedNCenter with the center the new
+	 *      lattice derives from (§ C_stamp),
+	 *   2. uploads the buffer — cell-local positions, per-slot lattice
+	 *      (User.CellOffsets), and the (NCenter - VT) uniform, reading
+	 *      the freshest VT via GetLatestVT at execution time.
+	 * The GPU flips atomically at the upload: it keeps rendering its own
+	 * prior copy of every array until these sets land, so in-place CPU
+	 * generation is never visible mid-write. Because the per-frame push
+	 * takes the same lock and reads the same stamp, no push can pair a
+	 * lattice/uniform built against different centers. Bounds are deferred
+	 * to ApplyPendingBounds on the game thread. 
+	 */
+	static void PushTierToNiagara(const TFunction<FVector()>& GetLatestVT, const FIntVector& NewCenter, const FVector& NewNCenter, const FParticleTierConfig& Config, FParticleTierState& State);
+	
 	/**
 	 * Per-frame parallax re-push: a SINGLE FVector uniform per component —
 	 * (StampedNCenter - VT) — no array traffic at all. Skips (rather than
@@ -614,39 +587,29 @@ struct FTierStreamingSystem
 	 * threshold gate and LastPushedVirtualTraversal bookkeeping stay with
 	 * the caller — this only performs the writes.
 	 */
-	static void PushTierPositions(
-		std::initializer_list<FParticleTierState*> Tiers,
-		const TFunction<FVector()>& GetLatestVT);
+	static void PushTierPositions(std::initializer_list<FParticleTierState*> Tiers, const TFunction<FVector()>& GetLatestVT);
 
 	// Game thread: apply Niagara fixed bounds deferred from a boundary-cross push.
 	static void ApplyPendingBounds(FParticleTierConfig& Config, FParticleTierState& State);
 
 	// Game thread (teardown): block until in-flight pushes drain, then bar new ones.
 	static void BeginShutdownDrain(FParticleTierState& State);
+
 	// ========================================================================
 	//  Octree Integration
 	// ========================================================================
 
-	static void InsertTierIntoOctree(const FTierStreamingContext& Ctx,
-		const FParticleTierConfig& Config, FParticleTierState& State);
+	static void InsertTierIntoOctree(const FTierStreamingContext& Ctx, const FParticleTierConfig& Config, FParticleTierState& State);
 
-	static void InsertSlotIntoOctree(const FTierStreamingContext& Ctx,
-		const FParticleTierConfig& Config, FParticleTierState& State,
-		const FIntVector& Coord, int32 SlotIndex);
+	static void InsertSlotIntoOctree(const FTierStreamingContext& Ctx, const FParticleTierConfig& Config, FParticleTierState& State, const FIntVector& Coord, int32 SlotIndex);
 
-	static void InsertParticleIntoOctree(const FTierStreamingContext& Ctx,
-		FSlotEntry& Entry, const FVector& Position, float Extent,
-		const FIntVector& GridCoord, int32 GenerationIndex, int32 AbsoluteBufferIndex,
-		double TreeExtent, int32 TierIndex);
+	static void InsertParticleIntoOctree(const FTierStreamingContext& Ctx, FSlotEntry& Entry, const FVector& Position, float Extent, const FIntVector& GridCoord, int32 GenerationIndex, int32 AbsoluteBufferIndex, double TreeExtent, int32 TierIndex);
 
 	// ========================================================================
 	//  Cell Cache
 	// ========================================================================
 
-	static void CacheCellFromBuffers(const FParticleTierConfig& Config,
-		FParticleTierState& State, const FIntVector& Coord,
-		int32 SlotIndex);
+	static void CacheCellFromBuffers(const FParticleTierConfig& Config, FParticleTierState& State, const FIntVector& Coord, int32 SlotIndex);
 
-	static void CullTierCache(const FParticleTierConfig& Config,
-		FParticleTierState& State, const FIntVector& NewCenter);
+	static void CullTierCache(const FParticleTierConfig& Config, FParticleTierState& State, const FIntVector& NewCenter);
 };

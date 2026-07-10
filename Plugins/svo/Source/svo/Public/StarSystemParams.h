@@ -1,10 +1,8 @@
-﻿// Fill out your copyright notice in the Description page of Project Settings.
-
-#pragma once
+﻿#pragma once
 
 #include "CoreMinimal.h"
-#include "ProceduralSpaceActor.h"     // FBaseParams (base of FStarSystemParams)
-#include "FTierStreamingSystem.h"     // FTierParams (shared tier config)
+#include "ProceduralSpaceActor.h"
+#include "FTierStreamingSystem.h"
 #include "StarSystemParams.generated.h"
 
 

@@ -3,12 +3,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "DataTypes.h"                // FPointData
-#include "FastNoise/FastNoise.h"      // FastNoise::SmartNode
+#include "DataTypes.h"
+#include "FastNoise/FastNoise.h"
 #include "ProceduralSpaceActor.h"
 #include "FVolumeTextureUtils.h"
 #include "FNiagaraParticleBuffer.h"
-#include "UniverseParams.h"           // FUniverseParams (moved out of this header)
+#include "UniverseParams.h"
 
 /// UNIVERSE GENERATOR - GENERATES DATA FOR POPULATING A UNIVERSE
 ///

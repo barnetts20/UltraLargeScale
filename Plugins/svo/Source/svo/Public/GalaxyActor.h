@@ -10,7 +10,7 @@
 #include "CoreMinimal.h"
 #include "ProceduralSpaceActor.h"
 #include "GalaxyDataGenerator.h"
-#include "GalaxyParams.h"             // FGalaxyParams (member)
+#include "GalaxyParams.h"
 #include "FTierStreamingSystem.h"
 #include "UniverseActor.h"
 #include "GalaxyActor.generated.h"
@@ -38,7 +38,7 @@ public:
 #pragma endregion
 
 #pragma region Spawn Range Scanning (public - tunable in editor)
-	/** Interval in seconds between spawn-scan dispatches. */
+	//TODO: SHOULD THESE SPAWN SCAN PARAMS BE HOISTED TO PROCEDURAL SPACE ACTOR? ALSO, SHOULD OUR SCAN INTERVAL BE CONTROLLED TOP DOWN INSTEAD OF EACH ENTITY TRACKING A SEPERATE TIMER?
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
 	float SpawnScanInterval = 0.1f;
 
@@ -89,9 +89,7 @@ protected:
 #pragma region Params Accessors
 	virtual double GetUnitScale() const override { return Params.UnitScale; }
 	virtual double GetExtent() const override { return Params.Extent; }
-	virtual double GetParentSpeedScale() const override {
-		return Universe ? Universe->SpeedScale : SpeedScale;
-	}
+	virtual double GetParentSpeedScale() const override { return Universe ? Universe->SpeedScale : SpeedScale; }
 #pragma endregion
 
 #pragma region Data Generation
@@ -148,6 +146,7 @@ protected:
 	TArray<AStarSystemActor*> StarSystemPool;
 
 	/// Mirrors AUniverseActor::ComputeChildSpawnLocation, accounts for VT.
+	// TODO: IS THIS A CONSISTENT FUNCTION ACROSS ALL LAYERS, SEEMS LIKE IT MIGHT BE - HOIST?
 	virtual FVector ComputeChildSpawnLocation(const FVector& NodeCenter, double ChildUnitScale) const override;
 
 	/** Deferred placement: finalizes world position and VirtualTraversal for a
@@ -168,8 +167,6 @@ private:
 #pragma region Spawn Scan - Internal
 	/** Guards against overlapping spawn-scan background tasks. */
 	std::atomic<bool> bSpawnScanInProgress{ false };
-
-	// NOTE: LastScanDispatchTime lives on AProceduralSpaceActor.
 
 	/** Nodes currently inside the spawn threshold. Diffed each interval. */
 	TSet<TSharedPtr<FOctreeNode>> TrackedSpawnNodes;

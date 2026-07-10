@@ -12,7 +12,7 @@ public:
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
 };
-
+//TODO: Robust instrumentation could be updated... we have done several refactors since we needed this, but instrumentation of game thread/non game thread actions would be very useful from an optimization and tuning standpoint
 // ===========================================================================
 //  Inline Game-Thread Profiler  (TEMPORARY — remove when optimization is done)
 // ---------------------------------------------------------------------------

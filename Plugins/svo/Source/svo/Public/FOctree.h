@@ -17,6 +17,7 @@ class SVO_API FOctreeNode : public TSharedFromThis<FOctreeNode>
 {
 public:
 #pragma region Public Parameters
+	// TODO: Shift to int64 or composite int64 morton index instead of heavyweight TArray<uint8>
 	TArray<uint8> Index;
 	int Depth;
 	TWeakPtr<FOctreeNode> Parent;
@@ -67,6 +68,8 @@ public:
 #pragma endregion
 
 #pragma region BulkInsert
+	//TODO: WITH SOME MODIFICATION, WE MAY BE ABLE TO USE THE BULK INSERT PATH WHEN REGENERATING A SET OF CELLS... CHUNK DEPTH WOULD HAVE TO BE ADAPTIVE INSTEAD OF STATIC, AND IT WOULD HAVE TO OPERATE FROM A GIVEN NODE INSTEAD OF ROOT
+	//TODO: BUT WE MAY GET A PERF IMPROVEMENT ON OCTREE INSERTION SO WORTH THINKING ABOUT
 	void BulkInsertPositions(TArray<FPointData> InPointData, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes, TArray<TSharedPtr<FOctreeNode>>& OutVolumeChunks) {
 		if (bIsResetting.load()) {
 			return; // Early exit if shutting down
@@ -240,6 +243,8 @@ public:
 		{
 			Current->Data = InData;
 		}
+		//TODO: INSERT COLLISIONS MAY NOT MAKE SENSE FOR THE USE CASE ANYMORE... WE STORE MORE THAN AN OBJECT ID IN THE NODE
+		//TODO: SO ANY COLLIDED OBJECTS WOULD HAVE INCOMPLETE DATA/COULDN'T BE RECONSTRUCTED. IF WE WANT TO KEEP THIS FUNCTIONALITY, WE WOULD NEED TO MOVE THE DATA PAYLOAD OUT OF THE NODE INTO A MAP OR SOMETHING KEYED ON OBJECT ID
 		else if (InData.ObjectId != -1 && InData.ObjectId != Current->Data.ObjectId)
 		{
 			Current->Data.AdditionalObjectIds.Add(InData.ObjectId);
@@ -306,7 +311,8 @@ public:
 		}
 	}
 
-	// Add to FOctree class in FOctree.h
+	//TODO: THIS SVO WAS DEVELOPED WITH A GENERIC INTENT... SOME OF THE LOGIC MAY NOT BE NEEDED FOR OUR PURPOSES ANY LONGER WITH A DENSITY FIRST GENERATION PARADIGM
+	//TODO: AT THIS POINT WE COULD POTENTIALLY START *SPECIALIZING* 
 	float SampleDensityAtPosition(const FVector& InPosition) const
 	{
 		if (!Root.IsValid()) return 0.0f;
@@ -440,40 +446,21 @@ public:
 		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) return;
 
 		const double DistSq = FVector::DistSquared(InNode->Center, InCenter);
-
-		// Subtree prune — strictly conservative. Every particle in this
-		// subtree lies inside the node's AABB (insert descends by position),
-		// and no particle's tested extent can exceed 2x the node extent:
-		// captured ParticleExtent <= node extent at the depth the particle
-		// fit (MakePointDataFromWorldScale picks the deepest depth with
-		// size <= extent), and the legacy fallback below is bounded by
-		// Extent * (1 + ScaleFactor) <= 2 * Extent. Closest possible
-		// particle sits at the AABB corner: Dist - sqrt(3) * Extent. Prune
-		// only when even that best case fails the threshold.
-		// (The previous form ignored ScaleFactor and the corner distance
-		// entirely and could cull nodes whose own test passed — e.g. the
-		// direct planet inserts with ScaleFactor = 0.5 lost ~1/3 of their
-		// intended spawn range.)
 		{
 			constexpr double Sqrt3 = 1.7320508075688772;   // AABB corner distance factor
-			const double MinPossibleDist =
-				FMath::Sqrt(DistSq) - Sqrt3 * InNode->Extent;
+			const double MinPossibleDist = FMath::Sqrt(DistSq) - Sqrt3 * InNode->Extent;
 			if (MinPossibleDist > 0.0)
 			{
 				const double MaxSubtreeExtent = 2.0 * InNode->Extent;
-				if (MaxSubtreeExtent * MaxSubtreeExtent <
-					ScreenSpaceThresholdSq * MinPossibleDist * MinPossibleDist)
-					return;
+				if (MaxSubtreeExtent * MaxSubtreeExtent < ScreenSpaceThresholdSq * MinPossibleDist * MinPossibleDist) return;
 			}
 		}
 
-		// Recurse into children before testing this node.
 		for (const TSharedPtr<FOctreeNode>& Child : InNode->Children)
 		{
 			if (Child.IsValid())
 			{
-				CollectNodesByScreenSpace(Child, OutNodes, InCenter, ScreenSpaceThresholdSq,
-					InMinDepth, InMaxDepth, InTypeIdFilter);
+				CollectNodesByScreenSpace(Child, OutNodes, InCenter, ScreenSpaceThresholdSq, InMinDepth, InMaxDepth, InTypeIdFilter);
 			}
 		}
 
@@ -484,25 +471,15 @@ public:
 		// quantized-node approximation, Extent * (1 + ScaleFactor) against
 		// the node center.
 		const bool bHasParticle = InNode->Data.ParticleExtent > 0.0f;
-		const double TestExtent = bHasParticle
-			? static_cast<double>(InNode->Data.ParticleExtent)
-			: InNode->Extent * (1.0 + InNode->Data.ScaleFactor);
-		const double TestDistSq = bHasParticle
-			? FVector::DistSquared(InNode->Data.ParticlePosition, InCenter)
-			: DistSq;
-		if (TestDistSq > 0.0)
-		{
-			if (TestExtent * TestExtent < ScreenSpaceThresholdSq * TestDistSq) return;
-		}
+		const double TestExtent = bHasParticle ? static_cast<double>(InNode->Data.ParticleExtent) : InNode->Extent * (1.0 + InNode->Data.ScaleFactor);
+		const double TestDistSq = bHasParticle ? FVector::DistSquared(InNode->Data.ParticlePosition, InCenter) : DistSq;
 
 		bool bPassesFilter = true;
 		if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
 		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) bPassesFilter = false;
 		if (InTypeIdFilter == -1) { if (InNode->Data.TypeId < 0) bPassesFilter = false; }
 		else { if (InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false; }
-
-		if (bPassesFilter)
-			OutNodes.Add(InNode);
+		if (bPassesFilter) OutNodes.Add(InNode);
 	}
 
 	// Deepest existing node containing InPosition, stopping at InMaxDepth.
@@ -529,8 +506,7 @@ public:
 		if (Root.IsValid())
 		{
 			const double ThresholdSq = ScreenSpaceThreshold * ScreenSpaceThreshold;
-			CollectNodesByScreenSpace(Root, Nodes, InCenter, ThresholdSq,
-				InMinDepth, InMaxDepth, InTypeIdFilter);
+			CollectNodesByScreenSpace(Root, Nodes, InCenter, ThresholdSq, InMinDepth, InMaxDepth, InTypeIdFilter);
 		}
 		return Nodes;
 	}

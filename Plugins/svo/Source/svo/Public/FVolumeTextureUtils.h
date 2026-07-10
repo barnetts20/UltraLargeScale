@@ -11,10 +11,15 @@
 #include "ContentBrowserModule.h"
 #include "IContentBrowserSingleton.h"
 #include "FastNoise/FastNoise.h"
+
 // Inline method bodies below dereference FOctree/FOctreeNode/FPointData, so we
 // need full definitions — forward declarations are not enough.
 #include "FOctree.h"
 #include "DataTypes.h"
+
+//TODO: IF WE CAN COME UP WITH A WAY TO UPDATE ONLY *PARTS* OF THE GPU TEXTURE BUFFER THEN WE MAY BE ABLE TO MOVE TO RAYMARCHING FOR THE UNIVERSE DENSITY FIELD
+//TODO: BUT WE NEED THE ABILITY TO UPDATE CELLS OF THE TEXTURE CORRESPONDING WITH CELL UPDATES TO DO SO... GALAXY IS A BOUNDED FIELD, UNIVERSE IS NOT SO IT HAS TO RUNTIME UPDATE
+//TODO: AND WE WOULD NEED A SIMILAR DISTANCE FADE IN THE RAY MARCHER AS THE PARTICLES USE TO HIDE POP IN
 
 /// <summary>
 /// Sparse voxel entry for rasterizing node data into a dense volume grid.
