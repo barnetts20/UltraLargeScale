@@ -46,7 +46,7 @@ struct SVO_API FBaseParams {
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
     double MaxDerivedExtent = 4398046511104.0;
 
-    // TODO: Update comment to indicate the min derived extent should be MaxDerived/Extent such that MinDerived extent is equivalent to 1 unit in the 32 bit particle system
+    // MaxDerivedExtent/int32 max to bring min scale into float is precision relative to max
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
     double MinDerivedExtent = 2048; 
 
