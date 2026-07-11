@@ -136,7 +136,7 @@ void AUniverseActor::BuildTierConfigs()
 	SmallTierConfig.NeighborhoodRadius = UniverseParams.SmallTier.NeighborhoodRadius;
 	SmallTierConfig.SlotCapacity = UniverseParams.SmallTier.SlotCapacity;
 	SmallTierConfig.NiagaraAssets = { SectorSmallCloud };
-	SmallTierConfig.bWantRotations = { false };
+	SmallTierConfig.bWantRotations = { true };
 	SmallTierConfig.OctreeInsertBufferIndex = 0;
 	SmallTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
 		const FVector NodeCenter = GridCoordToCenter(Coord, SmallTierConfig.GridDepth);
