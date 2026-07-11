@@ -13,6 +13,7 @@
 #include "FTierStreamingSystem.h"
 #include "UniverseParams.h"
 #include "GalaxyParams.h"
+#include "StarSystemParams.h"
 #include "UniverseActor.generated.h"
 class AGalaxyActor;
 #pragma endregion
@@ -44,11 +45,16 @@ public:
 
 #pragma region Editor Parameters
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
 	FUniverseParams UniverseParams;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
+	FUniverseParamBounds UniverseParamBounds;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy Properties")
-	FGalaxyParams GalaxyParams;
+	FGalaxyParamBounds GalaxyParamBounds;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Star System Properties")
+	FStarSystemParamBounds StarSystemParamBounds;
 
 #pragma endregion
 
@@ -207,8 +213,7 @@ protected:
 #pragma endregion
 
 #pragma region Niagara Assets
-	//TODO: VALIDATE NAMING SCHEME ACROSS LAYERS, FOLLOW CONSISTENT NAMING PARADIGM FOR TIER/TIER CONFIGS/PARTICLE SYSTEMS
-	//TODO: WE MAY ALSO BE ABLE TO MOVE TO 1 PARTICLE SYSTEM PER LAYER - currently we just use it to easily divide up sprite materials, the logic is generally the same with the potential exception of pushing galaxy alignment normals
+	//TODO: VALIDATE NAMING SCHEME ACROSS LAYERS, FOLLOW CONSISTENT NAMING PARADIGM FOR TIER/TIER CONFIGS/PARTICLE SYSTEMS WE MAY ALSO BE ABLE TO MOVE TO 1 PARTICLE SYSTEM PER LAYER - currently we just use it to easily divide up sprite materials, the logic is generally the same with the potential exception of pushing galaxy alignment normals
 	/** Large-tier galaxy sprite system. Renders galaxy cluster positions with
 	 *  face-normal rotation data for non-billboard shading. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
@@ -235,8 +240,8 @@ protected:
 
 	/** Large-tier config (cluster + gas). Depth/radius/capacity come from
 	 *  UniverseParams.LargeTier (defaults: GridDepth 1, NeighborhoodRadius 1). */
-	FParticleTierConfig CoarseTierConfig;
-	FParticleTierState  CoarseTierState;
+	FParticleTierConfig LargeTierConfig;
+	FParticleTierState  LargeTierState;
 
 	/** Mid-tier config. From UniverseParams.MidTier (defaults: GridDepth 3,
 	 *  NeighborhoodRadius 1). */

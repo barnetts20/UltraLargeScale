@@ -14,7 +14,6 @@ namespace NiagaraBufferParams
     // Cell-anchored toroidal path. The graph reconstructs
     //   worldRel = Positions[i] + CellOffsets[slot] + NCenterMinusVT
     //   slot     = i / SlotCapacity
-    //TODO - RENAME CellRelativeVT TO CellOffsets IN ALL NIAGARA SYSTEMS AND THEN RENAME TEXT HERE
     inline const FName CellOffsets = TEXT("User.CellOffsets");
     inline const FName NCenterMinusVT = TEXT("User.NCenterMinusVT");
     inline const FName SlotCapacity = TEXT("User.SlotCapacity");

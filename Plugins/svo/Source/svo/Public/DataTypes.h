@@ -6,16 +6,15 @@
 
 struct SVO_API FVoxelData {
 public:
-	FVoxelData() : ScaleFactor(0.0), Density(0.0), Composition(0, 0, 0), ObjectId(-1), TypeId(-1), ParticleIndex(-1), ParticlePosition(FVector::ZeroVector), ParticleExtent(0.0f) {};
-	FVoxelData(float InDensity, float InGasDensity, FVector InComposition, int InObjectId, int InTypeId = -1) : ScaleFactor(InDensity), Density(InGasDensity), Composition(InComposition), ObjectId(InObjectId), TypeId(InTypeId), ParticleIndex(-1), ParticlePosition(FVector::ZeroVector), ParticleExtent(0.0f) {};
+	FVoxelData() : ScaleFactor(0.0), Density(0.0), Composition(0, 0, 0), Seed(-1), TypeId(-1), ParticleIndex(-1), ParticlePosition(FVector::ZeroVector), ParticleExtent(0.0f) {};
+	FVoxelData(float InDensity, float InGasDensity, FVector InComposition, int InObjectId, int InTypeId = -1) : ScaleFactor(InDensity), Density(InGasDensity), Composition(InComposition), Seed(InObjectId), TypeId(InTypeId), ParticleIndex(-1), ParticlePosition(FVector::ZeroVector), ParticleExtent(0.0f) {};
 
 	float ScaleFactor;
 	float Density;
 	FVector Composition;
 
 	/** Deterministic hierarchical seed for this node. */
-	//TODO: If this is truly the hashed seed and not a human discernable index may be worth changing to be named Seed
-	int ObjectId;
+	int Seed;
 
 	//TypeId allows insertion of different classes of objects in the same tree. Type mapping framework must be externally managed.
 	int TypeId;

@@ -344,7 +344,7 @@ void AStarSystemActor::InitializeNiagara()
 		VD.ScaleFactor = 0.5f;
 		VD.Density = 1.0f;
 		VD.Composition = FVector(PlanetColors[i].R, PlanetColors[i].G, PlanetColors[i].B);
-		VD.ObjectId = FVoxelData::ComposeSeed(Params.Seed, FIntVector::ZeroValue, i);
+		VD.Seed = FVoxelData::ComposeSeed(Params.Seed, FIntVector::ZeroValue, i);
 		VD.TypeId = static_cast<int32>(StarSystemDataGenerator::EObjectType::TerrestrialPlanet);
 		VD.ParticleIndex = i;
 		// Exact particle capture — the spawn scan tests against this, giving
@@ -735,7 +735,7 @@ void AStarSystemActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) 
 	UE_LOG(LogTemp, Log,
 		TEXT("AStarSystemActor::SpawnScan ENTER — center=(%.1f,%.1f,%.1f) extent=%.2f seed=%d planetIdx=%d"),
 		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
-		InNode->Extent, InNode->Data.ObjectId, InNode->Data.ParticleIndex);
+		InNode->Extent, InNode->Data.Seed, InNode->Data.ParticleIndex);
 }
 
 void AStarSystemActor::LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const
@@ -744,7 +744,7 @@ void AStarSystemActor::LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) c
 	UE_LOG(LogTemp, Log,
 		TEXT("AStarSystemActor::SpawnScan EXIT  — center=(%.1f,%.1f,%.1f) extent=%.2f seed=%d"),
 		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
-		InNode->Extent, InNode->Data.ObjectId);
+		InNode->Extent, InNode->Data.Seed);
 }
 
 void AStarSystemActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) const

@@ -224,9 +224,7 @@ struct SVO_API FGalaxyDensityParams
 	float BackgroundFadeStart = 0.7f;
 };
 
-//TODO: DESCRIPTION COMMENT - THIS FORMS THE PARAMETER INTERFACE WITH THE RAYMARCH MATERIAL
-//OUR RAYMARCHER IS NOT MATURE AT THIS POINT SO THIS WILL CHANGE, MANY OF THESE VALUES CURRENTLY HAVE NO EFFECT - THATS FINE,
-//IT WILL NEED REFACTORING WHEN WE DO A GALAXY RAYMARCHER DEEP DIVE ANYWAY
+//TODO: DESCRIPTION COMMENT - THIS FORMS THE PARAMETER INTERFACE WITH THE RAYMARCH MATERIAL OUR RAYMARCHER IS NOT MATURE AT THIS POINT SO THIS WILL CHANGE, MANY OF THESE VALUES CURRENTLY HAVE NO EFFECT - THATS FINE, IT WILL NEED REFACTORING WHEN WE DO A GALAXY RAYMARCHER DEEP DIVE ANYWAY
 USTRUCT(BlueprintType)
 struct SVO_API FGalaxyMaterialParams
 {
@@ -281,7 +279,7 @@ USTRUCT(BlueprintType)
 struct SVO_API FGalaxyParams : public FBaseParams
 {
 	GENERATED_BODY()
-	///   TODO: SEE IF WE CAN BRIDGE THE GAP TO REAL WORLD SCALE HERE, I THINK WE HIT PRECISION ISSUES THOUGH... UNIT SCALE AND POTENTIALLY STAR SYSTEM SCALES/PARAMS MAY NEED TO SHIFT
+	// TODO: SEE IF WE CAN BRIDGE THE GAP TO REAL WORLD SCALE HERE, I THINK WE HIT PRECISION ISSUES THOUGH... UNIT SCALE AND POTENTIALLY STAR SYSTEM SCALES/PARAMS MAY NEED TO SHIFT
 
 	// --- Tier scale derivation ---
 	/// Fixed absolute largest star-system scale in world cm.
@@ -304,26 +302,6 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	/// coordinate system while the physical size stays constant.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
 	double MaxEntityScale = 4e16;
-
-	// TODO: Star System UnitScale should likely live within star system actor instead of galaxy actor, usurping responsibility a bit here
-	/** PER-LAYER DESIGN CONSTANT for spawned star systems: real-world cm
-	 *  per star-system local unit (see FBaseParams::UnitScale). Carried on
-	 *  the galaxy params so it flows from the UniverseActor template to
-	 *  every galaxy and is applied at star-system spawn.
-	 *
-	 *  Valid window (recompute when retuning — shown for the current
-	 *  MaxEntityScale 4e16 and BoundsScaleMultiplier 1):
-	 *    floor:   TerrestrialMinScale 1e8 cm must span >= ~8 local units
-	 *             (clear of the SVO integer lattice's 2-unit floor)
-	 *             -> UnitScale <= 1e8 / 8 = 1.25e7
-	 *    ceiling: largest system span (MaxEntityScale * BoundsScaleMultiplier
-	 *             = 4e16) must fit within 2^42 local units
-	 *             -> UnitScale >= 4e16 / 2^42 ≈ 9.1e3
-	 *  1.2e7 sits inside that window: Earth ~106 local units, Jupiter
-	 *  ~1200, largest system extent ~3.3e9 local units (well under the
-	 *  2^42 clamp). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
-	double StarSystemUnitScale = 1.2e7;
 
 	// --- Large tier SDF culling grid ---
 
@@ -399,4 +377,18 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	}
 };
 
-//TODO: PARAM FACTORY
+USTRUCT(BlueprintType)
+struct SVO_API FGalaxyParamBounds {
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy Param Bounds")
+	FGalaxyParams Min;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy Param Bounds")
+	FGalaxyParams Max;
+
+	static FGalaxyParams Generate(FGalaxyParamBounds Bounds, int Seed) {
+		//TODO: Randomize
+		return Bounds.Max;
+	}
+};

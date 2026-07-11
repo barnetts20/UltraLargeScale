@@ -604,7 +604,7 @@ void AGalaxyActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) cons
 	UE_LOG(LogTemp, Log,
 		TEXT("AGalaxyActor::SpawnScan ENTER — center=(%.1f,%.1f,%.1f) extent=%.2f depth=%d seed=%d tier=%d"),
 		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
-		InNode->Extent, InNode->Depth, InNode->Data.ObjectId, InNode->Data.TypeId);
+		InNode->Extent, InNode->Depth, InNode->Data.Seed, InNode->Data.TypeId);
 }
 
 void AGalaxyActor::LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const
@@ -613,7 +613,7 @@ void AGalaxyActor::LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const
 	UE_LOG(LogTemp, Log,
 		TEXT("AGalaxyActor::SpawnScan EXIT  — center=(%.1f,%.1f,%.1f) extent=%.2f depth=%d seed=%d"),
 		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
-		InNode->Extent, InNode->Depth, InNode->Data.ObjectId);
+		InNode->Extent, InNode->Depth, InNode->Data.Seed);
 }
 
 void AGalaxyActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) const
@@ -671,19 +671,8 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 	AStarSystemActor* System = StarSystemPool.Pop();
 	SpawnedStarSystems.Add(InNode, TWeakObjectPtr<AStarSystemActor>(System));
 	System->ResetForSpawn();
-
-	// INVERTED DERIVATION: UnitScale is the per-layer design constant
-	// (FGalaxyParams::StarSystemUnitScale, flowing from the universe
-	// template through every galaxy); the system's LOCAL Extent is what
-	// varies. The system's real span is the star sprite's real size times
-	// BoundsScaleMultiplier (clearing the star glyph — MaxEntityScale
-	// already authors the full orbital diameter); dividing by the constant
-	// UnitScale converts that to local units. Because star sprite sizes
-	// are themselves invariant (authored real sizes through the constant
-	// galaxy UnitScale), system extents — and therefore planet local sizes
-	// and the planet-sprite precision budget — are a single global range
-	// rather than per-instance quantities.
-	System->Params.UnitScale = Params.StarSystemUnitScale;
+	System->Params = FStarSystemParamBounds::Generate(Universe->StarSystemParamBounds, InNode->Data.Seed);
+	
 	{
 		const double DerivedExtent =
 			(static_cast<double>(ParticleExtent) * Params.UnitScale
@@ -699,12 +688,13 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 				DerivedExtent, System->Params.Extent);
 		}
 	}
+
 	System->SpeedScale = Universe ? Universe->SpeedScale : SpeedScale;
-	// ObjectId is the deterministic hierarchical seed composed from
+	// Seed is the deterministic hierarchical seed composed from
 	// (GalaxySeed, GridCoord, GenerationIndex) during octree insertion.
-	System->Params.Seed = InNode->Data.ObjectId;
+	System->Params.Seed = InNode->Data.Seed;
 	System->Params.ParentColor = FLinearColor(InNode->Data.Composition);
-	System->Params.Rotation = FRandomStream(InNode->Data.ObjectId).GetUnitVector().Rotation();
+	System->Params.Rotation = FRandomStream(InNode->Data.Seed).GetUnitVector().Rotation();
 
 	// Deferred placement — FinalizeStarSystemPlacement uses this frame's VT.
 	System->PendingNodeCenter = ParticlePos;

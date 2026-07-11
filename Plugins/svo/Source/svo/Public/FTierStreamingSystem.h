@@ -56,7 +56,6 @@ struct SVO_API FTierParams
 
 	// Half-width of the 3D neighborhood streamed around the player.
 	// 1 -> 3x3x3 = 27 slots.
-	// TODO: I WOULD BE INTERESTED TO VALIDATE WHAT HAPPENS WITH A RADIUS > 1 - WOULD OUR SYSTEM WORK, OR FALL TO PEICES
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming")
 	int32 NeighborhoodRadius = 1;
 

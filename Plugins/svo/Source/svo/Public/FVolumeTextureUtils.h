@@ -17,9 +17,7 @@
 #include "FOctree.h"
 #include "DataTypes.h"
 
-//TODO: IF WE CAN COME UP WITH A WAY TO UPDATE ONLY *PARTS* OF THE GPU TEXTURE BUFFER THEN WE MAY BE ABLE TO MOVE TO RAYMARCHING FOR THE UNIVERSE DENSITY FIELD
-//TODO: BUT WE NEED THE ABILITY TO UPDATE CELLS OF THE TEXTURE CORRESPONDING WITH CELL UPDATES TO DO SO... GALAXY IS A BOUNDED FIELD, UNIVERSE IS NOT SO IT HAS TO RUNTIME UPDATE
-//TODO: AND WE WOULD NEED A SIMILAR DISTANCE FADE IN THE RAY MARCHER AS THE PARTICLES USE TO HIDE POP IN
+//TODO: IF WE CAN COME UP WITH A WAY TO UPDATE ONLY *PARTS* OF THE GPU TEXTURE BUFFER THEN WE MAY BE ABLE TO MOVE TO RAYMARCHING FOR THE UNIVERSE DENSITY FIELD BUT WE NEED THE ABILITY TO UPDATE CELLS OF THE TEXTURE CORRESPONDING WITH CELL UPDATES TO DO SO... GALAXY IS A BOUNDED FIELD, UNIVERSE IS NOT SO IT HAS TO RUNTIME UPDATE AND WE WOULD NEED A SIMILAR DISTANCE FADE IN THE RAY MARCHER AS THE PARTICLES USE TO HIDE POP IN
 
 /// <summary>
 /// Sparse voxel entry for rasterizing node data into a dense volume grid.
@@ -390,7 +388,7 @@ public:
 	/// ellipsoidal density kernels, and optionally write the resulting density
 	/// into the octree at a target depth.
 	///
-	/// Each node gets a randomized splat seeded from its ObjectId:
+	/// Each node gets a randomized splat seeded from its Seed:
 	/// per-axis radius, orientation, falloff sharpness, and intensity.
 	/// The random rotation breaks axis-alignment so ellipsoids point in
 	/// arbitrary directions — no grid artifacts.
@@ -443,7 +441,7 @@ public:
 		{
 			if (!Node.IsValid()) continue;
 
-			FRandomStream NodeStream(Node->Data.ObjectId);
+			FRandomStream NodeStream(Node->Data.Seed);
 
 			float VoxelX = (float)((Node->Center.X + InExtent) * InvVoxelSize);
 			float VoxelY = (float)((Node->Center.Y + InExtent) * InvVoxelSize);

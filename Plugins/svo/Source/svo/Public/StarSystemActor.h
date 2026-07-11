@@ -71,9 +71,6 @@ protected:
 	virtual void InitializeData() override;
 	virtual void InitializeVolumetric() override;
 	virtual void InitializeNiagara() override;
-	// TOOD: COMMENT BELOW IS ONLY ACCURATE CURRENTLY... THIS WILL EVENTUALLY BE MERGED WITH OUR PLANET PROJECT AND THEN IT WOULD LIKELY BE USING A HYRBID POOL APPROACH
-	// COMPLEX ACTORS SUCH AS PLANETS WOULD BE POOLED, SIMPLE ACTORS (STATIC MESHES ETC) MAY JUST SPAWN WITH NO POOL
-	// No InitializeChildPool — star systems manage individual actor spawns, not a pool.
 
 #pragma endregion
 

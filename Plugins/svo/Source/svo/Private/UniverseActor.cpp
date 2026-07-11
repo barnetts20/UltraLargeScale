@@ -15,6 +15,7 @@
 AUniverseActor::AUniverseActor()
 {
 	bAutoInitializeOnBeginPlay = true;
+	this->UniverseParams = FUniverseParamBounds::Generate(UniverseParamBounds, 666);
 	SectorLargeCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorLarge.NG_SectorLarge"));
 	SectorMidCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorMid.NG_SectorMid"));
 	SectorSmallCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/svo/Sector/NG_SectorSmall.NG_SectorSmall"));
@@ -86,7 +87,7 @@ void AUniverseActor::InitializeNiagara()
 	double StartTime = FPlatformTime::Seconds();
 	BuildTierConfigs();
 	const FTierStreamingContext Ctx = BuildStreamingContext();
-	FTierStreamingSystem::InitializeTier(Ctx, CoarseTierConfig, CoarseTierState, TierNiagaraComponents);
+	FTierStreamingSystem::InitializeTier(Ctx, LargeTierConfig, LargeTierState, TierNiagaraComponents);
 	FTierStreamingSystem::InitializeTier(Ctx, MidTierConfig, MidTierState, TierNiagaraComponents);
 	FTierStreamingSystem::InitializeTier(Ctx, SmallTierConfig, SmallTierState, TierNiagaraComponents);
 	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeNiagara total duration: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
@@ -101,17 +102,17 @@ void AUniverseActor::BuildTierConfigs()
 	UniverseParams.DeriveScaleRanges();
 
 	// --- Large tier (was "Coarse") ---
-	CoarseTierConfig.TierName = TEXT("Large");
-	CoarseTierConfig.TierIndex = 0;
-	CoarseTierConfig.GridDepth = UniverseParams.LargeTier.GridDepth;
-	CoarseTierConfig.NeighborhoodRadius = UniverseParams.LargeTier.NeighborhoodRadius;
-	CoarseTierConfig.SlotCapacity = UniverseParams.LargeTier.SlotCapacity;
-	CoarseTierConfig.NiagaraAssets = { SectorLargeCloud, SectorGasCloud };
-	CoarseTierConfig.bWantRotations = { true, false };
-	CoarseTierConfig.OctreeInsertBufferIndex = 0;
-	CoarseTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
-		const FVector NodeCenter = GridCoordToCenter(Coord, CoarseTierConfig.GridDepth);
-		UniverseGenerator.GenerateLargeTierNode(Coord, SlotIndex, *Buffers[0], *Buffers[1], NodeCenter, CoarseTierState.SlotCounts[SlotIndex]);
+	LargeTierConfig.TierName = TEXT("Large");
+	LargeTierConfig.TierIndex = 0;
+	LargeTierConfig.GridDepth = UniverseParams.LargeTier.GridDepth;
+	LargeTierConfig.NeighborhoodRadius = UniverseParams.LargeTier.NeighborhoodRadius;
+	LargeTierConfig.SlotCapacity = UniverseParams.LargeTier.SlotCapacity;
+	LargeTierConfig.NiagaraAssets = { SectorLargeCloud, SectorGasCloud };
+	LargeTierConfig.bWantRotations = { true, false };
+	LargeTierConfig.OctreeInsertBufferIndex = 0;
+	LargeTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
+		const FVector NodeCenter = GridCoordToCenter(Coord, LargeTierConfig.GridDepth);
+		UniverseGenerator.GenerateLargeTierNode(Coord, SlotIndex, *Buffers[0], *Buffers[1], NodeCenter, LargeTierState.SlotCounts[SlotIndex]);
 		};
 
 	// --- Mid tier ---
@@ -165,7 +166,7 @@ void AUniverseActor::BuildTierConfigs()
 					return FBox(FVector(-BoundsExtent), FVector(BoundsExtent));
 				};
 		};
-	CoarseTierConfig.ComputeBounds = MakeBoundsLambda(CoarseTierConfig);
+	LargeTierConfig.ComputeBounds = MakeBoundsLambda(LargeTierConfig);
 	MidTierConfig.ComputeBounds = MakeBoundsLambda(MidTierConfig);
 	SmallTierConfig.ComputeBounds = MakeBoundsLambda(SmallTierConfig);
 }
@@ -230,7 +231,7 @@ void AUniverseActor::SchedulePush()
 			{
 				bPushDirty.store(false, std::memory_order_relaxed);
 				FTierStreamingSystem::PushTierPositions(
-					{ &CoarseTierState, &MidTierState, &SmallTierState },
+					{ &LargeTierState, &MidTierState, &SmallTierState },
 					[this] { return ReadLatestVT(); });
 				if (!bPushDirty.load(std::memory_order_acquire))
 				{
@@ -283,7 +284,7 @@ void AUniverseActor::Tick(float DeltaTime)
 	}
 
 	const FTierStreamingContext Ctx = BuildStreamingContext();
-	FTierStreamingSystem::UpdateTier(Ctx, CoarseTierConfig, CoarseTierState);
+	FTierStreamingSystem::UpdateTier(Ctx, LargeTierConfig, LargeTierState);
 	FTierStreamingSystem::UpdateTier(Ctx, MidTierConfig, MidTierState);
 	FTierStreamingSystem::UpdateTier(Ctx, SmallTierConfig, SmallTierState);
 
@@ -313,7 +314,7 @@ void AUniverseActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	GalaxyPool.Empty();
 
 	// Drain any in-flight pushes before destroying the components they may touch.
-	for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &SmallTierState })
+	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 		FTierStreamingSystem::BeginShutdownDrain(*Tier);
 
 	// Mirror ResetForPool: also wait out an in-flight boundary-cross task —
@@ -323,13 +324,13 @@ void AUniverseActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	// waited here — it rendezvouses with the GT (would deadlock a GT wait);
 	// it aborts on the Pooling state set above, and actor memory outlives
 	// EndPlay until GC.
-	for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &SmallTierState })
+	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 	{
 		while (Tier->bUpdateInProgress.load())
 			FPlatformProcess::Sleep(0.0005f);
 	}
 
-	for (FParticleTierState* Tier : { &CoarseTierState, &MidTierState, &SmallTierState })
+	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 	{
 		for (UNiagaraComponent*& NC : Tier->NiagaraComponents)
 		{
@@ -373,7 +374,7 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	// TypeId carries the tier index (0=Large, 1=Mid, 2=Small),
 	// written during InsertParticleIntoOctree.
 	const int32 TierIndex = FMath::Clamp(InNode->Data.TypeId, 0, 2);
-	FParticleTierState* TierStates[] = { &CoarseTierState, &MidTierState, &SmallTierState };
+	FParticleTierState* TierStates[] = { &LargeTierState, &MidTierState, &SmallTierState };
 	FParticleTierState& MatchedState = *TierStates[TierIndex];
 
 	// ParticleIndex is the absolute buffer index. Direct lookup — no slot math needed.
@@ -396,7 +397,7 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 
 	// Start with the universe-level galaxy params (editor-tunable template),
 	// then override per-instance fields (seed, color, rotation, scale).
-	Galaxy->Params = this->GalaxyParams;
+	Galaxy->Params = FGalaxyParamBounds::Generate(GalaxyParamBounds, InNode->Data.Seed);
 
 	// INVERTED DERIVATION: UnitScale is the per-layer design constant
 	// (carried in from the GalaxyParams template copy above); the galaxy's
@@ -425,11 +426,11 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	// No need to set it here — DeriveScaleRanges handles the cascade.
 
 	Galaxy->SpeedScale = SpeedScale;
-	// ObjectId is the deterministic hierarchical seed composed from
+	// Seed is the deterministic hierarchical seed composed from
 	// (UniverseSeed, GridCoord, GenerationIndex) during octree insertion.
-	Galaxy->Params.Seed = InNode->Data.ObjectId;
+	Galaxy->Params.Seed = InNode->Data.Seed;
 	Galaxy->Params.ParentColor = FLinearColor(InNode->Data.Composition);
-	FRandomStream RandStream(InNode->Data.ObjectId);
+	FRandomStream RandStream(InNode->Data.Seed);
 	Galaxy->Params.Rotation = FRotator(
 		RandStream.FRandRange(-180.0f, 180.0f),
 		RandStream.FRandRange(-180.0f, 180.0f),
@@ -481,7 +482,7 @@ void AUniverseActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 	if (!SpawnedGalaxies.RemoveAndCopyValue(InNode, WeakGalaxy)) return;
 	AGalaxyActor* Galaxy = WeakGalaxy.Get();
 	if (!Galaxy) return;
-	UE_LOG(LogTemp, Log, TEXT("Returning galaxy to pool for node seed: %d"), InNode->Data.ObjectId);
+	UE_LOG(LogTemp, Log, TEXT("Returning galaxy to pool for node seed: %d"), InNode->Data.Seed);
 
 	// Abort signal for an in-flight async init chain — checked between
 	// phases and live (via GetLiveState) inside InitializeTier.
@@ -672,7 +673,7 @@ void AUniverseActor::ProcessPendingScanResults()
 void AUniverseActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) const
 {
 	if (!InNode.IsValid()) return;
-	const int32 Seed = InNode->Data.ObjectId;
+	const int32 Seed = InNode->Data.Seed;
 	const int32 AbsIdx = InNode->Data.ParticleIndex;
 	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::SpawnScan ENTER — node center=(%.1f, %.1f, %.1f) extent=%.2f depth=%d seed=%d bufIdx=%d scale=%.3f tier=%d"), InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Depth, Seed, AbsIdx, InNode->Data.ScaleFactor, InNode->Data.TypeId);
 	if (bLogSpawnEnterExitBuffers)
@@ -683,7 +684,7 @@ void AUniverseActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) co
 		const TCHAR* TierLabel = TEXT("unknown");
 		switch (InNode->Data.TypeId)
 		{
-		case 0: Config = &CoarseTierConfig; State = &CoarseTierState; TierLabel = TEXT("coarse"); break;
+		case 0: Config = &LargeTierConfig; State = &LargeTierState; TierLabel = TEXT("coarse"); break;
 		case 1: Config = &MidTierConfig;    State = &MidTierState;    TierLabel = TEXT("mid");    break;
 		case 2: Config = &SmallTierConfig;  State = &SmallTierState;  TierLabel = TEXT("small");  break;
 		default: break;
@@ -707,7 +708,7 @@ void AUniverseActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) co
 void AUniverseActor::LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const
 {
 	if (!InNode.IsValid()) return;
-	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::SpawnScan EXIT  — node center=(%.1f, %.1f, %.1f) extent=%.2f depth=%d seed=%d"), InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Depth, InNode->Data.ObjectId);
+	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::SpawnScan EXIT  — node center=(%.1f, %.1f, %.1f) extent=%.2f depth=%d seed=%d"), InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Depth, InNode->Data.Seed);
 }
 
 void AUniverseActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) const
@@ -740,7 +741,7 @@ void AUniverseActor::CheckOctreeBounds()
 		return;
 
 	// Don't rebase while any tier owns its back buffer / state.
-	if (CoarseTierState.bUpdateInProgress.load() ||
+	if (LargeTierState.bUpdateInProgress.load() ||
 		MidTierState.bUpdateInProgress.load() ||
 		SmallTierState.bUpdateInProgress.load())
 		return;
@@ -772,8 +773,8 @@ void AUniverseActor::CheckOctreeBounds()
 			// flight (checked on the GT), and UpdateTier gates on
 			// bRebaseInProgress, so no new transition can start until the
 			// swap below completes. Safe to read every tier buffer wholesale.
-			FTierStreamingSystem::InsertTierIntoOctree(Ctx, Self->CoarseTierConfig,
-				Self->CoarseTierState);
+			FTierStreamingSystem::InsertTierIntoOctree(Ctx, Self->LargeTierConfig,
+				Self->LargeTierState);
 			FTierStreamingSystem::InsertTierIntoOctree(Ctx, Self->MidTierConfig,
 				Self->MidTierState);
 			FTierStreamingSystem::InsertTierIntoOctree(Ctx, Self->SmallTierConfig,
@@ -791,7 +792,7 @@ void AUniverseActor::CheckOctreeBounds()
 					// first post-rebase scan sees all-new pointers, despawns
 					// EVERY live galaxy and respawns it from the pool (full
 					// re-init hitch + 2x pool headroom on the worst frame).
-					// ObjectId survives the rebase (ComposeSeed is
+					// Seed survives the rebase (ComposeSeed is
 					// deterministic), so counterparts are matched by the
 					// node-captured particle position + seed.
 					auto FindCounterpart = [&NewTree](const TSharedPtr<FOctreeNode>& Old) -> TSharedPtr<FOctreeNode>
@@ -809,7 +810,7 @@ void AUniverseActor::CheckOctreeBounds()
 								? Old->Data.ParticlePosition
 								: Old->Center;
 							TSharedPtr<FOctreeNode> Candidate = NewTree->FindNodeAtPosition(P, Old->Depth);
-							return (Candidate.IsValid() && Candidate->Data.ObjectId == Old->Data.ObjectId)
+							return (Candidate.IsValid() && Candidate->Data.Seed == Old->Data.Seed)
 								? Candidate : nullptr;
 						};
 

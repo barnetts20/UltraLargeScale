@@ -644,7 +644,7 @@ void FTierStreamingSystem::InsertParticleIntoOctree(
 		Ctx.UnitScale,
 		static_cast<int64>(TreeExtent));
 	PD.SetPosition(Position);
-	PD.Data.ObjectId = FVoxelData::ComposeSeed(Ctx.ParentSeed, GridCoord, GenerationIndex);
+	PD.Data.Seed = FVoxelData::ComposeSeed(Ctx.ParentSeed, GridCoord, GenerationIndex);
 	PD.Data.TypeId = TierIndex;
 	PD.Data.ParticleIndex = AbsoluteBufferIndex;
 	// Capture the EXACT particle position/extent on the node. Immutable after

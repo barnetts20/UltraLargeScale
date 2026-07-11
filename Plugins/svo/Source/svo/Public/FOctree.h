@@ -17,7 +17,6 @@ class SVO_API FOctreeNode : public TSharedFromThis<FOctreeNode>
 {
 public:
 #pragma region Public Parameters
-	// TODO: Shift to int64 or composite int64 morton index instead of heavyweight TArray<uint8>
 	TArray<uint8> Index;
 	int Depth;
 	TWeakPtr<FOctreeNode> Parent;
@@ -49,7 +48,7 @@ class SVO_API FOctree : public TSharedFromThis<FOctree>
 {
 public:
 #pragma region Public Parameters
-	double Extent; //Must be power of 2, eg 1024 2048 etc
+	double Extent;
 	TSharedPtr<FOctreeNode> Root;
 
 	int MaxDepth;
@@ -68,8 +67,7 @@ public:
 #pragma endregion
 
 #pragma region BulkInsert
-	//TODO: WITH SOME MODIFICATION, WE MAY BE ABLE TO USE THE BULK INSERT PATH WHEN REGENERATING A SET OF CELLS... CHUNK DEPTH WOULD HAVE TO BE ADAPTIVE INSTEAD OF STATIC, AND IT WOULD HAVE TO OPERATE FROM A GIVEN NODE INSTEAD OF ROOT
-	//TODO: BUT WE MAY GET A PERF IMPROVEMENT ON OCTREE INSERTION SO WORTH THINKING ABOUT
+	//TODO: WITH SOME MODIFICATION, WE MAY BE ABLE TO USE THE BULK INSERT PATH WHEN REGENERATING A SET OF CELLS... CHUNK DEPTH WOULD HAVE TO BE ADAPTIVE INSTEAD OF STATIC, AND IT WOULD HAVE TO OPERATE FROM A GIVEN NODE INSTEAD OF ROOT BUT WE MAY GET A PERF IMPROVEMENT ON OCTREE INSERTION SO WORTH THINKING ABOUT
 	void BulkInsertPositions(TArray<FPointData> InPointData, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes, TArray<TSharedPtr<FOctreeNode>>& OutVolumeChunks) {
 		if (bIsResetting.load()) {
 			return; // Early exit if shutting down
@@ -231,13 +229,13 @@ public:
 			Current = Current->Children[ChildIndex];
 		}
 
-		// First-writer-wins payload. ObjectId == -1 means the node has no
+		// First-writer-wins payload. Seed == -1 means the node has no
 		// payload yet; the first insert claims it and later inserts at the same
 		// quantized node are dropped. Collided inserts are not tracked: the node
 		// stores full per-particle data (density, composition, particle index),
-		// which a bare ObjectId cannot reconstruct, so multi-hit aggregation had
+		// which a bare Seed cannot reconstruct, so multi-hit aggregation had
 		// no consumer.
-		if (Current->Data.ObjectId == -1)
+		if (Current->Data.Seed == -1)
 		{
 			Current->Data = InData;
 		}
@@ -293,8 +291,7 @@ public:
 		}
 	}
 
-	//TODO: THIS SVO WAS DEVELOPED WITH A GENERIC INTENT... SOME OF THE LOGIC MAY NOT BE NEEDED FOR OUR PURPOSES ANY LONGER WITH A DENSITY FIRST GENERATION PARADIGM
-	//TODO: AT THIS POINT WE COULD POTENTIALLY START *SPECIALIZING* 
+	//TODO: THIS SVO WAS DEVELOPED WITH A GENERIC INTENT... SOME OF THE LOGIC MAY NOT BE NEEDED FOR OUR PURPOSES ANY LONGER WITH A DENSITY FIRST GENERATION PARADIGM AT THIS POINT WE COULD POTENTIALLY START *SPECIALIZING* 
 	float SampleDensityAtPosition(const FVector& InPosition) const
 	{
 		if (!Root.IsValid()) return 0.0f;

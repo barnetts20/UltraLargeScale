@@ -130,3 +130,20 @@ struct SVO_API FUniverseParams : public FBaseParams {
 		DeriveScaleRanges();
 	}
 };
+
+/// UNIVERSE GENERATION PARAM STRUCT
+USTRUCT(BlueprintType)
+struct SVO_API FUniverseParamBounds {
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Param Bounds")
+	FUniverseParams Min;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Param Bounds")
+	FUniverseParams Max;
+
+	static FUniverseParams Generate(FUniverseParamBounds Bounds, int Seed) {
+		//TODO: Randomize
+		return Bounds.Max;
+	}
+};

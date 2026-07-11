@@ -83,10 +83,26 @@ struct SVO_API FStarSystemParams : public FBaseParams
 
 		MidTier.GridDepth = 4;
 		MidTier.NeighborhoodRadius = 1;
-		MidTier.SlotCapacity = 0; // Zero — unused for now
+		MidTier.SlotCapacity = 0;
 
 		SmallTier.GridDepth = 7;
 		SmallTier.NeighborhoodRadius = 1;
-		SmallTier.SlotCapacity = 0; // Zero — unused for now
+		SmallTier.SlotCapacity = 0;
+	}
+};
+
+USTRUCT(BlueprintType)
+struct SVO_API FStarSystemParamBounds {
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Star System Param Bounds")
+	FStarSystemParams Min;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Star System Param Bounds")
+	FStarSystemParams Max;
+
+	static FStarSystemParams Generate(FStarSystemParamBounds Bounds, int Seed) {
+		//TODO: Randomize
+		return Bounds.Max;
 	}
 };
