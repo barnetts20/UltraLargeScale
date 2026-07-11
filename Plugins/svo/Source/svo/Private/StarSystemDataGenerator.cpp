@@ -165,10 +165,7 @@ void StarSystemDataGenerator::GeneratePlanet(const FOrbit& InPlanetOrbit, int32 
 		return;
 	}
 
-	FPointData PlanetData = FPointData::MakePointDataFromWorldScale(scale, UnitScale, Extent);
-	PlanetData.Data.TypeId = InPlanetOrbit.Type;
-	PlanetData.Data.Composition = composition;
-	PlanetData.SetPosition(GetOrbitPosition(InPlanetOrbit));
+	FPointData PlanetData = FPointData::MakePointData(GetOrbitPosition(InPlanetOrbit), scale, UnitScale, Extent, InPlanetOrbit.Type, composition);
 
 	GeneratedData.Add(PlanetData);
 
@@ -216,18 +213,13 @@ void StarSystemDataGenerator::GeneratePlanet(const FOrbit& InPlanetOrbit, int32 
 		{
 			// Moon size scales with planet
 			double moonScale = Stream.FRandRange(scale * 0.05, scale * 0.35);
-			FPointData MoonData = FPointData::MakePointDataFromWorldScale(moonScale, UnitScale, Extent);
-			MoonData.Data.TypeId = EObjectType::Moon;
-
-			// Gray/brown moons with variation
-			MoonData.Data.Composition = FVector(
+			FVector moonComposition = FVector(
 				Stream.FRandRange(0.4, 0.7),
 				Stream.FRandRange(0.4, 0.7),
 				Stream.FRandRange(0.4, 0.7)
 			);
 
-			MoonData.SetPosition(GetOrbitPosition(SubOrbit));
-			GeneratedData.Add(MoonData);
+			GeneratedData.Add(FPointData::MakePointData(GetOrbitPosition(SubOrbit), moonScale, UnitScale, Extent, EObjectType::Moon, moonComposition));
 		}
 	}
 }
@@ -286,18 +278,16 @@ void StarSystemDataGenerator::GenerateDebris(const FOrbit& InDebrisOrbit, int32 
 		// Typical asteroids: 1-50 km diameter = 1e5 to 5e6 cm
 		// Large objects (Ceres-class): up to ~1e8 cm
 		double debrisScale = Stream.FRandRange(1e5, 5e6); // 1km to 50km asteroids
+		
 		if (Stream.FRand() < 0.05) // 5% chance of larger object
 			debrisScale = Stream.FRandRange(5e6, 1e8);
-
-		FPointData DebrisData = FPointData::MakePointDataFromWorldScale(debrisScale, UnitScale, Extent);
-		DebrisData.Data.TypeId = EObjectType::Debris;
-
-		// Rocky/icy composition
-		DebrisData.Data.Composition = FVector(
+		
+		FVector composition = FVector(
 			Stream.FRandRange(0.3, 0.6),
 			Stream.FRandRange(0.3, 0.5),
 			Stream.FRandRange(0.3, 0.5)
 		);
+		FPointData DebrisData = FPointData::MakePointData(FinalPos, debrisScale, UnitScale, Extent, EObjectType::Debris, composition);
 
 		DebrisData.SetPosition(FinalPos);
 		GeneratedData.Add(DebrisData);
@@ -327,10 +317,7 @@ void StarSystemDataGenerator::GenerateUnboundDebris()
 		// Small debris objects (absolute world cm, 1-20 km diameter)
 		double debrisScale = Stream.FRandRange(1e5, 2e6);
 
-		FPointData DebrisData = FPointData::MakePointDataFromWorldScale(debrisScale, UnitScale, Extent);
-		DebrisData.Data.TypeId = EObjectType::Debris;
-		DebrisData.Data.Composition = FVector(0.4, 0.4, 0.4);
-		DebrisData.SetPosition(Pos);
+		FPointData DebrisData = FPointData::MakePointData(Pos, debrisScale, UnitScale, Extent, EObjectType::Debris, FVector(0.4, 0.4, 0.4));
 
 		GeneratedData.Add(DebrisData);
 	}
@@ -361,11 +348,8 @@ void StarSystemDataGenerator::GenerateGas()
 		);
 
 		// Very large, very low density gas clouds (absolute world cm)
-		FPointData GasData = FPointData::MakePointDataFromWorldScale(Stream.FRandRange(1e5, 2e6), UnitScale, Extent);
+		FPointData GasData = FPointData::MakePointData(Pos, Stream.FRandRange(1e5, 2e6), UnitScale, Extent, EObjectType::Gas, FVector(0.1, 0.1, 0.15));
 		GasData.Data.Density = Stream.FRandRange(0.001, 0.01); // Very diffuse
-		GasData.Data.TypeId = EObjectType::Gas;
-		GasData.Data.Composition = FVector(0.1, 0.1, 0.15); // Faint blue
-		GasData.SetPosition(Pos);
 
 		GeneratedData.Add(GasData);
 	}

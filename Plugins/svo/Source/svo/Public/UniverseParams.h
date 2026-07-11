@@ -121,7 +121,6 @@ struct SVO_API FUniverseParams : public FBaseParams {
 		SmallTier.NeighborhoodRadius = 1;
 		SmallTier.SlotCapacity = 500;
 
-		// TODO: DO WE NEED IF THIS IS JUST WRAPPING THE SHARED FUNCTION? 
 		// Scale ranges derived from MaxEntityScale (1e22) + depth spacing (2).
 		// 2^2 = 4, so each tier covers two octaves of scale (64x total spread):
 		//   Large: 2.5e21    -> 1e22

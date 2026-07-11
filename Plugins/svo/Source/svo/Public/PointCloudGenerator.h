@@ -1,4 +1,3 @@
-// Fill out your copyright notice in the Description page of Project Settings.
 #if 0	// SVO_LEGACY_EXAMPLE_GENERATORS
 #pragma once
 #include <DataTypes.h>
@@ -167,7 +166,6 @@ public:
 	double PitchAngleRadians;
 	double MaxTheta;
 
-	//TODO: Should randomize distortion formula
 	//const char* EncodedTree = "DQAIAAAAAAAAQAcAAAAAAD8AAAAAAA==";
 	const char* EncodedTree = "FwAAAAAAAACAPwAAgD8AAIC/DwABAAAAAAAAQA0ACAAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAPwAAAAAA";
 	//const char* EncodedTree = "FwAAAAAAmpmZPwAAAAAAAIA/DwABAAAAAAAAQA0ACAAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAPwAAAAAA";

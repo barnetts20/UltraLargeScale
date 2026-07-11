@@ -589,8 +589,7 @@ void FTierStreamingSystem::InsertTierIntoOctree(
 		{
 			const int32 Idx = BufferStart + i;
 			if (InsertBuffer.Extents[Idx] <= 0.0f) continue;
-			InsertParticleIntoOctree(Ctx, Entry, InsertBuffer.Positions[Idx],
-				InsertBuffer.Extents[Idx], Coord, i, Idx, TreeExtent, Config.TierIndex);
+			InsertParticleIntoOctree(Ctx, Entry, InsertBuffer.Positions[Idx], InsertBuffer.Extents[Idx], InsertBuffer.Colors[Idx], Coord, i, Idx, TreeExtent, Config.TierIndex);
 		}
 	}
 }
@@ -626,38 +625,29 @@ void FTierStreamingSystem::InsertSlotIntoOctree(
 	{
 		const int32 Idx = BufferStart + i;
 		if (InsertBuffer.Extents[Idx] <= 0.0f) continue;
-		InsertParticleIntoOctree(Ctx, Entry, InsertBuffer.Positions[Idx],
-			InsertBuffer.Extents[Idx], Coord, i, Idx, TreeExtent, Config.TierIndex);
+		InsertParticleIntoOctree(Ctx, Entry, InsertBuffer.Positions[Idx], InsertBuffer.Extents[Idx], InsertBuffer.Colors[Idx], Coord, i, Idx, TreeExtent, Config.TierIndex);
 	}
 }
 
 void FTierStreamingSystem::InsertParticleIntoOctree(
 	const FTierStreamingContext& Ctx,
-	FSlotEntry& Entry, const FVector& Position, float Extent,
+	FSlotEntry& Entry, const FVector& Position, const float& Extent, const FLinearColor& Color,
 	const FIntVector& GridCoord, int32 GenerationIndex, int32 AbsoluteBufferIndex,
 	double TreeExtent, int32 TierIndex)
 {
 	if (Extent <= 0.0f) return;
 
-	FPointData PD = FPointData::MakePointDataFromWorldScale(
-		static_cast<double>(Extent) * Ctx.UnitScale,
-		Ctx.UnitScale,
-		static_cast<int64>(TreeExtent));
-	PD.SetPosition(Position);
+	FPointData PD = FPointData::MakePointData(Position, static_cast<double>(Extent) * Ctx.UnitScale, Ctx.UnitScale, static_cast<int64>(TreeExtent), TierIndex, FVector(Color.R, Color.B, Color.G));
+	
 	PD.Data.Seed = FVoxelData::ComposeSeed(Ctx.ParentSeed, GridCoord, GenerationIndex);
-	PD.Data.TypeId = TierIndex;
+	//Particle Specific Data
 	PD.Data.ParticleIndex = AbsoluteBufferIndex;
-	// Capture the EXACT particle position/extent on the node. Immutable after
-	// insert, so the spawn scan and rebase remap can consume them race-free —
-	// no tier-buffer read, no bUpdateInProgress gating, and correct even for
-	// stale nodes whose ParticleIndex points at a recycled slot.
 	PD.Data.ParticlePosition = Position;
 	PD.Data.ParticleExtent = Extent;
 
-	TSharedPtr<FOctreeNode> Node = Ctx.Octree->InsertPosition(
-		PD.GetPosition(), PD.InsertDepth, PD.Data);
-	if (Node.IsValid())
-		Entry.InsertedNodes.Add(Node);
+	TSharedPtr<FOctreeNode> Node = Ctx.Octree->InsertPosition(PD.GetPosition(), PD.InsertDepth, PD.Data);
+	
+	if (Node.IsValid()) Entry.InsertedNodes.Add(Node);
 }
 
 // ============================================================================

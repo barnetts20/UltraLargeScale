@@ -336,7 +336,6 @@ struct SVO_API FGalaxyParams : public FBaseParams
 	// --- Encoded noise graph (kept for future FastNoise swap-in) ---
 	static constexpr const char* EncodedTree = "DQAFAAAAAAAAQAgAAAAAAD8AAAAAAA==";
 
-	// TODO: Do we need a wrapper method that just calls a delegate? Seems like we could just replace with the delegate call at the call site?
 	/// Derive MinScale/MaxScale for each tier from MaxEntityScale and the
 	/// depth sequence. Delegates to FTierParams::DeriveTierScaleRanges.
 	void DeriveScaleRanges()

@@ -213,7 +213,6 @@ protected:
 #pragma endregion
 
 #pragma region Niagara Assets
-	//TODO: VALIDATE NAMING SCHEME ACROSS LAYERS, FOLLOW CONSISTENT NAMING PARADIGM FOR TIER/TIER CONFIGS/PARTICLE SYSTEMS WE MAY ALSO BE ABLE TO MOVE TO 1 PARTICLE SYSTEM PER LAYER - currently we just use it to easily divide up sprite materials, the logic is generally the same with the potential exception of pushing galaxy alignment normals
 	/** Large-tier galaxy sprite system. Renders galaxy cluster positions with
 	 *  face-normal rotation data for non-billboard shading. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")

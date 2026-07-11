@@ -55,9 +55,7 @@ public:
 		PositionInternal = InPosition;
 	}
 
-	//TODO: Should probably just do the scale calculation and manage the data struct creation a level up
-	static FPointData MakePointDataFromWorldScale(const double InScaleWorldUnits, const double InUnitScale, const int64 InExtent)
-	{
+	static FPointData MakePointData(const FVector InPosition, const double InScaleWorldUnits, const double InUnitScale, const int64 InExtent, const int InTypeId, const FVector InComposition) {
 		double LocalSize = InScaleWorldUnits / InUnitScale;
 		int MinDepth = 1, BestDepth = 1, MaxDepth = static_cast<int>(FMath::Log2(static_cast<double>(InExtent)));
 		int64 BestNodeExtent = InExtent >> MinDepth;
@@ -77,7 +75,11 @@ public:
 		float ScaleFactor = FMath::Clamp(static_cast<float>((LocalSize / static_cast<double>(BestNodeExtent)) - 1.0), 0.0001f, 1.0f);
 		FVoxelData Data;
 		Data.ScaleFactor = ScaleFactor;
-		return FPointData(FVector::ZeroVector, BestDepth, Data);
+		Data.Composition = InComposition;
+		Data.TypeId = InTypeId;
+		FPointData ReturnData = FPointData(FVector::ZeroVector, BestDepth, Data);
+		ReturnData.SetPosition(InPosition);
+		return ReturnData;
 	}
 
 	static double SampleScaleFromDistribution(double InMinScale, double InMaxScale, double InSample, const FRuntimeFloatCurve& InDistributionCurve) {
