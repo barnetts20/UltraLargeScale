@@ -57,40 +57,11 @@ struct FNiagaraParticleBuffer
     int32 TotalSlots = 0;
     int32 SlotCapacity = 0;
 
-    // Largest particle extent in this buffer. Updated by RecomputeMaxExtent
-    // on the async thread after generation/cache-restore completes. Read by
-    // PushTierToNiagara on the game thread to expand Niagara fixed bounds.
-    // TODO: LETS GET A JUSTIFICATION FOR WHY MAX EXTENT TRACKING IS EVEN NECESSARY... COULD WE JUST SET ALL PARTICLE SYSTEMS TO INT32 MIN/MAX OR SOMETHING?
-    float MaxExtent = 0.f;
-
     static FIntVector EmptySlotCoord() { return FIntVector(INT32_MIN, INT32_MIN, INT32_MIN); }
 
     bool IsSlotOccupied(int32 SlotIndex) const
     {
         return SlotCoord.IsValidIndex(SlotIndex) && SlotCoord[SlotIndex].X != INT32_MIN;
-    }
-
-    // Full scan of the Extents array, cached in MaxExtent. Init-time only:
-    // transitions grow MaxExtent incrementally from the entering plane via
-    // SlotMaxExtent, since bounds are grow-only and never need it to shrink.
-    // TODO: IT MAY BE POSSIBLE THAT WE CAN JUST AWAYS TRACK MAX EXTENT DURING UPDATE LOOPS, REITERATING THE ARRAY TO JUST GET MAX EXTENT MAY BE UNESSCESARY
-    // TODO: AND AS ABOVE, WE NEED TO THINK ABOUT IF WE NEED TO BE MANUALLY UPDATING THE BOUNDS AT ALL INSTEAD OF JUST SETTING ONCE TO A PRESET SIZE
-    void RecomputeMaxExtent()
-    {
-        float Max = 0.f;
-        for (int32 i = 0; i < Extents.Num(); ++i)
-            Max = FMath::Max(Max, Extents[i]);
-        MaxExtent = Max;
-    }
-
-    // Largest extent within one slot's range.
-    float SlotMaxExtent(int32 SlotIndex) const
-    {
-        const int32 Start = SlotStart(SlotIndex);
-        float Max = 0.f;
-        for (int32 i = 0; i < SlotCapacity; ++i)
-            Max = FMath::Max(Max, Extents[Start + i]);
-        return Max;
     }
 
     // Allocate (or reallocate) all active arrays. Pass bWantRotations=false for tiers that don't need face-normal data — saves the alloc and push cost.

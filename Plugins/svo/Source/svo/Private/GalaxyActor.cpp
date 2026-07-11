@@ -156,7 +156,7 @@ void AGalaxyActor::ResetForPool()
 		{
 			if (NC) { NC->Deactivate(); NC->DestroyComponent(); NC = nullptr; }
 		}
-		Tier->ResetState();   // plain state data + sentinels + atomics (incl. bBoundsDirty)
+		Tier->ResetState();   // plain state data + sentinels + atomics
 	}
 	TierNiagaraComponents.Empty();
 	DiagTickCount = 0;
@@ -362,7 +362,7 @@ void AGalaxyActor::BuildTierConfigs()
 
 	// Shared bounds convention — see the derivation in
 	// AUniverseActor::BuildTierConfigs. Tight half-bound is
-	// (2R+2) * CellHalfExtent (+ particle radius via ApplyPendingBounds);
+	// (2R+2) * CellHalfExtent;
 	// we provision 2 * (2R+1) to match the universe tiers. The previous
 	// (2R+1) * CellHalfExtent under-bounded by up to one half-cell when VT
 	// sat near a cell boundary, risking edge-cell culling pops.
@@ -492,11 +492,6 @@ void AGalaxyActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
 	const FTierStreamingContext Ctx = BuildStreamingContext();
 	FTierStreamingSystem::UpdateTier(Ctx, MidTierConfig, MidTierState);
 	FTierStreamingSystem::UpdateTier(Ctx, SmallTierConfig, SmallTierState);
-
-	// Apply any Niagara fixed bounds deferred from a boundary-cross push (GT only).
-	FTierStreamingSystem::ApplyPendingBounds(LargeTierConfig, LargeTierState);
-	FTierStreamingSystem::ApplyPendingBounds(MidTierConfig, MidTierState);
-	FTierStreamingSystem::ApplyPendingBounds(SmallTierConfig, SmallTierState);
 
 	if (IsDebug) DrawDebugBounds();
 

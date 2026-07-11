@@ -318,10 +318,6 @@ struct FParticleTierState
 	 *  dirty flags below instead. */
 	FCriticalSection PushCS;
 
-	/** Raised by the transition commit; consumed on the game thread by
-	 *  ApplyPendingBounds to apply SetSystemFixedBounds (grow-only). */
-	std::atomic<bool> bBoundsDirty{ false };
-
 	/** Set on teardown (BeginShutdownDrain) so in-flight pushes bail before touching
 	 *  a component that is about to be destroyed. */
 	std::atomic<bool> bShuttingDown{ false };
@@ -352,17 +348,6 @@ struct FParticleTierState
 	 *  StampedCenter. ZeroVector until the first commit. */
 	FVector StampedNCenter = FVector::ZeroVector;
 
-	/** Grow-only high-water mark for the applied Niagara fixed-bounds pad
-	 *  (largest MaxExtent ever committed to SetSystemFixedBounds). The base
-	 *  box from ComputeBounds is constant per tier — with the cell-anchored
-	 *  reconstruction, rendered positions are bounded by the neighborhood
-	 *  half-extent plus one particle radius regardless of streaming — so
-	 *  bounds only ever need to GROW to admit a bigger particle, never
-	 *  shrink or move. ApplyPendingBounds skips the render-state touch when
-	 *  the candidate pad doesn't exceed this. Converges to zero bounds
-	 *  updates within a few crossings. Game-thread only. -1 = never applied. */
-	double AppliedBoundsPad = -1.0;
-
 	/** Per-slot accepted particle count, written by GenerateCallback.
 	 *  Used by CacheCellFromBuffers and InsertSlotIntoOctree to skip dead
 	 *  padding without iterating the full SlotCapacity. */
@@ -391,9 +376,7 @@ struct FParticleTierState
 		CenterCoord = FIntVector(INT32_MIN);
 		StampedCenter = FIntVector(INT32_MIN);
 		StampedNCenter = FVector::ZeroVector;
-		AppliedBoundsPad = -1.0;
 		bUpdateInProgress.store(false);
-		bBoundsDirty.store(false);
 		bShuttingDown.store(false);
 	}
 };
@@ -571,11 +554,11 @@ struct FTierStreamingSystem
 	 * prior copy of every array until these sets land, so in-place CPU
 	 * generation is never visible mid-write. Because the per-frame push
 	 * takes the same lock and reads the same stamp, no push can pair a
-	 * lattice/uniform built against different centers. Bounds are deferred
-	 * to ApplyPendingBounds on the game thread. 
+	 * lattice/uniform built against different centers. Fixed bounds are
+	 * set once at init and never updated.
 	 */
 	static void PushTierToNiagara(const TFunction<FVector()>& GetLatestVT, const FIntVector& NewCenter, const FVector& NewNCenter, const FParticleTierConfig& Config, FParticleTierState& State);
-	
+
 	/**
 	 * Per-frame parallax re-push: a SINGLE FVector uniform per component —
 	 * (StampedNCenter - VT) — no array traffic at all. Skips (rather than
@@ -588,9 +571,6 @@ struct FTierStreamingSystem
 	 * the caller — this only performs the writes.
 	 */
 	static void PushTierPositions(std::initializer_list<FParticleTierState*> Tiers, const TFunction<FVector()>& GetLatestVT);
-
-	// Game thread: apply Niagara fixed bounds deferred from a boundary-cross push.
-	static void ApplyPendingBounds(FParticleTierConfig& Config, FParticleTierState& State);
 
 	// Game thread (teardown): block until in-flight pushes drain, then bar new ones.
 	static void BeginShutdownDrain(FParticleTierState& State);

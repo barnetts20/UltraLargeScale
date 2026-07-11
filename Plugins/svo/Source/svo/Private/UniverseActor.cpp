@@ -152,7 +152,7 @@ void AUniverseActor::BuildTierConfigs()
 	//   |cellLocal| + |lattice| <= (2R+1) * CellHalfExtent   (neighborhood half-span)
 	//   |NCenter - VT|          <= CellHalfExtent            (VT resides in the center cell)
 	// so the tight half-bound is (2R+2) * CellHalfExtent plus one particle
-	// radius (added later by ApplyPendingBounds). We provision 2 * (2R+1),
+	// radius. We provision 2 * (2R+1),
 	// which exceeds the tight bound for all R >= 0 and leaves slack for
 	// transition frames. This is the SHARED convention — GalaxyActor's
 	// MakeBounds must match (it previously used (2R+1), which can clip edge
@@ -286,11 +286,6 @@ void AUniverseActor::Tick(float DeltaTime)
 	FTierStreamingSystem::UpdateTier(Ctx, CoarseTierConfig, CoarseTierState);
 	FTierStreamingSystem::UpdateTier(Ctx, MidTierConfig, MidTierState);
 	FTierStreamingSystem::UpdateTier(Ctx, SmallTierConfig, SmallTierState);
-
-	// Apply any Niagara fixed bounds deferred from a boundary-cross push (GT only).
-	FTierStreamingSystem::ApplyPendingBounds(CoarseTierConfig, CoarseTierState);
-	FTierStreamingSystem::ApplyPendingBounds(MidTierConfig, MidTierState);
-	FTierStreamingSystem::ApplyPendingBounds(SmallTierConfig, SmallTierState);
 
 	CheckOctreeBounds();
 

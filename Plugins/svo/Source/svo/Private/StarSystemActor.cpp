@@ -165,7 +165,7 @@ void AStarSystemActor::ResetForPool()
 		{
 			if (NC) { NC->Deactivate(); NC->DestroyComponent(); NC = nullptr; }
 		}
-		Tier->ResetState();   // plain state data + sentinels + atomics (incl. bBoundsDirty)
+		Tier->ResetState();   // plain state data + sentinels + atomics
 	}
 	TierNiagaraComponents.Empty();
 	DiagTickCount = 0;
@@ -615,11 +615,6 @@ void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPo
 	FTierStreamingSystem::UpdateTier(Ctx, LargeTierConfig, LargeTierState);
 	FTierStreamingSystem::UpdateTier(Ctx, MidTierConfig, MidTierState);
 	FTierStreamingSystem::UpdateTier(Ctx, SmallTierConfig, SmallTierState);
-
-	// Apply any Niagara fixed bounds deferred from a boundary-cross push (GT only).
-	FTierStreamingSystem::ApplyPendingBounds(LargeTierConfig, LargeTierState);
-	FTierStreamingSystem::ApplyPendingBounds(MidTierConfig, MidTierState);
-	FTierStreamingSystem::ApplyPendingBounds(SmallTierConfig, SmallTierState);
 
 	// --- Drive live planets ---
 	// Each planet's world position is recomputed from the current VT every

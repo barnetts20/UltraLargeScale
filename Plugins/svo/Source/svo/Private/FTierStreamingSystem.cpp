@@ -112,18 +112,6 @@ void FTierStreamingSystem::InitializeTier(
 		// Cache generated data for each cell.
 		for (const auto& Pair : ToGenerate)
 			CacheCellFromBuffers(Config, State, Pair.Key, Pair.Value);
-
-		// Seed MaxExtent with the one full scan this buffer ever gets;
-		// transitions grow it incrementally from the entering plane.
-		for (int32 b = 0; b < NumBuffers; ++b)
-			State.Buffers[b].RecomputeMaxExtent();
-
-		// Radius-0 tiers never transition, so PushTierToNiagara (which is
-		// what normally raises this) never runs for them — without this,
-		// ApplyPendingBounds never fires and the MaxExtent particle-radius
-		// pad is never applied, letting edge particles clip the fixed
-		// bounds. Consumed on the GT once the actor starts ticking.
-		State.bBoundsDirty.store(true);
 	}
 
 	if (IsPooling()) return;
@@ -167,7 +155,13 @@ void FTierStreamingSystem::InitializeTier(
 					if (bAbsolutePos)
 						NC->SetAbsolute(true, false, false);
 
-					const FBox Bounds = Config.ComputeBounds();
+					// Fixed bounds are set once here and never updated. The box
+					// surrounds the camera, so it can't be frustum-culled; a
+					// generous static box replaces the old dynamically tracked pad.
+					// Doubling the origin-centered geometric box swallows any
+					// particle-radius overhang at no culling cost.
+					const FBox Base = Config.ComputeBounds();
+					const FBox Bounds(Base.Min * 2.0, Base.Max * 2.0);
 					NC->SetSystemFixedBounds(Bounds);
 					NC->TranslucencySortPriority = -1000;
 					NC->SetCustomDepthStencilValue(-1000);
@@ -184,7 +178,8 @@ void FTierStreamingSystem::InitializeTier(
 			}
 
 			// Push initial data and activate each component exactly once.
-			const FBox Bounds = Config.ComputeBounds();
+			const FBox Base = Config.ComputeBounds();
+			const FBox Bounds(Base.Min * 2.0, Base.Max * 2.0);
 			for (int32 b = 0; b < NumBuffers; ++b)
 			{
 				UNiagaraComponent* NC = State.NiagaraComponents[b];
@@ -448,17 +443,6 @@ void FTierStreamingSystem::UpdateTier(
 			for (const auto& EnteringPair : AllEnteringSlots)
 				InsertSlotIntoOctree(InsertCtx, Config, State, EnteringPair.Key, EnteringPair.Value);
 
-			// Grow MaxExtent from the ENTERING plane only. Bounds are
-			// grow-only (ApplyPendingBounds), so the pad never needs to
-			// shrink, and resident slots cannot raise a max they already
-			// contributed to — a full-buffer rescan per transition is waste.
-			for (int32 b = 0; b < NumBuffers; ++b)
-			{
-				FNiagaraParticleBuffer& Buf = State.Buffers[b];
-				for (const int32 EnterSlot : EnteringSlots)
-					Buf.MaxExtent = FMath::Max(Buf.MaxExtent, Buf.SlotMaxExtent(EnterSlot));
-			}
-
 			// Commit: stamp the new center and upload arrays + lattice +
 			// uniform, all inside the tier PushCS, so a concurrent per-frame
 			// push can never pair a stale VT or a lattice/uniform built
@@ -522,10 +506,6 @@ void FTierStreamingSystem::PushTierToNiagara(
 		if (!NC) continue;
 		State.Buffers[b].PushToNiagara(NC, VirtualTraversal, NewNCenter);
 	}
-
-	// SetSystemFixedBounds is a component render-state touch; defer it to the game
-	// thread (ApplyPendingBounds). MaxExtent is stable by the time we set the flag.
-	State.bBoundsDirty.store(true);
 }
 
 // ============================================================================
@@ -567,43 +547,6 @@ void FTierStreamingSystem::PushTierPositions(
 			Tier->Buffers[b].PushNCenterMinusVT(
 				NC, Tier->StampedNCenter, VirtualTraversal);
 		}
-	}
-}
-
-// ============================================================================
-//  ApplyPendingBounds  (game thread)
-// ============================================================================
-// Consumes the bBoundsDirty flag raised by the transition commit. GROW-ONLY:
-// the base box from ComputeBounds is constant per tier, and cell-anchored
-// reconstruction bounds every rendered position by the neighborhood half-
-// extent plus one particle radius — streaming never moves the box. The only
-// variable is the MaxExtent pad, and shrinking it buys nothing (culling
-// already can't reject a camera-surrounding box) while re-registering render
-// state costs. So SetSystemFixedBounds fires only when the pad exceeds the
-// tier's high-water mark; steady-state transitions apply nothing at all.
-void FTierStreamingSystem::ApplyPendingBounds(
-	FParticleTierConfig& Config, FParticleTierState& State)
-{
-	if (!State.bBoundsDirty.exchange(false)) return;
-
-	// Pad by the largest particle across ALL buffers so the one shared
-	// high-water mark is valid for every component in the tier. MaxExtent
-	// may be racily read against a worker growing it mid-transition; that
-	// is benign — a stale (smaller) value is re-flagged by that commit.
-	double CandidatePad = 0.0;
-	for (int32 b = 0; b < State.Buffers.Num(); ++b)
-		CandidatePad = FMath::Max(CandidatePad,
-			static_cast<double>(State.Buffers[b].MaxExtent));
-
-	if (CandidatePad <= State.AppliedBoundsPad) return;   // box wouldn't grow
-	State.AppliedBoundsPad = CandidatePad;
-
-	const FBox Bounds = Config.ComputeBounds().ExpandBy(CandidatePad);
-	for (int32 b = 0; b < State.NiagaraComponents.Num(); ++b)
-	{
-		UNiagaraComponent* NC = State.NiagaraComponents[b];
-		if (!NC) continue;
-		NC->SetSystemFixedBounds(Bounds);
 	}
 }
 
