@@ -11,50 +11,57 @@
 #include "ContentBrowserModule.h"
 #include "IContentBrowserSingleton.h"
 #include "FastNoise/FastNoise.h"
-
-// Inline method bodies below dereference FOctree/FOctreeNode/FPointData, so we
-// need full definitions — forward declarations are not enough.
 #include "FOctree.h"
 #include "DataTypes.h"
 
 //TODO: IF WE CAN COME UP WITH A WAY TO UPDATE ONLY *PARTS* OF THE GPU TEXTURE BUFFER THEN WE MAY BE ABLE TO MOVE TO RAYMARCHING FOR THE UNIVERSE DENSITY FIELD BUT WE NEED THE ABILITY TO UPDATE CELLS OF THE TEXTURE CORRESPONDING WITH CELL UPDATES TO DO SO... GALAXY IS A BOUNDED FIELD, UNIVERSE IS NOT SO IT HAS TO RUNTIME UPDATE AND WE WOULD NEED A SIMILAR DISTANCE FADE IN THE RAY MARCHER AS THE PARTICLES USE TO HIDE POP IN
 
-/// <summary>
-/// Sparse voxel entry for rasterizing node data into a dense volume grid.
-/// </summary>
+/** Sparse voxel entry for rasterizing node data into a dense volume grid. */
 struct FVolumeVoxelEntry
 {
-	int X, Y, Z;       // Grid coordinates (0 to Resolution-1)
-	uint8 R, G, B, A;  // Channel values
+	/** Grid coordinates (0 to Resolution-1). */
+	int X, Y, Z;
+
+	/** Channel values. */
+	uint8 R, G, B, A;
 };
 
-/// <summary>
-/// CPU-side density field view — wraps the authoritative uint8 BGRA8 buffer
-/// produced by SampleNoiseToVolume along with the source-space metadata
-/// required to map world-space queries back into voxel coordinates.
-///
-/// The backing buffer is owned externally (typically by whichever actor ran
-/// the noise sampling) and MUST outlive any sampling calls. FDensityVolume
-/// only holds a pointer + metadata — no ownership, no copy.
-///
-/// Layout matches SampleNoiseToVolume output:
-///   - uint8 BGRA8, 4 bytes per voxel
-///   - Linear [z][y][x] order, X fastest, Z slowest
-///   - Voxel-center convention: voxel (i,j,k) is centered at
-///     (Min + (i+0.5)*VoxelSize, ...) in source-local space
-///
-/// Channel indexing matches the raw byte layout: channel 0 = B, 1 = G,
-/// 2 = R, 3 = A. The noise sampler defaults to channel 3 (alpha), so the
-/// default sampler channel here matches.
-/// </summary>
+/** CPU-side density field view: wraps the authoritative uint8 BGRA8 buffer
+ *  produced by SampleNoiseToVolume plus the source-space metadata needed to
+ *  map world-space queries back into voxel coordinates.
+ *
+ *  The backing buffer is owned externally (typically by whichever actor ran
+ *  the noise sampling) and must outlive any sampling calls; FDensityVolume
+ *  holds a pointer and metadata only, no ownership or copy.
+ *
+ *  Layout matches SampleNoiseToVolume output:
+ *    - uint8 BGRA8, 4 bytes per voxel
+ *    - Linear [z][y][x] order, X fastest, Z slowest
+ *    - Voxel-center convention: voxel (i,j,k) is centered at
+ *      (Min + (i+0.5)*VoxelSize, ...) in source-local space
+ *
+ *  Channel indexing matches the raw byte layout: channel 0 = B, 1 = G, 2 = R,
+ *  3 = A. The noise sampler defaults to channel 3 (alpha), matching the default
+ *  sampler channel here. */
 struct SVO_API FDensityVolume
 {
-	const uint8* Buffer = nullptr;          // Non-owning pointer to BGRA8 buffer
-	int64        BufferSize = 0;            // Buffer size in bytes (for validation)
-	FVector      SourceCenter = FVector::ZeroVector;   // Source-space center
-	FVector      SourceHalfExtent = FVector::ZeroVector; // Source-space half-size
-	int32        Resolution = 0;            // Voxels per axis
-	int32        NumChannels = 4;           // BGRA8 = 4
+	/** Non-owning pointer to the BGRA8 buffer. */
+	const uint8* Buffer = nullptr;
+
+	/** Buffer size in bytes, for validation. */
+	int64 BufferSize = 0;
+
+	/** Source-space center. */
+	FVector SourceCenter = FVector::ZeroVector;
+
+	/** Source-space half-size. */
+	FVector SourceHalfExtent = FVector::ZeroVector;
+
+	/** Voxels per axis. */
+	int32 Resolution = 0;
+
+	/** Channel count; BGRA8 = 4. */
+	int32 NumChannels = 4;
 
 	FDensityVolume() = default;
 
@@ -78,15 +85,11 @@ struct SVO_API FDensityVolume
 			&& BufferSize == (int64)Resolution * Resolution * Resolution * NumChannels;
 	}
 
-	/// <summary>
-	/// Sample density in normalized [0,1] at a source-local position with trilinear
-	/// interpolation. Channel defaults to 3 (alpha) to match SampleNoiseToVolume's
-	/// default output channel.
-	///
-	/// NOTE: InLocalPos is relative to SourceCenter (i.e. already transformed into
-	/// the coordinate frame the noise was sampled in — same space as the
-	/// generator's InExtent). Out-of-bounds positions fail a check().
-	/// </summary>
+	/** Samples density in normalized [0,1] at a source-local position with
+	 *  trilinear interpolation. Channel defaults to 3 (alpha) to match
+	 *  SampleNoiseToVolume's default output channel. InLocalPos is relative to
+	 *  SourceCenter (the coordinate frame the noise was sampled in, same space as
+	 *  the generator's InExtent); out-of-bounds positions fail a check(). */
 	float SampleDensityAtLocalPos(const FVector& InLocalPos, int32 Channel = 3) const
 	{
 		checkf(IsValid(), TEXT("FDensityVolume::SampleDensityAtLocalPos: buffer not valid"));
@@ -168,32 +171,26 @@ struct SVO_API FDensityVolume
 	}
 };
 
-/// <summary>
-/// VOLUME TEXTURE UTILITIES
-/// Pure texture/buffer operations: upscaling, compositing, rasterization,
-/// pseudo-volume packing, async texture creation, and optional bake-to-disk.
-/// No octree or noise dependencies � operates on raw buffers.
-/// 
-/// Buffer format: BGRA8 (4 bytes per voxel), linear layout [z][y][x].
-/// Channel semantics are defined by the caller � this class is channel-agnostic.
-/// </summary>
+/** Pure texture/buffer operations: upscaling, compositing, rasterization,
+ *  pseudo-volume packing, async texture creation, and optional bake-to-disk.
+ *  No octree or noise dependencies; operates on raw buffers.
+ *
+ *  Buffer format: BGRA8 (4 bytes per voxel), linear layout [z][y][x]. Channel
+ *  semantics are defined by the caller; this class is channel-agnostic. */
 class SVO_API FVolumeTextureUtils
 {
 public:
 
 #pragma region Noise Sampling
-	/// <summary>
-	/// Sample a noise function into a volume grid at the specified resolution.
-	/// Optionally writes results into an octree at the given depth simultaneously (single pass).
-	/// Parallel chunking at depth-5 boundaries (each depth-5 chunk processes its sub-nodes serially).
-	/// When no octree is provided, produces a standalone volume buffer from noise.
-	///
-	/// InWorldOffset is an additive offset applied to noise sample coordinates
-	/// AFTER normalization (so it's in normalized noise-space units, not world
-	/// units). For a tiled grid of volumes that want to be continuous across
-	/// boundaries, pass `(2 * CellCoord)` so adjacent cells sample contiguous
-	/// regions of the same field. Default zero matches single-volume behavior.
-	/// </summary>
+	/** Samples a noise function into a volume grid at the given resolution,
+	 *  optionally writing into an octree at InOctreeDepth in the same pass (chunked
+	 *  in parallel at depth-5 boundaries, each chunk's sub-nodes serial). With no
+	 *  octree, produces a standalone volume buffer.
+	 *
+	 *  InWorldOffset is added to noise sample coordinates after normalization (so
+	 *  in normalized noise-space units, not world units). For a tiled grid of
+	 *  volumes continuous across boundaries, pass (2 * CellCoord) so adjacent cells
+	 *  sample contiguous regions of the same field; zero matches single-volume. */
 	static TArray<uint8> SampleNoiseToVolume(
 		FastNoise::SmartNode<> InNoise,
 		int InSeed,
@@ -205,16 +202,12 @@ public:
 		int InChannel = 3,
 		FVector InWorldOffset = FVector::ZeroVector);
 
-	/// <summary>
-	/// Sample a noise function into a sub-region of an existing volume buffer.
-	/// The sub-region is defined by a voxel bounding box [Min, Max) per axis.
-	///
-	/// InExtent is the half-size of the volume in world space (determines where
-	/// each voxel sits spatially). InNoiseNormExtent is the half-size used to
-	/// normalize positions into noise space — typically Params.Extent (one cell)
-	/// so that noise coordinates match the particle generators. InWorldOffset
-	/// is added after normalization for seamless cross-cell tiling.
-	/// </summary>
+	/** Samples a noise function into a voxel sub-region [InVoxelMin, InVoxelMax)
+	 *  of an existing volume buffer. InExtent is the volume half-size in world
+	 *  space (where each voxel sits); InNoiseNormExtent is the half-size used to
+	 *  normalize positions into noise space, typically Params.Extent (one cell) so
+	 *  noise coordinates match the particle generators. InWorldOffset is added
+	 *  after normalization for seamless cross-cell tiling. */
 	static void SampleNoiseToSubRegion(
 		TArray<uint8>& InOutVolumeData,
 		int InResolution,
@@ -228,10 +221,8 @@ public:
 		int InChannel = 3,
 		FVector InWorldOffset = FVector::ZeroVector);
 
-	/// <summary>
-	/// Zero all voxels in a sub-region of a volume buffer. Used to clear
-	/// exiting cells before sampling entering cells into the same buffer.
-	/// </summary>
+	/** Zeroes all voxels in a sub-region of a volume buffer. Clears exiting cells
+	 *  before sampling entering cells into the same buffer. */
 	static void ClearSubRegion(
 		TArray<uint8>& InOutVolumeData,
 		int InResolution,
@@ -240,18 +231,18 @@ public:
 #pragma endregion
 
 #pragma region Extract Mip Data From Volume Nodes
+	/** Rasterizes octree volume nodes into a dense InResolution^3 BGRA8 buffer,
+	 *  mapping each node center to a voxel and writing its normalized density
+	 *  (Density / InMaxDensity) as alpha and its composition as color. Defined in
+	 *  the .cpp. */
 	static TArray<uint8> GenerateVolumeMipDataFromOctree(TArray<TSharedPtr<FOctreeNode>> InVolumeNodes, int InResolution, double InExtent, double InMaxDensity);
 #pragma endregion
 
 #pragma region Upscale Volume Data
 
-	/// <summary>
-	/// Upscale a low-resolution volume grid to 256^3 via trilinear interpolation.
-	/// Returns the upscaled data as a flat 256^3 BGRA8 buffer.
-	/// </summary>
-	/// <param name="InMipData">Input volume data (InResolution^3 * 4 bytes, BGRA8)</param>
-	/// <param name="InResolution">Input resolution per axis (e.g., 32)</param>
-	/// <returns>Upscaled 256^3 BGRA8 buffer</returns>
+	/** Upscales a low-resolution volume grid to 256^3 via trilinear interpolation.
+	 *  InMipData is InResolution^3 * 4 bytes (BGRA8); returns a flat 256^3 BGRA8
+	 *  buffer. */
 	static TArray<uint8> UpscaleVolumeData(const TArray<uint8>& InMipData, int InResolution)
 	{
 		double StartTime = FPlatformTime::Seconds();
@@ -339,14 +330,10 @@ public:
 
 #pragma region Rasterize Sparse Data to Volume
 
-	/// <summary>
-	/// Rasterize sparse voxel entries into a dense volume buffer.
-	/// Additive � values are added to existing buffer content, clamped to 255.
-	/// Use for writing sparse octree node data into a 256^3 grid.
-	/// </summary>
-	/// <param name="InOutVolumeData">Target volume buffer (modified in place, Resolution^3 * 4 bytes)</param>
-	/// <param name="InResolution">Volume resolution per axis</param>
-	/// <param name="InEntries">Sparse voxel entries to rasterize</param>
+	/** Rasterizes sparse voxel entries into a dense volume buffer (InOutVolumeData,
+	 *  modified in place, InResolution^3 * 4 bytes). Additive: values add to
+	 *  existing content, clamped to 255. Use for writing sparse octree node data
+	 *  into a 256^3 grid. */
 	static void RasterizeSparseEntries(
 		TArray<uint8>& InOutVolumeData,
 		int InResolution,
@@ -381,20 +368,18 @@ public:
 	}
 
 #pragma endregion
+
 #pragma region Splat VBOs to Volume
 
-	/// <summary>
-	/// Splat point cloud nodes into a 256^3 volume buffer as randomly-oriented
-	/// ellipsoidal density kernels, and optionally write the resulting density
-	/// into the octree at a target depth.
-	///
-	/// Each node gets a randomized splat seeded from its Seed:
-	/// per-axis radius, orientation, falloff sharpness, and intensity.
-	/// The random rotation breaks axis-alignment so ellipsoids point in
-	/// arbitrary directions — no grid artifacts.
-	///
-	/// Uses Lorentzian falloff: 1 / (1 + k * t^2) — sharp spike, long tail.
-	/// </summary>
+	/** Splats point-cloud nodes into a 256^3 volume buffer as randomly oriented
+	 *  ellipsoidal density kernels, optionally writing the resulting density into
+	 *  the octree at InOctreeDepth.
+	 *
+	 *  Each node gets a randomized splat seeded from its Seed: per-axis radius,
+	 *  orientation, falloff sharpness, and intensity. The random rotation breaks
+	 *  axis-alignment so ellipsoids point in arbitrary directions, avoiding grid
+	 *  artifacts. Uses Lorentzian falloff 1 / (1 + k * t^2): sharp spike, long
+	 *  tail. */
 	static void SplatVBOsToVolume(
 		TArray<uint8>& InOutVolumeData,
 		int InResolution,
@@ -417,7 +402,7 @@ public:
 		const double InvVoxelSize = 1.0 / VoxelSize;
 		const int Slice = InResolution * InResolution;
 
-		// --- Per-node splat: randomized oriented ellipsoid ---
+		// Per-node splat: randomized oriented ellipsoid
 		struct FSplatEntry
 		{
 			float CenterX, CenterY, CenterZ;
@@ -425,7 +410,7 @@ public:
 			float InvRadiusX, InvRadiusY, InvRadiusZ;
 			float FalloffK;
 			float Intensity;
-			float MaxRadius;  // Largest axis radius — for AABB bounding box
+			float MaxRadius;  // Largest axis radius, for AABB bounding box
 
 			// Inverse rotation matrix rows (rotates world-space delta into ellipsoid-local space)
 			// Stored as 3 row vectors for cache-friendly dot products
@@ -451,7 +436,7 @@ public:
 			float RY = NodeStream.FRandRange(InMinRadiusVoxels.Y, InMaxRadiusVoxels.Y);
 			float RZ = NodeStream.FRandRange(InMinRadiusVoxels.Z, InMaxRadiusVoxels.Z);
 
-			// Random rotation — uniform random Euler angles
+			// Random rotation: uniform random Euler angles
 			FRotator RandomRot(
 				NodeStream.FRandRange(-180.0f, 180.0f),
 				NodeStream.FRandRange(-180.0f, 180.0f),
@@ -493,17 +478,17 @@ public:
 			return;
 		}
 
-		// --- Float accumulation buffer ---
+		// Float accumulation buffer
 		const int64 TotalVoxels = (int64)InResolution * InResolution * InResolution;
 		TArray<float> AccumBuffer;
 		AccumBuffer.SetNumZeroed(TotalVoxels);
 
-		// --- Pass 1: Parallel splat into float accumulation buffer ---
+		// Pass 1: parallel splat into float accumulation buffer
 		ParallelFor(Splats.Num(), [&](int SplatIdx)
 			{
 				const FSplatEntry& S = Splats[SplatIdx];
 
-				// AABB uses MaxRadius — conservative bounding box for the rotated ellipsoid
+				// AABB uses MaxRadius: conservative bounding box for the rotated ellipsoid
 				int MinX = FMath::Max(0, FMath::FloorToInt(S.CenterX - S.MaxRadius));
 				int MaxX = FMath::Min(InResolution - 1, FMath::CeilToInt(S.CenterX + S.MaxRadius));
 				int MinY = FMath::Max(0, FMath::FloorToInt(S.CenterY - S.MaxRadius));
@@ -547,7 +532,7 @@ public:
 				}
 			}, Splats.Num() > 64 ? EParallelForFlags::BackgroundPriority : EParallelForFlags::ForceSingleThread);
 
-		// --- Octree setup for depth writes ---
+		// Octree setup for depth writes
 		bool bWriteOctree = InOctree.IsValid() && InOctreeDepth > 0;
 		TArray<TSharedPtr<FOctreeNode>> VolumeChunks;
 
@@ -557,7 +542,7 @@ public:
 			InOctree->PrePopulateVolumeLayer(VolumeChunks, DummyChunkData);
 		}
 
-		// --- Pass 2: Quantize to byte buffer + write octree (parallel over Z slices) ---
+		// Pass 2: quantize to byte buffer + write octree (parallel over Z slices)
 		uint8* DataPtr = InOutVolumeData.GetData();
 
 		ParallelFor(InResolution, [&](int z)
@@ -615,14 +600,11 @@ public:
 	}
 
 #pragma endregion
+
 #pragma region Composite Volume Layers
 
-	/// <summary>
-	/// Composite a detail layer onto a base volume buffer (both same resolution, BGRA8).
-	/// Additive per channel, clamped to 255.
-	/// </summary>
-	/// <param name="InOutBaseData">Base volume (modified in place)</param>
-	/// <param name="InDetailData">Detail volume to composite (additive)</param>
+	/** Composites InDetailData onto InOutBaseData in place (both same resolution,
+	 *  BGRA8). Additive per channel, clamped to 255. */
 	static void CompositeVolumeLayers(TArray<uint8>& InOutBaseData, const TArray<uint8>& InDetailData)
 	{
 		double StartTime = FPlatformTime::Seconds();
@@ -656,12 +638,9 @@ public:
 
 #pragma region Pack to Pseudo-Volume Layout
 
-	/// <summary>
-	/// Pack a 256^3 BGRA8 volume buffer into a 4096x4096 2D pseudo-volume layout.
-	/// Layout: 16x16 tiles, each tile is a 256x256 Z-slice.
-	/// Input: linear 256^3 buffer [z][y][x] * 4 bytes.
-	/// Output: tiled 4096x4096 buffer suitable for UTexture2D creation.
-	/// </summary>
+	/** Packs a 256^3 BGRA8 volume buffer (linear [z][y][x] * 4 bytes) into a
+	 *  4096x4096 2D pseudo-volume layout: 16x16 tiles, each a 256x256 Z-slice.
+	 *  Output is suitable for UTexture2D creation. */
 	static TArray<uint8> PackToPseudoVolumeLayout(const TArray<uint8>& InVolumeData)
 	{
 		double StartTime = FPlatformTime::Seconds();
@@ -708,14 +687,11 @@ public:
 
 #pragma region Async Texture Creation
 
-	/// <summary>
-	/// Create a UTexture2D from pre-built 4096x4096 BGRA8 pseudo-volume data.
-	/// Must be called from a background thread (uses async game thread dispatch internally).
-	/// If InSavePath is non-empty, the texture is also saved to disk as a persistent .uasset.
-	/// </summary>
-	/// <param name="InMipData">4096x4096 BGRA8 buffer (67,108,864 bytes)</param>
-	/// <param name="InSavePath">If non-empty, saves the texture as a persistent asset at this path</param>
-	/// <returns>Transient UTexture2D ready for material use</returns>
+	/** Creates a transient UTexture2D from pre-built 4096x4096 BGRA8 pseudo-volume
+	 *  data (InMipData, 67,108,864 bytes), ready for material use. Must be called
+	 *  from a background thread (dispatches to the game thread internally). If
+	 *  InSavePath is non-empty, also saves the texture to disk as a persistent
+	 *  .uasset at that path. */
 	static UTexture2D* CreatePseudoVolumeTexture(
 		const TArray<uint8>& InMipData,
 		const FString& InSavePath = TEXT(""))
@@ -819,28 +795,26 @@ private:
 
 #pragma region Save to Disk
 
-	/// <summary>
-	/// Save a pseudo-volume texture to disk as a persistent .uasset.
-	/// InSavePath must be a content-relative package path with NO file extension,
-	/// e.g. "/Game/GeneratedTextures/SectorVolume_0". The .uasset extension is
-	/// appended internally by LongPackageNameToFilename.
-	///
-	/// NOTE: This creates a NEW UTexture2D in the target package using Source mip data
-	/// (the editor-facing source representation). PlatformData alone is not sufficient
-	/// for SavePackage -- without Source data the asset saves but loads as blank in
-	/// the editor and content browser.
-	/// InTexture (the transient runtime texture) is intentionally NOT reused here;
-	/// it lives in GetTransientPackage() and cannot be moved to a persistent package.
-	/// </summary>
+	/** Saves a pseudo-volume texture to disk as a persistent .uasset. InSavePath
+	 *  must be a content-relative package path with no file extension, e.g.
+	 *  "/Game/GeneratedTextures/SectorVolume_0"; LongPackageNameToFilename appends
+	 *  the .uasset extension.
+	 *
+	 *  Creates a new UTexture2D in the target package from Source mip data (the
+	 *  editor-facing representation); PlatformData alone is not sufficient for
+	 *  SavePackage, as without Source data the asset saves but loads blank in the
+	 *  editor and content browser. InTexture (the transient runtime texture) is
+	 *  not reused: it lives in GetTransientPackage() and cannot move to a
+	 *  persistent package. */
 	static void SaveTextureToDisk(
-		UTexture2D* InTexture,   // Unused directly -- kept for API clarity/future use
+		UTexture2D* InTexture,   // Unused directly; kept for API clarity/future use
 		const TArray<uint8>& InMipData,
 		int InResolution,
 		const FString& InSavePath)
 	{
 		double StartTime = FPlatformTime::Seconds();
 
-		// Capture by value -- this is called from a background thread and the caller
+		// Capture by value; this is called from a background thread and the caller
 		// may return before the AsyncTask executes on the game thread.
 		TArray<uint8> MipDataCopy = InMipData;
 		FString SavePathCopy = InSavePath;
@@ -873,7 +847,7 @@ private:
 					return;
 				}
 
-				// --- Texture settings ---
+				// Texture settings
 				SaveTexture->NeverStream = true;
 				SaveTexture->SRGB = false;
 				SaveTexture->CompressionSettings = TC_VectorDisplacementmap;
@@ -882,7 +856,7 @@ private:
 				SaveTexture->MipGenSettings = TMGS_NoMipmaps;
 				SaveTexture->LODGroup = TEXTUREGROUP_ColorLookupTable;
 
-				// --- Populate SOURCE data ---
+				// Populate SOURCE data
 				// Source is the editor-facing representation that SavePackage persists.
 				// PlatformData is the cooked runtime form and is NOT written by SavePackage.
 				const int ExpectedBytes = InResolution * InResolution * 4;
@@ -922,8 +896,8 @@ private:
 				}
 				SaveTexture->Source.UnlockMip(0);
 
-				// Do NOT call UpdateResource() -- this texture is never rendered.
-				// Do NOT call PostEditChange() -- on a 4096^2 texture it kicks off a full
+				// Do NOT call UpdateResource(): this texture is never rendered.
+				// Do NOT call PostEditChange(): on a 4096^2 texture it kicks off a full
 				// async compression job (hence "Waiting for textures to be ready") even with
 				// CompressionNone=true, because it still schedules a build task.
 				// We just need the source data written; SavePackage handles the rest.
@@ -945,7 +919,7 @@ private:
 					AssetRegistry.Get().ScanPathsSynchronous(PathsToScan, /*bForceRescan=*/true);
 
 #if WITH_EDITOR
-					// Explicitly notify the Content Browser to refresh — ScanPathsSynchronous
+					// Explicitly notify the Content Browser to refresh; ScanPathsSynchronous
 					// updates the registry but doesn't always force a visible refresh.
 					FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
 					ContentBrowserModule.Get().SyncBrowserToAssets(TArray<FAssetData>{ FAssetData(SaveTexture) });
