@@ -4,6 +4,7 @@
 
 #include "Modules/ModuleManager.h"
 
+/** SVO module entry point; wires up module startup and shutdown. */
 class FsvoModule : public IModuleInterface
 {
 public:
@@ -13,24 +14,22 @@ public:
 	virtual void ShutdownModule() override;
 };
 //TODO: Robust instrumentation could be updated... we have done several refactors since we needed this, but instrumentation of game thread/non game thread actions would be very useful from an optimization and tuning standpoint
-// ===========================================================================
-//  Inline Game-Thread Profiler  (TEMPORARY — remove when optimization is done)
-// ---------------------------------------------------------------------------
-//  Drop SVO_GT_SCOPE("Label") at the top of any GAME-THREAD method. It:
-//    1. Emits an Unreal Insights CPU trace event (named scope on the timeline).
-//    2. Accumulates inclusive wall-time into a per-label bucket.
-//  Call SVO_GT_FLUSH() once per frame from the ROOT game-thread tick
-//  (AUniverseActor::Tick). Every second it logs a summary sorted worst-first:
-//    Total(ms) | Calls | Avg(ms) | Max(ms)     (Max = single-frame outlier).
-//
-//  GAME-THREAD ONLY: the accumulator is an unlocked TMap. Do not place a scope
-//  inside an AsyncTask/ParallelFor body. Timing is INCLUSIVE (a parent's total
-//  includes any instrumented children). Set SVO_GT_PROFILING 0 to compile out.
-//
-//  To remove later: delete this block, the DEFINE_LOG_CATEGORY line in svo.cpp,
-//  the #include "svo.h" added to instrumented .cpp files, and every
-//  SVO_GT_SCOPE/SVO_GT_FLUSH call.
-// ===========================================================================
+/** Inline game-thread profiler (temporary; remove when optimization is done).
+ *
+ *  Drop SVO_GT_SCOPE("Label") at the top of any game-thread method. It:
+ *    1. Emits an Unreal Insights CPU trace event (named scope on the timeline).
+ *    2. Accumulates inclusive wall-time into a per-label bucket.
+ *  Call SVO_GT_FLUSH() once per frame from the root game-thread tick
+ *  (AUniverseActor::Tick). Every second it logs a summary sorted worst-first:
+ *    Total(ms) | Calls | Avg(ms) | Max(ms)  (Max = single-frame outlier).
+ *
+ *  Game-thread only: the accumulator is an unlocked TMap. Do not place a scope
+ *  inside an AsyncTask/ParallelFor body. Timing is inclusive (a parent's total
+ *  includes any instrumented children). Set SVO_GT_PROFILING 0 to compile out.
+ *
+ *  To remove later: delete this block, the DEFINE_LOG_CATEGORY line in svo.cpp,
+ *  the #include "svo.h" added to instrumented .cpp files, and every
+ *  SVO_GT_SCOPE/SVO_GT_FLUSH call. */
 
 #include "CoreMinimal.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
@@ -43,6 +42,7 @@ DECLARE_LOG_CATEGORY_EXTERN(LogSVOPerf, Log, All);
 
 #if SVO_GT_PROFILING
 
+/** Per-label accumulation bucket: total and max wall-time plus call count. */
 struct FSVOGTStat
 {
 	double TotalSeconds = 0.0;
@@ -50,6 +50,8 @@ struct FSVOGTStat
 	int32  Calls = 0;
 };
 
+/** Singleton game-thread time accumulator; buckets scoped timings by label and
+ *  logs a periodic worst-first summary. */
 class FSVOGameThreadProfiler
 {
 public:
@@ -59,6 +61,7 @@ public:
 		return Instance;
 	}
 
+	/** Adds Seconds to Name's bucket and bumps its call count and max. */
 	FORCEINLINE void Accumulate(const TCHAR* Name, double Seconds)
 	{
 		FSVOGTStat& S = Stats.FindOrAdd(Name);
@@ -67,7 +70,7 @@ public:
 		++S.Calls;
 	}
 
-	// Logs + resets the accumulated window every IntervalSeconds. No-op otherwise.
+	/** Logs and resets the accumulated window every IntervalSeconds; no-op otherwise. */
 	void FlushIfDue(double IntervalSeconds = 1.0)
 	{
 		const double Now = FPlatformTime::Seconds();
@@ -106,6 +109,7 @@ private:
 	double LastFlush = 0.0;
 };
 
+/** RAII scope timer: accumulates its lifetime into the named bucket on destruction. */
 struct FSVOScopedGTTimer
 {
 	const TCHAR* Name;
@@ -118,7 +122,7 @@ struct FSVOScopedGTTimer
 	}
 };
 
-// NameLiteral MUST be a narrow string literal, e.g. SVO_GT_SCOPE("Universe::Tick").
+/** NameLiteral must be a narrow string literal, e.g. SVO_GT_SCOPE("Universe::Tick"). */
 #define SVO_GT_SCOPE(NameLiteral) \
 	TRACE_CPUPROFILER_EVENT_SCOPE_STR(NameLiteral); \
 	FSVOScopedGTTimer ANONYMOUS_VARIABLE(SVOGTTimer_)(TEXT(NameLiteral))
