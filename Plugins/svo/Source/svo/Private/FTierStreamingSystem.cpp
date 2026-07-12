@@ -3,9 +3,7 @@
 #include "Misc/ScopeLock.h"
 #include "Misc/ScopeTryLock.h"
 
-// ============================================================================
-//  InitializeTier
-// ============================================================================
+#pragma region InitializeTier
 void FTierStreamingSystem::InitializeTier(
 	const FTierStreamingContext& Ctx,
 	FParticleTierConfig& Config,
@@ -29,13 +27,13 @@ void FTierStreamingSystem::InitializeTier(
 
 	// Toroidal addressing invariant: Side must be odd on every axis so the
 	// window has a well-defined center cell and Side==1 is a clean degenerate
-	// subset. Trivially true with a scalar radius — asserted so a future
+	// subset. Trivially true with a scalar radius; asserted so a future
 	// per-axis radius can't silently break the bijection.
 	checkf((Side % 2) == 1 && Config.NeighborhoodRadius >= 0,
 		TEXT("InitializeTier [%s]: Side (=2R+1) must be odd and positive, got %d"),
 		*Config.TierName, Side);
 
-	// Allocate particle data — ONE buffer per Niagara asset (single-buffered;
+	// Allocate particle data: ONE buffer per Niagara asset (single-buffered;
 	// see FParticleTierState::Buffers for why no back buffer is needed).
 	State.Buffers.SetNum(NumBuffers);
 	for (int32 b = 0; b < NumBuffers; ++b)
@@ -125,7 +123,7 @@ void FTierStreamingSystem::InitializeTier(
 	const bool bAbsolutePos = Ctx.bNiagaraAbsolutePosition;
 	const FVector VT = Ctx.VirtualTraversal;
 	// Radius-0 tiers stamped their permanent center above; streaming tiers are
-	// still at the sentinel (ZeroVector NCenter) — all their particles are dead
+	// still at the sentinel (ZeroVector NCenter); all their particles are dead
 	// until the first UpdateTier commit, so the seed uniform is inert.
 	const FVector NCenterSeed = State.StampedNCenter;
 
@@ -139,7 +137,7 @@ void FTierStreamingSystem::InitializeTier(
 				UNiagaraSystem* Template = Config.NiagaraAssets[b];
 				if (!Template)
 				{
-					UE_LOG(LogTemp, Warning, TEXT("FTierStreamingSystem::InitializeTier [%s] — NiagaraAssets[%d] not assigned."),
+					UE_LOG(LogTemp, Warning, TEXT("FTierStreamingSystem::InitializeTier [%s] - NiagaraAssets[%d] not assigned."),
 						*Config.TierName, b);
 				}
 
@@ -156,10 +154,9 @@ void FTierStreamingSystem::InitializeTier(
 						NC->SetAbsolute(true, false, false);
 
 					// Fixed bounds are set once here and never updated. The box
-					// surrounds the camera, so it can't be frustum-culled; a
-					// generous static box replaces the old dynamically tracked pad.
-					// Doubling the origin-centered geometric box swallows any
-					// particle-radius overhang at no culling cost.
+					// surrounds the camera, so it can't be frustum-culled. Doubling
+					// the origin-centered geometric box swallows any particle-radius
+					// overhang at no culling cost.
 					const FBox Base = Config.ComputeBounds();
 					const FBox Bounds(Base.Min * 2.0, Base.Max * 2.0);
 					NC->SetSystemFixedBounds(Bounds);
@@ -169,7 +166,7 @@ void FTierStreamingSystem::InitializeTier(
 				}
 				else
 				{
-					UE_LOG(LogTemp, Error, TEXT("FTierStreamingSystem::InitializeTier [%s] — Failed to create NiagaraComponent[%d]"),
+					UE_LOG(LogTemp, Error, TEXT("FTierStreamingSystem::InitializeTier [%s] - Failed to create NiagaraComponent[%d]"),
 						*Config.TierName, b);
 				}
 
@@ -194,14 +191,14 @@ void FTierStreamingSystem::InitializeTier(
 		});
 	Future.Wait();
 
-	UE_LOG(LogTemp, Log, TEXT("FTierStreamingSystem::InitializeTier [%s] — %d slots, %d capacity, streaming=%d, %.3f sec"),
+	UE_LOG(LogTemp, Log, TEXT("FTierStreamingSystem::InitializeTier [%s] - %d slots, %d capacity, streaming=%d, %.3f sec"),
 		*Config.TierName, TotalSlots, Config.SlotCapacity, bIsStreamingTier ? 1 : 0,
 		FPlatformTime::Seconds() - StartTime);
 }
 
-// ============================================================================
-//  UpdateTier
-// ============================================================================
+#pragma endregion
+
+#pragma region UpdateTier
 void FTierStreamingSystem::UpdateTier(
 	const FTierStreamingContext& Ctx,
 	FParticleTierConfig& Config,
@@ -219,9 +216,9 @@ void FTierStreamingSystem::UpdateTier(
 	}
 	if (!bHasComponent) return;
 
-	// NOTE: the full boundary-cross push now happens at the tail of the async
-	// generation task (below), on the worker thread, while bUpdateInProgress is
-	// still held. It is never run on the game thread.
+	// The full boundary-cross push happens at the tail of the async generation
+	// task (below), on the worker thread, while bUpdateInProgress is still held.
+	// It never runs on the game thread.
 
 	// No streaming for single-cell tiers (e.g. Galaxy Large with radius 0).
 	if (Config.NeighborhoodRadius == 0) return;
@@ -233,20 +230,20 @@ void FTierStreamingSystem::UpdateTier(
 	if (NewCoord == State.CenterCoord) return;
 
 	// STREAMING GATE: if the player's own cell is skippable (outside the
-	// actor's volume), admit no transition — the resident window FREEZES at
+	// actor's volume), admit no transition: the resident window FREEZES at
 	// its last in-bounds center. Live edge cells persist as a boundary halo
 	// and keep parallaxing via the per-frame uniform (whose StampedNCenter is
 	// likewise frozen, so lattice and uniform stay mutually consistent).
 	// This also suppresses the rapid crossing churn of traversing the grid at
 	// intergalactic speeds outside the volume: the gate runs before any state
 	// mutation or task spawn, so an out-of-bounds crossing costs one AABB
-	// test. Re-entry resumes normally — a multi-cell delta lands in the
+	// test. Re-entry resumes normally: a multi-cell delta lands in the
 	// teleport path (Entering == whole window). Cell-granular by construction,
 	// so it cannot flap without an actual boundary cross. Radius-0 tiers
 	// never reach this (early-out above) and stay resident at any distance.
 	if (Config.ShouldSkipCell && Config.ShouldSkipCell(NewCoord)) return;
 
-	UE_LOG(LogTemp, Verbose, TEXT("FTierStreamingSystem::UpdateTier [%s] — boundary cross: (%d,%d,%d) → (%d,%d,%d)"),
+	UE_LOG(LogTemp, Verbose, TEXT("FTierStreamingSystem::UpdateTier [%s] - boundary cross: (%d,%d,%d) -> (%d,%d,%d)"),
 		*Config.TierName,
 		State.CenterCoord.X, State.CenterCoord.Y, State.CenterCoord.Z,
 		NewCoord.X, NewCoord.Y, NewCoord.Z);
@@ -265,9 +262,9 @@ void FTierStreamingSystem::UpdateTier(
 	TSharedPtr<FOctree> CtxOctree = Ctx.Octree;
 
 	// The tail push reads the freshest VirtualTraversal at execution time via this
-	// accessor (guarded on the actor), NOT a value captured now -- a generation can
-	// span several frames, and re-seeding the GPU with a stale VT is exactly what
-	// caused the boundary-cross jitter.
+	// accessor (guarded on the actor), not a value captured now: a generation can
+	// span several frames, and re-seeding the GPU with a stale VT would jitter the
+	// boundary cross.
 	TFunction<FVector()> GetLatestVT = Ctx.GetLatestVT;
 
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask,
@@ -282,11 +279,11 @@ void FTierStreamingSystem::UpdateTier(
 
 			// SINGLE BUFFER, IN-PLACE: entering slots are overwritten
 			// directly in the live CPU arrays. This is safe because nothing
-			// reads them mid-write — the GPU renders its own prior copy of
+			// reads them mid-write: the GPU renders its own prior copy of
 			// every array until the commit's upload lands, the per-frame
 			// push reads only the stamps, and external readers gate on
 			// bUpdateInProgress. Resident cells are never copied or
-			// regenerated — that is the point of the torus.
+			// regenerated: that is the point of the torus.
 
 			// Diff old and new neighborhoods.
 			const int32 TotalSlots = Side * Side * Side;
@@ -318,12 +315,11 @@ void FTierStreamingSystem::UpdateTier(
 			// Exiting cells need no slot bookkeeping: each exiting coord is
 			// congruent mod Side to exactly one entering coord (the residue
 			// sets of any two Side-wide windows are identical), so its slot is
-			// fully overwritten by that entering cell below — generation,
+			// fully overwritten by that entering cell below: generation,
 			// cache-restore, and skip paths all write or dead-pad the whole
 			// slot. Octree node refs from the previous occupant are released
 			// when InsertSlotIntoOctree resets the slot's entry. ExitingNodes
-			// is still computed for the OnBoundaryCross hook and cache
-			// semantics, mirroring the old pipeline.
+			// is computed for the OnBoundaryCross hook and cache semantics.
 
 			// Fire optional boundary-cross hook (e.g. streaming volumetric).
 			if (Config.OnBoundaryCross)
@@ -350,7 +346,7 @@ void FTierStreamingSystem::UpdateTier(
 				const int32 SlotIndex = SlotOf(Coord, Side);
 #if DO_CHECK
 				checkf(!SlotClaimed[SlotIndex],
-					TEXT("UpdateTier [%s]: modular slot collision at slot %d for cell (%d,%d,%d) — bijection violated"),
+					TEXT("UpdateTier [%s]: modular slot collision at slot %d for cell (%d,%d,%d) - bijection violated"),
 					*Config.TierName, SlotIndex, Coord.X, Coord.Y, Coord.Z);
 				SlotClaimed[SlotIndex] = true;
 #endif
@@ -377,7 +373,7 @@ void FTierStreamingSystem::UpdateTier(
 				}
 
 				// Cache-hit path. NOTE: a cached cell with ZERO particles is
-				// still a HIT — legitimately-empty cells must not re-run
+				// still a HIT: legitimately-empty cells must not re-run
 				// generation (noise sampling for nothing) on every re-entry;
 				// the slot is simply dead-padded from the cached count of 0.
 				const FCachedCellData* Cached = State.CellCache.Find(Coord);
@@ -391,7 +387,7 @@ void FTierStreamingSystem::UpdateTier(
 						const int32 Start = SlotIndex * Config.SlotCapacity;
 						if (LiveCount > 0)
 						{
-							// Element types are trivially copyable — blit the
+							// Element types are trivially copyable: blit the
 							// contiguous ranges instead of copying element-wise.
 							const TArray<FVector>& CPos = Cached->PerBufferPositions[b];
 							const TArray<float>& CExt = Cached->PerBufferExtents[b];
@@ -454,15 +450,15 @@ void FTierStreamingSystem::UpdateTier(
 			State.bUpdateInProgress.store(false);
 
 			UE_LOG(LogTemp, Verbose,
-				TEXT("FTierStreamingSystem::UpdateTier [%s] — %d entering (%d cached, %d generated), %d exiting in %.3f sec"),
+				TEXT("FTierStreamingSystem::UpdateTier [%s] - %d entering (%d cached, %d generated), %d exiting in %.3f sec"),
 				*Config.TierName, EnteringNodes.Num(), CacheHitCount, ToGenerate.Num(),
 				ExitingNodes.Num(), FPlatformTime::Seconds() - StartTime);
 		});
 }
 
-// ============================================================================
-//  PushTierToNiagara  (transition commit)
-// ============================================================================
+#pragma endregion
+
+#pragma region PushTierToNiagara
 // Publishes the transition by uploading the in-place-updated buffer, and
 // makes it atomic with respect to every other Niagara write. Holds the tier
 // PushCS across stamp + upload and reads the freshest VirtualTraversal via
@@ -476,7 +472,7 @@ void FTierStreamingSystem::UpdateTier(
 // a different center), that slot would teleport by ~Side*CellSize for a
 // frame. Everything below the lock acquisition exists to make that state
 // unrepresentable. Bounds are deferred to the game thread. No SVO_GT_SCOPE
-// here -- the profiler accumulator is game-thread only.
+// here: the profiler accumulator is game-thread only.
 void FTierStreamingSystem::PushTierToNiagara(
 	const TFunction<FVector()>& GetLatestVT,
 	const FIntVector& NewCenter,
@@ -485,7 +481,7 @@ void FTierStreamingSystem::PushTierToNiagara(
 	FParticleTierState& State)
 {
 	// Serialize against the per-frame push. VT is read here, at execution
-	// time, never captured — a generation can span several frames.
+	// time, never captured: a generation can span several frames.
 	FScopeLock Lock(&State.PushCS);
 	if (State.bShuttingDown.load()) return;
 
@@ -497,7 +493,7 @@ void FTierStreamingSystem::PushTierToNiagara(
 
 	// 2. Upload: cell-local positions, the per-slot lattice (vs NewNCenter),
 	//    and the seeded (NCenter - VT) uniform. The GPU keeps rendering its
-	//    own prior copy of every array until these sets land — this upload
+	//    own prior copy of every array until these sets land: this upload
 	//    IS the publish; there is no CPU-side buffer flip.
 	const FVector VirtualTraversal = GetLatestVT();
 	for (int32 b = 0; b < Config.NiagaraAssets.Num(); ++b)
@@ -508,9 +504,9 @@ void FTierStreamingSystem::PushTierToNiagara(
 	}
 }
 
-// ============================================================================
-//  PushTierPositions
-// ============================================================================
+#pragma endregion
+
+#pragma region PushTierPositions
 void FTierStreamingSystem::PushTierPositions(
 	std::initializer_list<FParticleTierState*> Tiers,
 	const TFunction<FVector()>& GetLatestVT)
@@ -519,7 +515,7 @@ void FTierStreamingSystem::PushTierPositions(
 	{
 		if (!Tier) continue;
 
-		// Same lock the transition commit holds — but TRY, don't block. If
+		// Same lock the transition commit holds, but TRY, don't block. If
 		// it's contended, the holder is the commit itself, which seeds a
 		// fresher (NCenter - VT) uniform (fresh VT read) as part of its
 		// upload; the value we'd have pushed is already superseded. Blocking
@@ -538,11 +534,11 @@ void FTierStreamingSystem::PushTierPositions(
 			UNiagaraComponent* NC = Tier->NiagaraComponents[b];
 			if (!NC || b >= Tier->Buffers.Num()) continue;
 
-			// ONE FVector uniform — (NCenter - VT) — the entire per-frame
+			// ONE FVector uniform, (NCenter - VT), the entire per-frame
 			// cost. The stamp is read under the same PushCS the commit wrote
 			// it under, so this uniform always matches the live lattice,
 			// even on a transition frame. StampedNCenter is ZeroVector
-			// before the first commit, when every particle is dead — the
+			// before the first commit, when every particle is dead, so the
 			// value is inert.
 			Tier->Buffers[b].PushNCenterMinusVT(
 				NC, Tier->StampedNCenter, VirtualTraversal);
@@ -550,9 +546,9 @@ void FTierStreamingSystem::PushTierPositions(
 	}
 }
 
-// ============================================================================
-//  BeginShutdownDrain  (game thread, teardown)
-// ============================================================================
+#pragma endregion
+
+#pragma region BeginShutdownDrain
 // Marks the tier as shutting down, then acquires PushCS once to block until any
 // in-flight push has released it. After this returns, every future push bails at
 // the bShuttingDown check before touching a component, so the caller can safely
@@ -563,9 +559,9 @@ void FTierStreamingSystem::BeginShutdownDrain(FParticleTierState& State)
 	FScopeLock Lock(&State.PushCS);
 }
 
-// ============================================================================
-//  Octree Integration
-// ============================================================================
+#pragma endregion
+
+#pragma region Octree Integration
 void FTierStreamingSystem::InsertTierIntoOctree(
 	const FTierStreamingContext& Ctx,
 	const FParticleTierConfig& Config,
@@ -604,8 +600,8 @@ void FTierStreamingSystem::InsertSlotIntoOctree(
 
 	const FNiagaraParticleBuffer& InsertBuffer = State.Buffers[Config.OctreeInsertBufferIndex];
 
-	// Residency check replaces the old ActiveSlots map lookup: the buffer's
-	// SlotCoord is the per-slot source of truth for which cell owns the slot.
+	// Residency check: the buffer's SlotCoord is the per-slot source of truth
+	// for which cell owns the slot.
 	if (!InsertBuffer.SlotCoord.IsValidIndex(SlotIndex) ||
 		InsertBuffer.SlotCoord[SlotIndex] != Coord) return;
 	if (!State.SlotEntries.IsValidIndex(SlotIndex)) return;
@@ -615,8 +611,8 @@ void FTierStreamingSystem::InsertSlotIntoOctree(
 	const int32 BufferStart = SlotIndex * Config.SlotCapacity;
 
 	// Resetting here releases the shared node refs held for the slot's
-	// PREVIOUS occupant (the congruent exiting cell) — the exit-time release
-	// the old pipeline did via ActiveSlots.Remove.
+	// previous occupant (the congruent exiting cell); this is the slot's
+	// exit-time release of octree node references.
 	FSlotEntry& Entry = State.SlotEntries[SlotIndex];
 	Entry.InsertedNodes.Reset();
 	Entry.InsertedNodes.Reserve(LiveCount);
@@ -638,7 +634,7 @@ void FTierStreamingSystem::InsertParticleIntoOctree(
 	if (Extent <= 0.0f) return;
 
 	FPointData PD = FPointData::MakePointData(Position, static_cast<double>(Extent) * Ctx.UnitScale, Ctx.UnitScale, static_cast<int64>(TreeExtent), TierIndex, FVector(Color.R, Color.B, Color.G));
-	
+
 	PD.Data.Seed = FVoxelData::ComposeSeed(Ctx.ParentSeed, GridCoord, GenerationIndex);
 	//Particle Specific Data
 	PD.Data.ParticleIndex = AbsoluteBufferIndex;
@@ -646,13 +642,13 @@ void FTierStreamingSystem::InsertParticleIntoOctree(
 	PD.Data.ParticleExtent = Extent;
 
 	TSharedPtr<FOctreeNode> Node = Ctx.Octree->InsertPosition(PD.GetPosition(), PD.InsertDepth, PD.Data);
-	
+
 	if (Node.IsValid()) Entry.InsertedNodes.Add(Node);
 }
 
-// ============================================================================
-//  Cell Cache
-// ============================================================================
+#pragma endregion
+
+#pragma region Cell Cache
 void FTierStreamingSystem::CacheCellFromBuffers(
 	const FParticleTierConfig& Config,
 	FParticleTierState& State,
@@ -720,7 +716,9 @@ void FTierStreamingSystem::CullTierCache(
 	if (ToEvict.Num() > 0)
 	{
 		UE_LOG(LogTemp, Verbose,
-			TEXT("FTierStreamingSystem::CullTierCache [%s] — evicted %d entries, %d remaining"),
+			TEXT("FTierStreamingSystem::CullTierCache [%s] - evicted %d entries, %d remaining"),
 			*Config.TierName, ToEvict.Num(), State.CellCache.Num());
 	}
 }
+
+#pragma endregion

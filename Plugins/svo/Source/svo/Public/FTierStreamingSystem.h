@@ -439,12 +439,23 @@ struct FTierStreamingSystem
 
 #pragma region Tier Initialization
 
+	/** Allocates buffers and slot bookkeeping for a tier, then spawns and
+	 *  activates its Niagara components on the game thread. Exhaustive tiers
+	 *  (radius 0) generate, octree-insert, and cache their full window immediately;
+	 *  streaming tiers defer population to the first UpdateTier (CenterCoord =
+	 *  INT32_MIN). Aborts if the actor enters Pooling mid-init. */
 	static void InitializeTier(const FTierStreamingContext& Ctx, FParticleTierConfig& Config, FParticleTierState& State, TArray<UNiagaraComponent*>& OutComponents);
 
 #pragma endregion
 
 #pragma region Tier Streaming Update
 
+	/** Streams the resident window to follow the player: on a boundary cross,
+	 *  diffs the old and new neighborhoods, generates or cache-restores entering
+	 *  cells in place into their modular slots, octree-inserts them, and commits
+	 *  the transition push on a worker thread (bUpdateInProgress held throughout).
+	 *  No-ops unless Ready and actually crossing; the streaming gate freezes the
+	 *  window while the player's cell is skippable. Radius-0 tiers never stream. */
 	static void UpdateTier(const FTierStreamingContext& Ctx, FParticleTierConfig& Config, FParticleTierState& State);
 
 #pragma endregion
@@ -482,18 +493,33 @@ struct FTierStreamingSystem
 
 #pragma region Octree Integration
 
+	/** Inserts every occupied slot's live particles (from OctreeInsertBufferIndex)
+	 *  into the context octree. Full-window pass used after exhaustive-tier init;
+	 *  no-op when the tier has no insert buffer or octree. */
 	static void InsertTierIntoOctree(const FTierStreamingContext& Ctx, const FParticleTierConfig& Config, FParticleTierState& State);
 
+	/** Inserts one entering slot's live particles into the octree, first resetting
+	 *  the slot entry (releasing the previous occupant's node refs). Guards on
+	 *  residency: SlotCoord[SlotIndex] must equal Coord. Incremental per-cross path. */
 	static void InsertSlotIntoOctree(const FTierStreamingContext& Ctx, const FParticleTierConfig& Config, FParticleTierState& State, const FIntVector& Coord, int32 SlotIndex);
 
+	/** Inserts one particle: builds its FPointData (world extent -> octree-local
+	 *  via UnitScale), composes a deterministic seed, captures the exact particle
+	 *  position/extent, inserts into the octree, and records the node on Entry.
+	 *  Skips non-positive extents. */
 	static void InsertParticleIntoOctree(const FTierStreamingContext& Ctx, FSlotEntry& Entry, const FVector& Position, const float& Extent, const FLinearColor& Color, const FIntVector& GridCoord, int32 GenerationIndex, int32 AbsoluteBufferIndex, double TreeExtent, int32 TierIndex);
 
 #pragma endregion
 
 #pragma region Cell Cache
 
+	/** Snapshots a slot's live particle data (per buffer) into the persistent cell
+	 *  cache keyed by Coord, so re-entry blits the stored arrays instead of
+	 *  regenerating. A zero-count cell is cached as a legitimate empty result. */
 	static void CacheCellFromBuffers(const FParticleTierConfig& Config, FParticleTierState& State, const FIntVector& Coord, int32 SlotIndex);
 
+	/** Evicts cell-cache entries beyond NeighborhoodRadius + 4 cells (Chebyshev)
+	 *  from NewCenter, bounding cache growth as the window streams. */
 	static void CullTierCache(const FParticleTierConfig& Config, FParticleTierState& State, const FIntVector& NewCenter);
 
 #pragma endregion
