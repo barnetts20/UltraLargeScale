@@ -1,11 +1,12 @@
 ﻿#include "FVolumeTextureUtils.h"
 #include "FOctree.h"
 
+#pragma region GenerateVolumeMipDataFromOctree
 TArray<uint8> FVolumeTextureUtils::GenerateVolumeMipDataFromOctree(TArray<TSharedPtr<FOctreeNode>> InVolumeNodes, int InResolution, double InExtent, double InMaxDensity)
 {
 	double StartTime = FPlatformTime::Seconds();
 
-	// --- Octree + setup ---
+	// Octree + setup
 	const int TargetDepth = FMath::FloorLog2(InResolution);
 	const double NodeExtentAtDepth = InExtent / FMath::Pow(2.0, TargetDepth);
 	const double OctreeExtent = InExtent;
@@ -13,7 +14,7 @@ TArray<uint8> FVolumeTextureUtils::GenerateVolumeMipDataFromOctree(TArray<TShare
 	// Precompute reciprocal for fast coordinate mapping
 	const double Scale = 1.0 / (2.0 * NodeExtentAtDepth);
 
-	// --- Texture allocation ---
+	// Texture allocation
 	const int BytesPerVoxel = 4; // BGRA8
 	const int64 TotalVoxels = (int64)InResolution * InResolution * InResolution;
 	const int64 TotalBytes = TotalVoxels * BytesPerVoxel;
@@ -21,7 +22,7 @@ TArray<uint8> FVolumeTextureUtils::GenerateVolumeMipDataFromOctree(TArray<TShare
 	TArray<uint8> TextureData;
 	TextureData.SetNumZeroed(TotalBytes);
 
-	// --- Parallel fill ---
+	// Parallel fill
 	// Use chunked ParallelFor to reduce scheduling overhead
 	const int ChunkSize = 512;
 	const int NumChunks = (InVolumeNodes.Num() + ChunkSize - 1) / ChunkSize;
@@ -35,7 +36,7 @@ TArray<uint8> FVolumeTextureUtils::GenerateVolumeMipDataFromOctree(TArray<TShare
 			const auto& Node = InVolumeNodes[NodeIndex];
 			if (!Node.IsValid()) continue;
 
-			// --- Compute voxel coords (multiply instead of divide) ---
+			// Compute voxel coords (multiply instead of divide)
 			int VolumeX = static_cast<int>((Node->Center.X + OctreeExtent) * Scale);
 			int VolumeY = static_cast<int>((Node->Center.Y + OctreeExtent) * Scale);
 			int VolumeZ = static_cast<int>((Node->Center.Z + OctreeExtent) * Scale);
@@ -47,11 +48,11 @@ TArray<uint8> FVolumeTextureUtils::GenerateVolumeMipDataFromOctree(TArray<TShare
 				continue;
 			}
 
-			// --- Linear voxel index ---
+			// Linear voxel index
 			int64 VoxelIndex = ((int64)VolumeZ * InResolution * InResolution) + ((int64)VolumeY * InResolution) + VolumeX;
 			int64 ByteIndex = VoxelIndex * BytesPerVoxel;
 
-			// --- ScaleFactor ---
+			// Density
 			uint8 DensityByte = 0;
 			if (InMaxDensity > 0.0f)
 			{
@@ -59,7 +60,7 @@ TArray<uint8> FVolumeTextureUtils::GenerateVolumeMipDataFromOctree(TArray<TShare
 				DensityByte = (uint8)FMath::Clamp(Norm * 255.0f, 0.0f, 255.0f);
 			}
 
-			// --- Composition ---
+			// Composition
 			FVector Comp = Node->Data.Composition;
 
 			TextureData[ByteIndex + 0] = (uint8)FMath::Clamp(Comp.X * 255.0f, 0.0f, 255.0f); // B
@@ -75,6 +76,9 @@ TArray<uint8> FVolumeTextureUtils::GenerateVolumeMipDataFromOctree(TArray<TShare
 	return TextureData;
 }
 
+#pragma endregion
+
+#pragma region SampleNoiseToVolume
 TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 	FastNoise::SmartNode<> InNoise,
 	int InSeed,
@@ -98,11 +102,11 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 	const double VoxelSize = (2.0 * InExtent) / InResolution;
 	const double InvExtent = 1.0 / InExtent;
 
-	// --- Octree setup ---
+	// Octree setup
 	bool bWriteOctree = InOctree.IsValid() && InOctreeDepth > 0;
 
 	// Octree resolution: number of nodes per axis at InOctreeDepth.
-	// Independent of InResolution � we accumulate density from multiple
+	// Independent of InResolution: we accumulate density from multiple
 	// texture voxels into each coarser octree node.
 	const int OctreeRes = bWriteOctree ? (1 << InOctreeDepth) : 0;
 	const int VoxelsPerOctreeNode = bWriteOctree ? FMath::Max(1, InResolution / OctreeRes) : 1;
@@ -117,13 +121,13 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 		OctreeDensityCount.SetNumZeroed(OctreeNodeCount);
 	}
 
-	// --- Chunking for noise sampling ---
+	// Chunking for noise sampling
 	const int ChunkRes = 32;
 	const int SubSamplesPerAxis = FMath::Max(1, InResolution / ChunkRes);
 	const int NumChunks = ChunkRes * ChunkRes * ChunkRes;
 	const int SamplesPerChunk = SubSamplesPerAxis * SubSamplesPerAxis * SubSamplesPerAxis;
 
-	// --- Pass 1: Noise sampling + texture write + accumulate octree density ---
+	// Pass 1: noise sampling + texture write + accumulate octree density
 	ParallelFor(NumChunks, [&](int ChunkIdx)
 		{
 			int cx = ChunkIdx % ChunkRes;
@@ -134,7 +138,7 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 			int yStart = cy * SubSamplesPerAxis;
 			int zStart = cz * SubSamplesPerAxis;
 
-			// --- Build coordinate arrays for batch sampling ---
+			// Build coordinate arrays for batch sampling
 			TArray<float> XCoords, YCoords, ZCoords, NoiseOut;
 			XCoords.SetNumUninitialized(SamplesPerChunk);
 			YCoords.SetNumUninitialized(SamplesPerChunk);
@@ -168,7 +172,7 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 				}
 			}
 
-			// --- Batch SIMD noise sample ---
+			// Batch SIMD noise sample
 			InNoise->GenPositionArray3D(
 				NoiseOut.GetData(),
 				SamplesPerChunk,
@@ -179,7 +183,7 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 				InSeed
 			);
 
-			// --- Write to texture + accumulate for octree ---
+			// Write to texture + accumulate for octree
 			SampleIdx = 0;
 			for (int lz = 0; lz < SubSamplesPerAxis; ++lz)
 			{
@@ -229,7 +233,7 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 
 	double SampleDuration = FPlatformTime::Seconds() - StartTime;
 
-	// --- Pass 2: Build FPointData from accumulated grid + bulk insert ---
+	// Pass 2: build FPointData from accumulated grid + bulk insert
 	if (bWriteOctree)
 	{
 		double InsertStart = FPlatformTime::Seconds();
@@ -287,6 +291,9 @@ TArray<uint8> FVolumeTextureUtils::SampleNoiseToVolume(
 	return TextureData;
 }
 
+#pragma endregion
+
+#pragma region SampleNoiseToSubRegion
 void FVolumeTextureUtils::SampleNoiseToSubRegion(
 	TArray<uint8>& InOutVolumeData,
 	int InResolution,
@@ -381,6 +388,9 @@ void FVolumeTextureUtils::SampleNoiseToSubRegion(
 		MinX, MinY, MinZ, MaxX, MaxY, MaxZ, Duration);
 }
 
+#pragma endregion
+
+#pragma region ClearSubRegion
 void FVolumeTextureUtils::ClearSubRegion(
 	TArray<uint8>& InOutVolumeData,
 	int InResolution,
@@ -409,3 +419,5 @@ void FVolumeTextureUtils::ClearSubRegion(
 		}
 	}
 }
+
+#pragma endregion

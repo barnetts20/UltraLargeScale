@@ -6,7 +6,10 @@
 
 class AStarSystemActor;
 
-//TODO: DESCRIPTION - THIS FORMS A VERY BASIC WRAPPER TO APPLY PARALLAX TO STATIC MESHES
+/** Lightweight actor wrapper that applies parallax to a single static mesh.
+ *  Spawned per planet from a StarSystem pool; TickFromStarSystem recomputes its
+ *  world position each frame from the owning system's VirtualTraversal so the
+ *  mesh stays locked to its parallax-correct location. */
 UCLASS()
 class SVO_API AParallaxStaticMeshActor : public AActor
 {
@@ -15,11 +18,12 @@ class SVO_API AParallaxStaticMeshActor : public AActor
 public:
 	AParallaxStaticMeshActor();
 
+	/** Wrapped static mesh this actor applies parallax to. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	UStaticMeshComponent* MeshComponent;
 
 	/** Owning star system. Set by SpawnPlanetFromPool. Used to derive
-	 *  the correct SpeedScale chain (StarSystem → Galaxy → Universe). */
+	 *  the correct SpeedScale chain (StarSystem -> Galaxy -> Universe). */
 	UPROPERTY()
 	AStarSystemActor* System = nullptr;
 

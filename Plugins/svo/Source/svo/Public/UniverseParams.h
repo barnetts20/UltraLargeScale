@@ -3,13 +3,13 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "ProceduralSpaceActor.h"     // FBaseParams (base of FUniverseParams)
-#include "FTierStreamingSystem.h"     // FTierParams (per-tier members)
+#include "ProceduralSpaceActor.h"
+#include "FTierStreamingSystem.h"
 #include "UniverseParams.generated.h"
 
 
-/// Noise-graph tuning knobs consumed by UniverseDataGenerator::BuildNoise().
-/// Defaults reproduce the original hardcoded values.
+/** Noise-graph tuning knobs consumed by UniverseDataGenerator::BuildNoise();
+ *  defaults reproduce the baseline graph values. */
 USTRUCT(BlueprintType)
 struct SVO_API FUniverseDensityParams
 {
@@ -50,27 +50,32 @@ struct SVO_API FUniverseDensityParams
 };
 
 
-/// UNIVERSE GENERATION PARAM STRUCT
+/** Universe-layer generation parameters: noise tuning, per-tier streaming
+ *  configs, gas layer, and scale derivation. */
 USTRUCT(BlueprintType)
 struct SVO_API FUniverseParams : public FBaseParams {
 	GENERATED_BODY()
 
-	// --- Noise ---
+#pragma region Noise
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
 	FUniverseDensityParams DensityParams;
 
-	// --- Tier scale derivation ---
+#pragma endregion
 
-	// The absolute largest entity scale (world units) that the sector supports.
-	// All tier scale ranges cascade downward from this single value:
-	//   Tier[0].MaxScale = MaxEntityScale
-	//   Tier[0].MinScale = MaxEntityScale / 2^(depth[1] - depth[0])
-	//   Tier[1].MaxScale = Tier[0].MinScale
-	//   ... and so on.
+#pragma region Tier Scale Derivation
+
+	/** Absolute largest entity scale (world units) the sector supports. All tier
+	 *  scale ranges cascade downward from this single value:
+	 *    Tier[0].MaxScale = MaxEntityScale
+	 *    Tier[0].MinScale = MaxEntityScale / 2^(depth[1] - depth[0])
+	 *    Tier[1].MaxScale = Tier[0].MinScale
+	 *    ... and so on. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scale")
 	double MaxEntityScale = 1e22;
 
-	// --- Per-tier streaming configs ---
+#pragma endregion
+
+#pragma region Per-Tier Streaming Configs
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Large")
 	FTierParams LargeTier;
@@ -81,21 +86,29 @@ struct SVO_API FUniverseParams : public FBaseParams {
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Small")
 	FTierParams SmallTier;
 
-	// --- Gas layer params (paired with the large tier) ---
+#pragma endregion
 
-	// Gas sprite extent as a multiplier of the per-particle cluster extent.
-	// GasExtent = ClusterExtent * Lerp(GasExtentMinMultiplier, GasExtentMaxMultiplier, Density).
-	// Keeps gas automatically in the same coordinate space as cluster sprites.
+#pragma region Gas Layer Params
+
+	/** Gas sprite extent as a multiplier of the per-particle cluster extent:
+	 *  GasExtent = ClusterExtent * Lerp(GasExtentMinMultiplier,
+	 *  GasExtentMaxMultiplier, Density). Keeps gas in the same coordinate space
+	 *  as cluster sprites. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gas")
 	float GasExtentMinMultiplier = 2000.0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gas")
 	float GasExtentMaxMultiplier = 20000.0;
 
+#pragma endregion
+
+#pragma region Defaults & Derivation
+
+	/** Serialized FastNoise graph (base64) for the universe density field. */
 	static constexpr const char* EncodedTree = "EAAAAIA/GQAbABsAEwAAAEBAJAAgAAAAFwAAAAAAAACAP8UggD8AAAAADQADAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAAEXAAAAAAAAAIA/zcxMvQAAgD8kAAIAAAD//wEAAAAASEIB//8GAAAAAIA+";
 
-	/// Derive MinScale/MaxScale for each tier from MaxEntityScale and the
-	/// depth sequence. Delegates to FTierParams::DeriveTierScaleRanges.
+	/** Derives MinScale/MaxScale for each tier from MaxEntityScale and the depth
+	 *  sequence. Delegates to FTierParams::DeriveTierScaleRanges. */
 	void DeriveScaleRanges()
 	{
 		FTierParams* Tiers[] = { &LargeTier, &MidTier, &SmallTier };
@@ -108,7 +121,7 @@ struct SVO_API FUniverseParams : public FBaseParams {
 		Rotation = FRotator::ZeroRotator;
 		ParentColor = FLinearColor(1, 1, 1);
 
-		// Tier streaming params — depths evenly spaced by 2 (ratio 4 per tier).
+		// Tier streaming params: depths evenly spaced by 2 (ratio 4 per tier).
 		LargeTier.GridDepth = 1;
 		LargeTier.NeighborhoodRadius = 1;
 		LargeTier.SlotCapacity = 1000;
@@ -128,9 +141,12 @@ struct SVO_API FUniverseParams : public FBaseParams {
 		//   Small: 1.5625e20 -> 6.25e20
 		DeriveScaleRanges();
 	}
+
+#pragma endregion
 };
 
-/// UNIVERSE GENERATION PARAM STRUCT
+/** Min/max bounds for randomized universe params; Generate() samples a value
+ *  between them for a given seed. */
 USTRUCT(BlueprintType)
 struct SVO_API FUniverseParamBounds {
 	GENERATED_BODY()

@@ -10,6 +10,7 @@ AProceduralSpaceActor::AProceduralSpaceActor()
     SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent")));
 }
 
+#pragma region Shared State
 bool AProceduralSpaceActor::GetPlayerLocation(const UWorld* World, FVector& OutLocation)
 {
     if (!World) return false;
@@ -22,6 +23,9 @@ bool AProceduralSpaceActor::GetPlayerLocation(const UWorld* World, FVector& OutL
     return false;
 }
 
+#pragma endregion
+
+#pragma region Lifecycle
 void AProceduralSpaceActor::Initialize()
 {
     InitializationState = ELifecycleState::Initializing;
@@ -46,7 +50,7 @@ void AProceduralSpaceActor::Initialize()
             AProceduralSpaceActor* Self = WeakThis.Get();
             if (!Self) return;
 
-            // Cleared on EVERY exit path — Pooling aborts included. The
+            // Cleared on EVERY exit path, Pooling aborts included. The
             // deferred pool-return worker waits on this before freeing the
             // buffers the phases below write.
             ON_SCOPE_EXIT{ Self->bInitInProgress.store(false); };
@@ -76,19 +80,19 @@ void AProceduralSpaceActor::Initialize()
 void AProceduralSpaceActor::ResetForSpawn()
 {
     // Do NOT re-enable tick here. Pool-managed actors (Galaxy, StarSystem)
-    // are driven by their parent's TickFromParent — enabling UE tick would
+    // are driven by their parent's TickFromParent; enabling UE tick would
     // double-tick them. Level-placed actors that need UE tick should enable
     // it explicitly after ResetForSpawn.
     InitializationState = ELifecycleState::Uninitialized;
     bPendingPlacement = false;
     PendingNodeCenter = FVector::ZeroVector;
 
-    // Virtual-traversal cluster. All five live on this base, so they reset
-    // here — resetting base state from a subclass is what let LatestVT get
-    // orphaned across the pool round-trip. LatestVT is the lock-guarded
-    // snapshot async push / boundary-cross tasks read via GetLatestVT; if it
-    // survives reuse, a re-acquired actor composites its first frames against
-    // the PREVIOUS occupant's traversal, offsetting the streaming window.
+    // Virtual-traversal cluster. All five live on this base, so they reset here:
+    // resetting them from a subclass would leave LatestVT orphaned across the
+    // pool round-trip. LatestVT is the lock-guarded snapshot async push /
+    // boundary-cross tasks read via GetLatestVT; if it survives reuse, a
+    // re-acquired actor composites its first frames against the previous
+    // occupant's traversal, offsetting the streaming window.
     VirtualTraversal = FVector::ZeroVector;
     LastPushedVirtualTraversal = FVector::ZeroVector;
     LastFrameOfReferenceLocation = FVector::ZeroVector;
@@ -112,7 +116,7 @@ void AProceduralSpaceActor::ResetForPool()
     }
 
     // Release the transient pseudo-volume texture + its MID so GC can
-    // reclaim them while pooled — the texture is large (~67MB at 256^3)
+    // reclaim them while pooled; the texture is large (~67MB at 256^3)
     // and otherwise stays pinned by these UPROPERTYs until the next init
     // overwrites the pointers.
     PseudoVolumeTexture = nullptr;
@@ -123,6 +127,9 @@ void AProceduralSpaceActor::ResetForPool()
         *GetClass()->GetName(), Duration);
 }
 
+#pragma endregion
+
+#pragma region Initialization
 void AProceduralSpaceActor::InitializeData()
 {
 }
@@ -139,6 +146,9 @@ void AProceduralSpaceActor::InitializeChildPool()
 {
 }
 
+#pragma endregion
+
+#pragma region Parallax
 void AProceduralSpaceActor::DrawDebugBounds()
 {
     if (Octree.IsValid() && InitializationState == ELifecycleState::Ready)
@@ -197,6 +207,9 @@ FVector AProceduralSpaceActor::ComputeChildSpawnLocation(const FVector& NodeCent
     return CurrentFrameOfReferenceLocation + CameraToNode * SizeRatio;
 }
 
+#pragma endregion
+
+#pragma region Tier System - Grid Coord Helpers
 FIntVector AProceduralSpaceActor::PositionToGridCoord(const FVector& InPos, int32 InGridDepth) const
 {
     return FTierStreamingSystem::PositionToGridCoord(InPos, InGridDepth, GetExtent(), GridExtentMultiplier);
@@ -211,3 +224,5 @@ double AProceduralSpaceActor::GetGridCellExtent(int32 InGridDepth) const
 {
     return FTierStreamingSystem::GetGridCellExtent(InGridDepth, GetExtent(), GridExtentMultiplier);
 }
+
+#pragma endregion
