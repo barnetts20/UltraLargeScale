@@ -1,36 +1,47 @@
 ﻿#pragma once
 
-#pragma region Includes/ForwardDec
 #include "CoreMinimal.h"
-#pragma endregion
 
+/** Payload carried by every FOctreeNode: the procgen attributes of one
+ *  inserted entity, its deterministic seed, and the exact particle it maps to.
+ *  ScaleFactor/Density/Composition drive sizing, density accumulation, and
+ *  color; Seed/TypeId identify and re-derive the entity; the Particle* fields
+ *  pin the exact particle captured at insert. */
 struct SVO_API FVoxelData {
 public:
 	FVoxelData() : ScaleFactor(0.0), Density(0.0), Composition(0, 0, 0), Seed(-1), TypeId(-1), ParticleIndex(-1), ParticlePosition(FVector::ZeroVector), ParticleExtent(0.0f) {};
 	FVoxelData(float InDensity, float InGasDensity, FVector InComposition, int InObjectId, int InTypeId = -1) : ScaleFactor(InDensity), Density(InGasDensity), Composition(InComposition), Seed(InObjectId), TypeId(InTypeId), ParticleIndex(-1), ParticlePosition(FVector::ZeroVector), ParticleExtent(0.0f) {};
 
+	/** Fractional oversize of the true entity beyond its best-fit node extent,
+	 *  in [0,1]. Consumed as Extent * (1 + ScaleFactor); set by MakePointData. */
 	float ScaleFactor;
+
+	/** Volumetric (gas) density at this node. Accumulated along traversal, gates
+	 *  node filtering, and is baked into the density volume texture. */
 	float Density;
+
+	/** RGB material composition packed in a vector; handed to child layers as
+	 *  their ParentColor / node LinearColor. */
 	FVector Composition;
 
 	/** Deterministic hierarchical seed for this node. */
 	int Seed;
 
-	//TypeId allows insertion of different classes of objects in the same tree. Type mapping framework must be externally managed.
+	/** Tags a node's object class so heterogeneous entities share one tree; the
+	 *  type-to-class mapping is managed externally. */
 	int TypeId;
 
-	/** Absolute index into the tier's flat particle buffer.  */
+	/** Absolute index into the tier's flat particle buffer. */
 	int ParticleIndex;
 
-	/** EXACT particle position (actor-local virtual space) captured at insert time*/
+	/** Exact particle position (actor-local virtual space) captured at insert. */
 	FVector ParticlePosition;
 
-	/** EXACT particle extent captured at insert time (actor-local units). */
+	/** Exact particle extent (actor-local units) captured at insert. */
 	float ParticleExtent;
 
-	/**
-	 * Composes a deterministic, always-positive seed from a parent seed, a grid coordinate, and a particle index within that cell.
-	 */
+	/** Composes a deterministic, always-positive seed from a parent seed, a grid
+	 *  coord, and a particle index within that cell. */
 	static int32 ComposeSeed(int32 InParentSeed, const FIntVector& InCoord, int32 InParticleIndex)
 	{
 		const uint32 CoordHash = HashCombine(HashCombine(GetTypeHash(InCoord.X), GetTypeHash(InCoord.Y)), GetTypeHash(InCoord.Z));
@@ -39,13 +50,20 @@ public:
 	}
 };
 
+/** Transient insert record: a position plus the FVoxelData payload and octree
+ *  depth chosen for one entity. Built by MakePointData, consumed by the octree
+ *  insert pipeline. */
 struct SVO_API FPointData
 {
 private:
+	/** Backing store for the position; access via GetPosition/SetPosition. */
 	FVector PositionInternal;
 
 public:
+	/** Octree depth this point inserts at, chosen by MakePointData. */
 	int InsertDepth;
+
+	/** Voxel payload carried into the octree node. */
 	FVoxelData Data;
 
 	const FVector& GetPosition() const { return PositionInternal; }
@@ -55,6 +73,11 @@ public:
 		PositionInternal = InPosition;
 	}
 
+	/** Selects the octree depth whose node extent best matches InScaleWorldUnits
+	 *  (converted to tree-local units by InUnitScale), then stores the residual
+	 *  oversize as ScaleFactor = clamp(LocalSize / BestNodeExtent - 1, 1e-4, 1).
+	 *  Walks depths [1, log2(InExtent)], stops once the object exceeds a node's
+	 *  extent, and minimizes |1 - LocalSize / ExtentAtDepth|. */
 	static FPointData MakePointData(const FVector InPosition, const double InScaleWorldUnits, const double InUnitScale, const int64 InExtent, const int InTypeId, const FVector InComposition) {
 		double LocalSize = InScaleWorldUnits / InUnitScale;
 		int MinDepth = 1, BestDepth = 1, MaxDepth = static_cast<int>(FMath::Log2(static_cast<double>(InExtent)));
@@ -82,6 +105,9 @@ public:
 		return ReturnData;
 	}
 
+	/** Maps a uniform [0,1] sample through InDistributionCurve (clamped to [0,1]),
+	 *  then lerps InMinScale..InMaxScale by the result. Falls back to the raw
+	 *  sample when the curve has no keys. */
 	static double SampleScaleFromDistribution(double InMinScale, double InMaxScale, double InSample, const FRuntimeFloatCurve& InDistributionCurve) {
 		const auto* Curve = InDistributionCurve.GetRichCurveConst();
 		const double T = (Curve && Curve->GetNumKeys() > 0) ? static_cast<double>(FMath::Clamp(Curve->Eval(FMath::Clamp(static_cast<float>(InSample), 0.0f, 1.0f)), 0.0f, 1.0f)) : InSample;
@@ -96,6 +122,9 @@ public:
 	}
 };
 
+/** Cached procgen output for one grid cell, replayed on a cache hit to skip
+ *  noise and rejection sampling. Arrays are per-buffer, parallel to the tier's
+ *  Niagara buffers. */
 struct SVO_API FCachedCellData
 {
 	TArray<TArray<FVector>>        PerBufferPositions;
@@ -105,6 +134,8 @@ struct SVO_API FCachedCellData
 	int32 ParticleCount = 0;
 };
 
+/** Actor lifecycle stage gating the tier pipeline: UpdateTier early-outs unless
+ *  Ready; Pooling/Destroying signal teardown to in-flight tasks. */
 UENUM()
 enum class ELifecycleState : uint8
 {

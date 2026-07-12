@@ -3,7 +3,7 @@
 #include "NiagaraComponent.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 
-// Names of the Niagara user-exposed arrays this buffer knows how to push to.
+/** Names of the Niagara user-exposed arrays this buffer pushes to. */
 namespace NiagaraBufferParams
 {
     inline const FName Positions = TEXT("User.Positions");
@@ -11,59 +11,68 @@ namespace NiagaraBufferParams
     inline const FName Colors = TEXT("User.Colors");
     inline const FName Rotations = TEXT("User.Rotations");
 
-    // Cell-anchored toroidal path. The graph reconstructs
-    //   worldRel = Positions[i] + CellOffsets[slot] + NCenterMinusVT
-    //   slot     = i / SlotCapacity
+    /** Cell-anchored toroidal path; the graph reconstructs
+     *    worldRel = Positions[i] + CellOffsets[slot] + NCenterMinusVT
+     *    slot     = i / SlotCapacity */
     inline const FName CellOffsets = TEXT("User.CellOffsets");
     inline const FName NCenterMinusVT = TEXT("User.NCenterMinusVT");
     inline const FName SlotCapacity = TEXT("User.SlotCapacity");
 }
 
-// A slot-packed array of particle data for a single
-// Niagara component. Arrays are optional — only allocate what the tier needs.
-// Dead particles are written with Extent == 0 (zeroed position); the
-// Niagara graph culls on Extent, and every CPU consumer skips Extent <= 0.
-//
-// Slot packing convention: slot S owns indices [S * SlotCapacity, (S+1) * SlotCapacity).
-// The SlotCapacity is fixed at Allocate time and shared across all arrays.
-//
-// Toroidal (modular) slot addressing: slot indices are derived from the cell
-// coordinate residues (see FTierStreamingSystem::SlotOf), so a resident cell
-// keeps its slot — and its particle data — across boundary crosses. SlotCoord
-// records which cell currently occupies each slot and is the per-slot source
-// of truth; SlotCenters is its derived FVector cache (kept because this struct
-// has no grid parameters — the streaming system writes both together).
+/** Slot-packed particle data for a single Niagara component. Arrays are
+ *  optional; only allocate what the tier needs. Dead particles are written
+ *  with Extent == 0 (zeroed position); the Niagara graph culls on Extent, and
+ *  every CPU consumer skips Extent <= 0.
+ *
+ *  Slot packing: slot S owns indices [S * SlotCapacity, (S+1) * SlotCapacity).
+ *  SlotCapacity is fixed at Allocate time and shared across all arrays.
+ *
+ *  Toroidal (modular) slot addressing: slot indices derive from the cell
+ *  coordinate residues (see FTierStreamingSystem::SlotOf), so a resident cell
+ *  keeps its slot (and its particle data) across boundary crosses. SlotCoord
+ *  records which cell occupies each slot and is the per-slot source of truth;
+ *  SlotCenters is its derived FVector cache, kept because this struct has no
+ *  grid parameters, so the streaming system writes both together. */
 struct FNiagaraParticleBuffer
 {
+    /** Per-particle data, parallel and slot-packed: absolute index =
+     *  SlotStart(slot) + i within [0, SlotCapacity). */
     TArray<FVector>         Positions;
     TArray<float>           Extents;
     TArray<FLinearColor>    Colors;
-    // Face normals for non-billboard rendering. Need to enable within the particle system as well if desired.
+    /** Face normals for non-billboard rendering; enable in the particle system
+     *  too if used. */
     TArray<FVector>         Rotations;
 
-    // Per-SLOT grid coordinate of the cell currently resident in that slot
+    /** Per-slot grid coordinate of the cell currently resident in that slot. */
     TArray<FIntVector> SlotCoord;
 
-    // Per-SLOT cell center in the actor's absolute virtual space.
+    /** Per-slot cell center in the actor's absolute virtual space. */
     TArray<FVector> SlotCenters;
 
-    // Persistent scratch buffer for MakeCellLocalPositions. Avoids allocating and discarding a large TArray on every transition push.
+    /** Persistent scratch for MakeCellLocalPositions; avoids reallocating a
+     *  large TArray on every transition push. */
     mutable TArray<FVector> CellLocalScratch;
-    // Persistent scratch for the per-slot lattice push. Size == TotalSlots.
+    /** Persistent scratch for the per-slot lattice push. Size == TotalSlots. */
     mutable TArray<FVector> LatticeScratch;
 
-    // Slot geometry - set once in Allocate, read-only after.
+    /** Slot geometry; set once in Allocate, read-only after. */
     int32 TotalSlots = 0;
     int32 SlotCapacity = 0;
 
+#pragma region Allocation & Occupancy
+
+    /** Sentinel coord marking an unoccupied slot. */
     static FIntVector EmptySlotCoord() { return FIntVector(INT32_MIN, INT32_MIN, INT32_MIN); }
 
+    /** True if SlotIndex is valid and currently holds a resident cell. */
     bool IsSlotOccupied(int32 SlotIndex) const
     {
         return SlotCoord.IsValidIndex(SlotIndex) && SlotCoord[SlotIndex].X != INT32_MIN;
     }
 
-    // Allocate (or reallocate) all active arrays. Pass bWantRotations=false for tiers that don't need face-normal data — saves the alloc and push cost.
+    /** Allocates (or reallocates) all active arrays. Pass bWantRotations = false
+     *  for tiers with no face-normal data; saves the alloc and push cost. */
     void Allocate(int32 InTotalSlots, int32 InSlotCapacity, bool bWantRotations = false)
     {
         TotalSlots = InTotalSlots;
@@ -82,10 +91,14 @@ struct FNiagaraParticleBuffer
         else Rotations.Empty();
     }
 
-    // --- Slot helpers ---
+#pragma endregion
+
+#pragma region Slot Helpers
+
+    /** First absolute buffer index owned by SlotIndex. */
     int32 SlotStart(int32 SlotIndex) const { return SlotIndex * SlotCapacity; }
 
-    // Write one dead particle entry at absolute index Idx.
+    /** Writes one dead particle entry at absolute index Idx. */
     void WriteDeadParticle(int32 Idx)
     {
         if (Positions.IsValidIndex(Idx)) Positions[Idx] = FVector::ZeroVector;
@@ -94,7 +107,7 @@ struct FNiagaraParticleBuffer
         if (Rotations.IsValidIndex(Idx)) Rotations[Idx] = FVector::ZeroVector;
     }
 
-    // Fill trailing dead particles after ActualCount accepted particles.
+    /** Fills trailing dead particles after ActualCount accepted particles. */
     void PadSlotDead(int32 SlotIndex, int32 ActualCount)
     {
         const int32 Start = SlotStart(SlotIndex);
@@ -102,9 +115,13 @@ struct FNiagaraParticleBuffer
             WriteDeadParticle(Start + i);
     }
 
-    // Cell-anchored: fold absolute positions to cell-local (Position - SlotCenter)
-    // into the scratch buffer. Camera-INDEPENDENT and center-INDEPENDENT, so this
-    // is pushed only when a slot's data changes (boundary cross), never per frame.
+#pragma endregion
+
+#pragma region Niagara Push
+
+    /** Cell-anchored: folds absolute positions to cell-local (Position -
+     *  SlotCenter) into the scratch buffer. Camera- and center-independent, so
+     *  pushed only when a slot's data changes (boundary cross), never per frame. */
     const TArray<FVector>& MakeCellLocalPositions() const
     {
         const int32 Num = Positions.Num();
@@ -121,8 +138,8 @@ struct FNiagaraParticleBuffer
         return CellLocalScratch;
     }
 
-    // Cell-anchored: build the per-slot lattice array,
-    //   lattice[s] = SlotCenters[s] - NCenter
+    /** Cell-anchored: builds the per-slot lattice array,
+     *    lattice[s] = SlotCenters[s] - NCenter (zero for empty slots). */
     const TArray<FVector>& MakeLattice(const FVector& NCenter) const
     {
         if (LatticeScratch.Num() != TotalSlots) LatticeScratch.SetNumUninitialized(TotalSlots);
@@ -133,7 +150,8 @@ struct FNiagaraParticleBuffer
         return LatticeScratch;
     }
 
-    // Cell-anchored boundary-cross push: upload the per-slot lattice into the User.CellOffsets array.
+    /** Cell-anchored boundary-cross push: uploads the per-slot lattice into the
+     *  User.CellOffsets array. */
     void PushSlotOffsets(UNiagaraComponent* Component, const FVector& NCenter) const
     {
         if (!Component) return;
@@ -141,19 +159,19 @@ struct FNiagaraParticleBuffer
         UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayVector(Component, NiagaraBufferParams::CellOffsets, Lattice);
     }
 
-    // Cell-anchored per-frame push: the ENTIRE per-frame cost — one FVector
-    // uniform, (NCenter - VirtualTraversal). NCenter MUST derive from the same
-    // stamped center coord the live lattice was built against (see
-    // FParticleTierState::StampedNCenter) so uniform and lattice can never
-    // disagree, even on a transition frame.
+    /** Cell-anchored per-frame push: the entire per-frame cost, one FVector
+     *  uniform (NCenter - VirtualTraversal). NCenter must derive from the same
+     *  stamped center coord the live lattice was built against (see
+     *  FParticleTierState::StampedNCenter) so uniform and lattice can never
+     *  disagree, even on a transition frame. */
     void PushNCenterMinusVT(UNiagaraComponent* Component, const FVector& NCenter, const FVector& VirtualTraversal) const
     {
         if (!Component) return;
         Component->SetVariableVec3(NiagaraBufferParams::NCenterMinusVT, NCenter - VirtualTraversal);
     }
 
-    // Push all allocated arrays to a Niagara component. NCenter is the
-    // neighborhood-center position the lattice/uniform are built against.
+    /** Pushes all allocated arrays to a Niagara component. NCenter is the
+     *  neighborhood-center position the lattice/uniform are built against. */
     void PushToNiagara(UNiagaraComponent* Component, const FVector& VirtualTraversal, const FVector& NCenter = FVector::ZeroVector) const
     {
         if (!Component) return;
@@ -167,11 +185,13 @@ struct FNiagaraParticleBuffer
         if (Rotations.Num() > 0) UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayPosition(Component, NiagaraBufferParams::Rotations, Rotations);
     }
 
-    // Called exactly once at tier init. Pushes the full dead-particle buffer.
+    /** Called exactly once at tier init. Pushes the full dead-particle buffer. */
     void ActivateOnce(UNiagaraComponent* Component, const FVector& VirtualTraversal, const FVector& NCenter = FVector::ZeroVector) const
     {
         if (!Component) return;
         PushToNiagara(Component, VirtualTraversal, NCenter);
         Component->Activate(true);
     }
+
+#pragma endregion
 };
