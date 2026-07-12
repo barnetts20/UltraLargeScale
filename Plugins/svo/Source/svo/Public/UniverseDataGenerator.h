@@ -10,11 +10,10 @@
 #include "FNiagaraParticleBuffer.h"
 #include "UniverseParams.h"
 
-/// UNIVERSE GENERATOR - GENERATES DATA FOR POPULATING A UNIVERSE
-///
-/// Owns all noise composition and particle generation logic. The sector actor
-/// wires tier callbacks that delegate here; this class has no knowledge of
-/// actors, Niagara, octrees, or the streaming pipeline.
+/** Generates the data that populates a universe sector: owns all noise
+ *  composition and particle generation logic. The sector actor wires tier
+ *  callbacks that delegate here; this class has no knowledge of actors, Niagara,
+ *  octrees, or the streaming pipeline. */
 class SVO_API UniverseDataGenerator {
 public:
 	UniverseDataGenerator() {};
@@ -26,34 +25,33 @@ public:
 	FastNoise::SmartNode<> DensityNoise;
 	TArray<FPointData> GeneratedData;
 
-	// -----------------------------------------------------------------------
-	// Noise Composition
-	// -----------------------------------------------------------------------
+#pragma region Noise Composition
 
-	// Build the sector-scale density noise graph from the current Params.
-	// Pure function of FUniverseDensityParams — no actor state needed.
+	/** Builds and stores DensityNoise from the current Params. */
 	void Initialize();
+
+	/** Builds the sector-scale density noise graph from Params. Pure function of
+	 *  FUniverseDensityParams; needs no actor state. */
 	FastNoise::SmartNode<> BuildNoise() const;
 
-	// Sample the noise field into a CPU-side volume texture buffer.
-	// Returns the raw BGRA8 data suitable for FDensityVolume or GPU upload.
+	/** Samples the noise field into a CPU-side volume texture buffer, returning
+	 *  raw BGRA8 data suitable for FDensityVolume or GPU upload. */
 	TArray<uint8> SampleNoiseVolume(
 		int InNoiseResolution,
 		const FIntVector& InCellCoord) const;
 
-	// -----------------------------------------------------------------------
-	// Tier Generation Callbacks
-	// -----------------------------------------------------------------------
-	// These are self-contained generation functions that write directly into
-	// particle buffers. The sector actor's tier system calls them via
-	// FParticleTierConfig::GenerateCallback lambdas.
-	//
-	// Grid geometry (NodeCenter, CellExtent) is passed in rather than
-	// computed internally so the generator stays decoupled from the actor's
-	// tree extent multiplier and grid-depth conventions.
+#pragma endregion
 
-	// Large tier: generates cluster + gas particles using batched noise.
-	// OutSlotCount receives the number of accepted particles.
+#pragma region Tier Generation Callbacks
+	/** Self-contained generation functions that write directly into particle
+	 *  buffers; the sector actor's tier system calls them via
+	 *  FParticleTierConfig::GenerateCallback lambdas. Grid geometry (NodeCenter,
+	 *  CellExtent) is passed in rather than computed internally so the generator
+	 *  stays decoupled from the actor's tree extent multiplier and grid-depth
+	 *  conventions. */
+
+	 /** Large tier: generates cluster + gas particles using batched noise.
+	  *  OutSlotCount receives the number of accepted particles. */
 	void GenerateLargeTierNode(
 		const FIntVector& InCoord,
 		int32 InSlotIndex,
@@ -62,8 +60,8 @@ public:
 		const FVector& InNodeCenter,
 		int32& OutSlotCount) const;
 
-	// Mid tier: generates cluster particles at mid-grid scale.
-	// OutSlotCount receives the number of accepted particles.
+	/** Mid tier: generates cluster particles at mid-grid scale. OutSlotCount
+	 *  receives the number of accepted particles. */
 	void GenerateMidTierNode(
 		const FIntVector& InCoord,
 		int32 InSlotIndex,
@@ -72,8 +70,8 @@ public:
 		double InCellExtent,
 		int32& OutSlotCount) const;
 
-	// Small tier: generates galaxy-scale particles.
-	// OutSlotCount receives the number of accepted particles.
+	/** Small tier: generates galaxy-scale particles. OutSlotCount receives the
+	 *  number of accepted particles. */
 	void GenerateSmallTierNode(
 		const FIntVector& InCoord,
 		int32 InSlotIndex,
@@ -81,4 +79,6 @@ public:
 		const FVector& InNodeCenter,
 		double InCellExtent,
 		int32& OutSlotCount) const;
+
+#pragma endregion
 };

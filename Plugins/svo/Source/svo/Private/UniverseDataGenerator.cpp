@@ -76,7 +76,7 @@ TArray<uint8> UniverseDataGenerator::SampleNoiseVolume(int InNoiseResolution, co
 #pragma region Tier Generation Callbacks
 
 void UniverseDataGenerator::GenerateLargeTierNode(const FIntVector& InCoord, int32 InSlotIndex, FNiagaraParticleBuffer& InClusterBuffer, FNiagaraParticleBuffer& InGasBuffer, const FVector& InNodeCenter, int32& OutSlotCount) const {
-	// Batched noise sampling — three phases:
+	// Batched noise sampling, three phases:
 	//   1. Generate candidate positions + normalized noise coords.
 	//   2. One GenPositionArray3D call covering all candidates.
 	//   3. Walk results, rejection-gate, write accepted to slot buffers.
@@ -101,7 +101,7 @@ void UniverseDataGenerator::GenerateLargeTierNode(const FIntVector& InCoord, int
 	const double NoiseOffsetY = (double)InCoord.Y * 2.0;
 	const double NoiseOffsetZ = (double)InCoord.Z * 2.0;
 
-	// --- Phase 1: generate candidates + normalized noise coords ---
+	// Phase 1: generate candidates + normalized noise coords
 	TArray<FVector> CandidatePositions;
 	TArray<float> NoiseX, NoiseY, NoiseZ;
 	CandidatePositions.SetNumUninitialized(NumCandidates);
@@ -122,7 +122,7 @@ void UniverseDataGenerator::GenerateLargeTierNode(const FIntVector& InCoord, int
 		NoiseZ[i] = (float)(Candidate.Z * InvExtent + NoiseOffsetZ);
 	}
 
-	// --- Phase 2: batch noise evaluation ---
+	// Phase 2: batch noise evaluation
 	TArray<float> NoiseOut;
 	NoiseOut.SetNumUninitialized(NumCandidates);
 	DensityNoise->GenPositionArray3D(
@@ -138,7 +138,7 @@ void UniverseDataGenerator::GenerateLargeTierNode(const FIntVector& InCoord, int
 	NoiseY.Empty();
 	NoiseZ.Empty();
 
-	// --- Phase 3: accept/reject + write to slot ---
+	// Phase 3: accept/reject + write to slot
 	int32 ActualCount = 0;
 	auto dCurve = Params.LargeTier.DensityResponse.GetRichCurveConst();
 	for (int32 i = 0; i < NumCandidates; ++i)
@@ -159,12 +159,10 @@ void UniverseDataGenerator::GenerateLargeTierNode(const FIntVector& InCoord, int
 
 		// AUTHORED SIZE IS TRUTH: convert the real-unit Scale through the
 		// layer's constant UnitScale exactly once. Octree insert depth is
-		// derived later, at insert time, by InsertParticleIntoOctree — no
-		// FPointData is needed here. (The old code built and discarded one
-		// per accepted particle: a wasted per-particle depth-search loop.)
-		// Never reconstruct size from the quantized depth — that inflated
-		// every particle to its power-of-two node extent and made sprite
-		// sizes octave-step with UnitScale.
+		// derived later, at insert time, by InsertParticleIntoOctree, so no
+		// FPointData is needed here. Never reconstruct size from the quantized
+		// depth: that would inflate every particle to its power-of-two node
+		// extent and make sprite sizes octave-step with UnitScale.
 		const float ClusterExtent = static_cast<float>(Scale / Params.UnitScale);
 
 		const FVector CompVec = Stream.GetUnitVector();
@@ -267,7 +265,7 @@ void UniverseDataGenerator::GenerateMidTierNode(
 			Params.MidTier.MinScale, Params.MidTier.MaxScale,
 			ScaleSample, Params.MidTier.ScaleDistribution);
 		// Authored size is truth (see the Large-tier note above). No FPointData
-		// here — insert depth is derived at octree-insert time.
+		// here; insert depth is derived at octree-insert time.
 		const float ClusterExtent = static_cast<float>(Scale / Params.UnitScale);
 
 		const FVector CompVec = Stream.GetUnitVector();
@@ -293,7 +291,7 @@ void UniverseDataGenerator::GenerateSmallTierNode(
 	double InCellExtent,
 	int32& OutSlotCount) const
 {
-	// Batched noise sampling — three phases matching GenerateLargeTierNode.
+	// Batched noise sampling, three phases matching GenerateLargeTierNode.
 	// Candidates are scan-node-local rather than cell-local; each candidate
 	// may straddle coarse cell boundaries so noise offset is computed
 	// per-candidate rather than shared across the node.
@@ -311,7 +309,7 @@ void UniverseDataGenerator::GenerateSmallTierNode(
 	const double InvExtent = 1.0 / (double)Params.Extent;
 	const double TwoExtent = 2.0 * (double)Params.Extent;
 
-	// --- Phase 1: generate candidates + normalized noise coords ---
+	// Phase 1: generate candidates + normalized noise coords
 	TArray<FVector> CandidatePositions;
 	TArray<float> NoiseX, NoiseY, NoiseZ;
 	CandidatePositions.SetNumUninitialized(NumCandidates);
@@ -344,7 +342,7 @@ void UniverseDataGenerator::GenerateSmallTierNode(
 		NoiseZ[i] = (float)((Candidate.Z - CenterZ) * InvExtent + (double)CZ * 2.0);
 	}
 
-	// --- Phase 2: batch noise evaluation ---
+	// Phase 2: batch noise evaluation
 	TArray<float> NoiseOut;
 	NoiseOut.SetNumUninitialized(NumCandidates);
 	DensityNoise->GenPositionArray3D(
@@ -361,7 +359,7 @@ void UniverseDataGenerator::GenerateSmallTierNode(
 	NoiseY.Empty();
 	NoiseZ.Empty();
 
-	// --- Phase 3: accept/reject + write to slot ---
+	// Phase 3: accept/reject + write to slot
 	int32 ActualCount = 0;
 	auto dCurve = Params.SmallTier.DensityResponse.GetRichCurveConst();
 	for (int32 i = 0; i < NumCandidates; ++i)
@@ -383,7 +381,7 @@ void UniverseDataGenerator::GenerateSmallTierNode(
 			ScaleSample, Params.SmallTier.ScaleDistribution);
 
 		// Authored size is truth (see the Large-tier note above). No FPointData
-		// here — insert depth is derived at octree-insert time.
+		// here; insert depth is derived at octree-insert time.
 		const float FinalExtent = static_cast<float>(Scale / Params.UnitScale);
 
 		const int32 Idx = BufferStart + ActualCount;

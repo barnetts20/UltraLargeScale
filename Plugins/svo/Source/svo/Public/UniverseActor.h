@@ -1,6 +1,5 @@
 ﻿#pragma once
 
-#pragma region Includes/ForwardDec
 #include "CoreMinimal.h"
 #include "ProceduralSpaceActor.h"
 #include "UniverseDataGenerator.h"
@@ -16,7 +15,6 @@
 #include "StarSystemParams.h"
 #include "UniverseActor.generated.h"
 class AGalaxyActor;
-#pragma endregion
 
 
 #pragma region AUniverseActor
@@ -107,7 +105,7 @@ public:
 	 * the current frame's resolved VirtualTraversal and player position,
 	 * initializes the galaxy's VirtualTraversal, makes it visible, and clears
 	 * the pending flag. The galaxy's first TickFromParent runs immediately after
-	 * in the same frame — zero frames of parallax drift.
+	 * in the same frame, zero frames of parallax drift.
 	 *
 	 * @param Galaxy  The galaxy actor to finalize.
 	 */
@@ -128,7 +126,7 @@ public:
 	 * in a local), then a game-thread hop that swaps the galaxy's Octree
 	 * member and re-inserts the galaxy into the pool. Split out so the
 	 * deferred (init-draining) return path can share it. The Octree member
-	 * swap MUST stay on the game thread — a background assign races GT
+	 * swap MUST stay on the game thread; a background assign races GT
 	 * readers of the TSharedPtr (BuildStreamingContext, IsPlayerInsideBounds).
 	 */
 	void FinishGalaxyPoolReturn(TWeakObjectPtr<AGalaxyActor> WeakGalaxy);
@@ -328,8 +326,8 @@ private:
 	 *  is updated. */
 	std::atomic<bool> bSpawnScanInProgress{ false };
 
-	// NOTE: LastScanDispatchTime lives on AProceduralSpaceActor (shared by all
-	// scan-capable layers) — previously shadowed here.
+	// LastScanDispatchTime lives on AProceduralSpaceActor (shared by all
+	// scan-capable layers); not redeclared here.
 
 	/** Set of nodes currently inside the spawn threshold. Diffed each scan
 	 *  interval to produce enter/exit events. Game-thread only. */
@@ -345,13 +343,13 @@ private:
 
 	/** Dispatches an async octree scan if enough time has elapsed
 	 *  since the last dispatch and no scan is already in flight.
-	 *  Called by DetermineAndDispatchScan — not by a timer. */
+	 *  Called by DetermineAndDispatchScan, not by a timer. */
 	virtual void RequestScan() override;
 
 	/**
-	 * Walks the active hierarchy deepest-first (star systems → galaxies →
+	 * Walks the active hierarchy deepest-first (star systems -> galaxies ->
 	 * universe) and dispatches exactly one scan per tick to the deepest
-	 * level the player is currently inside. Replaces all per-level timers.
+	 * level the player is currently inside. Tick-driven, with no per-level timers.
 	 */
 	void DetermineAndDispatchScan();
 
