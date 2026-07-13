@@ -47,7 +47,7 @@ public:
 	 * built in a local), then a game-thread hop that swaps the system's
 	 * Octree member and re-inserts it into the pool. Split out so the
 	 * deferred (init-draining) return path can share it. The Octree member
-	 * swap must stay on the game thread — a background assign races GT
+	 * swap must stay on the game thread - a background assign races GT
 	 * readers of the TSharedPtr.
 	 */
 	void FinishStarSystemPoolReturn(TWeakObjectPtr<AStarSystemActor> WeakSystem);
@@ -109,7 +109,7 @@ protected:
 	void BuildTierConfigs();
 	FTierStreamingContext BuildStreamingContext() const;
 
-	/// Returns true if the given grid coord's cell overlaps the galaxy volume.
+	/** Returns true if the given grid coord's cell overlaps the galaxy volume. */
 	bool CellOverlapsVolume(const FIntVector& Coord, int32 GridDepth) const;
 #pragma endregion
 

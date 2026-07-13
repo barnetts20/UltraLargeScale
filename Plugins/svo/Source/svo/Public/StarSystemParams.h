@@ -6,14 +6,10 @@
 #include "StarSystemParams.generated.h"
 
 
-// ---------------------------------------------------------------------------
-// FStarSystemParams
-//
-// Tiers use the shared FTierParams (same struct as Universe/Galaxy). Star
-// systems lay planets out analytically, so the tier curve/scale fields go
-// unused here — only GridDepth / NeighborhoodRadius / SlotCapacity
-// feed the streaming pipeline.
-// ---------------------------------------------------------------------------
+/** Star-system generation parameters. Tiers use the shared FTierParams (same
+ *  struct as Universe/Galaxy); star systems lay planets out analytically, so
+ *  the tier curve/scale fields go unused here: only GridDepth,
+ *  NeighborhoodRadius, and SlotCapacity feed the streaming pipeline. */
 USTRUCT(BlueprintType)
 struct SVO_API FStarSystemParams : public FBaseParams
 {
@@ -21,7 +17,7 @@ struct SVO_API FStarSystemParams : public FBaseParams
 
 	/** How much larger the star system's real span is than the star
 	 *  particle's real size. NOTE: MaxEntityScale already authors a full
-	 *  system DIAMETER (orbits included — Pluto-orbit class at the top of
+	 *  system DIAMETER (orbits included, Pluto-orbit class at the top of
 	 *  the range), so this multiplier only needs to clear the star glyph
 	 *  plus margin. Over-provisioning here directly burns the system's
 	 *  integer-lattice and float-precision budget: span/smallest-feature
@@ -37,13 +33,13 @@ struct SVO_API FStarSystemParams : public FBaseParams
 	/** Absolute world-cm scale ranges for planet generation.
 	 *  Inner rocky planets are drawn from TerrestrialMinScale..TerrestrialMaxScale.
 	 *  Outer gas giants are drawn from GasGiantMinScale..GasGiantMaxScale.
-	 *  MakePointDataFromWorldScale converts these to octree-local extents
+	 *  MakePointData converts these to octree-local extents
 	 *  using UnitScale, so planets have consistent physical sizes regardless
 	 *  of which galaxy or star spawned them.
 	 *
 	 *  Real references (diameters in cm):
-	 *    Mercury ≈ 4.9e8, Mars ≈ 6.8e8, Earth ≈ 1.27e9, Venus ≈ 1.2e9
-	 *    Neptune ≈ 4.95e9, Saturn ≈ 1.16e10, Jupiter ≈ 1.4e10 */
+	 *    Mercury ~ 4.9e8, Mars ~ 6.8e8, Earth ~ 1.27e9, Venus ~ 1.2e9
+	 *    Neptune ~ 4.95e9, Saturn ~ 1.16e10, Jupiter ~ 1.4e10 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets|Terrestrial")
 	double TerrestrialMinScale = 1e8;   // Small rocky (Ceres-to-Mercury class)
 
@@ -64,7 +60,9 @@ struct SVO_API FStarSystemParams : public FBaseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets")
 	double OuterOrbitFraction = 0.85;
 
-	// --- Tier configs (shared FTierParams; Mid/Small unused in first pass) ---
+#pragma region Tier Configs
+	/** Shared FTierParams (same struct as Universe/Galaxy); Mid/Small are
+	 *  currently unused. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Large")
 	FTierParams LargeTier;
 
@@ -89,8 +87,12 @@ struct SVO_API FStarSystemParams : public FBaseParams
 		SmallTier.NeighborhoodRadius = 1;
 		SmallTier.SlotCapacity = 0;
 	}
+
+#pragma endregion
 };
 
+/** Min/max bounds for randomized star-system params; Generate() samples
+ *  between them for a given seed. */
 USTRUCT(BlueprintType)
 struct SVO_API FStarSystemParamBounds {
 	GENERATED_BODY()

@@ -123,8 +123,8 @@ void StarSystemDataGenerator::GeneratePlanet(const FOrbit& InPlanetOrbit, int32 
 	// All scales are absolute world-cm (diameters). These are fixed physical
 	// sizes independent of which galaxy or star system spawned us.
 	// Real references:
-	//   Mercury ≈ 4.9e8, Mars ≈ 6.8e8, Earth ≈ 1.27e9, Venus ≈ 1.2e9
-	//   Neptune ≈ 4.95e9, Saturn ≈ 1.16e10, Jupiter ≈ 1.4e10
+	//   Mercury ~ 4.9e8, Mars ~ 6.8e8, Earth ~ 1.27e9, Venus ~ 1.2e9
+	//   Neptune ~ 4.95e9, Saturn ~ 1.16e10, Jupiter ~ 1.4e10
 
 	if (InPlanetOrbit.Type == EObjectType::TerrestrialPlanet)
 	{
@@ -278,10 +278,10 @@ void StarSystemDataGenerator::GenerateDebris(const FOrbit& InDebrisOrbit, int32 
 		// Typical asteroids: 1-50 km diameter = 1e5 to 5e6 cm
 		// Large objects (Ceres-class): up to ~1e8 cm
 		double debrisScale = Stream.FRandRange(1e5, 5e6); // 1km to 50km asteroids
-		
+
 		if (Stream.FRand() < 0.05) // 5% chance of larger object
 			debrisScale = Stream.FRandRange(5e6, 1e8);
-		
+
 		FVector composition = FVector(
 			Stream.FRandRange(0.3, 0.6),
 			Stream.FRandRange(0.3, 0.5),

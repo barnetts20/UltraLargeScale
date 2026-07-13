@@ -14,9 +14,8 @@
 class AGalaxyActor;
 class AParallaxStaticMeshActor;
 
-// ---------------------------------------------------------------------------
-// AStarSystemActor
-// ---------------------------------------------------------------------------
+/** Star-system layer actor: lays planets out analytically over the shared
+ *  tier-streaming framework, driven by its parent galaxy's TickFromParent. */
 UCLASS()
 class SVO_API AStarSystemActor : public AProceduralSpaceActor
 {
@@ -114,7 +113,7 @@ protected:
 
 #pragma region Tier System - Grid Coord Helpers
 	/** True if the cell's AABB overlaps the system's orbital volume
-	 *  (±Extent * OuterOrbitFraction cube — the same region the Large tier's
+	 *  (+/-Extent * OuterOrbitFraction cube, the same region the Large tier's
 	 *  bounds cover). Serves as ShouldSkipCell for the streaming tiers: both
 	 *  the per-cell cull and the streaming gate. Mirrors
 	 *  AGalaxyActor::CellOverlapsVolume. */
@@ -123,8 +122,6 @@ protected:
 
 #pragma region Diagnostics
 	int32 DiagTickCount = 0;
-
-	void DrawPlanetDebugPositions() const;
 #pragma endregion
 
 private:

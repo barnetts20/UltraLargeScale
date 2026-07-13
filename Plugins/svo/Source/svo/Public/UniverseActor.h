@@ -62,12 +62,11 @@ public:
 	 * (Extent * (1 + ScaleFactor))^2 / DistSq exceeds InScreenSpaceThreshold^2.
 	 * Traversal prunes entire subtrees whose maximum possible screen size
 	 * cannot pass the threshold, making it significantly faster than a full
-	 * range query for sparse large-scale distributions.
-	 *
-	 * @param InCenter                Query origin in sector-local space (typically VirtualTraversal).
-	 * @param InScreenSpaceThreshold  Minimum angular size ratio to pass. Squared internally.
-	 * @param InTypeId                TypeId filter. Pass -1 to return all types.
-	 * @return                        Nodes passing the screen-space threshold.
+	 * range query for sparse large-scale distributions. InCenter is the query
+	 * origin in sector-local space (typically VirtualTraversal);
+	 * InScreenSpaceThreshold is the minimum angular size ratio to pass (squared
+	 * internally); InTypeId filters by TypeId (-1 returns all types). Returns the
+	 * nodes that pass.
 	 */
 	TArray<TSharedPtr<FOctreeNode>> GetNodesByScreenSpace(
 		const FVector& InCenter, double InScreenSpaceThreshold, int32 InTypeId = -1) const;
@@ -90,12 +89,11 @@ public:
 	TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> SpawnedGalaxies;
 
 	/**
-	 * Pops a galaxy from the pool, configures params (UnitScale, Seed,
-	 * ParentColor, Rotation), marks it hidden with bPendingPlacement = true,
-	 * and calls Initialize(). Does NOT position the galaxy or make it visible;
-	 * that is deferred to FinalizeGalaxyPlacement once async init completes.
-	 *
-	 * @param InNode  Octree node representing the galaxy to spawn.
+	 * Pops a galaxy from the pool for InNode (the octree node representing the
+	 * galaxy to spawn), configures params (UnitScale, Seed, ParentColor,
+	 * Rotation), marks it hidden with bPendingPlacement = true, and calls
+	 * Initialize(). Does NOT position the galaxy or make it visible; that is
+	 * deferred to FinalizeGalaxyPlacement once async init completes.
 	 */
 	void SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode);
 
@@ -105,9 +103,8 @@ public:
 	 * the current frame's resolved VirtualTraversal and player position,
 	 * initializes the galaxy's VirtualTraversal, makes it visible, and clears
 	 * the pending flag. The galaxy's first TickFromParent runs immediately after
-	 * in the same frame, zero frames of parallax drift.
-	 *
-	 * @param Galaxy  The galaxy actor to finalize.
+	 * in the same frame, zero frames of parallax drift. Galaxy is the galaxy
+	 * actor to finalize.
 	 */
 	void FinalizeGalaxyPlacement(AGalaxyActor* Galaxy);
 
@@ -115,9 +112,8 @@ public:
 	 * Returns the galaxy associated with InNode to the pool. Calls
 	 * ResetForPool() on the game thread (component teardown), then flushes
 	 * the galaxy's octree on a background thread before re-inserting it into
-	 * the pool on the game thread.
-	 *
-	 * @param InNode  Octree node whose associated galaxy should be returned.
+	 * the pool on the game thread. InNode is the octree node whose associated
+	 * galaxy should be returned.
 	 */
 	void ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode);
 
@@ -147,11 +143,10 @@ public:
 	FVector CellOrigin = FVector::ZeroVector;
 
 	/**
-	 * Sets CellCoord and derives CellOrigin, then repositions the actor.
-	 * Also rebuilds the octree against the actual Params.Extent in case Params
-	 * were overridden after construction. Must be called before Initialize().
-	 *
-	 * @param InCellCoord  Universe grid coordinate for this sector.
+	 * Sets CellCoord from InCellCoord (the universe grid coordinate for this
+	 * sector) and derives CellOrigin, then repositions the actor. Also rebuilds
+	 * the octree against the actual Params.Extent in case Params were overridden
+	 * after construction. Must be called before Initialize().
 	 */
 	void ConfigureCell(FIntVector InCellCoord);
 

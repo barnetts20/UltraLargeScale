@@ -7,7 +7,6 @@
 
 float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY) const
 {
-	// =====================================================================
 	// Arm SDF: unsigned distance from the nearest spiral arm centerline.
 	//
 	// Returns unsigned distance. The density remap (core/envelope
@@ -17,7 +16,6 @@ float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY) co
 	// (preserves spiral structure). Vertical distance is scaled by
 	// ArmVerticalSquash (lerped from inner to outer along the arm) so
 	// the arm tube cross-section appears round when viewed edge-on.
-	// =====================================================================
 
 	const double discR = (double)Params.DensityParams.DiscRadius;
 	const double armStart = (double)Params.DensityParams.ArmStartRadius * discR;
@@ -29,7 +27,7 @@ float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY) co
 	if (rXY > discR)
 		return static_cast<float>(rXY - discR + 1.0);
 
-	// --- Un-twist to find angular offset from nearest arm ---
+	// Un-twist to find angular offset from nearest arm
 	const double normalizedR = rXY / discR;
 	const double baseTwist = (double)Params.DensityParams.ArmTwistStrength * normalizedR;
 	const double coreBoost = (double)Params.DensityParams.ArmCoreTwistStrength *
@@ -46,7 +44,7 @@ float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY) co
 	if (angDist < 0.0) angDist += armSpacing;
 	if (angDist > armSpacing * 0.5) angDist -= armSpacing;
 
-	// --- Find the closest point on the arm at this radius ---
+	// Find the closest point on the arm at this radius
 	const double armTheta = theta - angDist;
 	const double armX = rXY * FMath::Cos(armTheta);
 	const double armY = rXY * FMath::Sin(armTheta);
@@ -98,7 +96,6 @@ float GalaxyDataGenerator::SampleBulgeSDF(const FVector& InNormPos) const
 
 float GalaxyDataGenerator::SampleBulgeDensity(const FVector& InNormPos) const
 {
-	// =====================================================================
 	// Hernquist bulge density in oblate (vertically squashed) coordinates.
 	//
 	// Profile: density(r) = BulgePeakDensity * (a / r_cutoff) *
@@ -115,7 +112,6 @@ float GalaxyDataGenerator::SampleBulgeDensity(const FVector& InNormPos) const
 	//
 	// Hard cutoff at BulgeCutoffRadius prevents the 1/r^4 Hernquist tail
 	// from leaking density into the disc and arm regions.
-	// =====================================================================
 
 	if (Params.DensityParams.BulgePeakDensity <= 0.0f)
 		return 0.0f;
@@ -145,7 +141,7 @@ float GalaxyDataGenerator::SampleBulgeDensity(const FVector& InNormPos) const
 	const double hernquist = 1.0 / (rOverA * FMath::Pow(1.0 + rOverA, 3.0));
 
 	// Normalise: hernquist(a) = 1/8, so multiply by 8 to get 1.0 at r = a.
-	// Beyond r = a density is < 1, at r < a it rises above 1 — clamp at the end.
+	// Beyond r = a density is < 1, at r < a it rises above 1 - clamp at the end.
 	const double normalised = hernquist * 8.0;
 
 	// Smooth fade to zero approaching the cutoff radius (avoids a hard density
@@ -192,8 +188,7 @@ float GalaxyDataGenerator::SampleDiscSDF(const FVector& InNormPos, double rXY, d
 
 float GalaxyDataGenerator::SampleDiscDensity(double rXY, double absZ) const
 {
-	// =====================================================================
-	// Analytic disc density — separable exponential profile.
+	// Analytic disc density - separable exponential profile.
 	//
 	// Radial:   exp(-rXY / scaleLength)
 	//   scaleLength = DiscRadius * DiscRadialScaleLength
@@ -202,12 +197,11 @@ float GalaxyDataGenerator::SampleDiscDensity(double rXY, double absZ) const
 	//
 	// Vertical: exp(-(|z| / h)^DiscVerticalFalloff)
 	//   h = DiscRadius * DiscHeightRatio
-	//   DiscVerticalFalloff = 1.0 → exponential / isothermal sheet
-	//   DiscVerticalFalloff = 2.0 → Gaussian (softer for thick disc)
+	//   DiscVerticalFalloff = 1.0 -> exponential / isothermal sheet
+	//   DiscVerticalFalloff = 2.0 -> Gaussian (softer for thick disc)
 	//
 	// Hard cutoff at the disc cylinder boundary (rXY > DiscRadius or
 	// absZ > h) prevents leakage into the arm/bulge regions above/below.
-	// =====================================================================
 
 	if (Params.DensityParams.DiscBaseDensity <= 0.0f)
 		return 0.0f;
@@ -216,7 +210,7 @@ float GalaxyDataGenerator::SampleDiscDensity(double rXY, double absZ) const
 	const double h = discR * FMath::Max((double)Params.DensityParams.DiscHeightRatio, 1e-6);
 	const double scaleL = discR * FMath::Max((double)Params.DensityParams.DiscRadialScaleLength, 1e-6);
 
-	// Hard boundary — outside cylinder contributes nothing
+	// Hard boundary - outside cylinder contributes nothing
 	if (rXY >= discR || absZ >= h)
 		return 0.0f;
 
@@ -224,7 +218,7 @@ float GalaxyDataGenerator::SampleDiscDensity(double rXY, double absZ) const
 	const double radialProfile = FMath::Exp(-rXY / scaleL);
 
 	// Vertical: exp(-(|z|/h)^falloff)
-	// Clamp zNorm to [0,1] — absZ < h is guaranteed above, but float precision guard
+	// Clamp zNorm to [0,1] - absZ < h is guaranteed above, but float precision guard
 	const double zNorm = FMath::Min(absZ / h, 1.0);
 	const double vExp = FMath::Max((double)Params.DensityParams.DiscVerticalFalloff, 0.1);
 	const double verticalProfile = FMath::Exp(-FMath::Pow(zNorm, vExp));
@@ -238,26 +232,24 @@ float GalaxyDataGenerator::SampleDiscDensity(double rXY, double absZ) const
 
 float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 {
-	// =====================================================================
 	// Composite density evaluation.
 	//
-	// Active layers (max-blended — each fills space the others don't):
-	//   1. Arms  — SDF distance -> core/envelope remap -> scaled peak density
-	//   2. Disc  — Analytic exponential radial x vertical profile
-	//   3. Bulge — Hernquist profile in oblate coordinates
+	// Active layers (max-blended - each fills space the others don't):
+	//   1. Arms  - SDF distance -> core/envelope remap -> scaled peak density
+	//   2. Disc  - Analytic exponential radial x vertical profile
+	//   3. Bulge - Hernquist profile in oblate coordinates
 	//
 	// Zeroed layers (re-enable during compositing phase):
-	//   4. BG    — Additive halo (BackgroundDensity = 0)
+	//   4. BG    - Additive halo (BackgroundDensity = 0)
 	//
 	// Global bounds fade: spherical smoothstep to zero at r = 1.0.
-	// =====================================================================
 
 	const double px = InNormPos.X;
 	const double py = InNormPos.Y;
 	const double pz = InNormPos.Z;
 
-	// --- Bounds check (early out) ---
-	// Hard zero beyond unit sphere — saves all SDF work for cube corners.
+	// Bounds check (early out)
+	// Hard zero beyond unit sphere - saves all SDF work for cube corners.
 	const double rBounds = FMath::Sqrt(px * px + py * py + pz * pz);
 	if (rBounds >= 1.0)
 		return 0.0f;
@@ -265,7 +257,7 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 	const double rXY = FMath::Sqrt(px * px + py * py);
 	const double absZ = FMath::Abs(pz);
 
-	// --- Arm density from unsigned distance ---
+	// Arm density from unsigned distance
 	const float ArmDist = SampleArmSDF(InNormPos, rXY);
 
 	// Radial progress along the arm (same t as in SampleArmSDF)
@@ -297,20 +289,20 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 		const double smooth = t * t * (3.0 - 2.0 * t);
 		ArmDensity = peakDensity * (1.0 - smooth);
 	}
-	// else: beyond envelope — density stays 0
+	// else: beyond envelope - density stays 0
 
-	// --- Disc density ---
+	// Disc density
 	// Max-blend: disc fills the inter-arm gaps without amplifying density
 	// where the arms are already strong.
 	const double DiscDensity = (double)SampleDiscDensity(rXY, absZ);
 
-	// --- Bulge density ---
+	// Bulge density
 	// Max-blend: concentrated central mass, fades before the disc/arm region.
 	const double BulgeDensity = (double)SampleBulgeDensity(InNormPos);
 
 	double Density = SmoothMax(BulgeDensity, DiscDensity, ArmDensity, 6);
 
-	// --- Background halo (not SDF-based) ---
+	// Background halo (not SDF-based)
 	if (Params.DensityParams.BackgroundDensity > 0.0f)
 	{
 		const double squashedZ = pz / FMath::Max((double)Params.DensityParams.BackgroundVerticalSquash, 0.01);
@@ -330,7 +322,7 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 		}
 	}
 
-	// --- Bounds fade — spherical smoothstep to zero approaching r=1.0 ---
+	// Bounds fade - spherical smoothstep to zero approaching r=1.0
 	const double fadeStart = (double)Params.DensityParams.BoundsFadeStart;
 	if (rBounds > fadeStart)
 	{
@@ -361,14 +353,14 @@ void GalaxyDataGenerator::SampleDensityBatch(
 
 void GalaxyDataGenerator::Initialize()
 {
-	// Build the encoded tree for future use (currently unused � C++ path active).
+	// Build the encoded tree for future use (currently unused; C++ path active).
 	DensityNoise = BuildNoise();
 }
 
 FastNoise::SmartNode<> GalaxyDataGenerator::BuildNoise() const
 {
 	// -----------------------------------------------------------------------
-	// Encoded noise tree � kept for future FastNoise swap-in.
+	// Encoded noise tree, kept for future FastNoise swap-in.
 	// Currently the C++ SampleDensity path is used instead.
 	// When ready to switch: replace SampleDensityBatch calls with
 	// DensityNoise->GenPositionArray3D and SampleNoiseVolume with
@@ -426,12 +418,6 @@ TArray<uint8> GalaxyDataGenerator::SampleNoiseVolume(int InNoiseResolution) cons
 
 #pragma endregion
 
-#pragma region Particle Count Derivation
-// DeriveLargeParticleCount removed — was never called. Large tier particle
-// count is effectively determined by SlotCapacity * acceptance rate from the
-// density rejection sampling, which is the correct behavior.
-#pragma endregion
-
 #pragma region Tier Generation Callbacks
 
 void GalaxyDataGenerator::GenerateTierNode(
@@ -466,7 +452,7 @@ void GalaxyDataGenerator::GenerateTierNode(
 	const int32 NumCandidates = InBuffer.SlotCapacity;
 	const double InvExtent = 1.0 / static_cast<double>(Params.Extent);
 
-	// --- Phase 1: generate candidates + normalized noise coords ---
+	// Phase 1: generate candidates + normalized noise coords
 	TArray<FVector> CandidatePositions;
 	TArray<float> NoiseX, NoiseY, NoiseZ;
 	CandidatePositions.SetNumUninitialized(NumCandidates);
@@ -490,7 +476,7 @@ void GalaxyDataGenerator::GenerateTierNode(
 		NoiseZ[i] = static_cast<float>(Candidate.Z * InvExtent);
 	}
 
-	// --- Phase 2: batch density evaluation ---
+	// Phase 2: batch density evaluation
 	TArray<float> NoiseOut;
 	NoiseOut.SetNumUninitialized(NumCandidates);
 	SampleDensityBatch(
@@ -501,7 +487,7 @@ void GalaxyDataGenerator::GenerateTierNode(
 	NoiseY.Empty();
 	NoiseZ.Empty();
 
-	// --- Phase 3: accept/reject + write to slot ---
+	// Phase 3: accept/reject + write to slot
 	int32 ActualCount = 0;
 	auto dCurve = InTierParams.DensityResponse.GetRichCurveConst();
 	for (int32 i = 0; i < NumCandidates; ++i)
@@ -521,12 +507,10 @@ void GalaxyDataGenerator::GenerateTierNode(
 
 		// AUTHORED SIZE IS TRUTH: convert the real-unit Scale through the
 		// layer's constant UnitScale exactly once. Octree insert depth is
-		// derived later, at insert time, by InsertParticleIntoOctree — no
-		// FPointData is needed here. (The old code built and discarded one
-		// per accepted particle: a wasted per-particle depth-search loop.)
-		// Never reconstruct size from the quantized depth — that inflated
-		// every particle to its power-of-two node extent and made sprite
-		// sizes octave-step with UnitScale.
+		// derived later, at insert time, by InsertParticleIntoOctree, so no
+		// FPointData is needed here. Never reconstruct size from the quantized
+		// depth: that would inflate every particle to its power-of-two node
+		// extent and make sprite sizes octave-step with UnitScale.
 		const float FinalExtent = static_cast<float>(Scale / Params.UnitScale);
 
 		const FVector CompVec = Stream.GetUnitVector();
@@ -543,9 +527,9 @@ void GalaxyDataGenerator::GenerateTierNode(
 	OutSlotCount = ActualCount;
 }
 
-// ============================================================================
-//  Large Tier — SDF-culled grid generation
-// ============================================================================
+#pragma endregion
+
+#pragma region Large Tier SDF Culling
 
 TArray<GalaxyDataGenerator::FActiveLargeTierCell> GalaxyDataGenerator::CollectActiveLargeTierCells() const
 {
@@ -559,7 +543,7 @@ TArray<GalaxyDataGenerator::FActiveLargeTierCell> GalaxyDataGenerator::CollectAc
 	// We intentionally test corners rather than the cell center so that cells
 	// straddling an envelope boundary are never wrongly discarded. A cell
 	// whose center happens to fall in the gap between two arms but whose
-	// corner clips an arm edge will still be included — candidates generated
+	// corner clips an arm edge will still be included - candidates generated
 	// inside it will simply fail the per-candidate density rejection gate as
 	// normal, at very low cost.
 	// -----------------------------------------------------------------------
@@ -571,7 +555,7 @@ TArray<GalaxyDataGenerator::FActiveLargeTierCell> GalaxyDataGenerator::CollectAc
 	const double HalfCell = CellFull * 0.5;
 	const double InvExtent = 1.0 / FullExtent;
 
-	// 8 corner offsets in cell-local space (±HalfCell on each axis)
+	// 8 corner offsets in cell-local space (+/-HalfCell on each axis)
 	static const FVector CornerOffsets[8] =
 	{
 		FVector(-1, -1, -1), FVector(1, -1, -1),
@@ -597,7 +581,7 @@ TArray<GalaxyDataGenerator::FActiveLargeTierCell> GalaxyDataGenerator::CollectAc
 					-FullExtent + HalfCell + static_cast<double>(iz) * CellFull);
 
 				// Test all 8 corners in normalized space.
-				// Early-out as soon as any corner has non-zero density —
+				// Early-out as soon as any corner has non-zero density -
 				// the cell is active and we don't need to check the rest.
 				bool bAnyActive = false;
 				for (int32 c = 0; c < 8; ++c)
@@ -613,7 +597,7 @@ TArray<GalaxyDataGenerator::FActiveLargeTierCell> GalaxyDataGenerator::CollectAc
 						FMath::Abs(CornerNorm.Y) > 1.0 ||
 						FMath::Abs(CornerNorm.Z) > 1.0)
 					{
-						continue; // This corner is outside — try next
+						continue; // This corner is outside - try next
 					}
 
 					if (SampleDensity(CornerNorm) > 0.0f)
@@ -636,7 +620,7 @@ TArray<GalaxyDataGenerator::FActiveLargeTierCell> GalaxyDataGenerator::CollectAc
 	}
 
 	UE_LOG(LogTemp, Verbose,
-		TEXT("GalaxyDataGenerator::CollectActiveLargeTierCells — depth=%d grid=%d^3 total=%d active=%d (%.1f%%)"),
+		TEXT("GalaxyDataGenerator::CollectActiveLargeTierCells - depth=%d grid=%d^3 total=%d active=%d (%.1f%%)"),
 		CullDepth, GridSide, TotalCells, ActiveCells.Num(),
 		TotalCells > 0 ? 100.0f * static_cast<float>(ActiveCells.Num()) / static_cast<float>(TotalCells) : 0.0f);
 
@@ -675,11 +659,11 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 	{
 		InBuffer.PadSlotDead(InSlotIndex, 0);
 		OutSlotCount = 0;
-		UE_LOG(LogTemp, Warning, TEXT("GalaxyDataGenerator::GenerateLargeTierSlot — no active cells found (check SDF params)"));
+		UE_LOG(LogTemp, Warning, TEXT("GalaxyDataGenerator::GenerateLargeTierSlot - no active cells found (check SDF params)"));
 		return;
 	}
 
-	// --- Compute per-cell mean corner density and total weight ---
+	// Compute per-cell mean corner density and total weight
 	const double InvExtent = 1.0 / static_cast<double>(Params.Extent);
 	static const FVector CornerOffsets[8] =
 	{
@@ -711,7 +695,7 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 		TotalWeight += CellWeights[ci];
 	}
 
-	// --- Allocate candidate counts proportional to weight ---
+	// Allocate candidate counts proportional to weight
 	TArray<int32> CandidateCounts;
 	CandidateCounts.SetNumZeroed(ActiveCells.Num());
 	int32 TotalAllocated = 0;
@@ -725,11 +709,11 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 	}
 
 	// Trim or top-up the last cell to hit exactly SlotCapacity.
-	// Rounding errors are typically ±1 per cell so the delta is small.
+	// Rounding errors are typically +/-1 per cell so the delta is small.
 	const int32 Delta = SlotCapacity - TotalAllocated;
 	CandidateCounts.Last() = FMath::Max(1, CandidateCounts.Last() + Delta);
 
-	// --- Generate per cell ---
+	// Generate per cell
 	auto dCurve = Params.LargeTier.DensityResponse.GetRichCurveConst();
 	int32 TotalAccepted = 0;
 
@@ -746,7 +730,7 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 			GetTypeHash(Cell.GridCoord.Z));
 		FRandomStream Stream(HashCombine(Params.Seed, CoordHash));
 
-		// --- Phase 1: candidates ---
+		// Phase 1: candidates
 		TArray<FVector> CandidatePositions;
 		TArray<float> NoiseX, NoiseY, NoiseZ;
 		CandidatePositions.SetNumUninitialized(NumCandidates);
@@ -766,13 +750,13 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 			NoiseZ[i] = static_cast<float>(Candidate.Z * InvExtent);
 		}
 
-		// --- Phase 2: batch density eval ---
+		// Phase 2: batch density eval
 		TArray<float> NoiseOut;
 		NoiseOut.SetNumUninitialized(NumCandidates);
 		SampleDensityBatch(NoiseOut.GetData(), NumCandidates,
 			NoiseX.GetData(), NoiseY.GetData(), NoiseZ.GetData());
 
-		// --- Phase 3: accept/reject + write ---
+		// Phase 3: accept/reject + write
 		for (int32 i = 0; i < NumCandidates; ++i)
 		{
 			if (TotalAccepted >= SlotCapacity) break;
@@ -790,7 +774,7 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 				Params.LargeTier.MinScale, Params.LargeTier.MaxScale,
 				ScaleSample, Params.LargeTier.ScaleDistribution);
 			// Authored size is truth (see the tier note above). No FPointData
-			// here — insert depth is derived at octree-insert time.
+			// here - insert depth is derived at octree-insert time.
 			const float FinalExtent = static_cast<float>(Scale / Params.UnitScale);
 
 			const FVector CompVec = Stream.GetUnitVector();
@@ -809,7 +793,7 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 	OutSlotCount = TotalAccepted;
 
 	UE_LOG(LogTemp, Log,
-		TEXT("GalaxyDataGenerator::GenerateLargeTierSlot — %d active cells, %d/%d particles accepted"),
+		TEXT("GalaxyDataGenerator::GenerateLargeTierSlot - %d active cells, %d/%d particles accepted"),
 		ActiveCells.Num(), TotalAccepted, SlotCapacity);
 }
 

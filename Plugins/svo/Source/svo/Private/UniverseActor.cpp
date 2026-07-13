@@ -1,5 +1,4 @@
-﻿#pragma region Includes/ForwardDec
-#include "UniverseActor.h"
+﻿#include "UniverseActor.h"
 #include "svo.h"
 #include "FTierStreamingSystem.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
@@ -9,7 +8,6 @@
 #include <StarSystemActor.h>
 #include <NiagaraFunctionLibrary.h>
 #include <DrawDebugHelpers.h>
-#pragma endregion
 
 #pragma region Constructor
 AUniverseActor::AUniverseActor()
@@ -101,7 +99,7 @@ void AUniverseActor::BuildTierConfigs()
 	// Must be called before any generate callback reads scale ranges.
 	UniverseParams.DeriveScaleRanges();
 
-	// --- Large tier (was "Coarse") ---
+	// Large tier
 	LargeTierConfig.TierName = TEXT("Large");
 	LargeTierConfig.TierIndex = 0;
 	LargeTierConfig.GridDepth = UniverseParams.LargeTier.GridDepth;
@@ -115,7 +113,7 @@ void AUniverseActor::BuildTierConfigs()
 		UniverseGenerator.GenerateLargeTierNode(Coord, SlotIndex, *Buffers[0], *Buffers[1], NodeCenter, LargeTierState.SlotCounts[SlotIndex]);
 		};
 
-	// --- Mid tier ---
+	// Mid tier
 	MidTierConfig.TierName = TEXT("Mid");
 	MidTierConfig.TierIndex = 1;
 	MidTierConfig.GridDepth = UniverseParams.MidTier.GridDepth;
@@ -130,7 +128,7 @@ void AUniverseActor::BuildTierConfigs()
 		UniverseGenerator.GenerateMidTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter, CellExt, MidTierState.SlotCounts[SlotIndex]);
 		};
 
-	// --- Small tier (was "Proximity") ---
+	// Small tier
 	SmallTierConfig.TierName = TEXT("Small");
 	SmallTierConfig.TierIndex = 2;
 	SmallTierConfig.GridDepth = UniverseParams.SmallTier.GridDepth;
@@ -146,7 +144,7 @@ void AUniverseActor::BuildTierConfigs()
 		};
 
 	// Applied to each tier after its GridDepth/NeighborhoodRadius are set.
-	// Captures Config by ref — safe since Config outlives all lambda calls.
+	// Captures Config by ref - safe since Config outlives all lambda calls.
 	//
 	// Bounds derivation (actor-relative; the actor is pegged to the player).
 	// Rendered offset = cellLocal + lattice + (NCenter - VT), where
@@ -155,9 +153,9 @@ void AUniverseActor::BuildTierConfigs()
 	// so the tight half-bound is (2R+2) * CellHalfExtent plus one particle
 	// radius. We provision 2 * (2R+1),
 	// which exceeds the tight bound for all R >= 0 and leaves slack for
-	// transition frames. This is the SHARED convention — GalaxyActor's
-	// MakeBounds must match (it previously used (2R+1), which can clip edge
-	// cells by up to one half-cell when VT sits near a cell boundary).
+	// transition frames. This is the SHARED convention - GalaxyActor's
+	// MakeBounds must match it; a bare (2R+1) bound clips edge cells by up to
+	// one half-cell when VT sits near a cell boundary.
 	auto MakeBoundsLambda = [this](const FParticleTierConfig& Cfg) -> TFunction<FBox()>
 		{
 			return [this, &Cfg]() -> FBox
@@ -290,7 +288,7 @@ void AUniverseActor::Tick(float DeltaTime)
 
 	CheckOctreeBounds();
 
-	// Single hierarchical scan — replaces all per-level timers.
+	// Single hierarchical scan; no per-level timers.
 	// Must run after the full tick cascade so all VTs are resolved.
 	DetermineAndDispatchScan();
 
@@ -317,11 +315,11 @@ void AUniverseActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 		FTierStreamingSystem::BeginShutdownDrain(*Tier);
 
-	// Mirror ResetForPool: also wait out an in-flight boundary-cross task —
+	// Mirror ResetForPool: also wait out an in-flight boundary-cross task -
 	// it writes Buffers/SlotEntries/CellCache (actor members) and would keep
 	// doing so through teardown. Safe on the GT: the transition task has no
 	// game-thread rendezvous. The async INIT chain is deliberately NOT
-	// waited here — it rendezvouses with the GT (would deadlock a GT wait);
+	// waited here - it rendezvouses with the GT (would deadlock a GT wait);
 	// it aborts on the Pooling state set above, and actor memory outlives
 	// EndPlay until GC.
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
@@ -377,12 +375,12 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	FParticleTierState* TierStates[] = { &LargeTierState, &MidTierState, &SmallTierState };
 	FParticleTierState& MatchedState = *TierStates[TierIndex];
 
-	// ParticleIndex is the absolute buffer index. Direct lookup — no slot math needed.
+	// ParticleIndex is the absolute buffer index. Direct lookup - no slot math needed.
 	// SINGLE-BUFFER READ GUARD: the transition task overwrites entering
 	// slots in place, so only read the CPU arrays while no task is in
 	// flight. On the GT this check is race-free (the flag is set on the GT
 	// before the task spawns), and if a transition IS in flight the matched
-	// node's slot may be mid-rewrite anyway — the octree fallback (node
+	// node's slot may be mid-rewrite anyway - the octree fallback (node
 	// center/extent) is the correct answer in that case.
 	FVector ParticlePos = InNode->Center;
 	float ParticleExtent = static_cast<float>(InNode->Extent);
@@ -401,13 +399,12 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 
 	// INVERTED DERIVATION: UnitScale is the per-layer design constant
 	// (carried in from the GalaxyParams template copy above); the galaxy's
-	// LOCAL Extent is what varies — derived from the particle's real size.
+	// LOCAL Extent is what varies - derived from the particle's real size.
 	// Real galaxy size therefore expresses itself as model size and star
 	// COUNT, while every authored real-unit content size converts through
 	// the same constant to identical local (= perceived) sizes in every
-	// galaxy. (Previously Extent was the template constant and UnitScale
-	// was derived, which made star sprites scale inversely with host
-	// galaxy size.)
+	// galaxy. (The inverse - a constant Extent with derived UnitScale -
+	// would make star sprites scale inversely with host galaxy size.)
 	{
 		const double DerivedExtent =
 			(static_cast<double>(ParticleExtent) * this->UniverseParams.UnitScale)
@@ -417,13 +414,13 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 		if (Galaxy->Params.Extent != DerivedExtent)
 		{
 			UE_LOG(LogTemp, Warning,
-				TEXT("AUniverseActor::SpawnGalaxy — derived extent %.3e clamped to %.3e; ")
+				TEXT("AUniverseActor::SpawnGalaxy - derived extent %.3e clamped to %.3e; ")
 				TEXT("retune GalaxyParams.UnitScale (layer constant) or the clamp bounds."),
 				DerivedExtent, Galaxy->Params.Extent);
 		}
 	}
 	// MaxEntityScale is derived from MaxEntityScaleFraction in GalaxyActor::InitializeData.
-	// No need to set it here — DeriveScaleRanges handles the cascade.
+	// No need to set it here - DeriveScaleRanges handles the cascade.
 
 	Galaxy->SpeedScale = SpeedScale;
 	// Seed is the deterministic hierarchical seed composed from
@@ -442,7 +439,7 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	Galaxy->Initialize();
 
 	UE_LOG(LogTemp, Log,
-		TEXT("AUniverseActor::SpawnGalaxyFromPool — pool=%d node=(%.1f,%.1f,%.1f) extent=%.1f "
+		TEXT("AUniverseActor::SpawnGalaxyFromPool - pool=%d node=(%.1f,%.1f,%.1f) extent=%.1f "
 			"particlePos=(%.1f,%.1f,%.1f) particleExtent=%.3f unitScale(const)=%.6e derivedExtent=%.6e seed=%d"),
 		GalaxyPool.Num(),
 		InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent,
@@ -484,13 +481,13 @@ void AUniverseActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 	if (!Galaxy) return;
 	UE_LOG(LogTemp, Log, TEXT("Returning galaxy to pool for node seed: %d"), InNode->Data.Seed);
 
-	// Abort signal for an in-flight async init chain — checked between
+	// Abort signal for an in-flight async init chain - checked between
 	// phases and live (via GetLiveState) inside InitializeTier.
 	Galaxy->InitializationState = ELifecycleState::Pooling;
 
 	if (!Galaxy->bInitInProgress.load())
 	{
-		// FAST PATH: no init chain in flight (the normal case — the galaxy
+		// FAST PATH: no init chain in flight (the normal case - the galaxy
 		// finished initializing long before it left the spawn threshold).
 		// Race-free on the GT: the flag is raised on the GT in Initialize()
 		// before the chain dispatches, so a false read here means the chain
@@ -500,14 +497,14 @@ void AUniverseActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 		return;
 	}
 
-	// DEFERRED RETURN: the init chain still owns the tier buffers — its
+	// DEFERRED RETURN: the init chain still owns the tier buffers - its
 	// generation ParallelFors write Buffers/SlotCounts and never raise
 	// bUpdateInProgress, so ResetForPool's transition-drain would free
 	// live arrays under the workers (use-after-free). We also cannot wait
 	// for the chain on the GAME THREAD: it rendezvouses with the GT
 	// (Niagara component spawns), so a GT spin here deadlocks. Park a
 	// worker to wait it out, then finish teardown through the normal GT
-	// path. The galaxy cannot be re-spawned meanwhile — it re-enters
+	// path. The galaxy cannot be re-spawned meanwhile - it re-enters
 	// GalaxyPool only at the end of FinishGalaxyPoolReturn.
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, WeakGalaxy]()
 		{
@@ -611,7 +608,7 @@ void AUniverseActor::DetermineAndDispatchScan()
 	SVO_GT_SCOPE("Universe::DetermineAndDispatchScan");
 	if (InitializationState != ELifecycleState::Ready) return;
 
-	// Walk deepest-first: star systems → galaxies → universe.
+	// Walk deepest-first: star systems -> galaxies -> universe.
 	// Only one level dispatches a scan per tick.
 	for (auto& GalaxyPair : SpawnedGalaxies)
 	{
@@ -639,7 +636,7 @@ void AUniverseActor::DetermineAndDispatchScan()
 		}
 	}
 
-	// Player isn't inside any child — scan at universe level
+	// Player isn't inside any child - scan at universe level
 	RequestScan();
 }
 
@@ -675,7 +672,7 @@ void AUniverseActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) co
 	if (!InNode.IsValid()) return;
 	const int32 Seed = InNode->Data.Seed;
 	const int32 AbsIdx = InNode->Data.ParticleIndex;
-	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::SpawnScan ENTER — node center=(%.1f, %.1f, %.1f) extent=%.2f depth=%d seed=%d bufIdx=%d scale=%.3f tier=%d"), InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Depth, Seed, AbsIdx, InNode->Data.ScaleFactor, InNode->Data.TypeId);
+	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::SpawnScan ENTER - node center=(%.1f, %.1f, %.1f) extent=%.2f depth=%d seed=%d bufIdx=%d scale=%.3f tier=%d"), InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Depth, Seed, AbsIdx, InNode->Data.ScaleFactor, InNode->Data.TypeId);
 	if (bLogSpawnEnterExitBuffers)
 	{
 		// Use TypeId (set by InsertParticleIntoOctree) to identify the source tier.
@@ -708,7 +705,7 @@ void AUniverseActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) co
 void AUniverseActor::LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const
 {
 	if (!InNode.IsValid()) return;
-	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::SpawnScan EXIT  — node center=(%.1f, %.1f, %.1f) extent=%.2f depth=%d seed=%d"), InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Depth, InNode->Data.Seed);
+	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::SpawnScan EXIT  - node center=(%.1f, %.1f, %.1f) extent=%.2f depth=%d seed=%d"), InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Depth, InNode->Data.Seed);
 }
 
 void AUniverseActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) const
@@ -728,7 +725,7 @@ void AUniverseActor::CheckOctreeBounds()
 	SVO_GT_SCOPE("Universe::CheckOctreeBounds");
 	if (!Octree.IsValid() || bRebaseInProgress.load()) return;
 
-	// Measure against the tree's ACTUAL center, not origin — after a rebase the
+	// Measure against the tree's ACTUAL center, not origin - after a rebase the
 	// root is centered on the player, so an origin-relative test would re-fire
 	// every tick.
 	const FVector TreeCenter = Octree->Root.IsValid() ? Octree->Root->Center : FVector::ZeroVector;
@@ -788,7 +785,7 @@ void AUniverseActor::CheckOctreeBounds()
 					// REMAP live spawn bookkeeping onto the new tree BEFORE
 					// clearing bRebaseInProgress. SpawnedGalaxies and
 					// TrackedSpawnNodes are keyed on node IDENTITY, and every
-					// node instance just changed — without this remap the
+					// node instance just changed - without this remap the
 					// first post-rebase scan sees all-new pointers, despawns
 					// EVERY live galaxy and respawns it from the pool (full
 					// re-init hitch + 2x pool headroom on the worst frame).
@@ -799,7 +796,7 @@ void AUniverseActor::CheckOctreeBounds()
 						{
 							if (!Old.IsValid()) return nullptr;
 							// Descend by the CAPTURED particle position (set
-							// at insert, immutable — no tier-buffer read
+							// at insert, immutable - no tier-buffer read
 							// needed), not the old node center: the new
 							// lattice is offset by the rebase origin, so the
 							// old center and the particle it quantized can
@@ -837,7 +834,7 @@ void AUniverseActor::CheckOctreeBounds()
 					S->TrackedSpawnNodes = MoveTemp(RemappedTracked);
 
 					// Drop results from any scan snapshotted against the old
-					// tree — diffing old-tree nodes against the remapped set
+					// tree - diffing old-tree nodes against the remapped set
 					// would re-introduce the churn this remap removes.
 					// (RequestScan's completion also drops stale-tree results
 					// for a scan still in flight.)

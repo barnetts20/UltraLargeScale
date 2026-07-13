@@ -157,10 +157,9 @@ struct FParticleTierConfig
 
 	/** Particle generation callback, invoked once per entering cell during
 	 *  parallel generation (InitializeTier and UpdateTier). Writes directly into
-	 *  each buffer's slot region.
-	 *  @param Coord      Grid coordinate of the cell being generated.
-	 *  @param SlotIndex  Flat slot index within the tier's buffers.
-	 *  @param Buffers    One raw pointer per NiagaraAsset (this tier's back buffer). */
+	 *  each buffer's slot region. Receives the cell's grid Coord, the flat
+	 *  SlotIndex within the tier's buffers, and Buffers (one raw pointer per
+	 *  NiagaraAsset, this tier's back buffer). */
 	TFunction<void(const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers)> GenerateCallback;
 
 	/** Returns the fixed AABB set once at InitializeTier as the Niagara bounds
@@ -170,10 +169,9 @@ struct FParticleTierConfig
 	/** Optional hook fired inside UpdateTier's async task after exiting slots
 	 *  are freed but before generation begins. Used by the streaming volumetric
 	 *  to update density sub-regions in lockstep with Large-tier boundary
-	 *  crosses. Not set for Mid or Small.
-	 *  @param Entering   Grid coords of cells entering the streaming window.
-	 *  @param Exiting    Grid coords of cells leaving the streaming window.
-	 *  @param NewCenter  The tier's new center coord after the boundary cross. */
+	 *  crosses. Not set for Mid or Small. Receives the Entering and Exiting cell
+	 *  coords (entering/leaving the streaming window) and NewCenter (the tier's
+	 *  new center coord after the boundary cross). */
 	TFunction<void(const TArray<FIntVector>& Entering, const TArray<FIntVector>& Exiting, const FIntVector& NewCenter)> OnBoundaryCross;
 
 	/** Optional per-cell culling predicate with two roles:
@@ -190,9 +188,9 @@ struct FParticleTierConfig
 	 *     so no hysteresis is needed.
 	 *  Used by bounded actors (GalaxyActor, StarSystemActor) to confine
 	 *  generation and boundary-cross tracking to their volume. Not set for
-	 *  unbounded actors (UniverseActor) or radius-0 exhaustive tiers.
-	 *  @param Coord  Grid coordinate of the cell being tested.
-	 *  @return       True to skip this cell / suppress streaming from it. */
+	 *  unbounded actors (UniverseActor) or radius-0 exhaustive tiers. Takes the
+	 *  Coord of the cell being tested; returns true to skip the cell / suppress
+	 *  streaming from it. */
 	TFunction<bool(const FIntVector& Coord)> ShouldSkipCell;
 };
 
