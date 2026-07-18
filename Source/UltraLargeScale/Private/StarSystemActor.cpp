@@ -7,6 +7,7 @@
 #include "StarSystemActor.h"
 #include "UltraLargeScale.h"
 #include "GalaxyActor.h"
+#include "ParallaxProxyActor.h"
 #include "ParallaxStaticMeshActor.h"
 #include "FTierStreamingSystem.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
@@ -582,11 +583,10 @@ void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPo
 	// Drive live planets
 	// Each planet's world position is recomputed from the current VT every
 	// frame so it stays locked to its parallax-correct location.
+	const double ActiveSpeedScale = GetParentSpeedScale();
 	for (auto& Pair : SpawnedPlanets)
-	{
-		if (AParallaxStaticMeshActor* Planet = Cast<AParallaxStaticMeshActor>(Pair.Value.Get()))
-			Planet->TickFromStarSystem(InPlayerPos);
-	}
+		if (auto* Proxy = Cast<AParallaxProxyActor>(Pair.Value.Get()))
+			Proxy->TickParallax(DeltaTime, InPlayerPos, ActiveSpeedScale);
 
 	// Planet spawn scan
 	// VirtualTraversal is resolved for this frame; process any pending
@@ -760,58 +760,28 @@ void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
 	// the camera-to-node vector by UnitScale to preserve angular position.
 	const FVector SpawnLoc = ComputeChildSpawnLocation(ParticlePos, 1.0);
 
-	AParallaxStaticMeshActor* Planet = World->SpawnActor<AParallaxStaticMeshActor>(
-		AParallaxStaticMeshActor::StaticClass(),
-		SpawnLoc,
-		FRotator::ZeroRotator,
-		SpawnParams);
+	AParallaxProxyActor* Proxy = World->SpawnActor<AParallaxProxyActor>(
+		AParallaxProxyActor::StaticClass(), SpawnLoc, FRotator::ZeroRotator, SpawnParams);
+	if (!Proxy) return;
 
-	if (!Planet)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("AStarSystemActor::SpawnPlanetFromPool - SpawnActor failed"));
-		return;
-	}
+	Proxy->VirtualTraversal = CurrentFrameOfReferenceLocation - SpawnLoc;   // positional seed
 
-	// Wire back-reference and store the ACTUAL particle position (not the
-	// quantized node center) so TickFromStarSystem recomputes the correct
-	// world position every frame.
-	Planet->System = this;
-	Planet->NodeCenter = ParticlePos;
+	UClass* BodyClass = Params.WrappedBodyClass.IsNull()
+		? AParallaxStaticMeshActor::StaticClass()          // default: unit sphere
+		: Params.WrappedBodyClass.LoadSynchronous();
+	if (!BodyClass) BodyClass = AParallaxStaticMeshActor::StaticClass();
+	double WorldRadius = double(ParticleExtent) * Params.UnitScale;
+	Proxy->SetupWrapped(BodyClass, WorldRadius);
 
-	// Visual size: the mesh must subtend the same angular size as the Niagara
-	// sprite it replaces. The sprite renders at ParticleExtent in compressed
-	// virtual space at distance |NodeCenter - VT|. The mesh sits at
-	// UnitScale * that distance, so it must be UnitScale * ParticleExtent
-	// to preserve the angular size ratio.
-	const double WorldRadius = static_cast<double>(ParticleExtent) * Params.UnitScale;
-	const double MeshScale = WorldRadius;
-
-	UStaticMesh* SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/UltraLargeScale/UnitSphere.UnitSphere"));
-	if (SphereMesh && Planet->MeshComponent)
-	{
-		Planet->MeshComponent->SetStaticMesh(SphereMesh);
-		Planet->MeshComponent->SetWorldScale3D(FVector(MeshScale));
-
-		UMaterialInterface* BaseMat = Planet->MeshComponent->GetMaterial(0);
-		if (BaseMat)
-		{
-			UMaterialInstanceDynamic* DynMat =
-				UMaterialInstanceDynamic::Create(BaseMat, Planet->MeshComponent);
-			DynMat->SetVectorParameterValue(FName("BaseColor"),
-				FLinearColor(InNode->Data.Composition));
-			Planet->MeshComponent->SetMaterial(0, DynMat);
-		}
-	}
-
-	SpawnedPlanets.Add(InNode, TWeakObjectPtr<AActor>(Planet));
+	SpawnedPlanets.Add(InNode, TWeakObjectPtr<AActor>(Proxy));
 
 	UE_LOG(LogTemp, Log,
 		TEXT("AStarSystemActor::SpawnPlanetFromPool - planet[%d] at (%.1f,%.1f,%.1f) "
-			"worldRadius=%.1f meshScale=%.4f particlePos=(%.1f,%.1f,%.1f) "
+			"worldRadius=%.1f, particlePos=(%.1f,%.1f,%.1f) "
 			"nodeCenter=(%.1f,%.1f,%.1f) VT=(%.1f,%.1f,%.1f) unitScale=%.4e"),
 		PlanetIndex,
 		SpawnLoc.X, SpawnLoc.Y, SpawnLoc.Z,
-		WorldRadius, MeshScale,
+		WorldRadius,
 		ParticlePos.X, ParticlePos.Y, ParticlePos.Z,
 		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
 		VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z,

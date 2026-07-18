@@ -657,13 +657,21 @@ void AUniverseActor::ProcessPendingScanResults()
 
 	for (const TSharedPtr<FOctreeNode>& Node : NearbySet)
 	{
+		// Log on first view-entry only (avoids per-scan spam on retries).
 		if (!TrackedSpawnNodes.Contains(Node))
-		{
 			LogSpawnNodeEnter(Node);
+
+		// Gate the SPAWN on whether it actually spawned, not on whether we've
+		// seen it. A first attempt that early-returns (transient not-ready)
+		// must retry next scan — the view-tracking set latched it out before.
+		if (!SpawnedGalaxies.Contains(Node))
 			SpawnGalaxyFromPool(Node);
-		}
+
 		if (bDebugDrawSpawnNodes) DebugDrawSpawnNode(Node);
 	}
+
+	// Despawn on view-exit (unchanged). ReturnGalaxyToPool no-ops on a node
+	// that never actually spawned, so tracked-but-unspawned nodes are safe.
 	TSet<TSharedPtr<FOctreeNode>> Exited = TrackedSpawnNodes.Difference(NearbySet);
 	for (const TSharedPtr<FOctreeNode>& Node : Exited)
 	{

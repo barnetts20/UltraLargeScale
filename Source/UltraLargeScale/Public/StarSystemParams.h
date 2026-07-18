@@ -72,6 +72,12 @@ struct ULTRALARGESCALE_API FStarSystemParams : public FBaseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Small")
 	FTierParams SmallTier;
 
+	/** Actor spawned per planet node, wrapped by AParallaxProxyActor. Leave null to
+	 *  keep the built-in AParallaxStaticMeshActor sprite body. Point at APlanetActor
+	 *  (or a BP subclass) for a real voxel planet. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets|Body")
+	TSoftClassPtr<AActor> WrappedBodyClass;
+
 	FStarSystemParams()
 	{
 		UnitScale = 1.2e7;

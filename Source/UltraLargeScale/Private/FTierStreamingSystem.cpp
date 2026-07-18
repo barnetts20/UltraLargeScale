@@ -174,6 +174,12 @@ void FTierStreamingSystem::InitializeTier(
 				OutComponents.Add(NC);
 			}
 
+			for (int32 b = 0; b < NumBuffers; ++b)
+			{
+				if (UNiagaraSystem* Template = Config.NiagaraAssets[b])
+					if (!Template->IsReadyToRun())
+						Template->WaitForCompilationComplete();   // blocks until compiled — no cold-window population
+			}
 			// Push initial data and activate each component exactly once.
 			const FBox Base = Config.ComputeBounds();
 			const FBox Bounds(Base.Min * 2.0, Base.Max * 2.0);
