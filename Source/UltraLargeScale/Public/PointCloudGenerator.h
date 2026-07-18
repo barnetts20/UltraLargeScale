@@ -1,0 +1,193 @@
+#if 0	// SVO_LEGACY_EXAMPLE_GENERATORS
+#pragma once
+#include <DataTypes.h>
+#include <FOctree.h>
+#include "FastNoise/FastNoise.h"
+#include "CoreMinimal.h"
+
+/**
+ *
+ */
+//ARCHIVED
+class ULTRALARGESCALE_API PointCloudGenerator
+{
+public:
+	int Seed;
+	int Count = 1000000;
+	int Type = 1;
+	int DepthRange = 8;
+	int MinInsertionDepth = 1;
+	int MaxInsertionDepth = 1;
+	int InsertDepthOffset = 0;
+	//Other implementations responsible for handling their internal configuration randomization
+	PointCloudGenerator(int InSeed) : Seed(InSeed) {};
+	virtual ~PointCloudGenerator() = default;
+
+	virtual void GenerateData(TSharedPtr<FOctree> InOctree) = 0;
+
+	// Applies noise derivative based point shifting
+	FInt64Vector ApplyNoiseDerivative(FastNoise::SmartNode<> InNoise, double InDomainScale, int64 InExtent, FInt64Vector InSamplePosition, float& OutDensity);
+	bool ApplyNoiseSelective(FastNoise::SmartNode<> InNoise, double InDensity, double InDomainScale, int64 InExtent, FVector InSamplePosition);
+
+	FInt64Vector RotateCoordinate(FInt64Vector InCoordinate, FRotator InAxes);
+
+	FVector RotateCoordinate(FVector InCoordinate, FRotator InRotation);
+
+	FRotator Rotation = FRotator(0.0, 0.0, 0.0);
+	FVector WarpAmount = FVector(1, 1, 1); // Controls how far we push points along the gradient
+
+	//ddxddyddz constants
+	const int GridSize = 3;
+	const float OffsetPositionsX[27] = {
+		-1,  0,  1,  -1,  0,  1,  -1,  0,  1,
+		-1,  0,  1,  -1,  0,  1,  -1,  0,  1,
+		-1,  0,  1,  -1,  0,  1,  -1,  0,  1
+	};
+	const float OffsetPositionsY[27] = {
+		-1, -1, -1,  0, 0, 0,  1, 1, 1,
+		-1, -1, -1,  0, 0, 0,  1, 1, 1,
+		-1, -1, -1,  0, 0, 0,  1, 1, 1
+	};
+	const float OffsetPositionsZ[27] = {
+		-1, -1, -1, -1, -1, -1, -1, -1, -1,
+		 0,  0,  0,  0,  0,  0,  0,  0,  0,
+		 1,  1,  1,  1,  1,  1,  1,  1,  1
+	};
+};
+
+// ============================================================================
+// LEGACY EXAMPLE GENERATORS — RETIRED
+// ----------------------------------------------------------------------------
+// These predate the tier streaming pipeline and use the defunct
+// GenerateData(TSharedPtr<FOctree>) framework (insert-everything-up-front).
+// Nothing in the active generation schemes references them. Disabled rather
+// than deleted because several remain useful as point-distribution / noise
+// composition examples (spiral math, gradient warping, globular falloff).
+// Delete this block once the useful patterns have been absorbed elsewhere.
+// The PointCloudGenerator base class above stays live —
+// StarSystemDataGenerator still derives from it.
+// ============================================================================
+
+//Basic Generators (No Noise)
+class ULTRALARGESCALE_API SimpleRandomGenerator : public PointCloudGenerator
+{
+public:
+	SimpleRandomGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
+	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
+};
+
+class ULTRALARGESCALE_API SimpleRandomNoiseGenerator : public PointCloudGenerator
+{
+public:
+	SimpleRandomNoiseGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
+	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
+	//Node tree string from noise tool
+	const char* EncodedTree = "EAAAAAA/DQAGAAAAAAAAQBcAAAAAAAAAgD8AAIC/AACAPwsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAAEbABMAzcxMPg0AAwAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAQA==";
+};
+
+class ULTRALARGESCALE_API GlobularGenerator : public PointCloudGenerator
+{
+public:
+	GlobularGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
+	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
+
+	double HorizontalExtent = 1;
+	double VerticalExtent = 1;
+	double Falloff = 2;
+};
+
+class ULTRALARGESCALE_API GlobularNoiseGenerator : public PointCloudGenerator
+{
+public:
+	GlobularNoiseGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
+	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
+
+	double HorizontalExtent = 1;
+	double VerticalExtent = 1;
+	double Falloff = 2;
+
+	const char* EncodedTree = "EAAAAAA/DQAGAAAAAAAAQBcAAAAAAAAAgD8AAIC/AACAPwsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAAEbABMAzcxMPg0AAwAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAQA==";
+};
+
+class ULTRALARGESCALE_API SpiralGenerator : public PointCloudGenerator
+{
+public:
+	SpiralGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
+	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
+
+	//Arm Coeff
+	int NumArms = 4;
+	double PitchAngle = 25;
+	double ArmContrast = .5;
+	double RadialFalloff = 3;
+	double CenterScale = .05;
+
+	//Jitter Coeff
+	double HorizontalSpreadMin = 0.02;
+	double HorizontalSpreadMax = .3;
+	double VerticalSpreadMin = 0.02;
+	double VerticalSpreadMax = .1;
+
+	//Scale Coef
+	double RadialDistance;
+	double CenterDistance;
+	double VerticalDistance;
+	double HorizontalSpreadDistance;
+	double VerticalSpreadDistance;
+	double PitchAngleRadians;
+	double MaxTheta;
+};
+
+class ULTRALARGESCALE_API SpiralNoiseGenerator : public PointCloudGenerator
+{
+public:
+	SpiralNoiseGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
+	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
+
+	//Arm Coeff
+	int NumArms = 4;
+	double PitchAngle = 25;
+	double ArmContrast = .5;
+	double RadialFalloff = 3;
+	double CenterScale = .05;
+
+	//Jitter Coeff
+	double HorizontalSpreadMin = 0.02;
+	double HorizontalSpreadMax = .3;
+	double VerticalSpreadMin = 0.02;
+	double VerticalSpreadMax = .1;
+
+	//Scale Coef
+	double RadialDistance;
+	double CenterDistance;
+	double VerticalDistance;
+	double HorizontalSpreadDistance;
+	double VerticalSpreadDistance;
+	double PitchAngleRadians;
+	double MaxTheta;
+
+	//const char* EncodedTree = "DQAIAAAAAAAAQAcAAAAAAD8AAAAAAA==";
+	const char* EncodedTree = "FwAAAAAAAACAPwAAgD8AAIC/DwABAAAAAAAAQA0ACAAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAPwAAAAAA";
+	//const char* EncodedTree = "FwAAAAAAmpmZPwAAAAAAAIA/DwABAAAAAAAAQA0ACAAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAPwAAAAAA";
+	//const char* EncodedTree = "DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA==";
+	//const char* EncodedTree = "FwAAAADAAACAPwAAgD8AAIC/EAAAAAA/DQAGAAAAAAAAQBcAAAAAAAAAgD8AAIC/AACAPwsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAAEbABMAzcxMPg0AAwAAAAAAAEAIAAAAAAA/AAAAAAAAAAAAQA==";
+	//const char* EncodedTree = "FwAAAAAAAACAPwAAgD8AAIC/DQAIAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAA==";
+};
+
+class ULTRALARGESCALE_API BurstGenerator : public PointCloudGenerator
+{
+public:
+	BurstGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
+	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
+};
+
+class ULTRALARGESCALE_API BurstNoiseGenerator : public PointCloudGenerator
+{
+public:
+	BurstNoiseGenerator(int InSeed) : PointCloudGenerator(InSeed) {};
+	virtual void GenerateData(TSharedPtr<FOctree> InOctree) override;
+
+	const char* EncodedTree = "EABSuD5ADQAIAAAAAAAAQAcAAAAAAD8AAAAAAAH//wAA";
+};
+
+#endif	// SVO_LEGACY_EXAMPLE_GENERATORS

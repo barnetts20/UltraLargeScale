@@ -1,0 +1,35 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "UltraLargeScale",
+	"Description": "",
+	"Category": "Other",
+	"CreatedBy": "snuzuns",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{"Name": "UltraLargeScale", "Type": "Runtime", "LoadingPhase": "Default"}
+	],
+	"AdditionalDependencies": [
+		"Core",
+		"CoreUObject",
+		"Engine"
+	],
+	"Plugins": [
+		{
+			"Name": "Niagara",
+			"Enabled": true
+		},
+		{
+			"Name": "EnhancedInput",
+			"Enabled": true
+		}
+	]
+}
