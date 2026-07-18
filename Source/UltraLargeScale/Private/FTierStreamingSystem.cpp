@@ -481,33 +481,27 @@ void FTierStreamingSystem::UpdateTier(
 // here: the profiler accumulator is game-thread only.
 void FTierStreamingSystem::PushTierToNiagara(
 	const TFunction<FVector()>& GetLatestVT,
-	const FIntVector& NewCenter,
-	const FVector& NewNCenter,
-	const FParticleTierConfig& Config,
-	FParticleTierState& State)
+	const FIntVector& NewCenter, const FVector& NewNCenter,
+	const FParticleTierConfig& Config, FParticleTierState& State)
 {
-	// Serialize against the per-frame push. VT is read here, at execution
-	// time, never captured: a generation can span several frames.
 	FScopeLock Lock(&State.PushCS);
 	if (State.bShuttingDown.load()) return;
 
-	// 1. C_stamp: record the center the lattice below derives from. The
-	//    per-frame push reads these under the same lock, so its uniform can
-	//    never disagree with the lattice uploaded below.
 	State.StampedCenter = NewCenter;
 	State.StampedNCenter = NewNCenter;
 
-	// 2. Upload: cell-local positions, the per-slot lattice (vs NewNCenter),
-	//    and the seeded (NCenter - VT) uniform. The GPU keeps rendering its
-	//    own prior copy of every array until these sets land: this upload
-	//    IS the publish; there is no CPU-side buffer flip.
+	// Niagara component writes must run on the GT. Marshal the upload; the
+	// worker has already produced the CPU arrays under PushCS, and Stamped*
+	// is set, so the per-frame push stays consistent in the meantime.
 	const FVector VirtualTraversal = GetLatestVT();
-	for (int32 b = 0; b < Config.NiagaraAssets.Num(); ++b)
-	{
-		UNiagaraComponent* NC = State.NiagaraComponents[b];
-		if (!NC) continue;
-		State.Buffers[b].PushToNiagara(NC, VirtualTraversal, NewNCenter);
-	}
+	TArray<UNiagaraComponent*> Comps = State.NiagaraComponents;   // snapshot under lock
+	AsyncTask(ENamedThreads::GameThread,
+		[&State, Comps, VirtualTraversal, NewNCenter, NumBuffers = Config.NiagaraAssets.Num()]()
+		{
+			for (int32 b = 0; b < NumBuffers && b < Comps.Num(); ++b)
+				if (UNiagaraComponent* NC = Comps[b])
+					State.Buffers[b].PushToNiagara(NC, VirtualTraversal, NewNCenter);
+		});
 }
 
 #pragma endregion

@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "CoreMinimal.h"
 #include "NiagaraComponent.h"
+#include "NiagaraSystem.h" 
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 
 /** Names of the Niagara user-exposed arrays this buffer pushes to. */
@@ -159,6 +160,17 @@ struct FNiagaraParticleBuffer
 		UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayVector(Component, NiagaraBufferParams::CellOffsets, Lattice);
 	}
 
+	// Compiled (WaitForCompilationComplete) guarantees the asset; this guarantees
+	// the *component* has a live system instance. False in the spawn-frame window
+	// where Activate() has run but the instance controller isn't up yet — exactly
+	// when SetVariablePosition writes into a half-built parameter store and crashes.
+	static bool IsPushable(UNiagaraComponent* Component)
+	{
+		if (!Component || !Component->IsActive()) return false;
+		if (!Component->GetSystemInstanceController().IsValid()) return false;
+		const UNiagaraSystem* Sys = Component->GetAsset();
+		return Sys && Sys->IsReadyToRun();
+	}
 	/** Cell-anchored per-frame push: the entire per-frame cost, one FVector
 	 *  uniform (NCenter - VirtualTraversal). NCenter must derive from the same
 	 *  stamped center coord the live lattice was built against (see
@@ -166,7 +178,7 @@ struct FNiagaraParticleBuffer
 	 *  disagree, even on a transition frame. */
 	void PushNCenterMinusVT(UNiagaraComponent* Component, const FVector& NCenter, const FVector& VirtualTraversal) const
 	{
-		if (!Component) return;
+		if (!IsPushable(Component)) return;
 		Component->SetVariablePosition(NiagaraBufferParams::NCenterMinusVT, NCenter - VirtualTraversal);
 	}
 
