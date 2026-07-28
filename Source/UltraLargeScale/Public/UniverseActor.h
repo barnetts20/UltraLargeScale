@@ -80,6 +80,16 @@ public:
 
 	UPROPERTY(EditAnywhere, Category = "Backdrop Composite")
 	FName BackdropDepthThresholdParamName = TEXT("FarThreshold");
+
+	/** Global brightness multiplier for the backdrop, applied in the composite before it
+	 *  feeds the main scene's bloom/tonemap. Galaxy sprites were authored hot for the old
+	 *  tonemapped path; drop this (start ~0.15-0.3) so they don't over-bloom or trigger
+	 *  lens-flare artifacts once composited. Per-emitter emissive is the granular lever. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdrop Composite", meta = (ClampMin = "0.0"))
+	float BackdropIntensity = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Backdrop Composite")
+	FName BackdropIntensityParamName = TEXT("BackdropIntensity");
 #pragma endregion
 
 #pragma region Editor Parameters

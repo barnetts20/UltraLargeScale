@@ -231,6 +231,7 @@ void AUniverseActor::InitializeBackdropComposite()
 	if (!CompositeMID) return;
 
 	CompositeMID->SetScalarParameterValue(BackdropDepthThresholdParamName, BackdropDepthThreshold);
+	CompositeMID->SetScalarParameterValue(BackdropIntensityParamName, BackdropIntensity);
 
 	// Unbound PP volume owned by this actor. Unbound = applies everywhere, so the
 	// backdrop composites in deep space (no atmosphere volume in range) as well as near
