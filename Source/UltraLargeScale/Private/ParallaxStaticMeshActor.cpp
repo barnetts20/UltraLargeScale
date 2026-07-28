@@ -9,10 +9,14 @@ AParallaxStaticMeshActor::AParallaxStaticMeshActor()
     MeshComponent = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("MeshComponent"));
     RootComponent = MeshComponent;
     MeshComponent->SetMobility(EComponentMobility::Movable);
-    MeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+    MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);// QueryAndPhysics);
     MeshComponent->SetCollisionResponseToAllChannels(ECR_Block);
     MeshComponent->SetRenderCustomDepth(true);
     MeshComponent->SetCustomDepthStencilValue(1);
+
+    // Virtual backdrop: hidden in the main renderer, visible only to the backdrop
+    // SceneCapture (nebula meshes, black-hole billboard, etc.).
+    MeshComponent->bVisibleInSceneCaptureOnly = true;
 
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Sphere(
         TEXT("/UltraLargeScale/UnitSphere.UnitSphere"));

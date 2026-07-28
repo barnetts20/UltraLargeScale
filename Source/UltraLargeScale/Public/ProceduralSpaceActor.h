@@ -86,8 +86,25 @@ public:
     UPROPERTY(EditAnywhere, Category = "Debug")
     bool IsDebug = false;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parallax Properties")
+    /** Parallax speed multiplier for this layer. Read-only to Blueprints so all
+     *  runtime changes go through SetSpeedScale (which enforces the floor and logs).
+     *  Still EditAnywhere for editor-time tuning; C++ propagation writes the member
+     *  directly. The authoritative copy is the Universe's; lower layers derive from
+     *  it via GetParentSpeedScale. */
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Parallax Properties")
     double SpeedScale = 1.0;
+
+    /** Floor for SpeedScale. At 1 the layer is 1:1 with world space and the wrapped
+     *  content parks + runs full-detail LOD. Values below 1 (microscopic-player
+     *  territory) aren't supported yet, so SetSpeedScale clamps up to this. */
+    static constexpr double MinSpeedScale = 1.0;
+
+    /** Sets SpeedScale, clamped to >= MinSpeedScale, logging the applied value on
+     *  change (and noting when a below-floor request was clamped). Route mousewheel /
+     *  input here instead of writing SpeedScale directly so the floor and the log fire.
+     *  Hitting exactly the floor is the trigger for parking the wrapped content. */
+    UFUNCTION(BlueprintCallable, Category = "Parallax Properties")
+    void SetSpeedScale(double NewSpeedScale);
 
     /** When true the actor auto-initializes from BeginPlay. Convenient for
      *  level-placed test actors. Set to false for pool-managed actors where

@@ -23,6 +23,22 @@ bool AProceduralSpaceActor::GetPlayerLocation(const UWorld* World, FVector& OutL
     return false;
 }
 
+void AProceduralSpaceActor::SetSpeedScale(double NewSpeedScale)
+{
+    const double Clamped = FMath::Max(NewSpeedScale, MinSpeedScale);
+    if (Clamped == SpeedScale) return;   // no-op (already at value, incl. pinned at floor)
+
+    const double Old = SpeedScale;
+    SpeedScale = Clamped;
+
+    if (NewSpeedScale < MinSpeedScale) {
+        UE_LOG(LogTemp, Log, TEXT("[Parallax] %s SpeedScale %.4f -> %.4f (requested %.4f clamped to floor %.1f)"), *GetName(), Old, Clamped, NewSpeedScale, MinSpeedScale);
+    }
+    else {
+        UE_LOG(LogTemp, Log, TEXT("[Parallax] %s SpeedScale %.4f -> %.4f"), *GetName(), Old, Clamped);
+    }
+}
+
 #pragma endregion
 
 #pragma region Lifecycle

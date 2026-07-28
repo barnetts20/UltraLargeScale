@@ -150,6 +150,13 @@ void FTierStreamingSystem::InitializeTier(
 
 				if (NC)
 				{
+					// Virtual backdrop: hidden in the main renderer, visible only to the
+					// backdrop SceneCapture. This is the single choke point for every
+					// tiered sprite system (universe/galaxy/starsystem x large/mid/small)
+					// and the sector gas cloud, and it reapplies automatically on every
+					// stream-in, so streaming churn can't un-flag anything.
+					NC->bVisibleInSceneCaptureOnly = true;
+
 					if (bAbsolutePos)
 						NC->SetAbsolute(true, false, false);
 

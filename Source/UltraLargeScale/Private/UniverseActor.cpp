@@ -8,6 +8,17 @@
 #include <StarSystemActor.h>
 #include <NiagaraFunctionLibrary.h>
 #include <DrawDebugHelpers.h>
+#include "Components/SceneCaptureComponent2D.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "Kismet/KismetRenderingLibrary.h"
+#include "Camera/PlayerCameraManager.h"
+#include "GameFramework/PlayerController.h"
+#include "Engine/GameViewportClient.h"
+#include "Engine/PostProcessVolume.h"
+#include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Engine/LocalPlayer.h"
+#include "SceneView.h"
 
 #pragma region Constructor
 AUniverseActor::AUniverseActor()
@@ -20,6 +31,18 @@ AUniverseActor::AUniverseActor()
 	SectorGasCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorGas.NG_SectorGas"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
 	Octree = MakeShared<FOctree>(UniverseParams.Extent * PersistentTreeMultiplier, FVector::ZeroVector);
+
+	// Backdrop capture: renders the virtual stack into an HDR target that gets
+	// composited behind the main scene. Config happens in InitializeBackdropCapture
+	// (BeginPlay); here we just create and attach it. Base ctor has already set the
+	// RootComponent, so attachment is valid.
+	BackdropCapture = CreateDefaultSubobject<USceneCaptureComponent2D>(TEXT("BackdropCapture"));
+	BackdropCapture->SetupAttachment(RootComponent);
+
+	// Composite material is a shared, read-only asset (unlike the per-instance RT),
+	// so loading it by path here matches how the Niagara systems above are loaded.
+	CompositeMaterial = LoadObject<UMaterialInterface>(nullptr,
+		TEXT("/UltraLargeScale/Sector/MT_BackdropPostProcess.MT_BackdropPostProcess"));
 }
 #pragma endregion
 
@@ -31,9 +54,184 @@ void AUniverseActor::Initialize()
 #pragma endregion
 
 #pragma region Initialization
+// ---------------------------------------------------------------------------
+// Backdrop capture
+// ---------------------------------------------------------------------------
+
+void AUniverseActor::InitializeBackdropCapture()
+{
+	if (!BackdropCapture) return;
+
+	// Linear HDR scene color with post-processing disabled *in the capture*: the
+	// backdrop must ride the MAIN scene's tonemapper/exposure at composite time,
+	// not carry its own. SCS_SceneColorHDR is pre-tonemap, pre-post.
+	BackdropCapture->CaptureSource = ESceneCaptureSource::SCS_SceneColorHDR;
+
+	// Driven manually from Tick (after the camera POV is synced) so the ordering is
+	// unambiguous. Never let the engine auto-capture on its own schedule.
+	BackdropCapture->bCaptureEveryFrame = false;
+	BackdropCapture->bCaptureOnMovement = false;
+
+	// Persist rendering state across manual captures (avoids per-capture re-init).
+	BackdropCapture->bAlwaysPersistRenderingState = true;
+
+	// Default render mode renders every primitive NOT marked bHiddenInSceneCapture,
+	// which includes the bVisibleInSceneCaptureOnly virtual stack. Real terrain/ocean
+	// are hidden, so no ShowOnly list is required.
+	BackdropCapture->PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_RenderScenePrimitives;
+
+	// Keep the real planet's environment out of the backdrop. Set on the FEngineShowFlags
+	// member directly: the details-panel ShowFlagSettings array is NOT applied for a
+	// dynamically-created capture component. (Verify these setter names against 5.7's
+	// ShowFlagsValues.inl if any fails to resolve.)
+	BackdropCapture->ShowFlags.SetFog(false);
+	BackdropCapture->ShowFlags.SetAtmosphere(false);
+	BackdropCapture->ShowFlags.SetVolumetricFog(false);
+	BackdropCapture->ShowFlags.SetCloud(false);
+	BackdropCapture->ShowFlags.SetMotionBlur(false);
+
+	EnsureBackdropRenderTarget();
+}
+
+void AUniverseActor::EnsureBackdropRenderTarget()
+{
+	if (!BackdropCapture) return;
+
+	// Debug override: use a hand-assigned RT asset (viewable live in its asset editor)
+	// instead of the runtime target. Skips sizing/allocation by design; still binds the
+	// RT to both the capture and the composite so the whole path exercises the override.
+	if (DebugRTOverride)
+	{
+		BackdropRT = DebugRTOverride;
+		BackdropCapture->TextureTarget = BackdropRT;
+		if (CompositeMID) CompositeMID->SetTextureParameterValue(BackdropRTParamName, BackdropRT);
+		return;
+	}
+
+	// Size to the viewport * scale. Fall back to 1080p if the viewport isn't up yet
+	// (first frames); the resize check below will correct it once it is.
+	FIntPoint ViewSize(1920, 1080);
+	if (GEngine && GEngine->GameViewport && GEngine->GameViewport->Viewport)
+	{
+		const FIntPoint VP = GEngine->GameViewport->Viewport->GetSizeXY();
+		if (VP.X > 0 && VP.Y > 0) ViewSize = VP;
+	}
+
+	const float S = FMath::Clamp(BackdropResolutionScale, 0.25f, 1.0f);
+	const FIntPoint Target(
+		FMath::Max(1, FMath::RoundToInt(ViewSize.X * S)),
+		FMath::Max(1, FMath::RoundToInt(ViewSize.Y * S)));
+
+	if (BackdropRT && BackdropRTSize == Target) return;   // already correct size
+
+	BackdropRT = UKismetRenderingLibrary::CreateRenderTarget2D(
+		this, Target.X, Target.Y, RTF_RGBA16f, FLinearColor::Black, false);
+
+	if (BackdropRT)
+	{
+		BackdropRT->TargetGamma = 1.0f;   // SceneColorHDR is already linear
+		BackdropRTSize = Target;
+		BackdropCapture->TextureTarget = BackdropRT;
+
+		// Rebind onto the composite MID: the RT object is a NEW pointer after a resize,
+		// so the material parameter has to be re-set or it keeps sampling the old target.
+		if (CompositeMID) CompositeMID->SetTextureParameterValue(BackdropRTParamName, BackdropRT);
+	}
+}
+
+void AUniverseActor::UpdateBackdropCapture()
+{
+	if (!bEnableBackdropCapture || !BackdropCapture) return;
+
+	EnsureBackdropRenderTarget();
+	if (!BackdropRT) return;
+
+	// Match the MAIN view, not the pawn peg the parallax uses: the backdrop
+	// projection has to line up with what the player actually sees. GetPlayerViewPoint
+	// returns the resolved view transform for this frame.
+	APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0);
+	if (!PC) return;
+
+	FVector ViewLoc; FRotator ViewRot;
+	PC->GetPlayerViewPoint(ViewLoc, ViewRot);
+	BackdropCapture->SetWorldLocationAndRotation(ViewLoc, ViewRot);
+
+	// Match the MAIN view's projection EXACTLY, including its Maintain-Axis aspect
+	// handling. SceneCapture treats FOVAngle as HORIZONTAL FOV and derives the vertical
+	// from the RT aspect, but the game camera constrains the OTHER axis -- on a non-square
+	// viewport those disagree and the backdrop stretches along the longer axis. Copying
+	// the view's own projection matrix sidesteps the FOV-axis question entirely. Only the
+	// projection is overridden; the view transform still comes from the component above.
+	bool bMatchedProjection = false;
+	if (ULocalPlayer* LP = PC->GetLocalPlayer())
+	{
+		if (LP->ViewportClient && LP->ViewportClient->Viewport)
+		{
+			FSceneViewProjectionData ProjData;
+			if (LP->GetProjectionData(LP->ViewportClient->Viewport, ProjData))
+			{
+				BackdropCapture->bUseCustomProjectionMatrix = true;
+				BackdropCapture->CustomProjectionMatrix = ProjData.ProjectionMatrix;
+				bMatchedProjection = true;
+			}
+		}
+	}
+
+	if (!bMatchedProjection)
+	{
+		// Fallback until the view is available (e.g. very first frames): derive from FOV.
+		// This can stretch on non-square viewports, but only transiently.
+		BackdropCapture->bUseCustomProjectionMatrix = false;
+		if (PC->PlayerCameraManager)
+			BackdropCapture->FOVAngle = PC->PlayerCameraManager->GetFOVAngle();
+	}
+
+	// Manual capture with this frame's resolved virtual positions.
+	BackdropCapture->CaptureScene();
+}
+
+void AUniverseActor::InitializeBackdropComposite()
+{
+	if (!CompositeMaterial)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[Universe] Backdrop composite material missing; backdrop will not render."));
+		return;
+	}
+
+	CompositeMID = UMaterialInstanceDynamic::Create(CompositeMaterial, this);
+	if (!CompositeMID) return;
+
+	CompositeMID->SetScalarParameterValue(BackdropDepthThresholdParamName, BackdropDepthThreshold);
+
+	// Unbound PP volume owned by this actor. Unbound = applies everywhere, so the
+	// backdrop composites in deep space (no atmosphere volume in range) as well as near
+	// a planet, where the atmosphere's own volume adds its pass at the later
+	// Translucency-After-DOF location and composites over us. The material's own
+	// Blendable Location (Scene Color After DOF) is what fixes the pass ordering; the
+	// volume just carries the blendable.
+	if (UWorld* W = GetWorld())
+	{
+		FActorSpawnParameters SP;
+		SP.Owner = this;
+		BackdropPPVolume = W->SpawnActor<APostProcessVolume>(SP);
+		if (BackdropPPVolume)
+		{
+			BackdropPPVolume->bUnbound = true;
+			BackdropPPVolume->BlendWeight = 1.0f;
+			BackdropPPVolume->Priority = 0.0f;
+			BackdropPPVolume->Settings.AddBlendable(CompositeMID, 1.0f);
+		}
+	}
+}
+
 void AUniverseActor::BeginPlay()
 {
 	Super::BeginPlay();
+	// Composite first: creates the MID + volume, so the RT created in the capture init
+	// below binds straight onto the MID.
+	InitializeBackdropComposite();
+	InitializeBackdropCapture();
 	if (bAutoInitializeOnBeginPlay) Initialize();
 }
 
@@ -298,6 +496,11 @@ void AUniverseActor::Tick(float DeltaTime)
 	// Must run after the full tick cascade so all VTs are resolved.
 	DetermineAndDispatchScan();
 
+	// Backdrop capture runs last: every virtual position for this frame is now
+	// resolved (parallax applied, tiers pushed, cascade ticked), so the captured
+	// image matches what the main view will composite this frame.
+	UpdateBackdropCapture();
+
 	// Emit the once-per-second game-thread profile summary. Root tick only.
 	SVO_GT_FLUSH();
 }
@@ -307,6 +510,14 @@ void AUniverseActor::Tick(float DeltaTime)
 void AUniverseActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	InitializationState = ELifecycleState::Pooling;
+
+	// Tear down the owned backdrop volume (a separate spawned actor); the capture
+	// component and MID are UPROPERTYs on this actor and GC with it.
+	if (BackdropPPVolume)
+	{
+		BackdropPPVolume->Destroy();
+		BackdropPPVolume = nullptr;
+	}
 
 	// Signal any in-flight galaxy initializations to abort, then clear tracking.
 	for (auto& Pair : SpawnedGalaxies)

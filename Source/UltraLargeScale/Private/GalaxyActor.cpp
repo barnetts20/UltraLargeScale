@@ -283,6 +283,12 @@ void AGalaxyActor::InitializeVolumetric()
 			Self->VolumetricComponent->SetDepthPriorityGroup(SDPG_World);
 
 			Self->VolumetricComponent->bRenderInDepthPass = false;
+
+			// Virtual backdrop: hidden in the main renderer, visible only to the
+			// backdrop SceneCapture. Set before RegisterComponent so the flag is
+			// baked into the scene proxy at creation.
+			Self->VolumetricComponent->bVisibleInSceneCaptureOnly = true;
+
 			Self->VolumetricComponent->RegisterComponent();
 			Self->VolumetricComponent->SetWorldScale3D(FVector(2 * Self->Params.Extent));
 
@@ -468,7 +474,7 @@ void AGalaxyActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 	if (DeltaSq > ParallaxPushThreshold * ParallaxPushThreshold)
 	{
 		LastPushedVirtualTraversal = VirtualTraversal;
-		
+
 		FTierStreamingSystem::PushTierVT({ &LargeTierState, &MidTierState, &SmallTierState }, [this] { return ReadLatestVT(); });
 	}
 }
@@ -708,7 +714,7 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 	SpawnedStarSystems.Add(InNode, TWeakObjectPtr<AStarSystemActor>(System));
 	System->ResetForSpawn();
 	System->Params = FStarSystemParamBounds::Generate(Universe->StarSystemParamBounds, InNode->Data.Seed);
-	
+
 	{
 		const double DerivedExtent =
 			(static_cast<double>(ParticleExtent) * Params.UnitScale

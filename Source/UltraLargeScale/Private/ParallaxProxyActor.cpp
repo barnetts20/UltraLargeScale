@@ -1,10 +1,10 @@
-#include "ParallaxProxyActor.h"
+ï»¿#include "ParallaxProxyActor.h"
 #include "UltraLargeScale.h"
 #include "Engine/World.h"
 
 AParallaxProxyActor::AParallaxProxyActor()
 {
-    // Driven by AStarSystemActor's tick loop, not UE's per-actor dispatch —
+    // Driven by AStarSystemActor's tick loop, not UE's per-actor dispatch ï¿½
     // self-ticking would fight the layer model, same as the static-mesh body.
     PrimaryActorTick.bCanEverTick = false;
     RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
@@ -20,7 +20,7 @@ void AParallaxProxyActor::SetupWrapped(UClass* WrappedClass, double WorldRadius)
     SP.Owner = this;
     SP.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-    // Proxy is spawned AT SpawnLoc, so spawn the wrapped actor there too —
+    // Proxy is spawned AT SpawnLoc, so spawn the wrapped actor there too ï¿½
     // it's already on its mark before the first TickParallax runs.
     Wrapped = World->SpawnActor<AActor>(WrappedClass, GetActorLocation(), FRotator::ZeroRotator, SP);
     if (!Wrapped)
@@ -31,7 +31,7 @@ void AParallaxProxyActor::SetupWrapped(UClass* WrappedClass, double WorldRadius)
     }
 
     // Size via scale. For a voxel planet this IS the radius (cm) and it self-
-    // initializes from scale on its first tick. Set ONCE — a planet rebuilds its
+    // initializes from scale on its first tick. Set ONCE ï¿½ a planet rebuilds its
     // terrain on scale change, so never rescale per frame; we only move it.
     Wrapped->SetActorScale3D(FVector(WorldRadius));
 }
@@ -40,20 +40,30 @@ void AParallaxProxyActor::TickParallax(float DeltaTime, const FVector& PlayerPos
 {
     SVO_GT_SCOPE("Planet::TickParallax");
 
-    SpeedScale = InSpeedScale;   // stored live; the future meshing gate reads this
+    SpeedScale = InSpeedScale;   // stored live; the meshing gate reads this
+
     if (!bHasLastPlayer) { LastPlayerPos = PlayerPos; bHasLastPlayer = true; }
 
     const FVector PlayerDelta = PlayerPos - LastPlayerPos;
     LastPlayerPos = PlayerPos;
 
     // Same accumulation as every layer: VT += PlayerDelta * (SpeedScale / UnitScale).
-    // UnitScale is fixed at 1 here, so speed scale is the whole numerator.
+    // UnitScale is fixed at 1 here, so speed scale is the whole numerator. VT keeps
+    // accumulating even at SpeedScale == 1 so the math stays continuous across speed
+    // changes -- but the rendered position is then constant.
     VirtualTraversal += PlayerDelta * InSpeedScale;
 
-    // Content renders at PlayerPos + (LocalOrigin - VT); the wrapped actor sits
-    // at the layer origin, so it renders at PlayerPos - VT.
+    // Content renders at PlayerPos + (LocalOrigin - VT); the wrapped actor sits at the
+    // layer origin, so it renders at PlayerPos - VT. Skip the push when the position
+    // hasn't meaningfully changed (SpeedScale == 1 parks the actor, and a stationary
+    // player never moves it) -- this avoids re-triggering the wrapped actor's
+    // transform-driven LOD churn while it sits still.
     if (Wrapped)
-        Wrapped->SetActorLocation(PlayerPos - VirtualTraversal);
+    {
+        const FVector NewLoc = PlayerPos - VirtualTraversal;
+        if (!Wrapped->GetActorLocation().Equals(NewLoc, 1.0))
+            Wrapped->SetActorLocation(NewLoc);
+    }
 }
 
 void AParallaxProxyActor::EndPlay(const EEndPlayReason::Type Reason)

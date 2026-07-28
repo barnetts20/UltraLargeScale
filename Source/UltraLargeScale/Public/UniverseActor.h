@@ -15,6 +15,11 @@
 #include "StarSystemParams.h"
 #include "UniverseActor.generated.h"
 class AGalaxyActor;
+class USceneCaptureComponent2D;
+class UTextureRenderTarget2D;
+class APostProcessVolume;
+class UMaterialInterface;
+class UMaterialInstanceDynamic;
 
 
 #pragma region AUniverseActor
@@ -40,6 +45,42 @@ class ULTRALARGESCALE_API AUniverseActor : public AProceduralSpaceActor
 
 public:
 	AUniverseActor();
+
+#pragma region Backdrop Capture
+	/** Master switch for the virtual-backdrop scene capture. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdrop Capture")
+	bool bEnableBackdropCapture = true;
+
+	/** Render-target resolution as a fraction of the viewport (1.0 = full res).
+	 *  The backdrop is low-frequency (sprites + smooth marches), so it tolerates a
+	 *  reduced-res capture well; this is the first knob to drop if the extra pass
+	 *  costs too much. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdrop Capture", meta = (ClampMin = "0.25", ClampMax = "1.0"))
+	float BackdropResolutionScale = 1.0f;
+
+	/** The HDR render target the virtual stack is captured into. The composite
+	 *  post-process material samples this as the backdrop. Null until BeginPlay. */
+	UTextureRenderTarget2D* GetBackdropRenderTarget() const { return BackdropRT; }
+
+	/** Debug: hand-assign an RT asset to view the capture in the RT asset editor.
+	 *  When set, EnsureBackdropRenderTarget uses it verbatim and skips sizing/alloc. */
+	UPROPERTY(EditAnywhere, Category = "Backdrop Capture")
+	UTextureRenderTarget2D* DebugRTOverride = nullptr;
+
+	/** SceneDepth (world cm) at/above which a pixel is treated as sky and filled with
+	 *  the backdrop. Must sit ABOVE your farthest real geometry (the near planet at max
+	 *  view distance) and BELOW the far-plane depth. Too low: backdrop bleeds over a
+	 *  distant planet. Too high: a thin sky halo at the planet limb. Tune this first. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdrop Composite")
+	float BackdropDepthThreshold = 1.0e9f;
+
+	/** Material parameter names on MT_BackdropPostProcess. Must match the asset. */
+	UPROPERTY(EditAnywhere, Category = "Backdrop Composite")
+	FName BackdropRTParamName = TEXT("BackdropRT");
+
+	UPROPERTY(EditAnywhere, Category = "Backdrop Composite")
+	FName BackdropDepthThresholdParamName = TEXT("FarThreshold");
+#pragma endregion
 
 #pragma region Editor Parameters
 
@@ -189,6 +230,51 @@ protected:
 	virtual void InitializeData() override;
 	virtual void InitializeNiagara() override;
 
+#pragma endregion
+
+#pragma region Backdrop Capture (internal)
+	/** Scene capture that renders ONLY the virtual stack into BackdropRT from the
+	 *  main camera's POV each frame. Real geometry (terrain/ocean) is excluded via
+	 *  bHiddenInSceneCapture; the virtual stack is bVisibleInSceneCaptureOnly, so no
+	 *  ShowOnly list is needed. Composited behind the main scene at Scene Color After
+	 *  DOF, so DOF/translucency/atmosphere all draw over it. Owned here because the
+	 *  backdrop is the visual form of the universe hierarchy this actor governs. */
+	UPROPERTY()
+	USceneCaptureComponent2D* BackdropCapture = nullptr;
+
+	/** HDR (RGBA16f) target for BackdropCapture. Transient; recreated on resize. */
+	UPROPERTY(Transient)
+	UTextureRenderTarget2D* BackdropRT = nullptr;
+
+	/** Last viewport size the RT was sized to, so resolution changes trigger a recreate. */
+	FIntPoint BackdropRTSize = FIntPoint::ZeroValue;
+
+	/** Composite base material (MT_BackdropPostProcess), constructor-loaded by path. */
+	UPROPERTY()
+	UMaterialInterface* CompositeMaterial = nullptr;
+
+	/** Dynamic instance of CompositeMaterial: holds the live RT + threshold params. */
+	UPROPERTY()
+	UMaterialInstanceDynamic* CompositeMID = nullptr;
+
+	/** Unbound post-process volume this actor spawns and owns; carries CompositeMID
+	 *  as a blendable. Always-on, so the backdrop composites in deep space too. */
+	UPROPERTY()
+	APostProcessVolume* BackdropPPVolume = nullptr;
+
+	/** One-time capture config: capture source, manual-drive, and the show flags
+	 *  that keep the real planet's atmosphere/fog out of the backdrop. */
+	void InitializeBackdropCapture();
+
+	/** One-time composite setup: MID from CompositeMaterial + owned unbound PP volume. */
+	void InitializeBackdropComposite();
+
+	/** Per-frame: sync the capture to the camera POV, then trigger CaptureScene. */
+	void UpdateBackdropCapture();
+
+	/** Creates or resizes BackdropRT to the current viewport * BackdropResolutionScale,
+	 *  and (re)binds it onto CompositeMID. */
+	void EnsureBackdropRenderTarget();
 #pragma endregion
 
 #pragma region Params Accessors
