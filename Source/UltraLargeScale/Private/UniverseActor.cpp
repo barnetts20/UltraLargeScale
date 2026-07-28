@@ -90,6 +90,34 @@ void AUniverseActor::InitializeBackdropCapture()
 	BackdropCapture->ShowFlags.SetCloud(false);
 	BackdropCapture->ShowFlags.SetMotionBlur(false);
 
+	// Keep the RT a CLEAN consolidation of the virtual stack: no post-process effects
+	// baked into the capture, so bloom/flares/tonemap/exposure apply exactly ONCE -- on
+	// the final composited main scene, never on the backdrop input. SCS_SceneColorHDR
+	// already captures pre-post, so most of these are belt-and-suspenders (explicit
+	// intent + a guard if the capture source is ever changed). Verify any that fail to
+	// resolve against 5.7's ShowFlagsValues.inl and drop them; they're independent.
+	BackdropCapture->ShowFlags.SetBloom(false);
+	BackdropCapture->ShowFlags.SetLensFlares(false);
+	BackdropCapture->ShowFlags.SetTonemapper(false);
+	BackdropCapture->ShowFlags.SetEyeAdaptation(false);   // no auto-exposure metering
+	BackdropCapture->ShowFlags.SetDepthOfField(false);
+	BackdropCapture->ShowFlags.SetVignette(false);
+	BackdropCapture->ShowFlags.SetSceneColorFringe(false); // chromatic aberration
+	BackdropCapture->ShowFlags.SetColorGrading(false);
+
+	// These two ARE in SceneColorHDR (they're applied during lighting, pre-post) but are
+	// meaningless on emissive backdrop content -- disabling saves capture cost and avoids
+	// stray darkening/reflection artifacts.
+	BackdropCapture->ShowFlags.SetScreenSpaceReflections(false);
+	BackdropCapture->ShowFlags.SetAmbientOcclusion(false);
+
+	// Pin exposure to a fixed 1.0 so the backdrop's brightness never drifts with scene
+	// metering. The final composite rides the MAIN view's exposure, which is what we want.
+	BackdropCapture->PostProcessSettings.bOverride_AutoExposureMethod = true;
+	BackdropCapture->PostProcessSettings.AutoExposureMethod = AEM_Manual;
+	BackdropCapture->PostProcessSettings.bOverride_AutoExposureBias = true;
+	BackdropCapture->PostProcessSettings.AutoExposureBias = 0.0f;
+
 	EnsureBackdropRenderTarget();
 }
 
