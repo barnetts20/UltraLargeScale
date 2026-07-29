@@ -36,7 +36,7 @@ class UMaterialInstanceDynamic;
  * Scale model: the actor is pegged to the player every tick so UE's rendering
  * stays in a clean numerical range. All virtual movement is accumulated in
  * VirtualTraversal and applied to particle positions as camera-relative
- * offsets before each Niagara push.
+ * offsets within the niagara system.
  */
 UCLASS()
 class ULTRALARGESCALE_API AUniverseActor : public AProceduralSpaceActor
@@ -72,7 +72,7 @@ public:
 	 *  view distance) and BELOW the far-plane depth. Too low: backdrop bleeds over a
 	 *  distant planet. Too high: a thin sky halo at the planet limb. Tune this first. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdrop Composite")
-	float BackdropDepthThreshold = 1.0e9f;
+	float BackdropDepthThreshold = 1.0e11f;
 
 	/** Material parameter names on MT_BackdropPostProcess. Must match the asset. */
 	UPROPERTY(EditAnywhere, Category = "Backdrop Composite")
@@ -82,9 +82,7 @@ public:
 	FName BackdropDepthThresholdParamName = TEXT("FarThreshold");
 
 	/** Global brightness multiplier for the backdrop, applied in the composite before it
-	 *  feeds the main scene's bloom/tonemap. Galaxy sprites were authored hot for the old
-	 *  tonemapped path; drop this (start ~0.15-0.3) so they don't over-bloom or trigger
-	 *  lens-flare artifacts once composited. Per-emitter emissive is the granular lever. */
+	 *  feeds the main scene's bloom/tonemap. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdrop Composite", meta = (ClampMin = "0.0"))
 	float BackdropIntensity = 1.0f;
 
