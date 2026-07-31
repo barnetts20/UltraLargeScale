@@ -458,7 +458,7 @@ void AGalaxyActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 	LastFrameOfReferenceLocation = InPlayerPos;
 	CurrentFrameOfReferenceLocation = InPlayerPos;
 
-	const double ActiveSpeedScale = GetParentSpeedScale();
+	const double ActiveSpeedScale = GetEffectiveSpeedScale();
 	const double Ratio = (Params.UnitScale > 0.0) ? (ActiveSpeedScale / Params.UnitScale) : 0.0;
 	VirtualTraversal += PlayerDelta * Ratio;
 
@@ -731,7 +731,6 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 		}
 	}
 
-	System->SpeedScale = Universe ? Universe->SpeedScale : SpeedScale;
 	// Seed is the deterministic hierarchical seed composed from
 	// (GalaxySeed, GridCoord, GenerationIndex) during octree insertion.
 	System->Params.Seed = InNode->Data.Seed;

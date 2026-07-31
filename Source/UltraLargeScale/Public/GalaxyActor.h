@@ -73,7 +73,9 @@ protected:
 #pragma region Params Accessors
 	virtual double GetUnitScale() const override { return Params.UnitScale; }
 	virtual double GetExtent() const override { return Params.Extent; }
-	virtual double GetParentSpeedScale() const override { return Universe ? Universe->SpeedScale : SpeedScale; }
+public:
+	virtual double GetEffectiveSpeedScale() const override { return Universe ? Universe->GetEffectiveSpeedScale() : 1.0; }
+protected:
 #pragma endregion
 
 #pragma region Data Generation

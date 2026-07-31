@@ -181,13 +181,9 @@ void AStarSystemActor::ResetForSpawn()
 #pragma endregion
 
 #pragma region Params Accessors
-double AStarSystemActor::GetParentSpeedScale() const
+double AStarSystemActor::GetEffectiveSpeedScale() const
 {
-	if (Galaxy && Galaxy->Universe)
-		return Galaxy->Universe->SpeedScale;
-	if (Galaxy)
-		return Galaxy->SpeedScale;
-	return SpeedScale;
+	return Galaxy ? Galaxy->GetEffectiveSpeedScale() : 1.0;
 }
 #pragma endregion
 
@@ -522,7 +518,7 @@ void AStarSystemActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 	LastFrameOfReferenceLocation = InPlayerPos;
 	CurrentFrameOfReferenceLocation = InPlayerPos;
 
-	const double ActiveSpeedScale = GetParentSpeedScale();
+	const double ActiveSpeedScale = GetEffectiveSpeedScale();
 	const double Ratio = (Params.UnitScale > 0.0) ? (ActiveSpeedScale / Params.UnitScale) : 0.0;
 	VirtualTraversal += PlayerDelta * Ratio;
 
@@ -583,7 +579,7 @@ void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPo
 	// Drive live planets
 	// Each planet's world position is recomputed from the current VT every
 	// frame so it stays locked to its parallax-correct location.
-	const double ActiveSpeedScale = GetParentSpeedScale();
+	const double ActiveSpeedScale = GetEffectiveSpeedScale();
 	for (auto& Pair : SpawnedPlanets)
 		if (auto* Proxy = Cast<AParallaxProxyActor>(Pair.Value.Get()))
 			Proxy->TickParallax(DeltaTime, InPlayerPos, ActiveSpeedScale);

@@ -668,7 +668,6 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	// MaxEntityScale is derived from MaxEntityScaleFraction in GalaxyActor::InitializeData.
 	// No need to set it here - DeriveScaleRanges handles the cascade.
 
-	Galaxy->SpeedScale = SpeedScale;
 	// Seed is the deterministic hierarchical seed composed from
 	// (UniverseSeed, GridCoord, GenerationIndex) during octree insertion.
 	Galaxy->Params.Seed = InNode->Data.Seed;

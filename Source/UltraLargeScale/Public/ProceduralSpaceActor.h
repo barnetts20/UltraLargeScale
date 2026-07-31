@@ -90,7 +90,7 @@ public:
      *  runtime changes go through SetSpeedScale (which enforces the floor and logs).
      *  Still EditAnywhere for editor-time tuning; C++ propagation writes the member
      *  directly. The authoritative copy is the Universe's; lower layers derive from
-     *  it via GetParentSpeedScale. */
+     *  it via GetEffectiveSpeedScale. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Parallax Properties")
     double SpeedScale = 1.0;
 
@@ -165,7 +165,10 @@ public:
 #pragma region Params Accessors
     virtual double GetUnitScale() const { return 1; }
     virtual double GetExtent() const { return 274877906944; }
-    virtual double GetParentSpeedScale() const { return 1; }
+    /** The authoritative parallax scale for this actor. Non-root layers delegate
+     *  up to the Universe, which returns its owned SpeedScale. Base returns 1.0
+     *  (identity) so a detached / unparented actor stays well-defined. */
+    virtual double GetEffectiveSpeedScale() const { return 1.0; }
 #pragma endregion
 
 #pragma region Tier System - Grid Coord Helpers

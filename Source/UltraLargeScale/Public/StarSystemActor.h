@@ -63,7 +63,9 @@ protected:
 #pragma region Params Accessors (pure virtual implementations)
 	virtual double GetUnitScale() const override { return Params.UnitScale; }
 	virtual double GetExtent() const override { return Params.Extent; }
-	virtual double GetParentSpeedScale() const override;
+public:
+	virtual double GetEffectiveSpeedScale() const override;
+protected:
 #pragma endregion
 
 #pragma region Initialization
