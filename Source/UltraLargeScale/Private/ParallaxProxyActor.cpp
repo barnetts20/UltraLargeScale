@@ -1,6 +1,7 @@
 ﻿#include "ParallaxProxyActor.h"
 #include "UltraLargeScale.h"
 #include "Engine/World.h"
+#include "PooledActor.h"
 
 AParallaxProxyActor::AParallaxProxyActor()
 {
@@ -33,7 +34,10 @@ void AParallaxProxyActor::SetupWrapped(UClass* WrappedClass, double WorldRadius)
     // Size via scale. For a voxel planet this IS the radius (cm) and it self-
     // initializes from scale on its first tick. Set ONCE � a planet rebuilds its
     // terrain on scale change, so never rescale per frame; we only move it.
-    Wrapped->SetActorScale3D(FVector(WorldRadius));
+    // Hand the body its world radius. A pooled body (IPooledActor) takes it via
+    // OnAcquired(double) so it can reconfigure/rebuild; a plain body just scales.
+    if (IPooledActor* Body = Cast<IPooledActor>(Wrapped)) Body->OnAcquired(WorldRadius);
+    else Wrapped->SetActorScale3D(FVector(WorldRadius));
 }
 
 void AParallaxProxyActor::TickParallax(float DeltaTime, const FVector& PlayerPos, double InSpeedScale)
@@ -70,4 +74,50 @@ void AParallaxProxyActor::EndPlay(const EEndPlayReason::Type Reason)
 {
     if (Wrapped) { Wrapped->Destroy(); Wrapped = nullptr; }
     Super::EndPlay(Reason);
+}
+
+void AParallaxProxyActor::OnAcquired()
+{
+    // Real wake (position + body reconfigure) happens in ReInit, which the star system
+    // calls right after acquire. Nothing generic to do here beyond a state reset.
+    bHasLastPlayer = false;
+}
+
+void AParallaxProxyActor::OnReturnToPool()
+{
+    // Park the wrapped body dormant (no tick/LOD/raymarch/ocean while pooled) WITHOUT
+    // destroying it -- keeping it warm is the whole point. A body that doesn't implement
+    // IPooledActor (the sprite placeholder) just gets hidden + tick-disabled.
+    if (Wrapped)
+    {
+        if (IPooledActor* Body = Cast<IPooledActor>(Wrapped)) Body->OnReturnToPool();
+        else { Wrapped->SetActorHiddenInGame(true); Wrapped->SetActorTickEnabled(false); }
+    }
+    VirtualTraversal = FVector::ZeroVector;
+    LastPlayerPos = FVector::ZeroVector;
+    bHasLastPlayer = false;
+    SetActorHiddenInGame(true);
+}
+
+void AParallaxProxyActor::ReInit(UClass* BodyClass, double WorldRadius, const FVector& SpawnLoc, const FVector& InitialVT)
+{
+    SetActorLocation(SpawnLoc);
+    VirtualTraversal = InitialVT;   // positional seed so frame 0 renders on the planet's spot
+    LastPlayerPos = FVector::ZeroVector;
+    bHasLastPlayer = false;
+    SetActorHiddenInGame(false);
+
+    if (!Wrapped || Wrapped->GetClass() != BodyClass)
+    {
+        // First use, or a different body class: (re)create the wrapped body.
+        if (Wrapped) { Wrapped->Destroy(); Wrapped = nullptr; }
+        SetupWrapped(BodyClass, WorldRadius);   // spawns at proxy loc + hands over radius
+    }
+    else
+    {
+        // Reuse the persistent pooled body: reposition + wake/reconfigure.
+        Wrapped->SetActorLocation(SpawnLoc);
+        if (IPooledActor* Body = Cast<IPooledActor>(Wrapped)) Body->OnAcquired(WorldRadius);
+        else { Wrapped->SetActorHiddenInGame(false); Wrapped->SetActorScale3D(FVector(WorldRadius)); }
+    }
 }

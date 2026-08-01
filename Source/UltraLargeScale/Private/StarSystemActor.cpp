@@ -25,14 +25,8 @@ AStarSystemActor::AStarSystemActor()
 
 	// Load Niagara assets. Paths mirror the galaxy naming convention.
 	// Clone NG_GalaxyLarge/Mid/Small into the StarSystem folder and rename.
-	// Mid/Small are zero-particle placeholders for now - they share the Large
-	// asset so InitializeTier doesn't fail on a null NiagaraSystem pointer.
-	// Swap StarSystemMidCloud / StarSystemSmallCloud for dedicated assets
-	// once you've created NG_StarSystemMid and NG_StarSystemSmall.
-	StarSystemLargeCloud = LoadObject<UNiagaraSystem>(nullptr,
-		TEXT("/UltraLargeScale/StarSystem/NG_StarSystemLarge.NG_StarSystemLarge"));
-	StarSystemMidCloud = StarSystemLargeCloud;  // placeholder - replace with NG_StarSystemMid
-	StarSystemSmallCloud = StarSystemLargeCloud;  // placeholder - replace with NG_StarSystemSmall
+	// Niagara cloud systems load lazily in BuildTierConfigs() (runtime), NOT here:
+	// loading assets during CDO construction runs before Niagara is ready and crashes.
 
 	Octree = MakeShared<FOctree>(Params.Extent);
 }
@@ -113,15 +107,15 @@ void AStarSystemActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 #pragma region Pool Lifecycle
 void AStarSystemActor::ResetForPool()
 {
-	// Tear down any live planet actors on the game thread.
-	for (auto& Pair : SpawnedPlanets)
+	// Cascade-release live planets back to the central pool (parks each body dormant)
+	// before this star system goes inert. Key snapshot first -- ReturnPlanetToPool
+	// mutates the map. Mirrors the galaxy -> star-system cascade.
 	{
-		if (AActor* Planet = Pair.Value.Get())
-		{
-			if (IsValid(Planet)) Planet->Destroy();
-		}
+		TArray<TSharedPtr<FOctreeNode>> LiveNodes;
+		SpawnedPlanets.GetKeys(LiveNodes);
+		for (const TSharedPtr<FOctreeNode>& Node : LiveNodes)
+			ReturnPlanetToPool(Node);
 	}
-	SpawnedPlanets.Empty();
 
 	// DRAIN BEFORE FREE - mirrors AGalaxyActor::ResetForPool. An async
 	// boundary-cross task may still be writing this tier's buffers; bar new
@@ -353,6 +347,18 @@ void AStarSystemActor::InitializeNiagara()
 #pragma endregion
 
 #pragma region BuildTierConfigs
+void AStarSystemActor::LoadRuntimeAssets()
+{
+	// Game thread (Initialize prologue, before async dispatch): LoadObject is not
+	// thread-safe, so the Niagara systems BuildTierConfigs reads must load here.
+	// Mid/Small are placeholders sharing the Large asset so InitializeTier never sees
+	// a null NiagaraSystem; swap for NG_StarSystemMid / NG_StarSystemSmall later.
+	if (!StarSystemLargeCloud) StarSystemLargeCloud = LoadObject<UNiagaraSystem>(nullptr,
+		TEXT("/UltraLargeScale/StarSystem/NG_StarSystemLarge.NG_StarSystemLarge"));
+	if (!StarSystemMidCloud)   StarSystemMidCloud = StarSystemLargeCloud;
+	if (!StarSystemSmallCloud) StarSystemSmallCloud = StarSystemLargeCloud;
+}
+
 void AStarSystemActor::BuildTierConfigs()
 {
 	// Large tier: planets, single cell exhaustive, always loaded
@@ -724,16 +730,13 @@ void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
 		InitializationState != ELifecycleState::Ready)
 		return;
 
-	UWorld* World = GetWorld();
-	if (!World) return;
+	UActorPoolManager* PM = GetPoolManager();
+	if (!PM) return;
 
-	// Resolve the actual particle position and extent from the buffer
-	// The octree node center is a quantized cell center, and InNode->Extent
-	// is the cell half-size at that depth - neither matches the real particle.
+	// Resolve the real particle position/extent (octree node center is quantized).
 	// ParticleIndex stores the planet index directly (set in InitializeNiagara).
-	FVector  ParticlePos = InNode->Center;                           // fallback
-	float    ParticleExtent = static_cast<float>(InNode->Extent);       // fallback
-
+	FVector  ParticlePos = InNode->Center;
+	float    ParticleExtent = static_cast<float>(InNode->Extent);
 	const int32 PlanetIndex = InNode->Data.ParticleIndex;
 	if (PlanetIndex >= 0 && PlanetIndex < PlanetPositions.Num())
 	{
@@ -748,41 +751,29 @@ void AStarSystemActor::SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode)
 			PlanetIndex, Params.Seed, PlanetPositions.Num());
 	}
 
-	FActorSpawnParameters SpawnParams;
-	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-
-	// Place the mesh at the parallax-correct world position. The planet sprite
-	// renders at (PlayerPos + (ParticlePos - VT)) in compressed virtual space.
-	// The static mesh lives in real UE space (UnitScale = 1), so we expand
-	// the camera-to-node vector by UnitScale to preserve angular position.
+	// The body lives in real UE space (UnitScale = 1); expand the camera-to-node vector
+	// by UnitScale to preserve angular position.
 	const FVector SpawnLoc = ComputeChildSpawnLocation(ParticlePos, 1.0);
+	const FVector InitialVT = CurrentFrameOfReferenceLocation - SpawnLoc;
 
-	AParallaxProxyActor* Proxy = World->SpawnActor<AParallaxProxyActor>(
-		AParallaxProxyActor::StaticClass(), SpawnLoc, FRotator::ZeroRotator, SpawnParams);
-	if (!Proxy) return;
-
-	Proxy->VirtualTraversal = CurrentFrameOfReferenceLocation - SpawnLoc;   // positional seed
-
+	// Body class: default sprite placeholder, or the star system's injected voxel body.
 	UClass* BodyClass = Params.WrappedBodyClass.IsNull()
-		? AParallaxStaticMeshActor::StaticClass()          // default: unit sphere
+		? AParallaxStaticMeshActor::StaticClass()
 		: Params.WrappedBodyClass.LoadSynchronous();
 	if (!BodyClass) BodyClass = AParallaxStaticMeshActor::StaticClass();
-	double WorldRadius = double(ParticleExtent) * Params.UnitScale;
-	Proxy->SetupWrapped(BodyClass, WorldRadius);
+	const double WorldRadius = double(ParticleExtent) * Params.UnitScale;
 
+	// Acquire a pooled proxy and (re)init it. ReInit wakes a persistent wrapped body
+	// (same class) via IPooledActor, or swaps to a new body class.
+	AParallaxProxyActor* Proxy = PM->Acquire<AParallaxProxyActor>();
+	if (!Proxy) return;   // pool grow failed; manager already warned
+	Proxy->ReInit(BodyClass, WorldRadius, SpawnLoc, InitialVT);
 	SpawnedPlanets.Add(InNode, TWeakObjectPtr<AActor>(Proxy));
 
 	UE_LOG(LogTemp, Log,
-		TEXT("AStarSystemActor::SpawnPlanetFromPool - planet[%d] at (%.1f,%.1f,%.1f) "
-			"worldRadius=%.1f, particlePos=(%.1f,%.1f,%.1f) "
-			"nodeCenter=(%.1f,%.1f,%.1f) VT=(%.1f,%.1f,%.1f) unitScale=%.4e"),
-		PlanetIndex,
-		SpawnLoc.X, SpawnLoc.Y, SpawnLoc.Z,
-		WorldRadius,
-		ParticlePos.X, ParticlePos.Y, ParticlePos.Z,
-		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
-		VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z,
-		Params.UnitScale);
+		TEXT("AStarSystemActor::SpawnPlanetFromPool - inert=%d planet[%d] at (%.1f,%.1f,%.1f) worldRadius=%.1f seed=%d"),
+		PM->NumInert(AParallaxProxyActor::StaticClass()),
+		PlanetIndex, SpawnLoc.X, SpawnLoc.Y, SpawnLoc.Z, WorldRadius, Params.Seed);
 }
 
 void AStarSystemActor::FinalizePlanetPlacement(AActor* Planet, TSharedPtr<FOctreeNode> InNode)
@@ -799,18 +790,17 @@ void AStarSystemActor::ReturnPlanetToPool(TSharedPtr<FOctreeNode> InNode)
 	if (!InNode.IsValid()) return;
 
 	TWeakObjectPtr<AActor> WeakPlanet;
-	if (SpawnedPlanets.RemoveAndCopyValue(InNode, WeakPlanet))
-	{
-		TWeakObjectPtr<AActor> WeakP(WeakPlanet);
-		AsyncTask(ENamedThreads::GameThread, [WeakP]()
-			{
-				if (AActor* P = WeakP.Get(); P && IsValid(P))
-				{
-					P->Destroy();
-					UE_LOG(LogTemp, Log, TEXT("AStarSystemActor::ReturnPlanetToPool - destroyed"));
-				}
-			});
-	}
+	if (!SpawnedPlanets.RemoveAndCopyValue(InNode, WeakPlanet)) return;
+	AActor* Proxy = WeakPlanet.Get();
+	if (!Proxy || !IsValid(Proxy)) return;
+
+	// Release through the manager: OnReturnToPool parks the wrapped body dormant
+	// (no tick/LOD/raymarch/ocean while pooled), then the proxy goes inert + re-pools.
+	// We're on the game thread here (ProcessPendingScanResults / ResetForPool).
+	if (UActorPoolManager* PM = GetPoolManager())
+		PM->Release(Proxy);
+	else
+		Proxy->Destroy();
 }
 #pragma endregion
 

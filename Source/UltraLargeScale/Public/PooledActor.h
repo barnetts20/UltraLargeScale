@@ -6,7 +6,7 @@
 #include "PooledActor.generated.h"
 
 /** Reflection stub for IPooledActor. MinimalAPI: only the type info is exported;
- *  the behavior lives on the C++ IPooledActor below (pure virtual, no UFUNCTIONs,
+ *  the behavior lives on the C++ IPooledActor below (plain virtual, no UFUNCTIONs,
  *  so calls go through Cast<IPooledActor>() rather than Execute_*). */
 UINTERFACE(MinimalAPI)
 class UPooledActor : public UInterface
@@ -39,7 +39,15 @@ public:
      *  per-acquire traits (backdrop-capture flag, scale space) so a recycled
      *  instance never inherits a previous occupant's flags. Do NOT unhide/position
      *  here — the parent's deferred finalize owns that. */
-    virtual void OnAcquired() = 0;
+    virtual void OnAcquired() {}
+
+    /** Wake + reconfigure for a proxy-CARRIED body that needs its world radius
+     *  (e.g. a voxel planet sizing/rebuilding itself). Called by the WRAPPING PROXY,
+     *  never by the manager; default no-op for the manager-pooled layers that aren't
+     *  carried. Bodies should skip a rebuild when the built radius already matches.
+     *  Made non-pure (with OnAcquired() above) so each implementer defines only the
+     *  one entry point it uses -- no dead stub on either side. */
+    virtual void OnAcquired(double WorldRadius) {}
 
     /** Teardown + cascade-release. Called before the manager's generic inert step.
      *  Release this instance's own live children (via its SpawnedX map) and clear

@@ -82,6 +82,7 @@ protected:
 	virtual void InitializeData() override;
 	virtual void InitializeVolumetric() override;
 	virtual void InitializeNiagara() override;
+	virtual void LoadRuntimeAssets() override;
 
 #pragma endregion
 

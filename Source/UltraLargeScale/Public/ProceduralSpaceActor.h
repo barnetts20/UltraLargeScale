@@ -164,6 +164,12 @@ public:
     virtual void InitializeVolumetric();
     virtual void InitializeNiagara();
     virtual void InitializeChildPool();
+
+    /** Game-thread asset loading, invoked by Initialize() BEFORE the async chain is
+     *  dispatched. LoadObject/StaticLoadObject are game-thread-only, so any asset the
+     *  async InitializeXxx hooks need (e.g. Niagara systems read in BuildTierConfigs)
+     *  must be loaded here, never inside those hooks. */
+    virtual void LoadRuntimeAssets() {}
 #pragma endregion
 
 #pragma region Params Accessors
@@ -192,6 +198,7 @@ public:
     bool IsVirtualSpace() const { return GetUnitScale() > 1.0; }
 
     // IPooledActor — generic wake/teardown; see .cpp.
+    using IPooledActor::OnAcquired;   // keep the OnAcquired(double) overload visible
     virtual void OnAcquired() override;
     virtual void OnReturnToPool() override;
 #pragma endregion

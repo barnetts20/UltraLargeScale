@@ -57,6 +57,7 @@ public:
 	virtual void InitializeData() override;
 	virtual void InitializeVolumetric() override;
 	virtual void InitializeNiagara() override;
+	virtual void LoadRuntimeAssets() override;
 	virtual void ResetForPool() override;
 	virtual void ResetForSpawn() override;
 

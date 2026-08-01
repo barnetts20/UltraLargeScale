@@ -17,6 +17,7 @@
 class AGalaxyActor;
 class UActorPoolManager;
 class AStarSystemActor;
+class AParallaxProxyActor;
 class USceneCaptureComponent2D;
 class UTextureRenderTarget2D;
 class APostProcessVolume;
@@ -240,6 +241,7 @@ protected:
 
 	virtual void InitializeData() override;
 	virtual void InitializeNiagara() override;
+	virtual void LoadRuntimeAssets() override;
 
 #pragma endregion
 
@@ -412,14 +414,19 @@ protected:
 
 	int32 GalaxyPoolSize = 5;
 
-	/** Star-system spawn class + GLOBAL prewarm count. Central pooling sizes star
-	 *  systems to global concurrent-visible max, NOT (galaxies x per-galaxy): the
-	 *  player is inside one galaxy at a time, so this tracks the old per-galaxy 5 plus
-	 *  transition headroom. The manager grows + warns on exhaustion, so tune from the
-	 *  log / HUD rather than over-provisioning. */
+	/** Star-system spawn class + GLOBAL prewarm count. Central pooling means this is
+	 *  global concurrent-visible, NOT (galaxies x per-galaxy) — the player is inside
+	 *  one galaxy at a time, so 5 matches the old per-galaxy count. The manager grows +
+	 *  warns on exhaustion, so brief transition overflow self-heals. */
 	TSubclassOf<AStarSystemActor> StarSystemActorClass;
 
-	int32 StarSystemPoolSize = 12;
+	int32 StarSystemPoolSize = 5;
+
+	/** Planet proxy spawn class + prewarm count. Proxies wrap the real voxel/mesh body;
+	 *  the body persists across the pool round-trip (parked dormant) so it stays warm. */
+	TSubclassOf<AParallaxProxyActor> ProxyActorClass;
+
+	int32 PlanetPoolSize = 5;
 
 	/** The single central actor pool. Created + prewarmed in BeginPlay, before any
 	 *  child activates; torn down in EndPlay. Resolved by every layer via

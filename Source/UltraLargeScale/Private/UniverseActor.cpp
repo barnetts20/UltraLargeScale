@@ -1,5 +1,6 @@
 ﻿#include "UniverseActor.h"
 #include "ActorPoolManager.h"
+#include "ParallaxProxyActor.h"
 #include "UltraLargeScale.h"
 #include "FTierStreamingSystem.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
@@ -26,12 +27,11 @@ AUniverseActor::AUniverseActor()
 {
 	bAutoInitializeOnBeginPlay = true;
 	this->UniverseParams = FUniverseParamBounds::Generate(UniverseParamBounds, 666);
-	SectorLargeCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorLarge.NG_SectorLarge"));
-	SectorMidCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorMid.NG_SectorMid"));
-	SectorSmallCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorSmall.NG_SectorSmall"));
-	SectorGasCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorGas.NG_SectorGas"));
+	// Niagara cloud systems load lazily in BuildTierConfigs() (runtime), NOT here:
+	// loading assets during CDO construction runs before Niagara is ready and crashes.
 	GalaxyActorClass = AGalaxyActor::StaticClass();
 	StarSystemActorClass = AStarSystemActor::StaticClass();
+	ProxyActorClass = AParallaxProxyActor::StaticClass();
 	Octree = MakeShared<FOctree>(UniverseParams.Extent * PersistentTreeMultiplier, FVector::ZeroVector);
 
 	// Backdrop capture: renders the virtual stack into an HDR target that gets
@@ -40,11 +40,6 @@ AUniverseActor::AUniverseActor()
 	// RootComponent, so attachment is valid.
 	BackdropCapture = CreateDefaultSubobject<USceneCaptureComponent2D>(TEXT("BackdropCapture"));
 	BackdropCapture->SetupAttachment(RootComponent);
-
-	// Composite material is a shared, read-only asset (unlike the per-instance RT),
-	// so loading it by path here matches how the Niagara systems above are loaded.
-	CompositeMaterial = LoadObject<UMaterialInterface>(nullptr,
-		TEXT("/UltraLargeScale/Sector/MT_BackdropPostProcess.MT_BackdropPostProcess"));
 }
 #pragma endregion
 
@@ -222,6 +217,11 @@ void AUniverseActor::UpdateBackdropCapture()
 
 void AUniverseActor::InitializeBackdropComposite()
 {
+	// Load here (runtime), not in the ctor: CDO-time asset loads are unsafe.
+	if (!CompositeMaterial)
+		CompositeMaterial = LoadObject<UMaterialInterface>(nullptr,
+			TEXT("/UltraLargeScale/Sector/MT_BackdropPostProcess.MT_BackdropPostProcess"));
+
 	if (!CompositeMaterial)
 	{
 		UE_LOG(LogTemp, Warning,
@@ -269,6 +269,7 @@ void AUniverseActor::BeginPlay()
 	PoolManager = NewObject<UActorPoolManager>(this);
 	PoolManager->RegisterType(GalaxyActorClass, GalaxyPoolSize);
 	PoolManager->RegisterType(StarSystemActorClass, StarSystemPoolSize);
+	PoolManager->RegisterType(ProxyActorClass, PlanetPoolSize);
 	PoolManager->PrewarmAll(GetWorld());
 
 	if (bAutoInitializeOnBeginPlay) Initialize();
@@ -310,6 +311,17 @@ void AUniverseActor::InitializeNiagara()
 #pragma endregion
 
 #pragma region Tier System - BuildTierConfigs
+void AUniverseActor::LoadRuntimeAssets()
+{
+	// Game thread (Initialize prologue, before async dispatch): LoadObject is not
+	// thread-safe, so the Niagara systems BuildTierConfigs reads must load here.
+	// Guarded so pooled reuse does not reload.
+	if (!SectorLargeCloud) SectorLargeCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorLarge.NG_SectorLarge"));
+	if (!SectorMidCloud)   SectorMidCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorMid.NG_SectorMid"));
+	if (!SectorSmallCloud) SectorSmallCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorSmall.NG_SectorSmall"));
+	if (!SectorGasCloud)   SectorGasCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorGas.NG_SectorGas"));
+}
+
 void AUniverseActor::BuildTierConfigs()
 {
 	// Derive MinScale/MaxScale for all tiers from MaxEntityScale + depth spacing.

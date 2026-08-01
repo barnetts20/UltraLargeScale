@@ -60,6 +60,10 @@ void AProceduralSpaceActor::Initialize()
         CurrentFrameOfReferenceLocation = PlayerPos;
     }
 
+    // Load assets the async chain needs, ON THE GAME THREAD (LoadObject is not
+    // thread-safe); must precede the AsyncTask dispatch below.
+    LoadRuntimeAssets();
+
     TWeakObjectPtr<AProceduralSpaceActor> WeakThis(this);
     AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis]()
         {

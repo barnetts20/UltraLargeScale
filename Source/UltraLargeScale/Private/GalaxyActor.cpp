@@ -23,9 +23,8 @@ AGalaxyActor::AGalaxyActor()
 	PrimaryActorTick.bCanEverTick = true;
 	SetActorTickEnabled(false);
 
-	GalaxyLargeCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Galaxy/NG_GalaxyLarge.NG_GalaxyLarge"));
-	GalaxyMidCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Galaxy/NG_GalaxyMid.NG_GalaxyMid"));
-	GalaxySmallCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Galaxy/NG_GalaxySmall.NG_GalaxySmall"));
+	// Niagara cloud systems load lazily in BuildTierConfigs() (runtime), NOT here:
+	// loading assets during CDO construction runs before Niagara is ready and crashes.
 
 	Octree = MakeShared<FOctree>(Params.Extent);
 }
@@ -317,6 +316,16 @@ bool AGalaxyActor::CellOverlapsVolume(const FIntVector& Coord, int32 GridDepth) 
 #pragma endregion
 
 #pragma region Tier System - BuildTierConfigs
+void AGalaxyActor::LoadRuntimeAssets()
+{
+	// Game thread (Initialize prologue, before async dispatch): LoadObject is not
+	// thread-safe, so the Niagara systems BuildTierConfigs reads must load here.
+	// Guarded so pooled reuse does not reload.
+	if (!GalaxyLargeCloud) GalaxyLargeCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Galaxy/NG_GalaxyLarge.NG_GalaxyLarge"));
+	if (!GalaxyMidCloud)   GalaxyMidCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Galaxy/NG_GalaxyMid.NG_GalaxyMid"));
+	if (!GalaxySmallCloud) GalaxySmallCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Galaxy/NG_GalaxySmall.NG_GalaxySmall"));
+}
+
 void AGalaxyActor::BuildTierConfigs()
 {
 	Params.DeriveScaleRanges();
