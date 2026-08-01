@@ -5,7 +5,11 @@
 #include "FOctree.h"
 #include "Misc/ScopeLock.h"
 #include <atomic>
+#include "PooledActor.h"
 #include "ProceduralSpaceActor.generated.h"
+
+class UActorPoolManager;
+class AUniverseActor;
 
 /** Base generation params shared across Universe/Galaxy/StarSystem. */
 USTRUCT(BlueprintType)
@@ -68,7 +72,7 @@ struct ULTRALARGESCALE_API FBaseParams {
  *  while child actors (Galaxy, StarSystem) are driven by their parent's
  *  TickFromParent cascade and should not tick independently when pool-managed. */
 UCLASS(Abstract)
-class ULTRALARGESCALE_API AProceduralSpaceActor : public AActor
+class ULTRALARGESCALE_API AProceduralSpaceActor : public AActor, public IPooledActor
 {
     GENERATED_BODY()
 
@@ -169,6 +173,27 @@ public:
      *  up to the Universe, which returns its owned SpeedScale. Base returns 1.0
      *  (identity) so a detached / unparented actor stays well-defined. */
     virtual double GetEffectiveSpeedScale() const { return 1.0; }
+
+    /** Central actor pool, owned by the permanent Universe; resolved up the parent
+     *  chain (mirrors GetEffectiveSpeedScale). Public so cross-object Universe->/
+     *  Galaxy-> calls don't re-earn C2248. Base identity is null. */
+    virtual UActorPoolManager* GetPoolManager() const { return nullptr; }
+
+    /** Permanent Universe at the root of the parent chain (the proc-gen bounds
+     *  surface). Base identity is null. */
+    virtual AUniverseActor* GetUniverse() const { return nullptr; }
+
+    /** True when this layer lives in compressed virtual space (renders to the
+     *  backdrop SceneCapture) rather than real space (main pass). Derived purely
+     *  from the per-layer UnitScale design constant: real space is UnitScale == 1,
+     *  everything above the terminal transition is UnitScale > 1. Read it wherever a
+     *  render component's bVisibleInSceneCaptureOnly is set, so the flag is a
+     *  consistent runtime derivation instead of a stamped/inherited trait. */
+    bool IsVirtualSpace() const { return GetUnitScale() > 1.0; }
+
+    // IPooledActor — generic wake/teardown; see .cpp.
+    virtual void OnAcquired() override;
+    virtual void OnReturnToPool() override;
 #pragma endregion
 
 #pragma region Tier System - Grid Coord Helpers

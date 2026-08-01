@@ -27,7 +27,6 @@ AGalaxyActor::AGalaxyActor()
 	GalaxyMidCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Galaxy/NG_GalaxyMid.NG_GalaxyMid"));
 	GalaxySmallCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Galaxy/NG_GalaxySmall.NG_GalaxySmall"));
 
-	StarSystemActorClass = AStarSystemActor::StaticClass();
 	Octree = MakeShared<FOctree>(Params.Extent);
 }
 
@@ -73,7 +72,6 @@ void AGalaxyActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 			System->InitializationState = ELifecycleState::Pooling;
 	}
 	SpawnedStarSystems.Empty();
-	StarSystemPool.Empty();
 
 	// Drain any in-flight pushes before destroying the components they may touch.
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
@@ -172,33 +170,6 @@ void AGalaxyActor::ResetForSpawn()
 #pragma endregion
 
 #pragma region Initialization
-void AGalaxyActor::InitializeChildPool()
-{
-	TPromise<void> CompletionPromise;
-	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	TWeakObjectPtr<AGalaxyActor> WeakThis(this);
-	AsyncTask(ENamedThreads::GameThread, [WeakThis, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-		{
-			AGalaxyActor* Self = WeakThis.Get();
-			if (!Self) { CompletionPromise.SetValue(); return; }
-			// TOP-UP to the target size rather than blind-spawning: pooled
-			// galaxies re-run the init chain on every spawn and the pool
-			// survives ResetForPool, so an unconditional spawn loop grows
-			// the world by StarSystemPoolSize actors per cycle. (Deferred
-			// star-system returns can land after this runs, briefly leaving
-			// the pool above target — harmless.)
-			const int32 ToSpawn = Self->StarSystemPoolSize - Self->StarSystemPool.Num();
-			for (int i = 0; i < ToSpawn; i++) {
-				AStarSystemActor* System = Self->GetWorld()->SpawnActor<AStarSystemActor>(
-					Self->StarSystemActorClass, FVector::ZeroVector, FRotator::ZeroRotator);
-				System->Galaxy = Self;
-				System->SetActorHiddenInGame(true);
-				Self->StarSystemPool.Add(System);
-			}
-			CompletionPromise.SetValue();
-		});
-	CompletionFuture.Wait();
-}
 
 void AGalaxyActor::InitializeData()
 {
@@ -287,7 +258,7 @@ void AGalaxyActor::InitializeVolumetric()
 			// Virtual backdrop: hidden in the main renderer, visible only to the
 			// backdrop SceneCapture. Set before RegisterComponent so the flag is
 			// baked into the scene proxy at creation.
-			Self->VolumetricComponent->bVisibleInSceneCaptureOnly = true;
+			Self->VolumetricComponent->bVisibleInSceneCaptureOnly = Self->IsVirtualSpace();
 
 			Self->VolumetricComponent->RegisterComponent();
 			Self->VolumetricComponent->SetWorldScale3D(FVector(2 * Self->Params.Extent));
@@ -424,6 +395,7 @@ FTierStreamingContext AGalaxyActor::BuildStreamingContext() const
 	FTierStreamingContext Ctx;
 	Ctx.Extent = Params.Extent;
 	Ctx.UnitScale = Params.UnitScale;
+	Ctx.bVirtualSpace = IsVirtualSpace();
 	Ctx.GridExtentMultiplier = GridExtentMultiplier;
 	Ctx.VirtualTraversal = VirtualTraversal;
 	Ctx.Octree = Octree;
@@ -674,33 +646,25 @@ void AGalaxyActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) con
 void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 {
 	SVO_GT_SCOPE("Galaxy::SpawnStarSystemFromPool");
-	if (!InNode.IsValid() || !StarSystemActorClass || SpawnedStarSystems.Contains(InNode) ||
+	if (!InNode.IsValid() || SpawnedStarSystems.Contains(InNode) ||
 		InitializationState != ELifecycleState::Ready)
 		return;
 
-	if (StarSystemPool.Num() == 0)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("AGalaxyActor: Star System pool exhausted"));
-		return;
-	}
+	UActorPoolManager* PM = GetPoolManager();
+	if (!PM) return;
+	AStarSystemActor* System = PM->Acquire<AStarSystemActor>();   // OnAcquired() runs ResetForSpawn
+	if (!System) return;                                          // pool grow failed; manager already warned
+	System->Galaxy = this;   // re-associate: a pooled instance carries no owner until now
+	SpawnedStarSystems.Add(InNode, TWeakObjectPtr<AStarSystemActor>(System));
 
-	// --- Resolve the actual particle position from the tier buffer ---
-	// The octree node center is a quantized approximation; the real rendered
-	// position lives in the Niagara buffer. Mirrors UniverseActor::SpawnGalaxyFromPool.
+	// Resolve the real particle position/extent from the tier buffer (octree node
+	// center is a quantized approximation). SINGLE-BUFFER READ GUARD as before.
 	const int32 TierIndex = FMath::Clamp(InNode->Data.TypeId, 0, 2);
 	FParticleTierState* TierStates[] = { &LargeTierState,  &MidTierState,  &SmallTierState };
 	FParticleTierState& MatchedState = *TierStates[TierIndex];
 
-	FVector  ParticlePos = InNode->Center;  // fallback
+	FVector  ParticlePos = InNode->Center;
 	float    ParticleExtent = static_cast<float>(InNode->Extent);
-
-	// ParticleIndex is the absolute buffer index. Direct lookup.
-	// SINGLE-BUFFER READ GUARD: the transition task overwrites entering
-	// slots in place, so only read the CPU arrays while no task is in
-	// flight. On the GT this check is race-free (the flag is set on the GT
-	// before the task spawns), and if a transition IS in flight the matched
-	// node's slot may be mid-rewrite anyway — the octree fallback above
-	// (node center/extent) is the correct answer in that case.
 	const int32 AbsIdx = InNode->Data.ParticleIndex;
 	if (AbsIdx >= 0 && MatchedState.Buffers.Num() > 0 &&
 		!MatchedState.bUpdateInProgress.load())
@@ -710,43 +674,39 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 		ParticleExtent = Buf.Extents[AbsIdx];
 	}
 
-	AStarSystemActor* System = StarSystemPool.Pop();
-	SpawnedStarSystems.Add(InNode, TWeakObjectPtr<AStarSystemActor>(System));
-	System->ResetForSpawn();
-	System->Params = FStarSystemParamBounds::Generate(Universe->StarSystemParamBounds, InNode->Data.Seed);
+	// Config: bounds (owned by the Universe) -> Generate -> context overlay (Seed,
+	// ParentColor). Universe is guaranteed non-null here (GetPoolManager resolved it).
+	FStarSystemParams P = FStarSystemParamBounds::Generate(Universe->StarSystemParamBounds, InNode->Data.Seed).ApplyContext(*InNode);
 
+	// Derived Extent (cross-layer): galaxy UnitScale * BoundsScaleMultiplier / system
+	// UnitScale. Unchanged from before.
 	{
 		const double DerivedExtent =
-			(static_cast<double>(ParticleExtent) * Params.UnitScale
-				* System->Params.BoundsScaleMultiplier)
-			/ System->Params.UnitScale;
-		System->Params.Extent = FMath::Clamp(DerivedExtent,
-			System->Params.MinDerivedExtent, System->Params.MaxDerivedExtent);
-		if (System->Params.Extent != DerivedExtent)
+			(static_cast<double>(ParticleExtent) * Params.UnitScale * P.BoundsScaleMultiplier)
+			/ P.UnitScale;
+		P.Extent = FMath::Clamp(DerivedExtent, P.MinDerivedExtent, P.MaxDerivedExtent);
+		if (P.Extent != DerivedExtent)
 		{
 			UE_LOG(LogTemp, Warning,
-				TEXT("AGalaxyActor::SpawnStarSystemFromPool — derived extent %.3e clamped to %.3e; ")
+				TEXT("AGalaxyActor::SpawnStarSystemFromPool - derived extent %.3e clamped to %.3e; ")
 				TEXT("retune FGalaxyParams::StarSystemUnitScale or the clamp bounds."),
-				DerivedExtent, System->Params.Extent);
+				DerivedExtent, P.Extent);
 		}
 	}
 
-	// Seed is the deterministic hierarchical seed composed from
-	// (GalaxySeed, GridCoord, GenerationIndex) during octree insertion.
-	System->Params.Seed = InNode->Data.Seed;
-	System->Params.ParentColor = FLinearColor(InNode->Data.Composition);
-	System->Params.Rotation = FRandomStream(InNode->Data.Seed).GetUnitVector().Rotation();
+	// Rotation is seed-derived and parent-owned for now (folds into Generate in step E).
+	P.Rotation = FRandomStream(InNode->Data.Seed).GetUnitVector().Rotation();
 
-	// Deferred placement — FinalizeStarSystemPlacement uses this frame's VT.
-	System->PendingNodeCenter = ParticlePos;
-	System->bPendingPlacement = true;
+	// Typed re-init: sets Params, arms deferred placement (PendingNodeCenter =
+	// ParticlePos), hides, and runs the async init chain. FinalizeStarSystemPlacement
+	// positions/unhides once Ready, exactly as before.
+	System->ReInit(P, FTransform(ParticlePos));
 
 	UE_LOG(LogTemp, Log,
-		TEXT("AGalaxyActor::SpawnStarSystemFromPool — particle=(%.1f,%.1f,%.1f) extent=%.2f unitScale(const)=%.4e derivedExtent=%.4e seed=%d (deferred)"),
+		TEXT("AGalaxyActor::SpawnStarSystemFromPool - inert=%d particle=(%.1f,%.1f,%.1f) extent=%.2f unitScale(const)=%.4e derivedExtent=%.4e seed=%d (deferred)"),
+		PM->NumInert(AStarSystemActor::StaticClass()),
 		ParticlePos.X, ParticlePos.Y, ParticlePos.Z,
-		ParticleExtent, System->Params.UnitScale, System->Params.Extent, System->Params.Seed);
-
-	System->Initialize();
+		ParticleExtent, P.UnitScale, P.Extent, P.Seed);
 }
 
 void AGalaxyActor::FinalizeStarSystemPlacement(AStarSystemActor* System)
@@ -808,7 +768,7 @@ void AGalaxyActor::ReturnStarSystemToPool(TSharedPtr<FOctreeNode> InNode)
 	// cannot wait on the GAME THREAD: the chain rendezvouses with the GT
 	// (component spawns), so a GT spin deadlocks. Wait it out on a worker,
 	// then finish teardown through the normal GT path. The system cannot
-	// be re-spawned meanwhile — it re-enters StarSystemPool only at the
+	// be re-spawned meanwhile — it re-enters the pool only at the
 	// end of FinishStarSystemPoolReturn.
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, WeakSystem]()
 		{
@@ -851,8 +811,23 @@ void AGalaxyActor::FinishStarSystemPoolReturn(TWeakObjectPtr<AStarSystemActor> W
 					AStarSystemActor* InnerSystem = WeakSystem.Get();
 					if (!InnerSystem) return;
 					InnerSystem->Octree = FreshTree;   // swap on game thread
-					if (Self) Self->StarSystemPool.Insert(InnerSystem, 0);
+					if (Self) { if (UActorPoolManager* PM = Self->GetPoolManager()) PM->ReturnPrepared(InnerSystem); }
 				});
 		});
+}
+#pragma endregion
+
+#pragma region Pooled Re-Init
+void AGalaxyActor::ReInit(const FGalaxyParams& InParams, const FTransform& InXform)
+{
+	bAutoInitializeOnBeginPlay = false;
+	Params = InParams;
+	// Deferred placement: the real world transform is sampled at finalize time from
+	// this frame's resolved VirtualTraversal, so stash the node center now and let
+	// FinalizeGalaxyPlacement position/unhide once async init reaches Ready.
+	PendingNodeCenter = InXform.GetLocation();
+	bPendingPlacement = true;
+	SetActorHiddenInGame(true);
+	Initialize();
 }
 #pragma endregion

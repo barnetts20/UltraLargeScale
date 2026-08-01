@@ -57,9 +57,14 @@ public:
 	virtual void InitializeData() override;
 	virtual void InitializeVolumetric() override;
 	virtual void InitializeNiagara() override;
-	virtual void InitializeChildPool() override;
 	virtual void ResetForPool() override;
 	virtual void ResetForSpawn() override;
+
+	/** Typed re-init for a pooled galaxy: sets Params, arms deferred placement from
+	 *  InXform's location (final placement stays with FinalizeGalaxyPlacement), and
+	 *  runs the existing async init chain. Called by the parent after Acquire<>() +
+	 *  association. Consumed in Phase B. */
+	void ReInit(const FGalaxyParams& InParams, const FTransform& InXform);
 #pragma endregion
 
 	virtual void ApplyParallaxOffset(const FVector& InPlayerPos) override;
@@ -75,6 +80,8 @@ protected:
 	virtual double GetExtent() const override { return Params.Extent; }
 public:
 	virtual double GetEffectiveSpeedScale() const override { return Universe ? Universe->GetEffectiveSpeedScale() : 1.0; }
+	virtual UActorPoolManager* GetPoolManager() const override { return Universe ? Universe->GetPoolManager() : nullptr; }
+	virtual AUniverseActor* GetUniverse() const override { return Universe; }
 protected:
 #pragma endregion
 
@@ -119,11 +126,7 @@ protected:
 	FString VolumetricMaterialPath = FString("/UltraLargeScale/Galaxy/MT_GalaxyRaymarchPseudoVolume_Inst.MT_GalaxyRaymarchPseudoVolume_Inst");
 #pragma endregion
 
-#pragma region Star System Pool
-	TSubclassOf<AStarSystemActor> StarSystemActorClass;
-	int32 StarSystemPoolSize = 5;
-	TArray<AStarSystemActor*> StarSystemPool;
-
+#pragma region Star System Placement
 	/** Deferred placement: finalizes world position and VirtualTraversal for a
 	 *  star system on the first tick after async init completes, mirroring
 	 *  AUniverseActor::FinalizeGalaxyPlacement. */

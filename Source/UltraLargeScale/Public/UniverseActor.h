@@ -15,6 +15,8 @@
 #include "StarSystemParams.h"
 #include "UniverseActor.generated.h"
 class AGalaxyActor;
+class UActorPoolManager;
+class AStarSystemActor;
 class USceneCaptureComponent2D;
 class UTextureRenderTarget2D;
 class APostProcessVolume;
@@ -236,7 +238,6 @@ protected:
 	virtual void TickFromParent(float DeltaTime, const FVector& InPlayerPos) override {}
 	virtual void Tick(float DeltaTime) override;
 
-	virtual void InitializeChildPool() override;
 	virtual void InitializeData() override;
 	virtual void InitializeNiagara() override;
 
@@ -293,6 +294,8 @@ protected:
 public:
 	/** Universe owns the authoritative parallax scale; all lower layers resolve to this. */
 	virtual double GetEffectiveSpeedScale() const override { return SpeedScale; }
+	virtual UActorPoolManager* GetPoolManager() const override { return PoolManager; }
+	virtual AUniverseActor* GetUniverse() const override { return const_cast<AUniverseActor*>(this); }
 protected:
 #pragma endregion
 
@@ -400,16 +403,29 @@ protected:
 
 #pragma endregion
 
-#pragma region Galaxy Pool
+#pragma region Pool Registration
 
-	/** Class used when pre-warming the galaxy actor pool. */
+	/** Galaxy spawn class + prewarm count, fed to the central UActorPoolManager in
+	 *  BeginPlay (RegisterType + PrewarmAll). Per-layer GalaxyPool storage is gone;
+	 *  acquire/release now go through the manager. */
 	TSubclassOf<AGalaxyActor> GalaxyActorClass;
 
-	/** Target pool size. Pool is pre-warmed during InitializeChildPool. */
 	int32 GalaxyPoolSize = 5;
 
-	/** Available galaxy actors ready for spawn. Managed as a stack (Pop/Insert). */
-	TArray<AGalaxyActor*> GalaxyPool;
+	/** Star-system spawn class + GLOBAL prewarm count. Central pooling sizes star
+	 *  systems to global concurrent-visible max, NOT (galaxies x per-galaxy): the
+	 *  player is inside one galaxy at a time, so this tracks the old per-galaxy 5 plus
+	 *  transition headroom. The manager grows + warns on exhaustion, so tune from the
+	 *  log / HUD rather than over-provisioning. */
+	TSubclassOf<AStarSystemActor> StarSystemActorClass;
+
+	int32 StarSystemPoolSize = 12;
+
+	/** The single central actor pool. Created + prewarmed in BeginPlay, before any
+	 *  child activates; torn down in EndPlay. Resolved by every layer via
+	 *  GetPoolManager(). (Legacy GalaxyPool above is deleted in Phase B.) */
+	UPROPERTY()
+	UActorPoolManager* PoolManager = nullptr;
 
 #pragma endregion
 

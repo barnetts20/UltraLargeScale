@@ -348,6 +348,16 @@ struct ULTRALARGESCALE_API FGalaxyParams : public FBaseParams
 		FTierParams::DeriveTierScaleRanges(MaxEntityScale, Tiers);
 	}
 
+	/** Post-Generate overlay: fills parent-derived (context) fields only —
+	 *  the randomizable ranged fields are Generate's job. Kept here so the
+	 *  parent's acquire call stays a one-liner. Confirm the field list in step E. */
+	FGalaxyParams& ApplyContext(const FOctreeNode& Node)
+	{
+		Seed = Node.Data.Seed;
+		ParentColor = FLinearColor(Node.Data.Composition);
+		return *this;
+	}
+
 	FGalaxyParams()
 	{
 		Seed = 666;
@@ -394,8 +404,10 @@ struct ULTRALARGESCALE_API FGalaxyParamBounds {
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy Param Bounds")
 	FGalaxyParams Max;
 
-	static FGalaxyParams Generate(FGalaxyParamBounds Bounds, int Seed) {
-		//TODO: Randomize
+	static FGalaxyParams Generate(const FGalaxyParamBounds& Bounds, int64 Seed) {
+		//TODO [E]: real Min..Max interpolation from Seed. Stub = uniform Max.
 		return Bounds.Max;
 	}
+	static FGalaxyParams Minimal(const FGalaxyParamBounds& Bounds) { return Bounds.Min; }
+	static FGalaxyParams Maximal(const FGalaxyParamBounds& Bounds) { return Bounds.Max; }
 };

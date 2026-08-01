@@ -470,6 +470,7 @@ FTierStreamingContext AStarSystemActor::BuildStreamingContext() const
 	FTierStreamingContext Ctx;
 	Ctx.Extent = Params.Extent;
 	Ctx.UnitScale = Params.UnitScale;
+	Ctx.bVirtualSpace = IsVirtualSpace();
 	Ctx.GridExtentMultiplier = GridExtentMultiplier;
 	Ctx.VirtualTraversal = VirtualTraversal;
 	Ctx.Octree = Octree;
@@ -810,5 +811,20 @@ void AStarSystemActor::ReturnPlanetToPool(TSharedPtr<FOctreeNode> InNode)
 				}
 			});
 	}
+}
+#pragma endregion
+
+#pragma region Pool Accessors + Re-Init
+UActorPoolManager* AStarSystemActor::GetPoolManager() const { return Galaxy ? Galaxy->GetPoolManager() : nullptr; }
+AUniverseActor* AStarSystemActor::GetUniverse()    const { return Galaxy ? Galaxy->GetUniverse() : nullptr; }
+
+void AStarSystemActor::ReInit(const FStarSystemParams& InParams, const FTransform& InXform)
+{
+	bAutoInitializeOnBeginPlay = false;
+	Params = InParams;
+	PendingNodeCenter = InXform.GetLocation();
+	bPendingPlacement = true;
+	SetActorHiddenInGame(true);
+	Initialize();
 }
 #pragma endregion

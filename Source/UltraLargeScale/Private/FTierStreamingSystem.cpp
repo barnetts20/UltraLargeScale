@@ -122,12 +122,17 @@ void FTierStreamingSystem::InitializeTier(
 	USceneComponent* AttachRoot = Ctx.AttachRoot;
 	const bool bAbsolutePos = Ctx.bNiagaraAbsolutePosition;
 	const FVector VT = Ctx.VirtualTraversal;
+	// Backdrop membership, sourced from the actor's REAL UnitScale via IsVirtualSpace()
+	// (Ctx.bVirtualSpace). NOT Ctx.UnitScale — that is the octree-insert scale, which the
+	// Universe forces to 1.0, so keying off it dropped the universe sprites into the main
+	// pass. Captured for the GT lambda.
+	const bool bVirtualSpace = Ctx.bVirtualSpace;
 	// Radius-0 tiers stamped their permanent center above; streaming tiers are
 	// still at the sentinel (ZeroVector NCenter); all their particles are dead
 	// until the first UpdateTier commit, so the seed uniform is inert.
 	const FVector NCenterSeed = State.StampedNCenter;
 
-	AsyncTask(ENamedThreads::GameThread, [AttachRoot, bAbsolutePos, VT, NCenterSeed,
+	AsyncTask(ENamedThreads::GameThread, [AttachRoot, bAbsolutePos, VT, NCenterSeed, bVirtualSpace,
 		&Config, &State, &OutComponents, NumBuffers,
 		Promise = MoveTemp(Promise)]() mutable
 		{
@@ -155,7 +160,7 @@ void FTierStreamingSystem::InitializeTier(
 					// tiered sprite system (universe/galaxy/starsystem x large/mid/small)
 					// and the sector gas cloud, and it reapplies automatically on every
 					// stream-in, so streaming churn can't un-flag anything.
-					NC->bVisibleInSceneCaptureOnly = true;
+					NC->bVisibleInSceneCaptureOnly = bVirtualSpace;
 
 					if (bAbsolutePos)
 						NC->SetAbsolute(true, false, false);

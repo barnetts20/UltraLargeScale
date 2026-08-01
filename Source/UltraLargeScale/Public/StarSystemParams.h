@@ -78,6 +78,16 @@ struct ULTRALARGESCALE_API FStarSystemParams : public FBaseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets|Body")
 	TSoftClassPtr<AActor> WrappedBodyClass;
 
+	/** Post-Generate overlay: fills parent-derived (context) fields only —
+	 *  the randomizable ranged fields are Generate's job. Kept here so the
+	 *  parent's acquire call stays a one-liner. Confirm the field list in step E. */
+	FStarSystemParams& ApplyContext(const FOctreeNode& Node)
+	{
+		Seed = Node.Data.Seed;
+		ParentColor = FLinearColor(Node.Data.Composition);
+		return *this;
+	}
+
 	FStarSystemParams()
 	{
 		UnitScale = 1.2e7;
@@ -109,8 +119,10 @@ struct ULTRALARGESCALE_API FStarSystemParamBounds {
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Star System Param Bounds")
 	FStarSystemParams Max;
 
-	static FStarSystemParams Generate(FStarSystemParamBounds Bounds, int Seed) {
-		//TODO: Randomize
+	static FStarSystemParams Generate(const FStarSystemParamBounds& Bounds, int64 Seed) {
+		//TODO [E]: real Min..Max interpolation from Seed. Stub = uniform Max.
 		return Bounds.Max;
 	}
+	static FStarSystemParams Minimal(const FStarSystemParamBounds& Bounds) { return Bounds.Min; }
+	static FStarSystemParams Maximal(const FStarSystemParamBounds& Bounds) { return Bounds.Max; }
 };

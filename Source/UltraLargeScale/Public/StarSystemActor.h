@@ -13,6 +13,8 @@
 
 class AGalaxyActor;
 class AParallaxStaticMeshActor;
+class UActorPoolManager;
+class AUniverseActor;
 
 /** Star-system layer actor: lays planets out analytically over the shared
  *  tier-streaming framework, driven by its parent galaxy's TickFromParent. */
@@ -57,6 +59,12 @@ public:
 	void SpawnPlanetFromPool(TSharedPtr<FOctreeNode> InNode);
 	void ReturnPlanetToPool(TSharedPtr<FOctreeNode> InNode);
 	void FinalizePlanetPlacement(AActor* Planet, TSharedPtr<FOctreeNode> InNode);
+
+	/** Typed re-init for a pooled star system: sets Params, arms deferred placement
+	 *  from InXform's location (final placement stays with the parent galaxy's
+	 *  FinalizeStarSystemPlacement), and runs the existing async init chain.
+	 *  Consumed in Phase C. */
+	void ReInit(const FStarSystemParams& InParams, const FTransform& InXform);
 #pragma endregion
 
 protected:
@@ -65,6 +73,8 @@ protected:
 	virtual double GetExtent() const override { return Params.Extent; }
 public:
 	virtual double GetEffectiveSpeedScale() const override;
+	virtual UActorPoolManager* GetPoolManager() const override;
+	virtual AUniverseActor* GetUniverse() const override;
 protected:
 #pragma endregion
 

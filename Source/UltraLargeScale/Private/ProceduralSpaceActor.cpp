@@ -242,3 +242,24 @@ double AProceduralSpaceActor::GetGridCellExtent(int32 InGridDepth) const
 }
 
 #pragma endregion
+
+#pragma region Pooled Actor Interface
+void AProceduralSpaceActor::OnReturnToPool()
+{
+    // Teardown + cascade-release. Subclass ResetForPool overrides already return
+    // their live children (galaxy->systems, system->planets) via SpawnedX and clear
+    // generator/tier state, so the cascade stays in one place.
+    ResetForPool();
+}
+
+void AProceduralSpaceActor::OnAcquired()
+{
+    // Re-arm lifecycle + the VT cluster. The parent then stamps Params via ReInit and
+    // calls Initialize(); world placement/visibility is deferred to the parent's
+    // FinalizeXxxPlacement (needs this frame's resolved VirtualTraversal), so do NOT
+    // unhide here. The backdrop-capture flag is no longer stamped per acquire: it is
+    // derived from IsVirtualSpace() at render-component creation inside Initialize(),
+    // which re-runs on every acquire, so it self-corrects with zero re-stamping.
+    ResetForSpawn();
+}
+#pragma endregion

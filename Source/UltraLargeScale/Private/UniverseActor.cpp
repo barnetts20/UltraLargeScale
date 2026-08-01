@@ -1,4 +1,5 @@
 ﻿#include "UniverseActor.h"
+#include "ActorPoolManager.h"
 #include "UltraLargeScale.h"
 #include "FTierStreamingSystem.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
@@ -30,6 +31,7 @@ AUniverseActor::AUniverseActor()
 	SectorSmallCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorSmall.NG_SectorSmall"));
 	SectorGasCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorGas.NG_SectorGas"));
 	GalaxyActorClass = AGalaxyActor::StaticClass();
+	StarSystemActorClass = AStarSystemActor::StaticClass();
 	Octree = MakeShared<FOctree>(UniverseParams.Extent * PersistentTreeMultiplier, FVector::ZeroVector);
 
 	// Backdrop capture: renders the virtual stack into an HDR target that gets
@@ -261,6 +263,14 @@ void AUniverseActor::BeginPlay()
 	// below binds straight onto the MID.
 	InitializeBackdropComposite();
 	InitializeBackdropCapture();
+	// Central actor pool: create, register types, prewarm — before any child
+	// activates. This is now the sole galaxy pool: SpawnGalaxyFromPool acquires
+	// from it and ReturnGalaxyToPool returns to it.
+	PoolManager = NewObject<UActorPoolManager>(this);
+	PoolManager->RegisterType(GalaxyActorClass, GalaxyPoolSize);
+	PoolManager->RegisterType(StarSystemActorClass, StarSystemPoolSize);
+	PoolManager->PrewarmAll(GetWorld());
+
 	if (bAutoInitializeOnBeginPlay) Initialize();
 }
 
@@ -277,26 +287,6 @@ void AUniverseActor::ConfigureCell(FIntVector InCellCoord)
 	Octree = MakeShared<FOctree>(UniverseParams.Extent * PersistentTreeMultiplier, FVector::ZeroVector);
 }
 
-void AUniverseActor::InitializeChildPool()
-{
-	TPromise<void> CompletionPromise;
-	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
-	TWeakObjectPtr<AUniverseActor> WeakThis(this);
-	AsyncTask(ENamedThreads::GameThread, [WeakThis, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
-		{
-			AUniverseActor* Self = WeakThis.Get();
-			if (!Self) { CompletionPromise.SetValue(); return; }
-			for (int i = 0; i < Self->GalaxyPoolSize; i++) {
-				AGalaxyActor* Galaxy = Self->GetWorld()->SpawnActor<AGalaxyActor>(
-					Self->GalaxyActorClass, FVector::ZeroVector, FRotator::ZeroRotator);
-				Galaxy->Universe = Self;
-				Galaxy->SetActorHiddenInGame(true);
-				Self->GalaxyPool.Add(Galaxy);
-			}
-			CompletionPromise.SetValue();
-		});
-	CompletionFuture.Wait();
-}
 
 void AUniverseActor::InitializeData()
 {
@@ -403,6 +393,7 @@ FTierStreamingContext AUniverseActor::BuildStreamingContext() const
 	FTierStreamingContext Ctx;
 	Ctx.Extent = UniverseParams.Extent;
 	Ctx.UnitScale = 1.0;  // Universe extents are already in octree-local units.
+	Ctx.bVirtualSpace = IsVirtualSpace();  // real UnitScale (1.6e17) -> backdrop
 	Ctx.GridExtentMultiplier = GridExtentMultiplier;
 	Ctx.VirtualTraversal = VirtualTraversal;
 	Ctx.Octree = Octree;
@@ -555,7 +546,7 @@ void AUniverseActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 			Galaxy->InitializationState = ELifecycleState::Pooling;
 	}
 	SpawnedGalaxies.Empty();
-	GalaxyPool.Empty();
+	if (PoolManager) { PoolManager->Shutdown(); PoolManager = nullptr; }
 
 	// Drain any in-flight pushes before destroying the components they may touch.
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
@@ -602,32 +593,26 @@ void AUniverseActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 {
 	SVO_GT_SCOPE("Universe::SpawnGalaxyFromPool");
-	if (!InNode.IsValid() || !GalaxyActorClass || SpawnedGalaxies.Contains(InNode) || InitializationState != ELifecycleState::Ready) return;
+	if (!InNode.IsValid() || SpawnedGalaxies.Contains(InNode) || InitializationState != ELifecycleState::Ready) return;
 	if (InNode->Data.ParticleIndex < 0) return;
-	if (GalaxyPool.Num() == 0)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("Galaxy pool exhausted, consider increasing GalaxyPoolSize"));
-		return;
-	}
-	AGalaxyActor* Galaxy = GalaxyPool.Pop();
-	SpawnedGalaxies.Add(InNode, TWeakObjectPtr<AGalaxyActor>(Galaxy));
-	Galaxy->ResetForSpawn();
-	Galaxy->Universe = this;
-	Galaxy->bAutoInitializeOnBeginPlay = false;
 
-	// TypeId carries the tier index (0=Large, 1=Mid, 2=Small),
-	// written during InsertParticleIntoOctree.
+	UActorPoolManager* PM = GetPoolManager();
+	if (!PM) return;
+	AGalaxyActor* Galaxy = PM->Acquire<AGalaxyActor>();   // OnAcquired() runs ResetForSpawn
+	if (!Galaxy) return;                                  // pool grow failed; manager already warned
+	Galaxy->Universe = this;
+	SpawnedGalaxies.Add(InNode, TWeakObjectPtr<AGalaxyActor>(Galaxy));
+
+	// TypeId carries the tier index (0=Large, 1=Mid, 2=Small), written during
+	// InsertParticleIntoOctree.
 	const int32 TierIndex = FMath::Clamp(InNode->Data.TypeId, 0, 2);
 	FParticleTierState* TierStates[] = { &LargeTierState, &MidTierState, &SmallTierState };
 	FParticleTierState& MatchedState = *TierStates[TierIndex];
 
-	// ParticleIndex is the absolute buffer index. Direct lookup - no slot math needed.
-	// SINGLE-BUFFER READ GUARD: the transition task overwrites entering
-	// slots in place, so only read the CPU arrays while no task is in
-	// flight. On the GT this check is race-free (the flag is set on the GT
-	// before the task spawns), and if a transition IS in flight the matched
-	// node's slot may be mid-rewrite anyway - the octree fallback (node
-	// center/extent) is the correct answer in that case.
+	// Resolve the real particle position/extent from the tier buffer (octree node
+	// center is a quantized approximation). SINGLE-BUFFER READ GUARD: only read the
+	// CPU arrays while no transition is in flight; otherwise the octree fallback is
+	// the correct answer. Unchanged from before.
 	FVector ParticlePos = InNode->Center;
 	float ParticleExtent = static_cast<float>(InNode->Extent);
 	const int32 AbsIdx = InNode->Data.ParticleIndex;
@@ -639,57 +624,47 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 		ParticleExtent = Buf.Extents[AbsIdx];
 	}
 
-	// Start with the universe-level galaxy params (editor-tunable template),
-	// then override per-instance fields (seed, color, rotation, scale).
-	Galaxy->Params = FGalaxyParamBounds::Generate(GalaxyParamBounds, InNode->Data.Seed);
+	// Config: bounds -> Generate -> context overlay (Seed, ParentColor), then the
+	// cross-layer spawn-time fields the parent owns (derived Extent, seed Rotation).
+	FGalaxyParams P = FGalaxyParamBounds::Generate(GalaxyParamBounds, InNode->Data.Seed).ApplyContext(*InNode);
 
-	// INVERTED DERIVATION: UnitScale is the per-layer design constant
-	// (carried in from the GalaxyParams template copy above); the galaxy's
-	// LOCAL Extent is what varies - derived from the particle's real size.
-	// Real galaxy size therefore expresses itself as model size and star
-	// COUNT, while every authored real-unit content size converts through
-	// the same constant to identical local (= perceived) sizes in every
-	// galaxy. (The inverse - a constant Extent with derived UnitScale -
-	// would make star sprites scale inversely with host galaxy size.)
+	// INVERTED DERIVATION: UnitScale is the per-layer constant; the galaxy's LOCAL
+	// Extent is derived from the particle's real size (real size -> model size ->
+	// star COUNT, while content sizes stay perceptually identical across galaxies).
 	{
 		const double DerivedExtent =
 			(static_cast<double>(ParticleExtent) * this->UniverseParams.UnitScale)
-			/ Galaxy->Params.UnitScale;
-		Galaxy->Params.Extent = FMath::Clamp(DerivedExtent,
-			Galaxy->Params.MinDerivedExtent, Galaxy->Params.MaxDerivedExtent);
-		if (Galaxy->Params.Extent != DerivedExtent)
+			/ P.UnitScale;
+		P.Extent = FMath::Clamp(DerivedExtent, P.MinDerivedExtent, P.MaxDerivedExtent);
+		if (P.Extent != DerivedExtent)
 		{
 			UE_LOG(LogTemp, Warning,
 				TEXT("AUniverseActor::SpawnGalaxy - derived extent %.3e clamped to %.3e; ")
 				TEXT("retune GalaxyParams.UnitScale (layer constant) or the clamp bounds."),
-				DerivedExtent, Galaxy->Params.Extent);
+				DerivedExtent, P.Extent);
 		}
 	}
-	// MaxEntityScale is derived from MaxEntityScaleFraction in GalaxyActor::InitializeData.
-	// No need to set it here - DeriveScaleRanges handles the cascade.
 
-	// Seed is the deterministic hierarchical seed composed from
-	// (UniverseSeed, GridCoord, GenerationIndex) during octree insertion.
-	Galaxy->Params.Seed = InNode->Data.Seed;
-	Galaxy->Params.ParentColor = FLinearColor(InNode->Data.Composition);
+	// Rotation is seed-derived and parent-owned for now (folds into Generate in step
+	// E). One stream, three sequential draws.
 	FRandomStream RandStream(InNode->Data.Seed);
-	Galaxy->Params.Rotation = FRotator(
+	P.Rotation = FRotator(
 		RandStream.FRandRange(-180.0f, 180.0f),
 		RandStream.FRandRange(-180.0f, 180.0f),
 		RandStream.FRandRange(-180.0f, 180.0f));
 
-	Galaxy->bPendingPlacement = true;
-	Galaxy->PendingNodeCenter = ParticlePos;
-	Galaxy->SetActorHiddenInGame(true);
-	Galaxy->Initialize();
+	// Typed re-init: sets Params, arms deferred placement (PendingNodeCenter =
+	// ParticlePos), hides, and runs the async init chain. FinalizeGalaxyPlacement
+	// positions/unhides once Ready, exactly as before.
+	Galaxy->ReInit(P, FTransform(ParticlePos));
 
 	UE_LOG(LogTemp, Log,
-		TEXT("AUniverseActor::SpawnGalaxyFromPool - pool=%d node=(%.1f,%.1f,%.1f) extent=%.1f "
+		TEXT("AUniverseActor::SpawnGalaxyFromPool - inert=%d node=(%.1f,%.1f,%.1f) extent=%.1f "
 			"particlePos=(%.1f,%.1f,%.1f) particleExtent=%.3f unitScale(const)=%.6e derivedExtent=%.6e seed=%d"),
-		GalaxyPool.Num(),
+		PM->NumInert(AGalaxyActor::StaticClass()),
 		InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent,
 		ParticlePos.X, ParticlePos.Y, ParticlePos.Z, ParticleExtent,
-		Galaxy->Params.UnitScale, Galaxy->Params.Extent, Galaxy->Params.Seed);
+		P.UnitScale, P.Extent, P.Seed);
 }
 
 void AUniverseActor::FinalizeGalaxyPlacement(AGalaxyActor* Galaxy)
@@ -750,7 +725,7 @@ void AUniverseActor::ReturnGalaxyToPool(TSharedPtr<FOctreeNode> InNode)
 	// (Niagara component spawns), so a GT spin here deadlocks. Park a
 	// worker to wait it out, then finish teardown through the normal GT
 	// path. The galaxy cannot be re-spawned meanwhile - it re-enters
-	// GalaxyPool only at the end of FinishGalaxyPoolReturn.
+	// the pool only at the end of FinishGalaxyPoolReturn.
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, WeakGalaxy]()
 		{
 			while (true)
@@ -792,7 +767,7 @@ void AUniverseActor::FinishGalaxyPoolReturn(TWeakObjectPtr<AGalaxyActor> WeakGal
 					AGalaxyActor* InnerGalaxy = WeakGalaxy.Get();
 					if (!InnerGalaxy) return;
 					InnerGalaxy->Octree = FreshTree;   // swap on game thread
-					if (Self) Self->GalaxyPool.Insert(InnerGalaxy, 0);
+					if (Self) { if (UActorPoolManager* PM = Self->GetPoolManager()) PM->ReturnPrepared(InnerGalaxy); }
 				});
 		});
 }

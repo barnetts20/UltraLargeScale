@@ -316,6 +316,13 @@ struct FTierStreamingContext
 	 *  Galaxy passes its actual UnitScale. */
 	double UnitScale = 1.0;
 
+	/** Backdrop membership for this actor's tier sprites. Derived from the actor's
+	 *  REAL UnitScale via IsVirtualSpace() (compressed virtual space > 1 -> backdrop;
+	 *  real space == 1 -> main pass) — deliberately SEPARATE from the UnitScale above,
+	 *  which the Universe forces to 1.0 for octree-insert math. InitializeTier stamps
+	 *  bVisibleInSceneCaptureOnly from this. */
+	bool bVirtualSpace = false;
+
 	/** Multiplier applied to Extent for grid cell sizing.
 	 *  CellSize = (Extent * GridExtentMultiplier) / (1 << GridDepth). */
 	double GridExtentMultiplier = 4.0;

@@ -157,8 +157,10 @@ struct ULTRALARGESCALE_API FUniverseParamBounds {
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Param Bounds")
 	FUniverseParams Max;
 
-	static FUniverseParams Generate(FUniverseParamBounds Bounds, int Seed) {
-		//TODO: Randomize
+	static FUniverseParams Generate(const FUniverseParamBounds& Bounds, int64 Seed) {
+		//TODO [E]: real Min..Max interpolation from Seed. Stub = uniform Max.
 		return Bounds.Max;
 	}
+	static FUniverseParams Minimal(const FUniverseParamBounds& Bounds) { return Bounds.Min; }
+	static FUniverseParams Maximal(const FUniverseParamBounds& Bounds) { return Bounds.Max; }
 };
