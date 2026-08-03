@@ -201,6 +201,7 @@ void AStarSystemActor::InitializeData()
 	PlanetPositions.SetNumUninitialized(NumPlanets);
 	PlanetExtents.SetNumUninitialized(NumPlanets);
 	PlanetColors.SetNumUninitialized(NumPlanets);
+	SystemGenerator.GeneratedOrbits.SetNum(NumPlanets);
 
 	FRandomStream Stream(Params.Seed);
 
@@ -213,14 +214,31 @@ void AStarSystemActor::InitializeData()
 	{
 		if (InitializationState == ELifecycleState::Pooling) return;
 
-		// Evenly space planets along +X from inner to outer orbit.
+		// Evenly space planets from inner to outer orbit (this is the semi-major axis).
 		const double t = (NumPlanets > 1)
 			? static_cast<double>(i) / static_cast<double>(NumPlanets - 1)
 			: 0.5;
 		const double OrbitRadius = FMath::Lerp(InnerRadius, OuterRadius, t);
 
-		// Place along +X axis - easy to traverse in a straight line.
-		PlanetPositions[i] = FVector(OrbitRadius, 0.0, 0.0);
+		// Static placement on a randomized ellipse, stored in GeneratedOrbits for the
+		// debug draw (and later the debris tiers). GetOrbitPosition is a pure function
+		// of the orbit, so the generator needs no other setup here.
+		StarSystemDataGenerator::FOrbit& Orbit = SystemGenerator.GeneratedOrbits[i];
+		Orbit.Center = FVector::ZeroVector;
+		Orbit.SemiMajorAxis = OrbitRadius;
+		Orbit.Eccentricity = FMath::Pow(Stream.FRand(), 2.0) * Params.MaxEccentricity;
+		const double InclRad = FMath::DegreesToRadians(
+			Stream.FRandRange(-Params.MaxInclinationDegrees, Params.MaxInclinationDegrees));
+		FVector TiltAxis(Stream.FRandRange(-1.f, 1.f), Stream.FRandRange(-1.f, 1.f), 0.f);
+		TiltAxis = TiltAxis.GetSafeNormal();
+		if (TiltAxis.IsNearlyZero()) TiltAxis = FVector::RightVector;
+		Orbit.Normal = FQuat(TiltAxis, InclRad).RotateVector(FVector::UpVector).GetSafeNormal();
+		Orbit.Phase = Stream.FRandRange(0.0, 2.0 * PI);
+		Orbit.Type = (i < FrostLineIndex)
+			? StarSystemDataGenerator::EObjectType::TerrestrialPlanet
+			: StarSystemDataGenerator::EObjectType::GasPlanet;
+
+		PlanetPositions[i] = SystemGenerator.GetOrbitPosition(Orbit);
 
 		// Absolute planet scale (world cm) -> octree-local extent
 		// Inner planets (below frost line) draw from terrestrial range.
@@ -262,7 +280,7 @@ void AStarSystemActor::InitializeData()
 	}
 
 	UE_LOG(LogTemp, Log,
-		TEXT("AStarSystemActor::InitializeData - %d planets along +X [%.0f ... %.0f octree units], "
+		TEXT("AStarSystemActor::InitializeData - %d planets on orbits [%.0f ... %.0f octree units], "
 			"frost line at index %d, UnitScale=%.4e, terrestrial=[%.2e..%.2e] gas=[%.2e..%.2e] cm"),
 		NumPlanets, InnerRadius, OuterRadius, FrostLineIndex, Params.UnitScale,
 		Params.TerrestrialMinScale, Params.TerrestrialMaxScale,
@@ -597,6 +615,7 @@ void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPo
 	ProcessPendingScanResults();
 
 	if (IsDebug) DrawDebugBounds();
+	if (bShowOrbits) DrawDebugOrbits();
 
 	if (IsDebug && ++DiagTickCount % 60 == 0)
 	{
@@ -605,6 +624,44 @@ void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPo
 			*GetName(),
 			VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z,
 			PlanetPositions.Num(), SpawnedPlanets.Num());
+	}
+}
+#pragma endregion
+
+#pragma region Debug
+void AStarSystemActor::DrawDebugOrbits()
+{
+	UWorld* World = GetWorld();
+	if (!World || InitializationState != ELifecycleState::Ready) return;
+
+	// Orbits are in octree-local space. The virtual layer renders a local point at
+	// (ActorLocation + local - VirtualTraversal) - the same mapping the planet sprites
+	// use - so sampling the ellipse through it traces where the planets appear.
+	const FVector Base = GetActorLocation() - VirtualTraversal;
+	constexpr int32 Segments = 64;
+
+	for (const StarSystemDataGenerator::FOrbit& Orbit : SystemGenerator.GeneratedOrbits)
+	{
+		const float Thickness = static_cast<float>(Orbit.SemiMajorAxis * 0.004);
+		FColor Color;
+		switch (Orbit.Type)
+		{
+		case StarSystemDataGenerator::EObjectType::GasPlanet:         Color = FColor::Orange; break;
+		case StarSystemDataGenerator::EObjectType::TerrestrialPlanet: Color = FColor::Green;  break;
+		case StarSystemDataGenerator::EObjectType::Debris:            Color = FColor(120, 120, 120); break;
+		default:                                                      Color = FColor::Silver; break;
+		}
+
+		StarSystemDataGenerator::FOrbit Sample = Orbit;
+		FVector Prev = FVector::ZeroVector;
+		for (int32 seg = 0; seg <= Segments; seg++)
+		{
+			Sample.Phase = (2.0 * PI) * static_cast<double>(seg) / static_cast<double>(Segments);
+			const FVector WorldPt = Base + SystemGenerator.GetOrbitPosition(Sample);
+			if (seg > 0)
+				DrawDebugLine(World, Prev, WorldPt, Color, false, -1.0f, 0, Thickness);
+			Prev = WorldPt;
+		}
 	}
 }
 #pragma endregion

@@ -60,6 +60,16 @@ struct ULTRALARGESCALE_API FStarSystemParams : public FBaseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets")
 	double OuterOrbitFraction = 0.85;
 
+	/** Max orbital eccentricity (0 = circular); seeded per planet in [0, this],
+	 *  low-biased. An interpolation target for the later param pass. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets|Orbits")
+	double MaxEccentricity = 0.2;
+
+	/** Max orbital inclination off the system plane, in degrees; seeded per planet
+	 *  in [-this, +this]. Small = near-coplanar. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets|Orbits")
+	double MaxInclinationDegrees = 8.0;
+
 #pragma region Tier Configs
 	/** Shared FTierParams (same struct as Universe/Galaxy); Mid/Small are
 	 *  currently unused. */

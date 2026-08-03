@@ -51,6 +51,14 @@ public:
 	 *  Single-flight: bursts collapse to one worker that re-reads the freshest VT. */
 	void SchedulePush();
 	virtual void TickFromParent(float DeltaTime, const FVector& InPlayerPos) override;
+
+	/** Debug: draw each stored planet orbit as a world-space ellipse. Gated by
+	 *  bShowOrbits; called from TickFromParent. */
+	void DrawDebugOrbits();
+
+	/** Toggle for DrawDebugOrbits (details panel / BP). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
+	bool bShowOrbits = false;
 #pragma endregion
 
 #pragma region Planet Pooled Spawn/Despawn Hooks
