@@ -4,6 +4,7 @@
 #include "Engine/World.h"
 #include "NiagaraComponent.h"
 
+//TODO: Regions
 void UActorPoolManager::RegisterType(TSubclassOf<AActor> Class, int32 Prewarm)
 {
     if (!Class)

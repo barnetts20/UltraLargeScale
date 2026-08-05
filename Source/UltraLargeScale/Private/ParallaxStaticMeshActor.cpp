@@ -18,8 +18,8 @@ AParallaxStaticMeshActor::AParallaxStaticMeshActor()
     // SceneCapture (nebula meshes, black-hole billboard, etc.).
     MeshComponent->bVisibleInSceneCaptureOnly = true;
 
-    static ConstructorHelpers::FObjectFinder<UStaticMesh> Sphere(
-        TEXT("/UltraLargeScale/UnitSphere.UnitSphere"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> Sphere(TEXT("/UltraLargeScale/UnitSphere.UnitSphere"));
+
     if (Sphere.Succeeded())
         MeshComponent->SetStaticMesh(Sphere.Object);
 }

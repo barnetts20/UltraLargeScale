@@ -4,7 +4,6 @@
 #include "GalaxyDataGenerator.h"
 
 #pragma region Signed Distance Fields
-
 float GalaxyDataGenerator::SampleArmSDF(const FVector& InNormPos, double rXY) const
 {
 	// Arm SDF: unsigned distance from the nearest spiral arm centerline.
@@ -530,7 +529,7 @@ void GalaxyDataGenerator::GenerateTierNode(
 #pragma endregion
 
 #pragma region Large Tier SDF Culling
-
+//TODO: Check if this block should be shared 
 TArray<GalaxyDataGenerator::FActiveLargeTierCell> GalaxyDataGenerator::CollectActiveLargeTierCells() const
 {
 	// -----------------------------------------------------------------------
@@ -796,5 +795,4 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 		TEXT("GalaxyDataGenerator::GenerateLargeTierSlot - %d active cells, %d/%d particles accepted"),
 		ActiveCells.Num(), TotalAccepted, SlotCapacity);
 }
-
 #pragma endregion

@@ -1,7 +1,4 @@
-﻿// GalaxyActor.cpp
-// Full tier streaming system mirroring UniverseActor pattern.
-
-#pragma region Includes
+﻿#pragma region Includes
 #include "GalaxyActor.h"
 #include "UltraLargeScale.h"
 #include "FTierStreamingSystem.h"
@@ -17,15 +14,9 @@
 #pragma region Constructor/Destructor
 AGalaxyActor::AGalaxyActor()
 {
-	// Galaxies are driven by their parent universe via TickFromParent.
-	// UE tick is only enabled for level-placed standalone galaxies
-	// (bAutoInitializeOnBeginPlay = true) in BeginPlay.
+	// Galaxies are driven by their parent universe via TickFromParent. UE tick is only enabled for level-placed standalone galaxies (bAutoInitializeOnBeginPlay = true) in BeginPlay.
 	PrimaryActorTick.bCanEverTick = true;
 	SetActorTickEnabled(false);
-
-	// Niagara cloud systems load lazily in BuildTierConfigs() (runtime), NOT here:
-	// loading assets during CDO construction runs before Niagara is ready and crashes.
-
 	Octree = MakeShared<FOctree>(Params.Extent);
 }
 
@@ -76,11 +67,7 @@ void AGalaxyActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 		FTierStreamingSystem::BeginShutdownDrain(*Tier);
 
-	// Mirror ResetForPool: also wait out an in-flight boundary-cross task —
-	// it writes Buffers/SlotEntries/CellCache through teardown otherwise.
-	// Safe on the GT (the transition task has no game-thread rendezvous).
-	// The async INIT chain is NOT waited here — it rendezvouses with the GT
-	// (would deadlock); it aborts on the Pooling state set above.
+	// Mirror ResetForPool: also wait out an in-flight boundary-cross task - it writes Buffers/SlotEntries/CellCache through teardown otherwise.
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 	{
 		while (Tier->bUpdateInProgress.load())
@@ -91,7 +78,11 @@ void AGalaxyActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		for (UNiagaraComponent*& NC : Tier->NiagaraComponents)
 		{
-			if (NC) { NC->Deactivate(); NC->DestroyComponent(); NC = nullptr; }
+			if (NC) {
+				NC->Deactivate();
+				NC->DestroyComponent();
+				NC = nullptr;
+			}
 		}
 	}
 	TierNiagaraComponents.Empty();
@@ -102,15 +93,11 @@ void AGalaxyActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 #pragma region Pool Lifecycle
 void AGalaxyActor::ResetForPool()
 {
-	// Return any live star systems BEFORE clearing scan state. Without this
-	// they are orphaned on galaxy pool-return (still spawned, never ticked,
-	// never returned) and InitializeChildPool's next top-up leaks actors.
-	// Key snapshot first — ReturnStarSystemToPool mutates the map.
-	// (PseudoVolumeTexture / VolumeMaterial are released in
-	// Super::ResetForPool alongside the VolumetricComponent destroy.)
+	// Return any live star systems BEFORE clearing scan state
 	{
 		TArray<TSharedPtr<FOctreeNode>> LiveNodes;
 		SpawnedStarSystems.GetKeys(LiveNodes);
+
 		for (const TSharedPtr<FOctreeNode>& Node : LiveNodes)
 			ReturnStarSystemToPool(Node);
 	}
@@ -120,13 +107,7 @@ void AGalaxyActor::ResetForPool()
 	TrackedSpawnNodes.Empty();
 	bSpawnScanInProgress.store(false);
 
-	// DRAIN BEFORE FREE: an async boundary-cross task may still own this
-	// tier's buffers (it writes Buffers/SlotCounts/SlotEntries and its tail
-	// commit touches NiagaraComponents under PushCS). Bar new pushes and wait
-	// out any in-flight push (BeginShutdownDrain), then wait for the task
-	// itself to clear bUpdateInProgress — its commit bails on bShuttingDown,
-	// so the wait is bounded by the remaining generation work. Only EndPlay
-	// did this previously; the pool path freed live buffers under a worker.
+	// DRAIN BEFORE FREE: an async boundary-cross task may still own this tier's buffers (it writes Buffers/SlotCounts/SlotEntries and its tail commit touches NiagaraComponents under PushCS). Bar new pushes and wait out any in-flight push (BeginShutdownDrain), then wait for the task itself to clear bUpdateInProgress — its commit bails on bShuttingDown, so the wait is bounded by the remaining generation work.
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 	{
 		FTierStreamingSystem::BeginShutdownDrain(*Tier);
@@ -136,12 +117,7 @@ void AGalaxyActor::ResetForPool()
 		}
 	}
 
-	// The push worker is single-flight and actor-level. BeginShutdownDrain
-	// makes its pushes bail (bShuttingDown) but does NOT stop the worker's
-	// loop — it can still be alive here. Wait for it to exit (it clears
-	// bPushWorkerLive on exit) BEFORE we clear bShuttingDown and free Buffers
-	// below: a live worker would otherwise resume on freed memory, and a stale
-	// 'live' flag would block the next occupant's push dispatch.
+	// The push worker is single-flight and actor-level. BeginShutdownDrain makes its pushes bail (bShuttingDown) but does NOT stop the worker's loop — it can still be alive here. Wait for it to exit (it clears bPushWorkerLive on exit) BEFORE we clear bShuttingDown and free Buffers below: a live worker would otherwise resume on freed memory, and a stale 'live' flag would block the next occupant's push dispatch.
 	while (bPushWorkerLive.load(std::memory_order_acquire))
 	{
 		FPlatformProcess::Sleep(0.0005f);
@@ -153,8 +129,9 @@ void AGalaxyActor::ResetForPool()
 		{
 			if (NC) { NC->Deactivate(); NC->DestroyComponent(); NC = nullptr; }
 		}
-		Tier->ResetState();   // plain state data + sentinels + atomics
+		Tier->ResetState();
 	}
+
 	TierNiagaraComponents.Empty();
 	DiagTickCount = 0;
 
@@ -163,21 +140,18 @@ void AGalaxyActor::ResetForPool()
 
 void AGalaxyActor::ResetForSpawn()
 {
-	Super::ResetForSpawn();   // resets the VT cluster (incl. LatestVT)
+	Super::ResetForSpawn();
 	DiagTickCount = 0;
 }
 #pragma endregion
 
 #pragma region Initialization
-
 void AGalaxyActor::InitializeData()
 {
 	double StartTime = FPlatformTime::Seconds();
-
+	
+	// MaxEntityScale is a fixed absolute world-cm value on FGalaxyParams. DeriveScaleRanges cascades it through the tier depth sequence to set MinScale/MaxScale per tier. No per-instance derivation needed.
 	GalaxyGenerator.Params = Params;
-	// MaxEntityScale is a fixed absolute world-cm value on FGalaxyParams.
-	// DeriveScaleRanges cascades it through the tier depth sequence to
-	// set MinScale/MaxScale per tier. No per-instance derivation needed.
 	GalaxyGenerator.Params.DeriveScaleRanges();
 	GalaxyGenerator.Initialize();
 
@@ -187,9 +161,7 @@ void AGalaxyActor::InitializeData()
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
-	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(
-		FVolumeTextureUtils::PackToPseudoVolumeLayout(
-			FVolumeTextureUtils::UpscaleVolumeData(VolumeData, Params.MaterialParams.DensityVolumeResolution)));
+	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(FVolumeTextureUtils::PackToPseudoVolumeLayout(FVolumeTextureUtils::UpscaleVolumeData(VolumeData, Params.MaterialParams.DensityVolumeResolution)));
 
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeData took: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
 }
@@ -209,61 +181,23 @@ void AGalaxyActor::InitializeVolumetric()
 				return;
 			}
 
-			// Resolve every asset up front and bail loudly. Previously a null mesh
-			// or material flowed straight into SetStaticMesh / MID::Create, both of
-			// which accept null without complaint: the component registered, turned
-			// visible, and rendered nothing. "Volumetric not loading" with a clean
-			// log was indistinguishable from success.
-			UStaticMesh* BoxMesh = LoadObject<UStaticMesh>(
-				nullptr, TEXT("/UltraLargeScale/UnitBoxInvertedNormals.UnitBoxInvertedNormals"));
-			UMaterialInterface* ParentMat = LoadObject<UMaterialInterface>(
-				nullptr, *Self->VolumetricMaterialPath);
-			UVolumeTexture* NoiseTex = LoadObject<UVolumeTexture>(
-				nullptr, *Self->Params.MaterialParams.VolumeNoise);
+			// Resolve every asset up front and bail loudly.
+			UStaticMesh* BoxMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/UltraLargeScale/UnitBoxInvertedNormals.UnitBoxInvertedNormals"));
+			UMaterialInterface* ParentMat = LoadObject<UMaterialInterface>(nullptr, *Self->VolumetricMaterialPath);
+			UVolumeTexture* NoiseTex = LoadObject<UVolumeTexture>(nullptr, *Self->Params.MaterialParams.VolumeNoise);
 
 			if (!BoxMesh || !ParentMat || !Self->PseudoVolumeTexture)
 			{
-				UE_LOG(LogTemp, Error,
-					TEXT("AGalaxyActor::InitializeVolumetric - ABORT, required assets unresolved. ")
-					TEXT("mesh=%s material=%s pseudovolume=%s"),
-					BoxMesh ? TEXT("ok") : TEXT("NULL /UltraLargeScale/UnitBoxInvertedNormals"),
-					ParentMat ? TEXT("ok") : *FString::Printf(TEXT("NULL %s"), *Self->VolumetricMaterialPath),
-					Self->PseudoVolumeTexture ? TEXT("ok") : TEXT("NULL (InitializeData failed - see its own error)"));
+				UE_LOG(LogTemp, Error, TEXT("AGalaxyActor::InitializeVolumetric - ABORT, required assets unresolved. ") TEXT("mesh=%s material=%s pseudovolume=%s"), BoxMesh ? TEXT("ok") : TEXT("NULL /UltraLargeScale/UnitBoxInvertedNormals"), ParentMat ? TEXT("ok") : *FString::Printf(TEXT("NULL %s"), *Self->VolumetricMaterialPath), Self->PseudoVolumeTexture ? TEXT("ok") : TEXT("NULL (InitializeData failed - see its own error)"));
 				CompletionPromise.SetValue();
 				return;
 			}
 			if (!NoiseTex)
 			{
-				UE_LOG(LogTemp, Warning,
-					TEXT("AGalaxyActor::InitializeVolumetric - noise texture '%s' unresolved; ")
-					TEXT("raymarcher will run without detail noise."),
-					*Self->Params.MaterialParams.VolumeNoise);
+				UE_LOG(LogTemp, Warning, TEXT("AGalaxyActor::InitializeVolumetric - noise texture '%s' unresolved; ") TEXT("raymarcher will run without detail noise."), *Self->Params.MaterialParams.VolumeNoise);
 			}
-
-			Self->VolumetricComponent = NewObject<UStaticMeshComponent>(Self);
-			Self->VolumetricComponent->SetVisibility(false);
-			Self->VolumetricComponent->SetStaticMesh(BoxMesh);
-			Self->VolumetricComponent->AttachToComponent(Self->RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-			Self->VolumetricComponent->SetAbsolute(true, false, false);
-			Self->VolumetricComponent->TranslucencySortPriority = 1;
-
-			// SDPG_MAX is the enum COUNT sentinel, not a renderable group. Valid
-			// values are SDPG_World and SDPG_Foreground only. The direct field
-			// assignment also skipped MarkRenderStateDirty().
-			Self->VolumetricComponent->SetDepthPriorityGroup(SDPG_World);
-
-			Self->VolumetricComponent->bRenderInDepthPass = false;
-
-			// Virtual backdrop: hidden in the main renderer, visible only to the
-			// backdrop SceneCapture. Set before RegisterComponent so the flag is
-			// baked into the scene proxy at creation.
-			Self->VolumetricComponent->bVisibleInSceneCaptureOnly = Self->IsVirtualSpace();
-
-			Self->VolumetricComponent->RegisterComponent();
-			Self->VolumetricComponent->SetWorldScale3D(FVector(2 * Self->Params.Extent));
-
+			
 			Self->VolumeMaterial = UMaterialInstanceDynamic::Create(ParentMat, Self);
-
 			Self->VolumeMaterial->SetTextureParameterValue(FName("VolumeTexture"), Self->PseudoVolumeTexture);
 			if (NoiseTex) Self->VolumeMaterial->SetTextureParameterValue(FName("NoiseTexture"), NoiseTex);
 			Self->VolumeMaterial->SetVectorParameterValue(FName("AmbientColor"), Self->Params.MaterialParams.VolumeAmbientColor);
@@ -278,10 +212,23 @@ void AGalaxyActor::InitializeVolumetric()
 			Self->VolumeMaterial->SetScalarParameterValue(FName("WarpAmount"), Self->Params.MaterialParams.VolumeWarpAmount);
 			Self->VolumeMaterial->SetScalarParameterValue(FName("WarpScale"), Self->Params.MaterialParams.VolumeWarpScale);
 
+			Self->VolumetricComponent = NewObject<UStaticMeshComponent>(Self);
+			Self->VolumetricComponent->SetVisibility(false);
+			Self->VolumetricComponent->SetStaticMesh(BoxMesh);
+			Self->VolumetricComponent->AttachToComponent(Self->RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+			Self->VolumetricComponent->SetAbsolute(true, false, false);
+			Self->VolumetricComponent->TranslucencySortPriority = 1;
+			Self->VolumetricComponent->SetDepthPriorityGroup(SDPG_World);
+			Self->VolumetricComponent->bRenderInDepthPass = false;
+			Self->VolumetricComponent->bVisibleInSceneCaptureOnly = Self->IsVirtualSpace(); // Virtual backdrop: "Virtual Space" components get rendered to the backdrop.
+			Self->VolumetricComponent->RegisterComponent();
+			Self->VolumetricComponent->SetWorldScale3D(FVector(2 * Self->Params.Extent));
 			Self->VolumetricComponent->SetMaterial(0, Self->VolumeMaterial);
 			Self->VolumetricComponent->SetVisibility(true);
+
 			CompletionPromise.SetValue();
 		});
+
 	CompletionFuture.Wait();
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeVolumetric took: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
 }
@@ -290,14 +237,16 @@ void AGalaxyActor::InitializeNiagara()
 {
 	double StartTime = FPlatformTime::Seconds();
 	BuildTierConfigs();
+	
 	const FTierStreamingContext Ctx = BuildStreamingContext();
+
 	FTierStreamingSystem::InitializeTier(Ctx, LargeTierConfig, LargeTierState, TierNiagaraComponents);
 	if (InitializationState == ELifecycleState::Pooling) return;
+	
 	FTierStreamingSystem::InitializeTier(Ctx, MidTierConfig, MidTierState, TierNiagaraComponents);
 	if (InitializationState == ELifecycleState::Pooling) return;
+	
 	FTierStreamingSystem::InitializeTier(Ctx, SmallTierConfig, SmallTierState, TierNiagaraComponents);
-
-	// No timer start needed — Universe::DetermineAndDispatchScan drives scans.
 
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeNiagara total: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
 }
@@ -309,18 +258,14 @@ bool AGalaxyActor::CellOverlapsVolume(const FIntVector& Coord, int32 GridDepth) 
 	const FVector Center = GridCoordToCenter(Coord, GridDepth);
 	const double HalfCell = GetGridCellExtent(GridDepth);
 	const double Ext = Params.Extent;
-	return (Center.X + HalfCell > -Ext && Center.X - HalfCell < Ext) &&
-		(Center.Y + HalfCell > -Ext && Center.Y - HalfCell < Ext) &&
-		(Center.Z + HalfCell > -Ext && Center.Z - HalfCell < Ext);
+	return (Center.X + HalfCell > -Ext && Center.X - HalfCell < Ext) && (Center.Y + HalfCell > -Ext && Center.Y - HalfCell < Ext) && (Center.Z + HalfCell > -Ext && Center.Z - HalfCell < Ext);
 }
 #pragma endregion
 
 #pragma region Tier System - BuildTierConfigs
 void AGalaxyActor::LoadRuntimeAssets()
 {
-	// Game thread (Initialize prologue, before async dispatch): LoadObject is not
-	// thread-safe, so the Niagara systems BuildTierConfigs reads must load here.
-	// Guarded so pooled reuse does not reload.
+	// Game thread (Initialize prologue, before async dispatch): LoadObject is not thread-safe, so the Niagara systems BuildTierConfigs reads must load here. Guarded so pooled reuse does not reload.
 	if (!GalaxyLargeCloud) GalaxyLargeCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Galaxy/NG_GalaxyLarge.NG_GalaxyLarge"));
 	if (!GalaxyMidCloud)   GalaxyMidCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Galaxy/NG_GalaxyMid.NG_GalaxyMid"));
 	if (!GalaxySmallCloud) GalaxySmallCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Galaxy/NG_GalaxySmall.NG_GalaxySmall"));
@@ -339,9 +284,7 @@ void AGalaxyActor::BuildTierConfigs()
 	LargeTierConfig.bWantRotations = { false };
 	LargeTierConfig.OctreeInsertBufferIndex = 0;
 	LargeTierConfig.TierIndex = 0;
-	LargeTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
-		GalaxyGenerator.GenerateLargeTierSlot(SlotIndex, *Buffers[0], LargeTierState.SlotCounts[SlotIndex]);
-		};
+	LargeTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) { GalaxyGenerator.GenerateLargeTierSlot(SlotIndex, *Buffers[0], LargeTierState.SlotCounts[SlotIndex]); };
 
 	// --- Mid tier: neighborhood streaming ---
 	MidTierConfig.TierName = TEXT("Mid");
@@ -352,15 +295,12 @@ void AGalaxyActor::BuildTierConfigs()
 	MidTierConfig.bWantRotations = { false };
 	MidTierConfig.OctreeInsertBufferIndex = 0;
 	MidTierConfig.TierIndex = 1;
-	MidTierConfig.ShouldSkipCell = [this](const FIntVector& Coord) {
-		return !CellOverlapsVolume(Coord, MidTierConfig.GridDepth);
-		};
+	MidTierConfig.ShouldSkipCell = [this](const FIntVector& Coord) { return !CellOverlapsVolume(Coord, MidTierConfig.GridDepth); };
 	MidTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
 		const FVector NodeCenter = GridCoordToCenter(Coord, MidTierConfig.GridDepth);
 		const double CellExt = GetGridCellExtent(MidTierConfig.GridDepth);
-		GalaxyGenerator.GenerateTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter,
-			CellExt, Params.MidTier, 7, MidTierState.SlotCounts[SlotIndex]);
-		};
+		GalaxyGenerator.GenerateTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter, CellExt, Params.MidTier, 7, MidTierState.SlotCounts[SlotIndex]);
+	};
 
 	// --- Small tier: neighborhood streaming ---
 	SmallTierConfig.TierName = TEXT("Small");
@@ -371,26 +311,19 @@ void AGalaxyActor::BuildTierConfigs()
 	SmallTierConfig.bWantRotations = { false };
 	SmallTierConfig.OctreeInsertBufferIndex = 0;
 	SmallTierConfig.TierIndex = 2;
-	SmallTierConfig.ShouldSkipCell = [this](const FIntVector& Coord) {
-		return !CellOverlapsVolume(Coord, SmallTierConfig.GridDepth);
-		};
+	SmallTierConfig.ShouldSkipCell = [this](const FIntVector& Coord) { return !CellOverlapsVolume(Coord, SmallTierConfig.GridDepth); };
 	SmallTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
 		const FVector NodeCenter = GridCoordToCenter(Coord, SmallTierConfig.GridDepth);
 		const double CellExt = GetGridCellExtent(SmallTierConfig.GridDepth);
 		GalaxyGenerator.GenerateTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter,
 			CellExt, Params.SmallTier, 23, SmallTierState.SlotCounts[SlotIndex]);
-		};
+	};
 
-	// Shared bounds convention — see the derivation in
-	// AUniverseActor::BuildTierConfigs. Tight half-bound is
-	// (2R+2) * CellHalfExtent;
-	// we provision 2 * (2R+1) to match the universe tiers. The previous
-	// (2R+1) * CellHalfExtent under-bounded by up to one half-cell when VT
-	// sat near a cell boundary, risking edge-cell culling pops.
+	// Shared bounds convention — see the derivation in AUniverseActor::BuildTierConfigs. Tight half-bound is (2R+2) * CellHalfExtent; we provision 2 * (2R+1) to match the universe tiers. The previous (2R+1) * CellHalfExtent under-bounded by up to one half-cell when VT sat near a cell boundary, risking edge-cell culling pops.
 	auto MakeBounds = [this](const FParticleTierConfig& Config) {
 		const double HalfExt = GetGridCellExtent(Config.GridDepth) * (2 * Config.NeighborhoodRadius + 1) * 2.0;
 		return FBox(FVector(-HalfExt), FVector(HalfExt));
-		};
+	};
 
 	LargeTierConfig.ComputeBounds = [this]() { return FBox(FVector(-Params.Extent), FVector(Params.Extent)); };
 	MidTierConfig.ComputeBounds = [this, MakeBounds]() { return MakeBounds(MidTierConfig); };
@@ -467,12 +400,10 @@ void AGalaxyActor::SchedulePush()
 	if (bPushWorkerLive.exchange(true)) return;
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this]()
 		{
-			for (;;)
+			while (true)
 			{
 				bPushDirty.store(false, std::memory_order_relaxed);
-				FTierStreamingSystem::PushTierVT(
-					{ &LargeTierState, &MidTierState, &SmallTierState },
-					[this] { return ReadLatestVT(); });
+				FTierStreamingSystem::PushTierVT({ &LargeTierState, &MidTierState, &SmallTierState }, [this] { return ReadLatestVT(); });
 				if (!bPushDirty.load(std::memory_order_acquire))
 				{
 					bPushWorkerLive.store(false, std::memory_order_release);
@@ -492,8 +423,7 @@ void AGalaxyActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
 	ApplyParallaxOffset(InPlayerPos);
 
 	// --- Process pending spawn-scan results ---
-	// VirtualTraversal is resolved for this frame, so SpawnStarSystemFromPool
-	// sees the correct parallax state. Mirrors UniverseActor::Tick ordering.
+	// VirtualTraversal is resolved for this frame, so SpawnStarSystemFromPool sees the correct parallax state. Mirrors UniverseActor::Tick ordering.
 	ProcessPendingScanResults();
 
 	// --- Drive active star systems and handle deferred placement ---
@@ -522,15 +452,7 @@ void AGalaxyActor::TickFromParent(float DeltaTime, const FVector& InPlayerPos)
 	{
 		const FIntVector MidCoord = PositionToGridCoord(VirtualTraversal, MidTierConfig.GridDepth);
 		const FIntVector SmallCoord = PositionToGridCoord(VirtualTraversal, SmallTierConfig.GridDepth);
-		UE_LOG(LogTemp, Verbose, TEXT("Galaxy [%s] VT=(%.0f,%.0f,%.0f) midGrid=(%d,%d,%d)->(%d,%d,%d) smallGrid=(%d,%d,%d)->(%d,%d,%d) updates=%d/%d"),
-			*GetName(),
-			VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z,
-			MidCoord.X, MidCoord.Y, MidCoord.Z,
-			MidTierState.CenterCoord.X, MidTierState.CenterCoord.Y, MidTierState.CenterCoord.Z,
-			SmallCoord.X, SmallCoord.Y, SmallCoord.Z,
-			SmallTierState.CenterCoord.X, SmallTierState.CenterCoord.Y, SmallTierState.CenterCoord.Z,
-			MidTierState.bUpdateInProgress.load() ? 1 : 0,
-			SmallTierState.bUpdateInProgress.load() ? 1 : 0);
+		UE_LOG(LogTemp, Verbose, TEXT("Galaxy [%s] VT=(%.0f,%.0f,%.0f) midGrid=(%d,%d,%d)->(%d,%d,%d) smallGrid=(%d,%d,%d)->(%d,%d,%d) updates=%d/%d"), *GetName(), VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z, MidCoord.X, MidCoord.Y, MidCoord.Z, MidTierState.CenterCoord.X, MidTierState.CenterCoord.Y, MidTierState.CenterCoord.Z, SmallCoord.X, SmallCoord.Y, SmallCoord.Z, SmallTierState.CenterCoord.X, SmallTierState.CenterCoord.Y, SmallTierState.CenterCoord.Z, MidTierState.bUpdateInProgress.load() ? 1 : 0, SmallTierState.bUpdateInProgress.load() ? 1 : 0);
 	}
 }
 #pragma endregion
@@ -550,10 +472,7 @@ void AGalaxyActor::RequestScan()
 	bSpawnScanInProgress.store(true);
 	const FVector LocalPlayerPos = VirtualTraversal;
 
-	// GT snapshot of the tree ref (one atomic ref-count bump). The Octree
-	// member is now only ever reassigned on the GT (FinishGalaxyPoolReturn /
-	// rebase), but the worker below must still read a snapshot rather than
-	// the member — the member can be swapped between dispatch and execution.
+	// GT snapshot of the tree ref (one atomic ref-count bump)
 	TSharedPtr<FOctree> TreeSnapshot = Octree;
 	TWeakObjectPtr<AGalaxyActor> WeakThis(this);
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, LocalPlayerPos, TreeSnapshot]()
@@ -561,21 +480,14 @@ void AGalaxyActor::RequestScan()
 			AGalaxyActor* Self = WeakThis.Get();
 			if (!Self || !TreeSnapshot.IsValid()) return;
 
-			const TArray<TSharedPtr<FOctreeNode>> NearbyArray =
-				TreeSnapshot->GetNodesByScreenSpace(LocalPlayerPos, Self->SpawnScreenSpaceThreshold);
+			const TArray<TSharedPtr<FOctreeNode>> NearbyArray = TreeSnapshot->GetNodesByScreenSpace(LocalPlayerPos, Self->SpawnScreenSpaceThreshold);
 
 			AsyncTask(ENamedThreads::GameThread, [WeakThis, NearbyArray, TreeSnapshot]()
 				{
 					AGalaxyActor* InnerSelf = WeakThis.Get();
 					if (!InnerSelf) return;
 					InnerSelf->bSpawnScanInProgress.store(false);
-					// Same guard as AUniverseActor::RequestScan: if the tree
-					// was swapped while this scan was in flight (pool return
-					// installs a fresh tree), these nodes belong to a retired
-					// tree — for a pooled-and-respawned galaxy they are the
-					// PREVIOUS identity's nodes, and processing them would
-					// spawn ghost star systems with the old seeds. Drop them;
-					// the next interval rescans the live tree.
+					// Same guard as AUniverseActor::RequestScan: if the tree was swapped while this scan was in flight (pool return installs a fresh tree), these nodes belong to a retired tree — for a pooled-and-respawned galaxy they are the PREVIOUS identity's nodes, and processing them would spawn ghost star systems with the old seeds. Drop them; the next interval rescans the live tree.
 					if (InnerSelf->Octree != TreeSnapshot) return;
 					InnerSelf->PendingScanResults = NearbyArray;
 					InnerSelf->bHasPendingScanResults = true;
@@ -587,9 +499,7 @@ bool AGalaxyActor::IsPlayerInsideBounds() const
 {
 	if (!Octree.IsValid()) return false;
 	const double E = Octree->Extent;
-	return FMath::Abs(VirtualTraversal.X) <= E
-		&& FMath::Abs(VirtualTraversal.Y) <= E
-		&& FMath::Abs(VirtualTraversal.Z) <= E;
+	return FMath::Abs(VirtualTraversal.X) <= E && FMath::Abs(VirtualTraversal.Y) <= E && FMath::Abs(VirtualTraversal.Z) <= E;
 }
 
 void AGalaxyActor::ProcessPendingScanResults()
@@ -624,19 +534,13 @@ void AGalaxyActor::ProcessPendingScanResults()
 void AGalaxyActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) const
 {
 	if (!InNode.IsValid()) return;
-	UE_LOG(LogTemp, Log,
-		TEXT("AGalaxyActor::SpawnScan ENTER — center=(%.1f,%.1f,%.1f) extent=%.2f depth=%d seed=%d tier=%d"),
-		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
-		InNode->Extent, InNode->Depth, InNode->Data.Seed, InNode->Data.TypeId);
+	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::SpawnScan ENTER — center=(%.1f,%.1f,%.1f) extent=%.2f depth=%d seed=%d tier=%d"), InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Depth, InNode->Data.Seed, InNode->Data.TypeId);
 }
 
 void AGalaxyActor::LogSpawnNodeExit(const TSharedPtr<FOctreeNode>& InNode) const
 {
 	if (!InNode.IsValid()) return;
-	UE_LOG(LogTemp, Log,
-		TEXT("AGalaxyActor::SpawnScan EXIT  — center=(%.1f,%.1f,%.1f) extent=%.2f depth=%d seed=%d"),
-		InNode->Center.X, InNode->Center.Y, InNode->Center.Z,
-		InNode->Extent, InNode->Depth, InNode->Data.Seed);
+	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::SpawnScan EXIT  — center=(%.1f,%.1f,%.1f) extent=%.2f depth=%d seed=%d"), InNode->Center.X, InNode->Center.Y, InNode->Center.Z, InNode->Extent, InNode->Depth, InNode->Data.Seed);
 }
 
 void AGalaxyActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) const
@@ -646,8 +550,7 @@ void AGalaxyActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) con
 	if (!World) return;
 	// Rendered world position = PlayerPos + NodeCenter - VirtualTraversal
 	const FVector NodeCenterWorld = GetActorLocation() + InNode->Center - VirtualTraversal;
-	DrawDebugBox(World, NodeCenterWorld, FVector(InNode->Extent),
-		FColor::Cyan, false, SpawnScanInterval, 0, 2000.0f);
+	DrawDebugBox(World, NodeCenterWorld, FVector(InNode->Extent), FColor::Cyan, false, SpawnScanInterval, 0, 2000.0f);
 }
 #pragma endregion
 
@@ -655,96 +558,74 @@ void AGalaxyActor::DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) con
 void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 {
 	SVO_GT_SCOPE("Galaxy::SpawnStarSystemFromPool");
-	if (!InNode.IsValid() || SpawnedStarSystems.Contains(InNode) ||
-		InitializationState != ELifecycleState::Ready)
-		return;
+	if (!InNode.IsValid() || SpawnedStarSystems.Contains(InNode) || InitializationState != ELifecycleState::Ready) return;
 
 	UActorPoolManager* PM = GetPoolManager();
 	if (!PM) return;
-	AStarSystemActor* System = PM->Acquire<AStarSystemActor>();   // OnAcquired() runs ResetForSpawn
-	if (!System) return;                                          // pool grow failed; manager already warned
-	System->Galaxy = this;   // re-associate: a pooled instance carries no owner until now
+	
+	AStarSystemActor* System = PM->Acquire<AStarSystemActor>();
+	if (!System) return;
+
+	System->Galaxy = this;
 	SpawnedStarSystems.Add(InNode, TWeakObjectPtr<AStarSystemActor>(System));
 
-	// Resolve the real particle position/extent from the tier buffer (octree node
-	// center is a quantized approximation). SINGLE-BUFFER READ GUARD as before.
+	// Resolve the real particle position/extent from the tier buffer (octree node center is a quantized approximation). SINGLE-BUFFER READ GUARD as before.
 	const int32 TierIndex = FMath::Clamp(InNode->Data.TypeId, 0, 2);
 	FParticleTierState* TierStates[] = { &LargeTierState,  &MidTierState,  &SmallTierState };
 	FParticleTierState& MatchedState = *TierStates[TierIndex];
 
-	FVector  ParticlePos = InNode->Center;
-	float    ParticleExtent = static_cast<float>(InNode->Extent);
+	FVector ParticlePos = InNode->Center;
+	float ParticleExtent = static_cast<float>(InNode->Extent);
 	const int32 AbsIdx = InNode->Data.ParticleIndex;
-	if (AbsIdx >= 0 && MatchedState.Buffers.Num() > 0 &&
-		!MatchedState.bUpdateInProgress.load())
+	if (AbsIdx >= 0 && MatchedState.Buffers.Num() > 0 && !MatchedState.bUpdateInProgress.load())
 	{
 		const FNiagaraParticleBuffer& Buf = MatchedState.Buffers[0];
 		ParticlePos = Buf.Positions[AbsIdx];
 		ParticleExtent = Buf.Extents[AbsIdx];
 	}
 
-	// Config: bounds (owned by the Universe) -> Generate -> context overlay (Seed,
-	// ParentColor). Universe is guaranteed non-null here (GetPoolManager resolved it).
+	// Config: bounds (owned by the Universe) -> Generate -> context overlay (Seed, ParentColor). Universe is guaranteed non-null here (GetPoolManager resolved it).
 	FStarSystemParams P = FStarSystemParamBounds::Generate(Universe->StarSystemParamBounds, InNode->Data.Seed).ApplyContext(*InNode);
 
-	// Derived Extent (cross-layer): galaxy UnitScale * BoundsScaleMultiplier / system
-	// UnitScale. Unchanged from before.
+	// Derived Extent (cross-layer): galaxy UnitScale * BoundsScaleMultiplier / system UnitScale. Unchanged from before.
 	{
-		const double DerivedExtent =
-			(static_cast<double>(ParticleExtent) * Params.UnitScale * P.BoundsScaleMultiplier)
-			/ P.UnitScale;
+		const double DerivedExtent = (static_cast<double>(ParticleExtent) * Params.UnitScale * P.BoundsScaleMultiplier) / P.UnitScale;
 		P.Extent = FMath::Clamp(DerivedExtent, P.MinDerivedExtent, P.MaxDerivedExtent);
 		if (P.Extent != DerivedExtent)
 		{
-			UE_LOG(LogTemp, Warning,
-				TEXT("AGalaxyActor::SpawnStarSystemFromPool - derived extent %.3e clamped to %.3e; ")
-				TEXT("retune FGalaxyParams::StarSystemUnitScale or the clamp bounds."),
-				DerivedExtent, P.Extent);
+			UE_LOG(LogTemp, Warning, TEXT("AGalaxyActor::SpawnStarSystemFromPool - derived extent %.3e clamped to %.3e; ") TEXT("retune FGalaxyParams::StarSystemUnitScale or the clamp bounds."), DerivedExtent, P.Extent);
 		}
 	}
 
 	// Rotation is seed-derived and parent-owned for now (folds into Generate in step E).
 	P.Rotation = FRandomStream(InNode->Data.Seed).GetUnitVector().Rotation();
 
-	// Typed re-init: sets Params, arms deferred placement (PendingNodeCenter =
-	// ParticlePos), hides, and runs the async init chain. FinalizeStarSystemPlacement
-	// positions/unhides once Ready, exactly as before.
+	// Typed re-init: sets Params, arms deferred placement (PendingNodeCenter = ParticlePos), hides, and runs the async init chain. FinalizeStarSystemPlacement positions/unhides once Ready, exactly as before.
 	System->ReInit(P, FTransform(ParticlePos));
 
-	UE_LOG(LogTemp, Log,
-		TEXT("AGalaxyActor::SpawnStarSystemFromPool - inert=%d particle=(%.1f,%.1f,%.1f) extent=%.2f unitScale(const)=%.4e derivedExtent=%.4e seed=%d (deferred)"),
-		PM->NumInert(AStarSystemActor::StaticClass()),
-		ParticlePos.X, ParticlePos.Y, ParticlePos.Z,
-		ParticleExtent, P.UnitScale, P.Extent, P.Seed);
+	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::SpawnStarSystemFromPool - inert=%d particle=(%.1f,%.1f,%.1f) extent=%.2f unitScale(const)=%.4e derivedExtent=%.4e seed=%d (deferred)"), PM->NumInert(AStarSystemActor::StaticClass()), ParticlePos.X, ParticlePos.Y, ParticlePos.Z, ParticleExtent, P.UnitScale, P.Extent, P.Seed);
 }
 
 void AGalaxyActor::FinalizeStarSystemPlacement(AStarSystemActor* System)
 {
 	SVO_GT_SCOPE("Galaxy::FinalizeStarSystemPlacement");
-	// Mirrors AUniverseActor::FinalizeGalaxyPlacement exactly.
-	// Called on the first tick after async init completes, so VirtualTraversal
-	// and CurrentFrameOfReferenceLocation are resolved for this frame.
+	// Mirrors AUniverseActor::FinalizeGalaxyPlacement exactly. Called on the first tick after async init completes, so VirtualTraversal and CurrentFrameOfReferenceLocation are resolved for this frame.
 
 	const FVector SpawnLoc = ComputeChildSpawnLocation(System->PendingNodeCenter, System->Params.UnitScale);
 	System->SetActorLocation(SpawnLoc);
 	System->LastFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
 	System->CurrentFrameOfReferenceLocation = CurrentFrameOfReferenceLocation;
 
-	// VT_initial = PlayerPos - SpawnLoc, so that:
-	//   Rendered pos = PlayerPos + (LocalPos - VT) = SpawnLoc + LocalPos
-	// matches the galaxy's particle sprite position.
+	// VT_initial = PlayerPos - SpawnLoc, so that: Rendered pos = PlayerPos + (LocalPos - VT) = SpawnLoc + LocalPos matches the galaxy's particle sprite position.
 	System->VirtualTraversal = CurrentFrameOfReferenceLocation - SpawnLoc;
-	// Seed the push threshold baseline too, mirroring FinalizeGalaxyPlacement,
-	// so the first tick doesn't fire a spurious full-delta push.
+
+	// Seed the push threshold baseline too, mirroring FinalizeGalaxyPlacement, so the first tick doesn't fire a spurious full-delta push.
 	System->LastPushedVirtualTraversal = System->VirtualTraversal;
 
 	System->SetActorHiddenInGame(false);
 	System->bPendingPlacement = false;
 
-	UE_LOG(LogTemp, Log,
-		TEXT("AGalaxyActor::FinalizeStarSystemPlacement — spawnLoc=(%.1f,%.1f,%.1f) VT=(%.1f,%.1f,%.1f)"),
-		SpawnLoc.X, SpawnLoc.Y, SpawnLoc.Z,
-		System->VirtualTraversal.X, System->VirtualTraversal.Y, System->VirtualTraversal.Z);
+	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::FinalizeStarSystemPlacement — spawnLoc=(%.1f,%.1f,%.1f) VT=(%.1f,%.1f,%.1f)"), SpawnLoc.X, SpawnLoc.Y, SpawnLoc.Z, System->VirtualTraversal.X, System->VirtualTraversal.Y, System->VirtualTraversal.Z);
 }
 
 void AGalaxyActor::ReturnStarSystemToPool(TSharedPtr<FOctreeNode> InNode)
@@ -758,27 +639,18 @@ void AGalaxyActor::ReturnStarSystemToPool(TSharedPtr<FOctreeNode> InNode)
 	AStarSystemActor* PoolSystem = WeakSystem.Get();
 	if (!PoolSystem) return;
 
-	// Abort signal for an in-flight async init chain — checked between
-	// phases and live (via GetLiveState) inside InitializeTier.
+	// Abort signal for an in-flight async init chain — checked between phases and live (via GetLiveState) inside InitializeTier.
 	PoolSystem->InitializationState = ELifecycleState::Pooling;
 
 	if (!PoolSystem->bInitInProgress.load())
 	{
-		// FAST PATH: no init chain in flight. Race-free on the GT — the
-		// flag is raised on the GT in Initialize() before dispatch.
+		// FAST PATH: no init chain in flight. Race-free on the GT — the flag is raised on the GT in Initialize() before dispatch.
 		PoolSystem->ResetForPool();
 		FinishStarSystemPoolReturn(WeakSystem);
 		return;
 	}
 
-	// DEFERRED RETURN: the init chain still owns the tier buffers — its
-	// generation writes are not covered by bUpdateInProgress, so
-	// ResetForPool would free live arrays under the workers. We also
-	// cannot wait on the GAME THREAD: the chain rendezvouses with the GT
-	// (component spawns), so a GT spin deadlocks. Wait it out on a worker,
-	// then finish teardown through the normal GT path. The system cannot
-	// be re-spawned meanwhile — it re-enters the pool only at the
-	// end of FinishStarSystemPoolReturn.
+	// DEFERRED RETURN: the init chain still owns the tier buffers — its generation writes are not covered by bUpdateInProgress, so ResetForPool would free live arrays under the workers. We also cannot wait on the GAME THREAD: the chain rendezvouses with the GT (component spawns), so a GT spin deadlocks. Wait it out on a worker, then finish teardown through the normal GT path. The system cannot be re-spawned meanwhile — it re-enters the pool only at the end of FinishStarSystemPoolReturn.
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, WeakSystem]()
 		{
 			while (true)
@@ -808,18 +680,14 @@ void AGalaxyActor::FinishStarSystemPoolReturn(TWeakObjectPtr<AStarSystemActor> W
 			if (!AsyncSystem) return;
 			AsyncSystem->Octree->bIsResetting.store(true);
 			FPlatformProcess::Yield();
-			// Build the fresh tree in a LOCAL; the MEMBER swap happens on
-			// the game thread below — a background assign races GT readers
-			// of the TSharedPtr (BuildStreamingContext, spawn-scan snapshot).
-			// The old tree keeps bIsResetting raised and dies with its last
-			// shared ref.
+			// Build the fresh tree in a LOCAL; the MEMBER swap happens on the game thread below — a background assign races GT readers of the TSharedPtr (BuildStreamingContext, spawn-scan snapshot). The old tree keeps bIsResetting raised and dies with its last shared ref.
 			TSharedPtr<FOctree> FreshTree = MakeShared<FOctree>(AsyncSystem->Params.Extent);
 			AsyncTask(ENamedThreads::GameThread, [WeakThis, WeakSystem, FreshTree]()
 				{
 					AGalaxyActor* Self = WeakThis.Get();
 					AStarSystemActor* InnerSystem = WeakSystem.Get();
 					if (!InnerSystem) return;
-					InnerSystem->Octree = FreshTree;   // swap on game thread
+					InnerSystem->Octree = FreshTree;
 					if (Self) { if (UActorPoolManager* PM = Self->GetPoolManager()) PM->ReturnPrepared(InnerSystem); }
 				});
 		});
@@ -831,9 +699,7 @@ void AGalaxyActor::ReInit(const FGalaxyParams& InParams, const FTransform& InXfo
 {
 	bAutoInitializeOnBeginPlay = false;
 	Params = InParams;
-	// Deferred placement: the real world transform is sampled at finalize time from
-	// this frame's resolved VirtualTraversal, so stash the node center now and let
-	// FinalizeGalaxyPlacement position/unhide once async init reaches Ready.
+	// Deferred placement: the real world transform is sampled at finalize time from this frame's resolved VirtualTraversal, so stash the node center now and let FinalizeGalaxyPlacement position/unhide once async init reaches Ready.
 	PendingNodeCenter = InXform.GetLocation();
 	bPendingPlacement = true;
 	SetActorHiddenInGame(true);

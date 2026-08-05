@@ -1,5 +1,4 @@
-﻿// ProceduralSpaceActor.cpp
-#include "ProceduralSpaceActor.h"
+﻿#include "ProceduralSpaceActor.h"
 #include "Misc/ScopeExit.h"
 #include <Kismet/GameplayStatics.h>
 #include "FTierStreamingSystem.h"
@@ -26,7 +25,7 @@ bool AProceduralSpaceActor::GetPlayerLocation(const UWorld* World, FVector& OutL
 void AProceduralSpaceActor::SetSpeedScale(double NewSpeedScale)
 {
     const double Clamped = FMath::Max(NewSpeedScale, MinSpeedScale);
-    if (Clamped == SpeedScale) return;   // no-op (already at value, incl. pinned at floor)
+    if (Clamped == SpeedScale) return;
 
     const double Old = SpeedScale;
     SpeedScale = Clamped;
@@ -46,11 +45,7 @@ void AProceduralSpaceActor::Initialize()
 {
     InitializationState = ELifecycleState::Initializing;
 
-    // Raised HERE (before dispatch) rather than inside the task so a
-    // teardown that runs between dispatch and task start can never observe
-    // a false flag while the chain is pending. For pool-managed actors
-    // Initialize() runs on the GT, which is what makes the fast-path check
-    // in ReturnGalaxyToPool / ReturnStarSystemToPool race-free.
+    // Raised HERE (before dispatch) rather than inside the task so a teardown that runs between dispatch and task start can never observe a false flag while the chain is pending. For pool-managed actors Initialize() runs on the GT, which is what makes the fast-path check in ReturnGalaxyToPool / ReturnStarSystemToPool race-free.
     bInitInProgress.store(true);
 
     FVector PlayerPos;
