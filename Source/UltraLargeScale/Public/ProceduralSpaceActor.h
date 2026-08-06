@@ -311,7 +311,7 @@ public:
      *  trigger a child spawn. Squared internally before traversal.
      *  Lower values = spawn/despawn from further away. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")
-    double SpawnScreenSpaceThreshold = 0.02;
+    double SpawnScreenSpaceThreshold = 0.0018;
 
     /** When true, draws a debug box around each node that passes the threshold. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawn Scanning")

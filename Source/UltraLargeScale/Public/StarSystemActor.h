@@ -156,6 +156,11 @@ protected:
 	 *  the per-cell cull and the streaming gate. Mirrors
 	 *  AGalaxyActor::CellOverlapsVolume. */
 	bool CellOverlapsVolume(const FIntVector& Coord, int32 GridDepth) const;
+
+	/** Mid-tier asteroid-belt density at an octree-local point, in [0,1]. */
+	double MidBeltDensity(const FVector& LocalPos) const;
+	/** Small-tier dust density at an octree-local point, in [0, DustDensity]. */
+	double SmallDustDensity(const FVector& LocalPos) const;
 #pragma endregion
 
 #pragma region Diagnostics

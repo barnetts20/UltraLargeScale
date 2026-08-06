@@ -15,8 +15,6 @@ struct ULTRALARGESCALE_API FStarSystemParams : public FBaseParams
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Star")
-	double StarRadiusFraction = .001;
 	/** How much larger the star system's real span is than the star
 	 *  particle's real size. NOTE: MaxEntityScale already authors a full
 	 *  system DIAMETER (orbits included, Pluto-orbit class at the top of
@@ -72,6 +70,28 @@ struct ULTRALARGESCALE_API FStarSystemParams : public FBaseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planets|Orbits")
 	double MaxInclinationDegrees = 8.0;
 
+	/** Central star radius as a fraction of system Extent (octree units). World
+	 *  radius = Extent * this * UnitScale, matching the planet world-radius rule. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Star")
+	double StarRadiusFraction = 0.000001;
+
+	// --- Debris tiers (particles only; no bodies) ---
+	/** Mid tier = asteroid belt: a Gaussian ring in the disc plane. Center radius,
+	 *  radial sigma, and vertical (Z) sigma, all as fractions of Extent. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debris|Mid Belt")
+	double BeltRadiusFraction = 0.45;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debris|Mid Belt")
+	double BeltWidthFraction = 0.10;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debris|Mid Belt")
+	double BeltThicknessFraction = 0.015;
+
+	/** Small tier = low-concentration dust across the disc, out to OuterOrbitFraction.
+	 *  DustDensity is the per-slot fill probability; thickness is the vertical sigma. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debris|Small Dust")
+	double DustDensity = 0.05;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debris|Small Dust")
+	double DustThicknessFraction = 0.04;
+
 #pragma region Tier Configs
 	/** Shared FTierParams (same struct as Universe/Galaxy); Mid/Small are
 	 *  currently unused. */
@@ -109,11 +129,11 @@ struct ULTRALARGESCALE_API FStarSystemParams : public FBaseParams
 
 		MidTier.GridDepth = 4;
 		MidTier.NeighborhoodRadius = 1;
-		MidTier.SlotCapacity = 0;
+		MidTier.SlotCapacity = 256;
 
 		SmallTier.GridDepth = 7;
 		SmallTier.NeighborhoodRadius = 1;
-		SmallTier.SlotCapacity = 0;
+		SmallTier.SlotCapacity = 128;
 	}
 
 #pragma endregion

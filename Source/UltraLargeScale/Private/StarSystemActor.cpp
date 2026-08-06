@@ -383,8 +383,10 @@ void AStarSystemActor::LoadRuntimeAssets()
 	// a null NiagaraSystem; swap for NG_StarSystemMid / NG_StarSystemSmall later.
 	if (!StarSystemLargeCloud) StarSystemLargeCloud = LoadObject<UNiagaraSystem>(nullptr,
 		TEXT("/UltraLargeScale/StarSystem/NG_StarSystemLarge.NG_StarSystemLarge"));
-	if (!StarSystemMidCloud)   StarSystemMidCloud = StarSystemLargeCloud;
-	if (!StarSystemSmallCloud) StarSystemSmallCloud = StarSystemLargeCloud;
+	if (!StarSystemMidCloud)   StarSystemMidCloud = LoadObject<UNiagaraSystem>(nullptr,
+		TEXT("/UltraLargeScale/StarSystem/NG_StarSystemMid.NG_StarSystemMid"));
+	if (!StarSystemSmallCloud) StarSystemSmallCloud = LoadObject<UNiagaraSystem>(nullptr,
+		TEXT("/UltraLargeScale/StarSystem/NG_StarSystemSmall.NG_StarSystemSmall"));
 }
 
 void AStarSystemActor::BuildTierConfigs()
@@ -442,12 +444,12 @@ void AStarSystemActor::BuildTierConfigs()
 
 	// No ShouldSkipCell or OnBoundaryCross needed for the exhaustive large tier.
 
-	// Mid tier: zero-particle placeholder
+	// Mid tier: asteroid belt -- density-driven particles, no bodies.
 	MidTierConfig.TierName = TEXT("Mid");
 	MidTierConfig.TierIndex = 1;
 	MidTierConfig.GridDepth = Params.MidTier.GridDepth;
 	MidTierConfig.NeighborhoodRadius = Params.MidTier.NeighborhoodRadius;
-	MidTierConfig.SlotCapacity = 0; // Zero particles for now
+	MidTierConfig.SlotCapacity = Params.MidTier.SlotCapacity;
 	MidTierConfig.NiagaraAssets = { StarSystemMidCloud };
 	MidTierConfig.bWantRotations = { false };
 	MidTierConfig.OctreeInsertBufferIndex = -1; // Skip octree insertion
@@ -461,8 +463,38 @@ void AStarSystemActor::BuildTierConfigs()
 		return !CellOverlapsVolume(Coord, MidTierConfig.GridDepth);
 		};
 
-	MidTierConfig.GenerateCallback = [this](const FIntVector&, int32, TArray<FNiagaraParticleBuffer*>&) {
-		// No-op: zero-particle tier.
+	MidTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex,
+		TArray<FNiagaraParticleBuffer*>& Buffers)
+		{
+			FNiagaraParticleBuffer& Buf = *Buffers[0];
+			const int32 Cap = MidTierConfig.SlotCapacity;
+			const FVector CellCenter = GridCoordToCenter(Coord, MidTierConfig.GridDepth);
+			const double  CellHalf = GetGridCellExtent(MidTierConfig.GridDepth);
+
+			// Stable per-cell stream so belt asteroids don't flicker as cells re-stream.
+			FRandomStream Stream(int32(HashCombine(GetTypeHash(Coord), uint32(Params.Seed))));
+
+			int32 Written = 0;
+			for (int32 i = 0; i < Cap; i++)
+			{
+				const int32 Base = SlotIndex * Cap + Written;
+				if (Base >= Buf.Positions.Num()) break;
+
+				const FVector P = CellCenter + FVector(
+					Stream.FRandRange(-CellHalf, CellHalf),
+					Stream.FRandRange(-CellHalf, CellHalf),
+					Stream.FRandRange(-CellHalf, CellHalf));
+
+				if (Stream.FRand() >= MidBeltDensity(P)) continue;   // density rejection
+
+				const float B = Stream.FRandRange(0.7f, 1.1f);
+				Buf.Positions[Base] = P;
+				Buf.Extents[Base] = Stream.FRandRange(0.15f, 0.6f);   // octree-local; sprite min-angular clamp covers far viz
+				Buf.Colors[Base] = FLinearColor(0.42f * B, 0.38f * B, 0.34f * B, 1.f);
+				Written++;
+			}
+			if (SlotIndex < MidTierState.SlotCounts.Num())
+				MidTierState.SlotCounts[SlotIndex] = Written;
 		};
 
 	MidTierConfig.ComputeBounds = [this]() {
@@ -471,12 +503,12 @@ void AStarSystemActor::BuildTierConfigs()
 		return FBox(FVector(-HalfCell), FVector(HalfCell));
 		};
 
-	// Small tier: zero-particle placeholder
+	// Small tier: low-concentration dust -- density-driven particles, no bodies.
 	SmallTierConfig.TierName = TEXT("Small");
 	SmallTierConfig.TierIndex = 2;
 	SmallTierConfig.GridDepth = Params.SmallTier.GridDepth;
 	SmallTierConfig.NeighborhoodRadius = Params.SmallTier.NeighborhoodRadius;
-	SmallTierConfig.SlotCapacity = 0; // Zero particles for now
+	SmallTierConfig.SlotCapacity = Params.SmallTier.SlotCapacity;
 	SmallTierConfig.NiagaraAssets = { StarSystemSmallCloud };
 	SmallTierConfig.bWantRotations = { false };
 	SmallTierConfig.OctreeInsertBufferIndex = -1; // Skip octree insertion
@@ -486,8 +518,38 @@ void AStarSystemActor::BuildTierConfigs()
 		return !CellOverlapsVolume(Coord, SmallTierConfig.GridDepth);
 		};
 
-	SmallTierConfig.GenerateCallback = [this](const FIntVector&, int32, TArray<FNiagaraParticleBuffer*>&) {
-		// No-op: zero-particle tier.
+	SmallTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex,
+		TArray<FNiagaraParticleBuffer*>& Buffers)
+		{
+			FNiagaraParticleBuffer& Buf = *Buffers[0];
+			const int32 Cap = SmallTierConfig.SlotCapacity;
+			const FVector CellCenter = GridCoordToCenter(Coord, SmallTierConfig.GridDepth);
+			const double  CellHalf = GetGridCellExtent(SmallTierConfig.GridDepth);
+
+			// Stable per-cell stream (salted so dust doesn't correlate with the belt).
+			FRandomStream Stream(int32(HashCombine(GetTypeHash(Coord), uint32(Params.Seed)) ^ 0x5bd1e995));
+
+			int32 Written = 0;
+			for (int32 i = 0; i < Cap; i++)
+			{
+				const int32 Base = SlotIndex * Cap + Written;
+				if (Base >= Buf.Positions.Num()) break;
+
+				const FVector P = CellCenter + FVector(
+					Stream.FRandRange(-CellHalf, CellHalf),
+					Stream.FRandRange(-CellHalf, CellHalf),
+					Stream.FRandRange(-CellHalf, CellHalf));
+
+				if (Stream.FRand() >= SmallDustDensity(P)) continue;   // density rejection
+
+				const float B = Stream.FRandRange(0.6f, 1.0f);
+				Buf.Positions[Base] = P;
+				Buf.Extents[Base] = Stream.FRandRange(0.03f, 0.12f);   // octree-local; fine dust/rocks
+				Buf.Colors[Base] = FLinearColor(0.30f * B, 0.29f * B, 0.27f * B, 1.f);
+				Written++;
+			}
+			if (SlotIndex < SmallTierState.SlotCounts.Num())
+				SmallTierState.SlotCounts[SlotIndex] = Written;
 		};
 
 	SmallTierConfig.ComputeBounds = [this]() {
@@ -521,6 +583,26 @@ FTierStreamingContext AStarSystemActor::BuildStreamingContext() const
 #pragma endregion
 
 #pragma region Grid Coord Helpers
+double AStarSystemActor::MidBeltDensity(const FVector& P) const
+{
+	const double R = FMath::Sqrt(P.X * P.X + P.Y * P.Y);
+	const double BeltR = Params.Extent * Params.BeltRadiusFraction;
+	const double BeltW = FMath::Max(1.0, Params.Extent * Params.BeltWidthFraction);
+	const double DiscZ = FMath::Max(1.0, Params.Extent * Params.BeltThicknessFraction);
+	const double Radial = FMath::Exp(-FMath::Square((R - BeltR) / BeltW));
+	const double Vert = FMath::Exp(-FMath::Square(P.Z / DiscZ));
+	return Radial * Vert;
+}
+
+double AStarSystemActor::SmallDustDensity(const FVector& P) const
+{
+	const double R = FMath::Sqrt(P.X * P.X + P.Y * P.Y);
+	if (R > Params.Extent * Params.OuterOrbitFraction) return 0.0;
+	const double DiscZ = FMath::Max(1.0, Params.Extent * Params.DustThicknessFraction);
+	const double Vert = FMath::Exp(-FMath::Square(P.Z / DiscZ));
+	return Params.DustDensity * Vert;
+}
+
 bool AStarSystemActor::CellOverlapsVolume(const FIntVector& Coord, int32 GridDepth) const
 {
 	const FVector Center = GridCoordToCenter(Coord, GridDepth);
