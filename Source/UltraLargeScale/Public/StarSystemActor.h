@@ -75,6 +75,23 @@ public:
 	void ReInit(const FStarSystemParams& InParams, const FTransform& InXform);
 #pragma endregion
 
+#pragma region Central Star
+	/** Body class the star proxy wraps. Defaults to AStarActor (renders with the C++
+	 *  default mesh + material); point at a BP_Star subclass to override the look. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Star")
+	TSubclassOf<AActor> StarBodyClass;
+
+	UPROPERTY()
+	TWeakObjectPtr<AActor> CentralStar;
+
+	bool bStarSpawned = false;
+
+	/** Acquire + place the central star. Game thread, once, after placement. */
+	void SpawnCentralStar();
+	/** Destroy the central star (owned directly by the system; not pooled). */
+	void DestroyCentralStar();
+#pragma endregion
+
 protected:
 #pragma region Params Accessors (pure virtual implementations)
 	virtual double GetUnitScale() const override { return Params.UnitScale; }

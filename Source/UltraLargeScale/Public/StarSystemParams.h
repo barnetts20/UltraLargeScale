@@ -15,6 +15,8 @@ struct ULTRALARGESCALE_API FStarSystemParams : public FBaseParams
 {
 	GENERATED_BODY()
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Star")
+	double StarRadiusFraction = .001;
 	/** How much larger the star system's real span is than the star
 	 *  particle's real size. NOTE: MaxEntityScale already authors a full
 	 *  system DIAMETER (orbits included, Pluto-orbit class at the top of

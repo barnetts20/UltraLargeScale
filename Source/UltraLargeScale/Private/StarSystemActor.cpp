@@ -8,6 +8,7 @@
 #include "UltraLargeScale.h"
 #include "GalaxyActor.h"
 #include "ParallaxProxyActor.h"
+#include "StarActor.h"
 #include "ParallaxStaticMeshActor.h"
 #include "FTierStreamingSystem.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
@@ -27,6 +28,8 @@ AStarSystemActor::AStarSystemActor()
 	// Clone NG_GalaxyLarge/Mid/Small into the StarSystem folder and rename.
 	// Niagara cloud systems load lazily in BuildTierConfigs() (runtime), NOT here:
 	// loading assets during CDO construction runs before Niagara is ready and crashes.
+
+	StarBodyClass = AStarActor::StaticClass();
 
 	Octree = MakeShared<FOctree>(Params.Extent);
 }
@@ -76,6 +79,11 @@ void AStarSystemActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 	SpawnedPlanets.Empty();
 
+	// Destroy the central star (real teardown).
+	if (AActor* Star = CentralStar.Get(); Star && IsValid(Star)) Star->Destroy();
+	CentralStar = nullptr;
+	bStarSpawned = false;
+
 	// Drain any in-flight pushes before destroying the components they may touch.
 	for (FParticleTierState* Tier : { &LargeTierState, &MidTierState, &SmallTierState })
 		FTierStreamingSystem::BeginShutdownDrain(*Tier);
@@ -116,6 +124,8 @@ void AStarSystemActor::ResetForPool()
 		for (const TSharedPtr<FOctreeNode>& Node : LiveNodes)
 			ReturnPlanetToPool(Node);
 	}
+
+	DestroyCentralStar();
 
 	// DRAIN BEFORE FREE - mirrors AGalaxyActor::ResetForPool. An async
 	// boundary-cross task may still be writing this tier's buffers; bar new
@@ -609,6 +619,13 @@ void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPo
 		if (auto* Proxy = Cast<AParallaxProxyActor>(Pair.Value.Get()))
 			Proxy->TickParallax(DeltaTime, InPlayerPos, ActiveSpeedScale);
 
+	// Central star: spawn once (GT) after the system is placed + ready, then drive its
+	// parallax wrapper every frame exactly like a planet proxy.
+	if (!bStarSpawned && InitializationState == ELifecycleState::Ready && !bPendingPlacement)
+		SpawnCentralStar();
+	if (AParallaxProxyActor* Star = Cast<AParallaxProxyActor>(CentralStar.Get()))
+		Star->TickParallax(DeltaTime, InPlayerPos, ActiveSpeedScale);
+
 	// Planet spawn scan
 	// VirtualTraversal is resolved for this frame; process any pending
 	// octree query results to fire SpawnPlanetFromPool / ReturnPlanetToPool.
@@ -625,6 +642,48 @@ void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPo
 			VirtualTraversal.X, VirtualTraversal.Y, VirtualTraversal.Z,
 			PlanetPositions.Num(), SpawnedPlanets.Num());
 	}
+}
+#pragma endregion
+
+#pragma region Central Star
+void AStarSystemActor::SpawnCentralStar()
+{
+	SVO_GT_SCOPE("StarSystem::SpawnCentralStar");
+	UWorld* World = GetWorld();
+	if (!World || !StarBodyClass) return;
+
+	// The star rides the SAME parallax wrapper the planets use, so its motion is
+	// identical - the only differences are that this proxy is spawned directly (not
+	// pooled) and never despawns. Spawn location + VT seed are the planet particle
+	// projection applied to the system center (octree-local origin).
+	const FVector SpawnLoc = ComputeChildSpawnLocation(FVector::ZeroVector, 1.0);
+	const FVector InitialVT = CurrentFrameOfReferenceLocation - SpawnLoc;
+	const double WorldRadius = double(Params.Extent) * Params.StarRadiusFraction * Params.UnitScale;
+
+	FActorSpawnParameters SP;
+	SP.Owner = this;
+	SP.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AParallaxProxyActor* Proxy = World->SpawnActor<AParallaxProxyActor>(
+		AParallaxProxyActor::StaticClass(), SpawnLoc, FRotator::ZeroRotator, SP);
+	if (!Proxy) return;
+
+	// Wraps StarBodyClass at unit scale 1 and seeds VT. The proxy scales the body via
+	// SetActorScale3D(WorldRadius) - correct for a unit-radius star mesh.
+	Proxy->ReInit(StarBodyClass, WorldRadius, SpawnLoc, InitialVT);
+	CentralStar = Proxy;
+	bStarSpawned = true;
+
+	UE_LOG(LogTemp, Log,
+		TEXT("AStarSystemActor::SpawnCentralStar - worldRadius=%.1f at (%.1f,%.1f,%.1f) seed=%d"),
+		WorldRadius, SpawnLoc.X, SpawnLoc.Y, SpawnLoc.Z, Params.Seed);
+}
+
+void AStarSystemActor::DestroyCentralStar()
+{
+	if (AActor* Star = CentralStar.Get(); Star && IsValid(Star))
+		Star->Destroy();
+	CentralStar = nullptr;
+	bStarSpawned = false;
 }
 #pragma endregion
 
