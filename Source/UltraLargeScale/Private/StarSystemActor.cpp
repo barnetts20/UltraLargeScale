@@ -9,6 +9,7 @@
 #include "GalaxyActor.h"
 #include "ParallaxProxyActor.h"
 #include "StarActor.h"
+#include "PooledActor.h"
 #include "ParallaxStaticMeshActor.h"
 #include "FTierStreamingSystem.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
@@ -381,12 +382,9 @@ void AStarSystemActor::LoadRuntimeAssets()
 	// thread-safe, so the Niagara systems BuildTierConfigs reads must load here.
 	// Mid/Small are placeholders sharing the Large asset so InitializeTier never sees
 	// a null NiagaraSystem; swap for NG_StarSystemMid / NG_StarSystemSmall later.
-	if (!StarSystemLargeCloud) StarSystemLargeCloud = LoadObject<UNiagaraSystem>(nullptr,
-		TEXT("/UltraLargeScale/StarSystem/NG_StarSystemLarge.NG_StarSystemLarge"));
-	if (!StarSystemMidCloud)   StarSystemMidCloud = LoadObject<UNiagaraSystem>(nullptr,
-		TEXT("/UltraLargeScale/StarSystem/NG_StarSystemMid.NG_StarSystemMid"));
-	if (!StarSystemSmallCloud) StarSystemSmallCloud = LoadObject<UNiagaraSystem>(nullptr,
-		TEXT("/UltraLargeScale/StarSystem/NG_StarSystemSmall.NG_StarSystemSmall"));
+	if (!StarSystemLargeCloud) StarSystemLargeCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/StarSystem/NG_StarSystemLarge.NG_StarSystemLarge"));
+	if (!StarSystemMidCloud)   StarSystemMidCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/StarSystem/NG_StarSystemMid.NG_StarSystemMid"));
+	if (!StarSystemSmallCloud) StarSystemSmallCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/StarSystem/NG_StarSystemSmall.NG_StarSystemSmall"));
 }
 
 void AStarSystemActor::BuildTierConfigs()
@@ -697,16 +695,34 @@ void AStarSystemActor::TickFromParent(float DeltaTime, const FVector& InPlayerPo
 	// Each planet's world position is recomputed from the current VT every
 	// frame so it stays locked to its parallax-correct location.
 	const double ActiveSpeedScale = GetEffectiveSpeedScale();
-	for (auto& Pair : SpawnedPlanets)
-		if (auto* Proxy = Cast<AParallaxProxyActor>(Pair.Value.Get()))
-			Proxy->TickParallax(DeltaTime, InPlayerPos, ActiveSpeedScale);
 
 	// Central star: spawn once (GT) after the system is placed + ready, then drive its
-	// parallax wrapper every frame exactly like a planet proxy.
+	// parallax wrapper FIRST, so we can hand its resolved world position to the planets.
 	if (!bStarSpawned && InitializationState == ELifecycleState::Ready && !bPendingPlacement)
 		SpawnCentralStar();
+
+	FVector StarWorldPos = FVector::ZeroVector;
+	bool bHaveStarPos = false;
 	if (AParallaxProxyActor* Star = Cast<AParallaxProxyActor>(CentralStar.Get()))
+	{
 		Star->TickParallax(DeltaTime, InPlayerPos, ActiveSpeedScale);
+		if (AActor* StarBody = Star->Wrapped)
+		{
+			StarWorldPos = StarBody->GetActorLocation();
+			bHaveStarPos = true;
+		}
+	}
+
+	// Drive each planet's parallax, then hand it the star's world position so its
+	// atmosphere can orient its light/raymarch toward the star.
+	for (auto& Pair : SpawnedPlanets)
+		if (auto* Proxy = Cast<AParallaxProxyActor>(Pair.Value.Get()))
+		{
+			Proxy->TickParallax(DeltaTime, InPlayerPos, ActiveSpeedScale);
+			if (bHaveStarPos)
+				if (IStarLit* Lit = Cast<IStarLit>(Proxy->Wrapped))
+					Lit->SetStarWorldPosition(StarWorldPos);
+		}
 
 	// Planet spawn scan
 	// VirtualTraversal is resolved for this frame; process any pending

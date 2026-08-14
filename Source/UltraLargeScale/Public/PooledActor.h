@@ -54,3 +54,29 @@ public:
      *  generator/tier state, so no live association leaks into an inert instance. */
     virtual void OnReturnToPool() = 0;
 };
+
+/** Reflection stub for IStarLit. */
+UINTERFACE(MinimalAPI)
+class UStarLit : public UInterface
+{
+    GENERATED_BODY()
+};
+
+/**
+ * A proxy-carried body (e.g. a voxel planet) that orients its lighting toward its
+ * system's star. The star system pushes the star's parallax-resolved world position
+ * each frame; the body aims its atmosphere's directional light + raymarch at it.
+ *
+ * NOTE: this interface exists only so the star system (ULTRALARGESCALE) can call into
+ * a planet (VOXELPLUGIN) across the module boundary. Once the actor modules are merged
+ * it can be deleted and replaced with a direct Cast<APlanetActor>. Parked here rather
+ * than in its own file precisely because it's temporary.
+ */
+class ULTRALARGESCALE_API IStarLit
+{
+    GENERATED_BODY()
+
+public:
+    /** Current world-space position of the system's star, already parallax-resolved. */
+    virtual void SetStarWorldPosition(const FVector& StarWorldPos) = 0;
+};
