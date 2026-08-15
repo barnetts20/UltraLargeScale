@@ -28,9 +28,17 @@
 #define GALAXY_PI 3.14159265358979323846
 #define GALAXY_POW_EPSILON 1e-6
 #define GALAXY_MAX_ARMS 16
+#define GALAXY_MAX_OCTAVES 5
 
 struct GalaxyDensitySampler
 {
+    // --- NOISE VOLUME ---
+    // An AUTHORED tiling asset, not a generated one. That distinction is what keeps
+    // CPU parity possible: fixed data can be exported once and trilinear-sampled in
+    // C++, where a per-galaxy generated texture could not be.
+    Texture3D    NoiseTex;
+    SamplerState NoiseTexSampler;
+
     float BoundsFadeStart;
 
     float BulgeScaleRadius;
@@ -58,8 +66,27 @@ struct GalaxyDensitySampler
     float ArmWidthPerp;         // 0 = same-radius width (legacy), 1 = true perpendicular
     float ArmStartRadius;
     float ArmStartBlendWidth;
-    float ArmVerticalSquash;
-    float ArmVerticalSquashOuter;
+    float ArmHeightRatio;       // vertical half-thickness at centre, fraction of DiscRadius
+    float ArmHeightOuter;       // multiplier on that at the rim; >1 thickens outward
+    float ArmVerticalFalloff;   // 2 = rounded/Gaussian, 1 = peaky exponential, 4+ = boxy
+    float ArmProfileExponent;   // horizontal shape; >1 tightens the core, lengthens the tail
+    float ArmMergeSmooth;       // 0 = hard max between arms; ~0.1 blends crossings
+
+    // --- NOISE / DISTORTION ---
+    float3 NoiseOffset;         // per-galaxy variation; a texture has no seed
+    float NoiseAmount;          // multiplicative depth; >1 breaks arms into knots
+    float NoiseScale;           // base frequency in normalized units
+    float NoiseVerticalScale;   // extra z frequency; >1 flattens features into the plane
+    float NoiseOctaves;
+    float NoiseLacunarity;      // frequency step per octave; 2.0 is standard
+    float NoiseGain;            // amplitude step per octave; 0.5 is standard
+    float NoiseRidged;          // 0 = fbm (clouds), 1 = ridged (filaments and lanes)
+    float NoiseArmMask;         // how strongly arms are modulated
+    float NoiseDiscMask;        // how strongly the disc is modulated
+    float WarpAmount;           // positional warp, normalized units; small values only
+    float WarpScale;            // warp frequency
+    float4 NoiseChannelWeights; // channel mix across the asset's frequencies (RGBA)
+    float ArmVerticalCutoff;    // skip the arm loop below this vertical profile value
     float ArmRadialGrowth;
     float ArmDensityFalloffExponent;
     float ArmCoreThickness;
@@ -173,33 +200,125 @@ struct GalaxyDensitySampler
         }
     }
 
-    // --- DISTANCE TO NEAREST ARM CENTERLINE, PLUS THAT ARM'S DENSITY MULTIPLIER ---
-    // Returns (unsigned distance, per-arm density multiplier).
+    // --- VOLUME TEXTURE LOOKUP, [-1,1] ---
+    // SampleLevel, not Sample: inside a dynamic march loop the derivatives that drive
+    // mip selection are undefined. Channel weights let a Perlin-Worley style asset
+    // supply several frequencies from ONE fetch, which is how the texture path claws
+    // back the octaves that baking into a single channel would lose.
+    float SampleNoiseTex(float3 P)
+    {
+        float4 t = Texture3DSampleLevel(NoiseTex, NoiseTexSampler, P, 0);
+        float wsum = dot(NoiseChannelWeights, float4(1.0, 1.0, 1.0, 1.0));
+        float v = dot(NoiseChannelWeights, t) / max(abs(wsum), 1e-6);
+        return v * 2.0 - 1.0;
+    }
+
+    // --- FRACTAL SUM, [-1,1] ---
+    // NoiseRidged blends toward 1-2|n|, which turns smooth blobs into filaments --
+    // that is what produces dust lanes and feathering rather than lumps.
+    float FBm(float3 P, int InOctaves)
+    {
+        float lac = max(NoiseLacunarity, 1.0);
+        float gain = saturate(NoiseGain);
+        float ridge = saturate(NoiseRidged);
+
+        float sum = 0.0;
+        float amp = 1.0;
+        float norm = 0.0;
+
+        for (int o = 0; o < GALAXY_MAX_OCTAVES; o++)
+        {
+            if (o >= InOctaves) { break; }
+
+            // A texture has no seed, so octaves are decorrelated by offset.
+            float n = SampleNoiseTex(P + float3(17.3, 11.7, 23.1) * float(o));
+            n = lerp(n, 1.0 - 2.0 * abs(n), ridge);
+
+            sum += n * amp;
+            norm += amp;
+            P *= lac;
+            amp *= gain;
+        }
+
+        return sum / max(norm, 1e-6);
+    }
+
+    // --- ARM-FRAME REFERENCE TWIST ---
+    // The base spiral angle, without any per-arm phase. Rotating a sample position by
+    // -twist before evaluating noise makes noise features wind WITH the spiral and
+    // shear inward as the twist grows -- world-space noise instead cuts across arms
+    // at arbitrary angles and reads as melted rather than turbulent.
     //
-    // Each arm is searched explicitly rather than found by fmod. The fmod shortcut
-    // relies on arms being evenly spaced, which stops being true the moment
-    // ArmAsymPhase or ArmAsymPitch is nonzero -- it would then select the wrong arm
-    // and produce a discontinuity wherever the true nearest changes. The loop is
-    // cheap because u and uTerm are shared across arms.
-    float2 SampleArmSDF(float3 InNormPos, float rXY)
+    // u is clamped because twist diverges logarithmically at the centre; past ~6 the
+    // sincos below would lose the precision that keeps the frame continuous.
+    float ReferenceTwist(float rXY)
+    {
+        float discR = DiscRadius;
+        float u = min(log(discR / max(rXY, 1e-5)), 6.0);
+        float T = max(ArmPitchTightening, 0.0);
+
+        float pitchDeg = clamp(ArmPitchAngle, -89.0, 89.0);
+        float tanP = tan(radians(max(abs(pitchDeg), 1.0)));
+        float k0 = ((pitchDeg < 0.0) ? -1.0 : 1.0) / tanP;
+
+        return k0 * (u + 0.5 * T * u * u);
+    }
+
+    // --- POSITION IN THE UN-TWISTED, ANISOTROPICALLY SCALED NOISE FRAME ---
+    float3 NoiseFrame(float3 InPos, float rXY, float InScale)
+    {
+        float tw = ReferenceTwist(rXY);
+        float st, ct;
+        sincos(tw, st, ct);
+
+        float3 pn = float3( InPos.x * ct + InPos.y * st,
+                           -InPos.x * st + InPos.y * ct,
+                            InPos.z * max(NoiseVerticalScale, 1e-3));
+        return pn * max(InScale, 1e-6);
+    }
+
+    // --- POLYNOMIAL SMOOTH MAXIMUM ---
+    // No pow/exp, unlike SmoothMax3, because this runs once per arm per march step.
+    // k = 0 degenerates to a plain max.
+    float SmoothMaxPoly(float A, float B, float K)
+    {
+        if (K <= 0.0) { return max(A, B); }
+        float h = saturate(0.5 + 0.5 * (A - B) / K);
+        return lerp(B, A, h) + K * h * (1.0 - h);
+    }
+
+    // --- COMBINED HORIZONTAL ARM DENSITY ---
+    // Every arm contributes and the contributions are merged. This replaces a
+    // nearest-arm search, which was C0-DISCONTINUOUS: the distance it returned was
+    // continuous, but the WINNER'S attributes (ArmMult, pitch) flipped instantly
+    // along the locus where two arms are equidistant, so any ArmAsymDensity produced
+    // a hard density step -- worst exactly where arms cross.
+    //
+    // Affordable per-arm because the closest point on an arm lies at the SAME RADIUS
+    // as the query point, so the in-plane distance is just the chord subtended by the
+    // angular offset: 2 r sin(d/2). One sin, no cos/sqrt.
+    //
+    // Z IS DELIBERATELY NOT FOLDED IN. Folding z into the distance metric before the
+    // core/envelope remap makes the vertical profile a scaled copy of the horizontal
+    // one, so the gradient in z ends up much steeper -- soft sides, vertical faces.
+    // The vertical profile is applied separably in SampleLayers, matching how
+    // SampleDiscDensity already works.
+    float SampleArmHorizontal(float3 InNormPos, float rXY)
     {
         float discR = DiscRadius;
         float armStart = ArmStartRadius * discR;
-        if (rXY < 1e-6)  { return float2(10.0, 1.0); }
-        if (rXY > discR) { return float2(rXY - discR + 1.0, 1.0); }
+
+        if (rXY < 1e-6 || rXY > discR) { return 0.0; }
 
         // --- LOGARITHMIC SPIRAL ---
         // twistAngle(r) IS the arm's angular position; its derivative is the winding
         // rate. Constant pitch angle p means tan(p) = dr/(r dTheta), which integrates
         // to Theta = ln(r/R)/tan(p) -- a log spiral, which is what real galaxies
-        // approximately are. Winding rate dTheta/dr = 1/(r tan p) grows as 1/r toward
-        // the center, so the spiral tightens inward BY CONSTRUCTION. No separate
-        // core-twist term, no clamp: ln() is self-bounding where exp(C/r) was not.
+        // approximately are. Winding rate grows as 1/r toward the centre, so the
+        // spiral tightens inward BY CONSTRUCTION, and ln() is self-bounding.
         //
-        // ArmPitchTightening T lets the winding rate grow linearly in u on top of that:
+        // ArmPitchTightening T lets the winding rate grow linearly in u on top:
         //   k(u) = k0 (1 + T u)   ->   Theta(u) = k0 (u + T u^2 / 2)
-        // Monotonic for T >= 0. At r = 1e-5 (u = 11.5) Theta is ~43 rad at T=0 or
-        // ~325 rad at T=1 -- both comfortably inside float32.
         float u = log(discR / max(rXY, 1e-5));      // 0 at the rim, grows inward
         float T = max(ArmPitchTightening, 0.0);
         float uTerm = u + 0.5 * T * u * u;
@@ -211,90 +330,85 @@ struct GalaxyDensitySampler
 
         float theta = atan2(InNormPos.y, InNormPos.x);
 
-        // --- NEAREST-ARM SEARCH ---
-        // Reads the records PrepareArms() built; the inner body is now two
-        // multiply-adds, a wrap, and a compare. Only the winning index is tracked
-        // so the end-of-arm fade is evaluated once, after the loop, instead of on
-        // every improvement.
-        float bestAbs = 1e9;
-        float bestAng = 0.0;
-        float bestPitchFactor = 1.0;
-        int   bestIdx = 0;
+        // --- RADIAL PROGRESS: 0 AT INNER EDGE, 1 AT DISC RIM ---
+        float tRadial = saturate((rXY - armStart) / max(discR - armStart, 1e-6));
+        float growthFactor = lerp(1.0, ArmRadialGrowth, tRadial);
+        float core = max(ArmCoreThickness * growthFactor, 0.0);
+        float envelope = max(ArmEnvelopeThickness * growthFactor, core + 1e-6);
+
+        float blendWidth = max(ArmStartBlendWidth, 1e-6);
+        float fadeW = max(0.2 * discR, 1e-6);
+        float mergeK = max(ArmMergeSmooth, 0.0);
+
+        float acc = 0.0;
 
         for (int i = 0; i < GALAXY_MAX_ARMS; i++)
         {
             if (i >= ArmN) { break; }
 
             float4 a = ArmData[i];
-
-            float twistI = k0 * a.x * uTerm + a.y;
+            float ki = k0 * a.x;
 
             // Signed angular offset from this arm, wrapped to [-PI, PI]. Wrapping to
             // +/-PI rather than +/-armSpacing/2 is what makes uneven spacing safe.
-            float d = WrapPi(theta - twistI);
-            float ad = abs(d);
+            float d = WrapPi(theta - (ki * uTerm + a.y));
 
-            if (ad < bestAbs)
+            // --- CHORD AT CONSTANT RADIUS ---
+            float xyDist = 2.0 * rXY * abs(sin(0.5 * d));
+
+            // --- SAME-RADIUS DISTANCE -> TRUE PERPENDICULAR DISTANCE ---
+            // The chord is purely tangential; the spiral tangent makes angle p with
+            // that direction, so true perpendicular distance is xyDist / sqrt(1+k^2).
+            // Without this, arm width is inflated by 1/sin(p), and since p varies with
+            // radius when T > 0 the arms read inconsistently thick along their length.
+            float kLocal = ki * uRate;
+            float dist = xyDist * lerp(1.0, rsqrt(1.0 + kLocal * kLocal), saturate(ArmWidthPerp));
+
+            // --- FADE IN FROM ARM START RADIUS ---
+            if (rXY < armStart)
             {
-                bestAbs = ad;
-                bestAng = d;
-                bestPitchFactor = a.x;
-                bestIdx = i;
+                dist += (armStart - rXY);
             }
+            else if (rXY < armStart + blendWidth)
+            {
+                float blend = (rXY - armStart) / blendWidth;
+                float smoothB = blend * blend * (3.0 - 2.0 * blend);
+                dist = lerp(dist + blendWidth, dist, smoothB);
+            }
+
+            // --- CORE / ENVELOPE REMAP ---
+            float w = 0.0;
+            if (dist <= core)
+            {
+                w = 1.0;
+            }
+            else if (dist < envelope)
+            {
+                float t = (dist - core) / (envelope - core);
+                w = 1.0 - t * t * (3.0 - 2.0 * t);
+            }
+
+            // --- PER-ARM STRENGTH, AND ARMS THAT PETER OUT EARLY ---
+            float mult = a.z;
+            if (rXY > a.w - fadeW)
+            {
+                float tf = saturate((rXY - (a.w - fadeW)) / fadeW);
+                mult *= 1.0 - tf * tf * (3.0 - 2.0 * tf);
+            }
+
+            acc = SmoothMaxPoly(acc, w * max(mult, 0.0), mergeK);
         }
 
-        float bestK = k0 * bestPitchFactor * uRate;
+        // --- HORIZONTAL SHAPE ---
+        // ArmProfileExponent > 1 pulls density toward the centreline and lengthens
+        // the tail, removing the flat-topped plateau the bare remap produces once
+        // ArmRadialGrowth widens the core.
+        acc = PowSafe(acc, max(ArmProfileExponent, GALAXY_POW_EPSILON));
 
-        // --- PER-ARM STRENGTH, AND ARMS THAT PETER OUT EARLY ---
-        float4 best = ArmData[bestIdx];
-        float bestMult = best.z;
-        float fadeW = max(0.2 * discR, 1e-6);
-        if (rXY > best.w - fadeW)
-        {
-            float tf = saturate((rXY - (best.w - fadeW)) / fadeW);
-            bestMult *= 1.0 - tf * tf * (3.0 - 2.0 * tf);
-        }
-        bestMult = max(bestMult, 0.0);
-
-        // --- CLOSEST POINT ON THE WINNING ARM AT THIS RADIUS ---
-        float armTheta = theta - bestAng;
-        float armX = rXY * cos(armTheta);
-        float armY = rXY * sin(armTheta);
-
-        float dx = InNormPos.x - armX;
-        float dy = InNormPos.y - armY;
-        float xyDist = sqrt(dx * dx + dy * dy);
-
-        // --- SAME-RADIUS DISTANCE -> TRUE PERPENDICULAR DISTANCE ---
-        // xyDist measures along the circle of constant radius, which is purely
-        // tangential. The spiral's tangent makes angle p with that direction, so the
-        // true perpendicular distance is xyDist * sin(p) = xyDist / sqrt(1 + k^2).
-        // Without this, arm width is inflated by 1/sin(p) -- and since p varies with
-        // radius whenever T > 0, the arms read inconsistently thick along their length.
-        xyDist *= lerp(1.0, rsqrt(1.0 + bestK * bestK), saturate(ArmWidthPerp));
-
-        // --- RADIAL PROGRESS: 0 AT INNER EDGE, 1 AT DISC RIM ---
-        float tRadial = saturate((rXY - armStart) / max(discR - armStart, 1e-6));
-
-        float squash = lerp(ArmVerticalSquash, ArmVerticalSquashOuter, tRadial);
-        float scaledZ = InNormPos.z * squash;
-
-        float dist = sqrt(xyDist * xyDist + scaledZ * scaledZ);
-
-        // --- FADE IN FROM ARM START RADIUS ---
-        float blendWidth = max(ArmStartBlendWidth, 1e-6);
-        if (rXY < armStart)
-        {
-            dist += (armStart - rXY);
-        }
-        else if (rXY < armStart + blendWidth)
-        {
-            float blend = (rXY - armStart) / blendWidth;
-            float smoothB = blend * blend * (3.0 - 2.0 * blend);
-            dist = lerp(dist + blendWidth, dist, smoothB);
-        }
-
-        return float2(dist, bestMult);
+        // Peak density drops as the arm widens (mass conservation).
+        float densityScale = pow(max(growthFactor, GALAXY_POW_EPSILON),
+                                 ArmDensityFalloffExponent);
+        return acc * (ArmPeakDensity / max(densityScale, 1e-6));
     }
 
     // --- HERNQUIST BULGE IN OBLATE COORDINATES ---
@@ -373,8 +487,30 @@ struct GalaxyDensitySampler
         float py = InNormPos.y;
         float pz = InNormPos.z;
 
-        float rXY = sqrt(px * px + py * py);
         float discR = DiscRadius;
+
+        // --- POSITIONAL WARP ---
+        // Bends the geometry itself. Applied to the gaseous layers only -- the bulge
+        // and halo are pressure-supported and smooth, so warping them just makes them
+        // wobble. Three offset lookups rather than three FBm calls: warp wants one
+        // low frequency, not a spectrum.
+        float3 gasPos = InNormPos;
+        if (WarpAmount > 0.0)
+        {
+            float rW = max(sqrt(InNormPos.x * InNormPos.x + InNormPos.y * InNormPos.y), 1e-5);
+            float3 wf = NoiseFrame(InNormPos, rW, WarpScale) + NoiseOffset;
+
+            // Three decorrelated channels from ONE fetch -- warp wants a vector, and
+            // RGB supplies one directly.
+            float3 wv = Texture3DSampleLevel(NoiseTex, NoiseTexSampler, wf, 0).rgb * 2.0 - 1.0;
+            gasPos += wv * WarpAmount;
+        }
+
+        px = gasPos.x;
+        py = gasPos.y;
+        pz = gasPos.z;
+
+        float rXY = sqrt(px * px + py * py);
         float rn = rXY / max(discR, 1e-6);
         float theta = atan2(py, px);
 
@@ -389,43 +525,62 @@ struct GalaxyDensitySampler
         // Very common in real galaxies; one side of the disc is simply denser.
         float lopsided = max(1.0 + DiscLopsidedAmount * cos(theta - DiscLopsidedPhase), 0.0);
 
-        // --- ARMS: SDF DISTANCE -> CORE/ENVELOPE REMAP ---
-        // Skipped entirely when the arm layer is off. The nearest-arm search is the
-        // most expensive thing in the field, so this makes debug isolation of the
-        // other layers cheap rather than merely correct.
+        // --- ARMS ---
+        // Skipped entirely when the arm layer is off. The arm merge is the most
+        // expensive thing in the field, so this makes debug isolation of the other
+        // layers cheap rather than merely correct.
         float ArmDensity = 0.0;
         if (LayerScaleArm > 0.0)
         {
-            float2 armResult = SampleArmSDF(discPos, rXY);
-            float ArmDist = armResult.x;
-            float ArmMult = armResult.y;
-
             float armStart = ArmStartRadius * discR;
             float tRadialArm = saturate((rXY - armStart) / max(discR - armStart, 1e-6));
 
-            float growthFactor = lerp(1.0, ArmRadialGrowth, tRadialArm);
-            float core = max(ArmCoreThickness * growthFactor, 0.0);
-            float envelope = max(ArmEnvelopeThickness * growthFactor, core + 1e-6);
+            // --- VERTICAL PROFILE, INDEPENDENT OF THE HORIZONTAL ONE ---
+            // Same separable form as SampleDiscDensity. ArmVerticalFalloff = 2 gives a
+            // Gaussian-like round cross-section; 1 is a peaky exponential; 4+ reads
+            // boxy. Thickness grows toward the rim via ArmHeightOuter and picks up
+            // DiscFlare so arms stay inside the disc they live in.
+            float armH = discR * max(ArmHeightRatio, 1e-6)
+                       * lerp(1.0, max(ArmHeightOuter, 1e-6), tRadialArm)
+                       * (1.0 + max(DiscFlare, 0.0) * saturate(rXY / max(discR, 1e-6)));
 
-            float densityScale = pow(max(growthFactor, GALAXY_POW_EPSILON),
-                                     ArmDensityFalloffExponent);
-            float peakDensity = ArmPeakDensity / max(densityScale, 1e-6);
+            float zn = abs(discPos.z) / armH;
+            float vExpArm = max(ArmVerticalFalloff, 0.1);
+            float verticalProfile = exp(-pow(max(zn, GALAXY_POW_EPSILON), vExpArm));
 
-            if (ArmDist <= core)
+            // --- VERTICAL GATE ---
+            // The arm merge loop is the single most expensive thing in the field, and
+            // it was previously running at every step inside the disc radius --
+            // including the large majority of samples far off the plane, where the
+            // vertical profile annihilates the result anyway. Bail before the loop,
+            // not after.
+            if (verticalProfile > max(ArmVerticalCutoff, 0.0))
             {
-                ArmDensity = peakDensity;
+                ArmDensity = SampleArmHorizontal(discPos, rXY) * verticalProfile * lopsided;
             }
-            else if (ArmDist < envelope)
-            {
-                float t = (ArmDist - core) / (envelope - core);
-                float smoothT = t * t * (3.0 - 2.0 * t);
-                ArmDensity = peakDensity * (1.0 - smoothT);
-            }
-            ArmDensity *= ArmMult * lopsided;
         }
 
         float DiscDensity  = SampleDiscDensity(rXY, absZ) * lopsided;
         float BulgeDensity = SampleBulgeDensity(InNormPos);
+
+        // --- MULTIPLICATIVE MODULATION ---
+        // What actually makes the field read as gas: real arms are chains of star
+        // forming knots, not smooth ribbons. NoiseAmount above 1 drives the modulator
+        // negative in places, which is clamped to zero and breaks arms apart.
+        //
+        // Gated on there being something to modulate. Most of the volume is empty, so
+        // this skips the octave loop for the majority of march steps -- the same
+        // early-out structure the universe layer will need.
+        if (NoiseAmount > 0.0 && (ArmDensity + DiscDensity) > 1e-4)
+        {
+            int oct = (int)clamp(NoiseOctaves, 1.0, (float)GALAXY_MAX_OCTAVES);
+            float3 nf = NoiseFrame(gasPos, max(rXY, 1e-5), NoiseScale) + NoiseOffset;
+            float n = FBm(nf, oct);
+
+            float modulator = 1.0 + NoiseAmount * n;
+            ArmDensity  *= max(lerp(1.0, modulator, saturate(NoiseArmMask)),  0.0);
+            DiscDensity *= max(lerp(1.0, modulator, saturate(NoiseDiscMask)), 0.0);
+        }
 
         // --- BACKGROUND HALO ---
         float BgDensity = 0.0;
@@ -644,8 +799,29 @@ gd.ArmPhaseOffset            = ArmPhaseOffset;
 gd.ArmWidthPerp              = ArmWidthPerp;
 gd.ArmStartRadius            = ArmStartRadius;
 gd.ArmStartBlendWidth        = 0;
-gd.ArmVerticalSquash         = ArmVerticalSquash;
-gd.ArmVerticalSquashOuter    = ArmVerticalSquashOuter;
+gd.ArmHeightRatio            = ArmHeightRatio;
+gd.ArmHeightOuter            = ArmHeightOuter;
+gd.ArmVerticalFalloff        = ArmVerticalFalloff;
+gd.ArmProfileExponent        = ArmProfileExponent;
+gd.ArmMergeSmooth            = ArmMergeSmooth;
+
+gd.NoiseOffset               = NoiseOffset;
+gd.NoiseAmount               = NoiseAmount;
+gd.NoiseScale                = NoiseScale;
+gd.NoiseVerticalScale        = NoiseVerticalScale;
+gd.NoiseOctaves              = NoiseOctaves;
+gd.NoiseLacunarity           = NoiseLacunarity;
+gd.NoiseGain                 = NoiseGain;
+gd.NoiseRidged               = NoiseRidged;
+gd.NoiseArmMask              = NoiseArmMask;
+gd.NoiseDiscMask             = NoiseDiscMask;
+gd.WarpAmount                = WarpAmount;
+gd.WarpScale                 = WarpScale;
+gd.NoiseChannelWeights       = NoiseChannelWeights;
+gd.ArmVerticalCutoff         = ArmVerticalCutoff;
+
+gd.NoiseTex                  = NoiseTex;
+gd.NoiseTexSampler           = NoiseTexSampler;
 gd.ArmRadialGrowth           = ArmRadialGrowth;
 gd.ArmDensityFalloffExponent = ArmDensityFalloffExponent;
 gd.ArmCoreThickness          = ArmCoreThickness;
