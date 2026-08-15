@@ -8,7 +8,7 @@
 //   - Guard every pow() base away from zero: HLSL does pow(x,y) = exp2(y*log2(x)),
 //     and log2(0) = -INF, which some compilers turn into NaN
 //   - Bound anything that can overflow float32 (exp overflows ~88 on GPU vs ~709
-//     for double on CPU) -- see GALAXY_MAX_TWIST_ANGLE
+//     for double on CPU)
 //   - No branch that exists on only one side
 //
 // SPACE: Sample() takes normalized galaxy space [-1,1], where 1.0 = Params.Extent.
@@ -17,23 +17,17 @@
 // NoisePower is NOT in this function. The old bake applied pow(d, NoisePower) in
 // SampleNoiseVolume while the particle path used raw density -- it is a render-side
 // shaping term with no CPU counterpart. Apply it AFTER Sample(), never inside.
+//
+// AHEAD OF C++, to port together:
+//   - logarithmic spiral by pitch angle, replacing ArmTwistStrength /
+//     ArmCoreTwistStrength / ArmCoreTwistRadius
+//   - BlendMode 2 (p-norm) vs the C++ log-sum-exp
+//   - per-arm asymmetry (ArmAsym*) and the nearest-arm search that requires
+//   - disc warp / flare / lopsidedness (DiscWarp*, DiscFlare, DiscLopsided*)
 
 #define GALAXY_PI 3.14159265358979323846
 #define GALAXY_POW_EPSILON 1e-6
-
-// exp(80) is finite in float32; exp(88) overflows. Stops an INF entering the
-// arithmetic before the angle clamp below.
-#define GALAXY_MAX_TWIST_EXP_ARG 80.0
-
-// Upper bound on |twistAngle| in radians. The core twist term is
-// -ArmCoreTwistStrength * exp(ArmCoreTwistRadius / r), which diverges as r -> 0:
-//   1. Overflow -- float32 goes INF ~8x further out in radius than double does
-//   2. Precision -- fmod(twistAngle, armSpacing) is meaningless once ULP(twistAngle)
-//      approaches armSpacing. At 512 the float32 ULP is 6.1e-5 rad, negligible vs PI.
-// With shipping defaults (Strength 8, Radius 0.2) this engages below
-// normalizedR ~= 0.048, at or inside ArmStartRadius (0.05), where arms have already
-// faded into the bulge. Arms stop winding further in rather than winding infinitely.
-#define GALAXY_MAX_TWIST_ANGLE 512.0
+#define GALAXY_MAX_ARMS 16
 
 struct GalaxyDensitySampler
 {
@@ -50,10 +44,18 @@ struct GalaxyDensitySampler
     float DiscRadialScaleLength;
     float DiscVerticalFalloff;
 
+    // --- DISC ASYMMETRY ---
+    float DiscFlare;            // 0 = constant scale height; >0 thickens toward the rim
+    float DiscWarpAmplitude;    // integral-sign vertical warp, in normalized z units
+    float DiscWarpPhase;        // radians; azimuth of the warp's rising node
+    float DiscLopsidedAmount;   // m=1 in-plane density mode; 0.2-0.4 is typical
+    float DiscLopsidedPhase;    // radians; azimuth of the dense side
+
     float ArmCount;
-    float ArmTwistStrength;
-    float ArmCoreTwistStrength;
-    float ArmCoreTwistRadius;
+    float ArmPitchAngle;        // degrees at the disc rim; sign sets chirality
+    float ArmPitchTightening;   // 0 = constant pitch (true log spiral); >0 tightens inward
+    float ArmPhaseOffset;       // radians; rotates the whole arm set
+    float ArmWidthPerp;         // 0 = same-radius width (legacy), 1 = true perpendicular
     float ArmStartRadius;
     float ArmStartBlendWidth;
     float ArmVerticalSquash;
@@ -63,6 +65,13 @@ struct GalaxyDensitySampler
     float ArmCoreThickness;
     float ArmEnvelopeThickness;
     float ArmPeakDensity;
+
+    // --- PER-ARM ASYMMETRY ---
+    float ArmAsymSeed;          // integer; changes which arm gets what
+    float ArmAsymPitch;         // fractional pitch spread between arms
+    float ArmAsymPhase;         // phase jitter, as a fraction of arm spacing
+    float ArmAsymDensity;       // strength spread between arms
+    float ArmAsymLength;        // fraction of disc radius an arm may end short by
 
     float BackgroundDensity;
     float BackgroundVerticalSquash;
@@ -93,6 +102,24 @@ struct GalaxyDensitySampler
         return (x > GALAXY_POW_EPSILON) ? pow(x, p) : 0.0;
     }
 
+    // --- INTEGER HASH, ONE float4 PER ARM INDEX ---
+    // uint arithmetic wraps identically in C++ and HLSL, so this is bit-exact
+    // across both -- no tolerance discussion needed when the port happens. This
+    // is the same primitive the universe layer will need for its noise field.
+    float4 ArmHash(int InIndex, int InSeed)
+    {
+        uint n = (uint)(InIndex * 73856093) ^ (uint)(InSeed * 19349663);
+        uint4 v;
+        v.x = n   * 1664525u + 1013904223u;
+        v.y = v.x * 1664525u + 1013904223u;
+        v.z = v.y * 1664525u + 1013904223u;
+        v.w = v.z * 1664525u + 1013904223u;
+        v ^= v >> 16u;
+        v *= 1664525u;
+        v ^= v >> 16u;
+        return float4(v) * (1.0 / 4294967296.0);
+    }
+
     // --- SMOOTH MAX OF THREE VALUES, STABILIZED LOG-SUM-EXP ---
     // Subtracting the running max keeps every exp() argument <= 0, so this
     // cannot overflow for any K.
@@ -105,47 +132,118 @@ struct GalaxyDensitySampler
         return M + log(ExpA + ExpB + ExpC) / K;
     }
 
-    // --- UNSIGNED DISTANCE FROM NEAREST SPIRAL ARM CENTERLINE ---
-    // Finds the closest arm point AT THE SAME RADIUS as the query point, which is
-    // what preserves spiral structure. Vertical distance is squashed so the arm
-    // cross-section reads round edge-on.
-    float SampleArmSDF(float3 InNormPos, float rXY)
+    // --- WRAP A SIGNED ANGLE INTO [-PI, PI] ---
+    float WrapPi(float InAngle)
+    {
+        float a = fmod(InAngle, 2.0 * GALAXY_PI);
+        if (a >  GALAXY_PI) { a -= 2.0 * GALAXY_PI; }
+        if (a < -GALAXY_PI) { a += 2.0 * GALAXY_PI; }
+        return a;
+    }
+
+    // --- DISTANCE TO NEAREST ARM CENTERLINE, PLUS THAT ARM'S DENSITY MULTIPLIER ---
+    // Returns (unsigned distance, per-arm density multiplier).
+    //
+    // Each arm is searched explicitly rather than found by fmod. The fmod shortcut
+    // relies on arms being evenly spaced, which stops being true the moment
+    // ArmAsymPhase or ArmAsymPitch is nonzero -- it would then select the wrong arm
+    // and produce a discontinuity wherever the true nearest changes. The loop is
+    // cheap because u and uTerm are shared across arms.
+    float2 SampleArmSDF(float3 InNormPos, float rXY)
     {
         float discR = DiscRadius;
         float armStart = ArmStartRadius * discR;
-        float N = max(ArmCount, 1.0);
+        int N = (int)clamp(ArmCount, 1.0, (float)GALAXY_MAX_ARMS);
 
-        if (rXY < 1e-6)  { return 10.0; }
-        if (rXY > discR) { return rXY - discR + 1.0; }
+        if (rXY < 1e-6)  { return float2(10.0, 1.0); }
+        if (rXY > discR) { return float2(rXY - discR + 1.0, 1.0); }
 
-        // --- UN-TWIST TO FIND ANGULAR OFFSET FROM NEAREST ARM ---
-        float normalizedR = rXY / discR;
-        float baseTwist = ArmTwistStrength * normalizedR;
+        // --- LOGARITHMIC SPIRAL ---
+        // twistAngle(r) IS the arm's angular position; its derivative is the winding
+        // rate. Constant pitch angle p means tan(p) = dr/(r dTheta), which integrates
+        // to Theta = ln(r/R)/tan(p) -- a log spiral, which is what real galaxies
+        // approximately are. Winding rate dTheta/dr = 1/(r tan p) grows as 1/r toward
+        // the center, so the spiral tightens inward BY CONSTRUCTION. No separate
+        // core-twist term, no clamp: ln() is self-bounding where exp(C/r) was not.
+        //
+        // ArmPitchTightening T lets the winding rate grow linearly in u on top of that:
+        //   k(u) = k0 (1 + T u)   ->   Theta(u) = k0 (u + T u^2 / 2)
+        // Monotonic for T >= 0. At r = 1e-5 (u = 11.5) Theta is ~43 rad at T=0 or
+        // ~325 rad at T=1 -- both comfortably inside float32.
+        float u = log(discR / max(rXY, 1e-5));      // 0 at the rim, grows inward
+        float T = max(ArmPitchTightening, 0.0);
+        float uTerm = u + 0.5 * T * u * u;
+        float uRate = 1.0 + T * u;
 
-        float expArg = min(ArmCoreTwistRadius / max(normalizedR, 1e-4),
-                           GALAXY_MAX_TWIST_EXP_ARG);
-        float coreBoost = ArmCoreTwistStrength * -exp(expArg);
-
-        float twistAngle = clamp(baseTwist + coreBoost,
-                                 -GALAXY_MAX_TWIST_ANGLE, GALAXY_MAX_TWIST_ANGLE);
+        float pitchDeg = clamp(ArmPitchAngle, -89.0, 89.0);
+        float tanP = tan(radians(max(abs(pitchDeg), 1.0)));
+        float k0 = ((pitchDeg < 0.0) ? -1.0 : 1.0) / tanP;
 
         float theta = atan2(InNormPos.y, InNormPos.x);
-        float untwistedTheta = theta - twistAngle;
+        float armSpacing = 2.0 * GALAXY_PI / float(N);
 
-        // --- ANGULAR DISTANCE TO NEAREST ARM ---
-        float armSpacing = 2.0 * GALAXY_PI / N;
-        float angDist = fmod(untwistedTheta, armSpacing);
-        if (angDist < 0.0)                { angDist += armSpacing; }
-        if (angDist > armSpacing * 0.5)   { angDist -= armSpacing; }
+        int seed = (int)ArmAsymSeed;
 
-        // --- CLOSEST POINT ON THE ARM AT THIS RADIUS ---
-        float armTheta = theta - angDist;
+        float bestAbs  = 1e9;
+        float bestAng  = 0.0;
+        float bestK    = k0 * uRate;
+        float bestMult = 1.0;
+
+        for (int i = 0; i < GALAXY_MAX_ARMS; i++)
+        {
+            if (i >= N) { break; }
+
+            float4 h = ArmHash(i, seed);
+
+            // --- THIS ARM'S OWN PITCH AND PHASE ---
+            float ki    = k0 * (1.0 + ArmAsymPitch * (2.0 * h.x - 1.0));
+            float phase = ArmPhaseOffset + float(i) * armSpacing
+                        + ArmAsymPhase * armSpacing * (2.0 * h.y - 1.0);
+
+            float twistI = ki * uTerm + phase;
+
+            // Signed angular offset from this arm, wrapped to [-PI, PI]. Wrapping to
+            // +/-PI rather than +/-armSpacing/2 is what makes uneven spacing safe.
+            float d = WrapPi(theta - twistI);
+            float ad = abs(d);
+
+            if (ad < bestAbs)
+            {
+                bestAbs = ad;
+                bestAng = d;
+                bestK   = ki * uRate;
+
+                // --- PER-ARM STRENGTH, AND ARMS THAT PETER OUT EARLY ---
+                float mult = 1.0 + ArmAsymDensity * (2.0 * h.z - 1.0);
+
+                float rEnd  = discR * (1.0 - ArmAsymLength * h.w);
+                float fadeW = max(0.2 * discR, 1e-6);
+                if (rXY > rEnd - fadeW)
+                {
+                    float tf = saturate((rXY - (rEnd - fadeW)) / fadeW);
+                    mult *= 1.0 - tf * tf * (3.0 - 2.0 * tf);
+                }
+
+                bestMult = max(mult, 0.0);
+            }
+        }
+
+        // --- CLOSEST POINT ON THE WINNING ARM AT THIS RADIUS ---
+        float armTheta = theta - bestAng;
         float armX = rXY * cos(armTheta);
         float armY = rXY * sin(armTheta);
 
         float dx = InNormPos.x - armX;
         float dy = InNormPos.y - armY;
         float xyDist = sqrt(dx * dx + dy * dy);
+
+        // --- SAME-RADIUS DISTANCE -> TRUE PERPENDICULAR DISTANCE ---
+        // xyDist measures along the circle of constant radius, which is purely
+        // tangential. The spiral's tangent makes angle p with that direction, so the
+        // true perpendicular distance is xyDist * sin(p) = xyDist / sqrt(1 + k^2).
+        // Without this, arm width is inflated by 1/sin(p) -- and since p varies with
+        // radius whenever T > 0, the arms read inconsistently thick along their length.
+        xyDist *= lerp(1.0, rsqrt(1.0 + bestK * bestK), saturate(ArmWidthPerp));
 
         // --- RADIAL PROGRESS: 0 AT INNER EDGE, 1 AT DISC RIM ---
         float tRadial = saturate((rXY - armStart) / max(discR - armStart, 1e-6));
@@ -168,7 +266,7 @@ struct GalaxyDensitySampler
             dist = lerp(dist + blendWidth, dist, smoothB);
         }
 
-        return dist;
+        return float2(dist, bestMult);
     }
 
     // --- HERNQUIST BULGE IN OBLATE COORDINATES ---
@@ -217,7 +315,12 @@ struct GalaxyDensitySampler
         if (DiscBaseDensity <= 0.0) { return 0.0; }
 
         float discR = DiscRadius;
-        float h = discR * max(DiscHeightRatio, 1e-6);
+        float rn = saturate(rXY / max(discR, 1e-6));
+
+        // --- FLARE ---
+        // Real discs thicken outward; a constant scale height is one of the strongest
+        // "machined" tells in an edge-on view.
+        float h = discR * max(DiscHeightRatio, 1e-6) * (1.0 + max(DiscFlare, 0.0) * rn);
         float scaleL = discR * max(DiscRadialScaleLength, 1e-6);
 
         if (rXY >= discR || absZ >= h) { return 0.0; }
@@ -243,12 +346,26 @@ struct GalaxyDensitySampler
         float pz = InNormPos.z;
 
         float rXY = sqrt(px * px + py * py);
-        float absZ = abs(pz);
+        float discR = DiscRadius;
+        float rn = rXY / max(discR, 1e-6);
+        float theta = atan2(py, px);
+
+        // --- DISC WARP: THE INTEGRAL-SIGN m=1 VERTICAL MODE ---
+        // Grows as r^2 so the inner disc and bulge stay put. Applied to arms and
+        // disc only -- the bulge and halo are pressure-supported and do not warp.
+        float warpZ = DiscWarpAmplitude * rn * rn * sin(theta - DiscWarpPhase);
+        float3 discPos = float3(px, py, pz - warpZ);
+        float absZ = abs(discPos.z);
+
+        // --- LOPSIDEDNESS: THE m=1 IN-PLANE MODE ---
+        // Very common in real galaxies; one side of the disc is simply denser.
+        float lopsided = max(1.0 + DiscLopsidedAmount * cos(theta - DiscLopsidedPhase), 0.0);
 
         // --- ARMS: SDF DISTANCE -> CORE/ENVELOPE REMAP ---
-        float ArmDist = SampleArmSDF(InNormPos, rXY);
+        float2 armResult = SampleArmSDF(discPos, rXY);
+        float ArmDist = armResult.x;
+        float ArmMult = armResult.y;
 
-        float discR = DiscRadius;
         float armStart = ArmStartRadius * discR;
         float tRadial = saturate((rXY - armStart) / max(discR - armStart, 1e-6));
 
@@ -271,8 +388,9 @@ struct GalaxyDensitySampler
             float smoothT = t * t * (3.0 - 2.0 * t);
             ArmDensity = peakDensity * (1.0 - smoothT);
         }
+        ArmDensity *= ArmMult * lopsided;
 
-        float DiscDensity  = SampleDiscDensity(rXY, absZ);
+        float DiscDensity  = SampleDiscDensity(rXY, absZ) * lopsided;
         float BulgeDensity = SampleBulgeDensity(InNormPos);
 
         // --- BACKGROUND HALO ---
@@ -473,20 +591,25 @@ gd.BulgePeakDensity          = BulgePeakDensity;
 gd.BulgeVerticalSquash       = BulgeVerticalSquash;
 gd.LayerScaleBulge           = LayerScaleBulge;
 
-
 gd.DiscRadius                = DiscRadius;
 gd.DiscHeightRatio           = DiscHeightRatio;
 gd.DiscBaseDensity           = DiscBaseDensity;
 gd.DiscRadialScaleLength     = DiscRadialScaleLength;
 gd.DiscVerticalFalloff       = DiscVerticalFalloff;
+gd.DiscFlare                 = 0;
+gd.DiscWarpAmplitude         = 0;
+gd.DiscWarpPhase             = 0;
+gd.DiscLopsidedAmount        = 0;
+gd.DiscLopsidedPhase         = 0;
 gd.LayerScaleDisc            = LayerScaleDisc;
 
 gd.ArmCount                  = ArmCount;
-gd.ArmTwistStrength          = ArmTwistStrength;
-gd.ArmCoreTwistStrength      = ArmCoreTwistStrength;
-gd.ArmCoreTwistRadius        = ArmCoreTwistRadius;
+gd.ArmPitchAngle             = ArmPitchAngle;
+gd.ArmPitchTightening        = ArmPitchTightening;
+gd.ArmPhaseOffset            = ArmPhaseOffset;
+gd.ArmWidthPerp              = ArmWidthPerp;
 gd.ArmStartRadius            = ArmStartRadius;
-gd.ArmStartBlendWidth        = ArmStartBlendWidth;
+gd.ArmStartBlendWidth        = 0;
 gd.ArmVerticalSquash         = ArmVerticalSquash;
 gd.ArmVerticalSquashOuter    = ArmVerticalSquashOuter;
 gd.ArmRadialGrowth           = ArmRadialGrowth;
@@ -494,6 +617,11 @@ gd.ArmDensityFalloffExponent = ArmDensityFalloffExponent;
 gd.ArmCoreThickness          = ArmCoreThickness;
 gd.ArmEnvelopeThickness      = ArmEnvelopeThickness;
 gd.ArmPeakDensity            = ArmPeakDensity;
+gd.ArmAsymSeed               = ArmAsymSeed;
+gd.ArmAsymPitch              = ArmAsymPitch;
+gd.ArmAsymPhase              = ArmAsymPhase;
+gd.ArmAsymDensity            = ArmAsymDensity;
+gd.ArmAsymLength             = ArmAsymLength;
 gd.LayerScaleArm             = LayerScaleArm;
 
 gd.BackgroundDensity         = BackgroundDensity;
@@ -513,8 +641,8 @@ return gd.RayMarch(
     CurPos,
     LocalCamVec,      // raw, not normalized -- the method handles it
     (int)MaxSteps,
-    .0015,            // InDensityScale -- WILL need recalibrating, see below
+    1,            // InDensityScale
     rand,             // InJitter; pass 0.0 to disable dither
-    2,                // InNoisePower
-    0                 // InDebugMode
+    1,                // InNoisePower
+    1                 // InDebugMode
 );
