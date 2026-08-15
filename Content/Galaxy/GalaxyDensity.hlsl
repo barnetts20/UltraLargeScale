@@ -73,6 +73,13 @@ struct GalaxyDensitySampler
     float ArmAsymDensity;       // strength spread between arms
     float ArmAsymLength;        // fraction of disc radius an arm may end short by
 
+    // --- PER-ARM RECORDS, FILLED ONCE BY PrepareArms() ---
+    // x = pitch factor (ki = k0 * x), y = phase, z = density multiplier,
+    // w = end radius. These are invariant along a ray, so hashing them per march
+    // step burned N hashes x MaxSteps per pixel for values that never changed.
+    int    ArmN;
+    float4 ArmData[GALAXY_MAX_ARMS];
+
     float BackgroundDensity;
     float BackgroundVerticalSquash;
     float BackgroundCutoffRadius;
@@ -133,12 +140,37 @@ struct GalaxyDensitySampler
     }
 
     // --- WRAP A SIGNED ANGLE INTO [-PI, PI] ---
+    // Branch-free: round-to-nearest beats fmod plus two compares, and this runs
+    // ArmN times per march step so it is squarely on the hot path.
     float WrapPi(float InAngle)
     {
-        float a = fmod(InAngle, 2.0 * GALAXY_PI);
-        if (a >  GALAXY_PI) { a -= 2.0 * GALAXY_PI; }
-        if (a < -GALAXY_PI) { a += 2.0 * GALAXY_PI; }
-        return a;
+        const float TwoPi = 2.0 * GALAXY_PI;
+        return InAngle - TwoPi * round(InAngle / TwoPi);
+    }
+
+    // --- HOIST PER-ARM CONSTANTS OUT OF THE MARCH ---
+    // Call once per pixel, before RayMarch. Every arm is filled unconditionally
+    // (not just the first ArmN) so no slot is ever read uninitialised; the cost
+    // is a handful of hashes once, against N x MaxSteps previously.
+    void PrepareArms()
+    {
+        ArmN = (int)clamp(ArmCount, 1.0, (float)GALAXY_MAX_ARMS);
+
+        float armSpacing = 2.0 * GALAXY_PI / float(ArmN);
+        float discR = DiscRadius;
+        int seed = (int)ArmAsymSeed;
+
+        for (int i = 0; i < GALAXY_MAX_ARMS; i++)
+        {
+            float4 h = ArmHash(i, seed);
+
+            ArmData[i] = float4(
+                1.0 + ArmAsymPitch * (2.0 * h.x - 1.0),
+                ArmPhaseOffset + float(i) * armSpacing
+                    + ArmAsymPhase * armSpacing * (2.0 * h.y - 1.0),
+                max(1.0 + ArmAsymDensity * (2.0 * h.z - 1.0), 0.0),
+                discR * (1.0 - ArmAsymLength * h.w));
+        }
     }
 
     // --- DISTANCE TO NEAREST ARM CENTERLINE, PLUS THAT ARM'S DENSITY MULTIPLIER ---
@@ -153,8 +185,6 @@ struct GalaxyDensitySampler
     {
         float discR = DiscRadius;
         float armStart = ArmStartRadius * discR;
-        int N = (int)clamp(ArmCount, 1.0, (float)GALAXY_MAX_ARMS);
-
         if (rXY < 1e-6)  { return float2(10.0, 1.0); }
         if (rXY > discR) { return float2(rXY - discR + 1.0, 1.0); }
 
@@ -180,27 +210,24 @@ struct GalaxyDensitySampler
         float k0 = ((pitchDeg < 0.0) ? -1.0 : 1.0) / tanP;
 
         float theta = atan2(InNormPos.y, InNormPos.x);
-        float armSpacing = 2.0 * GALAXY_PI / float(N);
 
-        int seed = (int)ArmAsymSeed;
-
-        float bestAbs  = 1e9;
-        float bestAng  = 0.0;
-        float bestK    = k0 * uRate;
-        float bestMult = 1.0;
+        // --- NEAREST-ARM SEARCH ---
+        // Reads the records PrepareArms() built; the inner body is now two
+        // multiply-adds, a wrap, and a compare. Only the winning index is tracked
+        // so the end-of-arm fade is evaluated once, after the loop, instead of on
+        // every improvement.
+        float bestAbs = 1e9;
+        float bestAng = 0.0;
+        float bestPitchFactor = 1.0;
+        int   bestIdx = 0;
 
         for (int i = 0; i < GALAXY_MAX_ARMS; i++)
         {
-            if (i >= N) { break; }
+            if (i >= ArmN) { break; }
 
-            float4 h = ArmHash(i, seed);
+            float4 a = ArmData[i];
 
-            // --- THIS ARM'S OWN PITCH AND PHASE ---
-            float ki    = k0 * (1.0 + ArmAsymPitch * (2.0 * h.x - 1.0));
-            float phase = ArmPhaseOffset + float(i) * armSpacing
-                        + ArmAsymPhase * armSpacing * (2.0 * h.y - 1.0);
-
-            float twistI = ki * uTerm + phase;
+            float twistI = k0 * a.x * uTerm + a.y;
 
             // Signed angular offset from this arm, wrapped to [-PI, PI]. Wrapping to
             // +/-PI rather than +/-armSpacing/2 is what makes uneven spacing safe.
@@ -211,22 +238,23 @@ struct GalaxyDensitySampler
             {
                 bestAbs = ad;
                 bestAng = d;
-                bestK   = ki * uRate;
-
-                // --- PER-ARM STRENGTH, AND ARMS THAT PETER OUT EARLY ---
-                float mult = 1.0 + ArmAsymDensity * (2.0 * h.z - 1.0);
-
-                float rEnd  = discR * (1.0 - ArmAsymLength * h.w);
-                float fadeW = max(0.2 * discR, 1e-6);
-                if (rXY > rEnd - fadeW)
-                {
-                    float tf = saturate((rXY - (rEnd - fadeW)) / fadeW);
-                    mult *= 1.0 - tf * tf * (3.0 - 2.0 * tf);
-                }
-
-                bestMult = max(mult, 0.0);
+                bestPitchFactor = a.x;
+                bestIdx = i;
             }
         }
+
+        float bestK = k0 * bestPitchFactor * uRate;
+
+        // --- PER-ARM STRENGTH, AND ARMS THAT PETER OUT EARLY ---
+        float4 best = ArmData[bestIdx];
+        float bestMult = best.z;
+        float fadeW = max(0.2 * discR, 1e-6);
+        if (rXY > best.w - fadeW)
+        {
+            float tf = saturate((rXY - (best.w - fadeW)) / fadeW);
+            bestMult *= 1.0 - tf * tf * (3.0 - 2.0 * tf);
+        }
+        bestMult = max(bestMult, 0.0);
 
         // --- CLOSEST POINT ON THE WINNING ARM AT THIS RADIUS ---
         float armTheta = theta - bestAng;
@@ -362,33 +390,39 @@ struct GalaxyDensitySampler
         float lopsided = max(1.0 + DiscLopsidedAmount * cos(theta - DiscLopsidedPhase), 0.0);
 
         // --- ARMS: SDF DISTANCE -> CORE/ENVELOPE REMAP ---
-        float2 armResult = SampleArmSDF(discPos, rXY);
-        float ArmDist = armResult.x;
-        float ArmMult = armResult.y;
-
-        float armStart = ArmStartRadius * discR;
-        float tRadial = saturate((rXY - armStart) / max(discR - armStart, 1e-6));
-
-        float growthFactor = lerp(1.0, ArmRadialGrowth, tRadial);
-        float core = max(ArmCoreThickness * growthFactor, 0.0);
-        float envelope = max(ArmEnvelopeThickness * growthFactor, core + 1e-6);
-
-        float densityScale = pow(max(growthFactor, GALAXY_POW_EPSILON),
-                                 ArmDensityFalloffExponent);
-        float peakDensity = ArmPeakDensity / max(densityScale, 1e-6);
-
+        // Skipped entirely when the arm layer is off. The nearest-arm search is the
+        // most expensive thing in the field, so this makes debug isolation of the
+        // other layers cheap rather than merely correct.
         float ArmDensity = 0.0;
-        if (ArmDist <= core)
+        if (LayerScaleArm > 0.0)
         {
-            ArmDensity = peakDensity;
+            float2 armResult = SampleArmSDF(discPos, rXY);
+            float ArmDist = armResult.x;
+            float ArmMult = armResult.y;
+
+            float armStart = ArmStartRadius * discR;
+            float tRadialArm = saturate((rXY - armStart) / max(discR - armStart, 1e-6));
+
+            float growthFactor = lerp(1.0, ArmRadialGrowth, tRadialArm);
+            float core = max(ArmCoreThickness * growthFactor, 0.0);
+            float envelope = max(ArmEnvelopeThickness * growthFactor, core + 1e-6);
+
+            float densityScale = pow(max(growthFactor, GALAXY_POW_EPSILON),
+                                     ArmDensityFalloffExponent);
+            float peakDensity = ArmPeakDensity / max(densityScale, 1e-6);
+
+            if (ArmDist <= core)
+            {
+                ArmDensity = peakDensity;
+            }
+            else if (ArmDist < envelope)
+            {
+                float t = (ArmDist - core) / (envelope - core);
+                float smoothT = t * t * (3.0 - 2.0 * t);
+                ArmDensity = peakDensity * (1.0 - smoothT);
+            }
+            ArmDensity *= ArmMult * lopsided;
         }
-        else if (ArmDist < envelope)
-        {
-            float t = (ArmDist - core) / (envelope - core);
-            float smoothT = t * t * (3.0 - 2.0 * t);
-            ArmDensity = peakDensity * (1.0 - smoothT);
-        }
-        ArmDensity *= ArmMult * lopsided;
 
         float DiscDensity  = SampleDiscDensity(rXY, absZ) * lopsided;
         float BulgeDensity = SampleBulgeDensity(InNormPos);
@@ -632,6 +666,9 @@ gd.LayerScaleBackground      = LayerScaleBackground;
 
 gd.BlendMode                 = BlendMode;   // 0 LSE (parity), 1 hard max, 2 p-norm
 gd.BlendPower                = BlendPower;
+
+// --- HOIST PER-ARM CONSTANTS: ONCE PER PIXEL, NOT ONCE PER MARCH STEP ---
+gd.PrepareArms();
 
 // --- DITHER: ENTRY-POINT OFFSET, RESOLVES THROUGH TEMPORAL AA ---
 int3 randpos = int3(Parameters.SvPosition.xy, View.StateFrameIndexMod8);
