@@ -21,14 +21,34 @@
 // AHEAD OF C++, to port together:
 //   - logarithmic spiral by pitch angle, replacing ArmTwistStrength /
 //     ArmCoreTwistStrength / ArmCoreTwistRadius
-//   - BlendMode 2 (p-norm) vs the C++ log-sum-exp
-//   - per-arm asymmetry (ArmAsym*) and the nearest-arm search that requires
+//   - layer composition via SmoothMaxPoly, replacing the C++ log-sum-exp SmoothMax
+//     (which carried a log(N)/K floor); evaluation order is bulge, disc, arms
+//   - per-arm asymmetry (ArmAsym*) and the all-arm merge that requires
+//   - elliptical arm cross-section: ArmWidth + ArmVerticalRatio replace
+//     ArmCoreThickness / ArmEnvelopeThickness / ArmHeightRatio / ArmHeightOuter /
+//     ArmVerticalFalloff / ArmWidthPerp
 //   - disc warp / flare / lopsidedness (DiscWarp*, DiscFlare, DiscLopsided*)
+//   - noise modulation and positional warp from the tiling volume asset
+
+// LAYER ORDER, everywhere in this file: x = arms, y = disc, z = bulge,
+// w = background. SampleLayers' return, SampleLayer's index, the debug modes, and
+// every float4 input pin all follow it. There is deliberately only one order.
 
 #define GALAXY_PI 3.14159265358979323846
 #define GALAXY_POW_EPSILON 1e-6
 #define GALAXY_MAX_ARMS 16
-#define GALAXY_MAX_OCTAVES 5
+#define GALAXY_MAX_OCTAVES 2
+
+// Standard fractal ratios: each octave doubles frequency and halves amplitude.
+// Constants rather than parameters -- with a pre-baked FBm asset the spectrum is
+// already inside the texture, so at one or two octaves these had almost no effect,
+// and no value other than the standard pair was ever worth reaching for.
+// Separates the halo noise domain from the gas one so their structure does not
+// correlate. Arbitrary, just needs to be large relative to feature size.
+#define GALAXY_HALO_DOMAIN float3(53.7, 29.1, 71.3)
+
+#define GALAXY_NOISE_LACUNARITY 2.0
+#define GALAXY_NOISE_GAIN 0.5
 
 struct GalaxyDensitySampler
 {
@@ -41,21 +61,22 @@ struct GalaxyDensitySampler
 
     float BoundsFadeStart;
 
-    float BulgeScaleRadius;
-    float BulgeCutoffRadius;
-    float BulgePeakDensity;
+    float BulgeScaleRadius;        // radius at which the layer reaches EXACTLY zero
+    float BulgePeakDensity;        // density at the centre -- now literally that
     float BulgeVerticalSquash;
+    float BulgeConcentration;      // profile exponent; see SampleSpheroid
 
     float DiscRadius;
     float DiscHeightRatio;
     float DiscBaseDensity;
-    float DiscRadialScaleLength;
+    float DiscScaleLengthRatio; // MULTIPLE OF BulgeScaleRadius, not of DiscRadius
     float DiscVerticalFalloff;
 
     // --- DISC ASYMMETRY ---
     float DiscFlare;            // 0 = constant scale height; >0 thickens toward the rim
     float DiscWarpAmplitude;    // integral-sign vertical warp, in normalized z units
-    float DiscWarpPhase;        // radians; azimuth of the warp's rising node
+    float DiscWarpPhase;        // radians; azimuth of the warp's rising node at r = 0
+    float DiscWarpTwist;        // radians of node-line precession across the disc
     float DiscLopsidedAmount;   // m=1 in-plane density mode; 0.2-0.4 is typical
     float DiscLopsidedPhase;    // radians; azimuth of the dense side
 
@@ -63,35 +84,71 @@ struct GalaxyDensitySampler
     float ArmPitchAngle;        // degrees at the disc rim; sign sets chirality
     float ArmPitchTightening;   // 0 = constant pitch (true log spiral); >0 tightens inward
     float ArmPhaseOffset;       // radians; rotates the whole arm set
-    float ArmWidthPerp;         // 0 = same-radius width (legacy), 1 = true perpendicular
-    float ArmStartRadius;
-    float ArmStartBlendWidth;
-    float ArmHeightRatio;       // vertical half-thickness at centre, fraction of DiscRadius
-    float ArmHeightOuter;       // multiplier on that at the rim; >1 thickens outward
-    float ArmVerticalFalloff;   // 2 = rounded/Gaussian, 1 = peaky exponential, 4+ = boxy
-    float ArmProfileExponent;   // horizontal shape; >1 tightens the core, lengthens the tail
-    float ArmMergeSmooth;       // 0 = hard max between arms; ~0.1 blends crossings
-
-    // --- NOISE / DISTORTION ---
-    float3 NoiseOffset;         // per-galaxy variation; a texture has no seed
-    float NoiseAmount;          // multiplicative depth; >1 breaks arms into knots
-    float NoiseScale;           // base frequency in normalized units
-    float NoiseVerticalScale;   // extra z frequency; >1 flattens features into the plane
-    float NoiseOctaves;
-    float NoiseLacunarity;      // frequency step per octave; 2.0 is standard
-    float NoiseGain;            // amplitude step per octave; 0.5 is standard
-    float NoiseRidged;          // 0 = fbm (clouds), 1 = ridged (filaments and lanes)
-    float NoiseArmMask;         // how strongly arms are modulated
-    float NoiseDiscMask;        // how strongly the disc is modulated
-    float WarpAmount;           // positional warp, normalized units; small values only
-    float WarpScale;            // warp frequency
-    float4 NoiseChannelWeights; // channel mix across the asset's frequencies (RGBA)
-    float ArmVerticalCutoff;    // skip the arm loop below this vertical profile value
+    float HaloTwistInherit;     // how much of the spiral twist the bulge/background
+                                // noise frame picks up; see NoiseFrame
+    float ArmWidth;             // TRUE perpendicular half-width at the arm's inner end
+    float ArmVerticalRatio;     // H/W. 1 = circular tube, <1 = ribbon, >1 = vertical sheet
+    float ArmProfileExponent;   // cross-section falloff. <1 flattens the top toward a
+                                // plateau, 1 is a smoothstep bump, >1 sharpens the core
     float ArmRadialGrowth;
     float ArmDensityFalloffExponent;
-    float ArmCoreThickness;
-    float ArmEnvelopeThickness;
     float ArmPeakDensity;
+    float ArmMergeSmooth;       // fraction of the larger arm's density, not absolute.
+                                // 0 = hard max between arms; ~0.1 blends crossings
+
+    // --- NOISE FIELD SHAPE ---
+    // FRAME CONVENTION, for NoiseScale and WarpScale only:
+    //   x = disc lateral, y = disc vertical, z = halo lateral, w = halo vertical
+    // This is NOT the layer convention (arm/disc/bulge/background) used by
+    // LayerDensity, NoiseAmount, LateralScale and VerticalScale. Frames are a
+    // property of the noise field; layers are what consume it.
+    //
+    // Splitting lateral from vertical per frame is what lets the warp field have
+    // different anisotropy than the modulation field -- previously one shared
+    // vertical scale was applied inside the frame, so both inherited it.
+    float3 NoiseOffset;         // per-galaxy variation; a texture has no seed
+    float4 NoiseScale;          // modulation frequency; frame convention above
+    float4 WarpScale;           // warp frequency; frame convention above
+    float NoiseOctaves;
+    float NoiseRidged;          // 0 = fbm (clouds), 1 = ridged (filaments and lanes)
+
+    // --- MASTER NOISE BYPASS ---
+    // 0 skips every volume-texture read: both warps and both modulations. What
+    // remains is the pure analytic field, which is EXACTLY what the C++ rejection
+    // sampler will compute on the first pass of the port -- so this A/Bs shader
+    // against future particle placement without disturbing any tuned value.
+    //
+    // Drive it from a StaticSwitchParameter between literal 0 and 1 and it resolves
+    // to a compile-time constant, so the branches fold away and the texture reads are
+    // dead-stripped. One node, no extra permutations.
+    float NoiseEnable;
+    float4 NoiseChannelWeights; // channel mix across the asset's frequencies (RGBA)
+
+    // --- PER-LAYER NOISE CONTRIBUTION ---
+    // Amounts are direct multiplicative depth: density *= 1 + Amount * n. Above 1 the
+    // modulator goes negative in places, clamps to zero, and breaks the layer into
+    // knots. This replaces NoiseAmount x NoiseLayerMask, which was two knobs doing
+    // one job.
+    float NoiseAmountArm;
+    float NoiseAmountDisc;
+    float NoiseAmountBulge;
+    float NoiseAmountBackground;
+    // Positional warp, in normalized units, one per layer. SIGNED: a negative value
+    // flips the displacement direction for that layer, which is free variety --
+    // the sampled warp vector is already centred on zero.
+    float WarpAmountArms;
+    float WarpAmountDisc;
+    float WarpAmountBulge;
+    float WarpAmountBackground;
+
+    // --- CENTRAL VOID ---
+    // The region cleared by the central black hole. Same profile family as
+    // SampleSpheroid but SPHERICAL (no squash -- accretion is not disc-aligned) and
+    // SUBTRACTIVE. Applied in Compose, so it carves every layer at once rather than
+    // needing a term in each.
+    float VoidRadius;           // radius at which the void stops removing anything
+    float VoidStrength;         // 0 = off, 1 = fully empty at the centre
+    float VoidConcentration;    // profile exponent; higher = tighter, harder-edged
 
     // --- PER-ARM ASYMMETRY ---
     float ArmAsymSeed;          // integer; changes which arm gets what
@@ -100,33 +157,22 @@ struct GalaxyDensitySampler
     float ArmAsymDensity;       // strength spread between arms
     float ArmAsymLength;        // fraction of disc radius an arm may end short by
 
-    // --- PER-ARM RECORDS, FILLED ONCE BY PrepareArms() ---
+    // --- PER-ARM RECORDS, FILLED ONCE IN THE DRIVER BLOCK BELOW ---
     // x = pitch factor (ki = k0 * x), y = phase, z = density multiplier,
     // w = end radius. These are invariant along a ray, so hashing them per march
     // step burned N hashes x MaxSteps per pixel for values that never changed.
+    //
+    // Filled by plain statement code rather than a member function: DXC (SM6) rejects
+    // a void-returning member that mutates struct state on the function-scope struct
+    // a Custom node produces, which FXC (SM5) accepted.
     int    ArmN;
     float4 ArmData[GALAXY_MAX_ARMS];
 
-    float BackgroundDensity;
+    float BackgroundDensity;        // density at the centre
     float BackgroundVerticalSquash;
-    float BackgroundCutoffRadius;
-    float BackgroundFadeStart;
+    float BackgroundCutoffRadius;   // radius at which the layer reaches EXACTLY zero
+    float BackgroundConcentration;  // profile exponent; see SampleSpheroid
 
-    // --- DEBUG: PER-LAYER SCALES ---
-    float LayerScaleBulge;
-    float LayerScaleDisc;
-    float LayerScaleArm;
-    float LayerScaleBackground;
-
-    // --- DEBUG: BLEND MODE ---
-    // 0 = log-sum-exp smooth max. Matches C++. Carries a log(3)/K = 0.183 floor
-    //     in empty space, so zeroing layers does NOT isolate the remainder.
-    // 1 = hard max. Exact, no floor, visible creases where layers meet.
-    //     Use this to see true structure and to make isolation meaningful.
-    // 2 = p-norm soft max, (A^p+B^p+C^p)^(1/p). Smooth like LSE but exact at
-    //     zero and exact when one layer dominates. No floor.
-    float BlendMode;
-    float BlendPower;   // p for mode 2; 4.0 is a good default
 
     // --- POW GUARDED AGAINST A ZERO BASE, WITH NO RESIDUE ---
     // max(x, EPSILON) inside pow() still leaves EPSILON^p behind, which is what
@@ -154,74 +200,58 @@ struct GalaxyDensitySampler
         return float4(v) * (1.0 / 4294967296.0);
     }
 
-    // --- SMOOTH MAX OF THREE VALUES, STABILIZED LOG-SUM-EXP ---
-    // Subtracting the running max keeps every exp() argument <= 0, so this
-    // cannot overflow for any K.
-    float SmoothMax3(float A, float B, float C, float K)
-    {
-        float M = max(A, max(B, C));
-        float ExpA = exp(K * (A - M));
-        float ExpB = exp(K * (B - M));
-        float ExpC = exp(K * (C - M));
-        return M + log(ExpA + ExpB + ExpC) / K;
-    }
-
-    // --- WRAP A SIGNED ANGLE INTO [-PI, PI] ---
-    // Branch-free: round-to-nearest beats fmod plus two compares, and this runs
-    // ArmN times per march step so it is squarely on the hot path.
-    float WrapPi(float InAngle)
-    {
-        const float TwoPi = 2.0 * GALAXY_PI;
-        return InAngle - TwoPi * round(InAngle / TwoPi);
-    }
-
-    // --- HOIST PER-ARM CONSTANTS OUT OF THE MARCH ---
-    // Call once per pixel, before RayMarch. Every arm is filled unconditionally
-    // (not just the first ArmN) so no slot is ever read uninitialised; the cost
-    // is a handful of hashes once, against N x MaxSteps previously.
-    void PrepareArms()
-    {
-        ArmN = (int)clamp(ArmCount, 1.0, (float)GALAXY_MAX_ARMS);
-
-        float armSpacing = 2.0 * GALAXY_PI / float(ArmN);
-        float discR = DiscRadius;
-        int seed = (int)ArmAsymSeed;
-
-        for (int i = 0; i < GALAXY_MAX_ARMS; i++)
-        {
-            float4 h = ArmHash(i, seed);
-
-            ArmData[i] = float4(
-                1.0 + ArmAsymPitch * (2.0 * h.x - 1.0),
-                ArmPhaseOffset + float(i) * armSpacing
-                    + ArmAsymPhase * armSpacing * (2.0 * h.y - 1.0),
-                max(1.0 + ArmAsymDensity * (2.0 * h.z - 1.0), 0.0),
-                discR * (1.0 - ArmAsymLength * h.w));
-        }
-    }
-
-    // --- VOLUME TEXTURE LOOKUP, [-1,1] ---
+    // --- VOLUME TEXTURE LOOKUP, SIGNED ---
     // SampleLevel, not Sample: inside a dynamic march loop the derivatives that drive
-    // mip selection are undefined. Channel weights let a Perlin-Worley style asset
-    // supply several frequencies from ONE fetch, which is how the texture path claws
-    // back the octaves that baking into a single channel would lose.
+    // mip selection are undefined.
+    //
+    // Each channel is centred to [-1,1] FIRST, then weighted. That ordering is what
+    // makes the weights behave like a mixer:
+    //   positive w    that channel, scaled
+    //   negative w    that channel inverted, scaled
+    //   |w| > 1       gain -- the weights are not renormalised, deliberately
+    //   all zero      returns 0, so the modulator is exactly 1. No special case.
+    //
+    // Weighting before centring (dot(W,t) then remap) cannot express this: it needs
+    // a signed-sum normalisation that divides by ~zero for (1,-1,0,0) and pushes the
+    // result outside [-1,1] for any mixed-sign pair.
+    //
+    // Output is NOT bounded to [-1,1] -- with sum|w| > 1 it exceeds that by design.
+    // The modulator downstream is 1 + Amount * n, so large |n| can spike density as
+    // well as clamp it to zero. Keep sum|w| near 1 unless gain is what you want.
+    //
+    // Useful combinations for a Perlin-Worley style asset:
+    //   (1,0,0,0)      one channel, unmodified
+    //   (-1,0,0,0)     that channel inverted
+    //   (0.6,0.3,0.1,0) approximates an FBm in a single fetch
+    //   (1,-1,0,0)     difference of two channels -- subtracting a Worley channel
+    //                  from a Perlin one carves cell-boundary voids out of a smooth
+    //                  field, closer to real dust than either channel alone
     float SampleNoiseTex(float3 P)
     {
         float4 t = Texture3DSampleLevel(NoiseTex, NoiseTexSampler, P, 0);
-        float wsum = dot(NoiseChannelWeights, float4(1.0, 1.0, 1.0, 1.0));
-        float v = dot(NoiseChannelWeights, t) / max(abs(wsum), 1e-6);
-        return v * 2.0 - 1.0;
+
+        // Centre each channel to [-1,1].
+        float4 c = t * 2.0 - 1.0;
+
+        // --- RIDGE, PER CHANNEL, BEFORE WEIGHTING ---
+        // 1 - 2|c| folds the field about zero, so peaks land where the base noise
+        // CROSSES zero -- that is what turns blobs into filaments and dust lanes.
+        //
+        // It must happen here, not on the weighted sum: the fold only maps back into
+        // [-1,1] when its input is already bounded there. Each centred channel is by
+        // construction; the weighted sum is NOT, since sum|w| > 1 is allowed as gain.
+        // Ridging afterwards would fold at half amplitude and shift the output range.
+        // Vectorises 4-wide, so per channel costs the same as one.
+        c = lerp(c, 1.0 - 2.0 * abs(c), saturate(NoiseRidged));
+
+        return dot(NoiseChannelWeights, c);
     }
 
-    // --- FRACTAL SUM, [-1,1] ---
-    // NoiseRidged blends toward 1-2|n|, which turns smooth blobs into filaments --
-    // that is what produces dust lanes and feathering rather than lumps.
+    // --- FRACTAL SUM ---
+    // Range follows SampleNoiseTex: [-1,1] when sum|w| <= 1, wider when weights carry
+    // gain. Ridging is applied per channel inside SampleNoiseTex, not here.
     float FBm(float3 P, int InOctaves)
     {
-        float lac = max(NoiseLacunarity, 1.0);
-        float gain = saturate(NoiseGain);
-        float ridge = saturate(NoiseRidged);
-
         float sum = 0.0;
         float amp = 1.0;
         float norm = 0.0;
@@ -230,30 +260,48 @@ struct GalaxyDensitySampler
         {
             if (o >= InOctaves) { break; }
 
-            // A texture has no seed, so octaves are decorrelated by offset.
+            // A texture has no seed, so octaves are decorrelated by offset. Ridging
+            // happens inside SampleNoiseTex, per channel -- still once per octave,
+            // which is what keeps ridges coherent across scales.
             float n = SampleNoiseTex(P + float3(17.3, 11.7, 23.1) * float(o));
-            n = lerp(n, 1.0 - 2.0 * abs(n), ridge);
 
             sum += n * amp;
             norm += amp;
-            P *= lac;
-            amp *= gain;
+            P *= GALAXY_NOISE_LACUNARITY;
+            amp *= GALAXY_NOISE_GAIN;
         }
 
         return sum / max(norm, 1e-6);
     }
 
-    // --- ARM-FRAME REFERENCE TWIST ---
+    // --- SPIRAL TWIST OF THE NOISE FRAME ---
     // The base spiral angle, without any per-arm phase. Rotating a sample position by
     // -twist before evaluating noise makes noise features wind WITH the spiral and
     // shear inward as the twist grows -- world-space noise instead cuts across arms
     // at arbitrary angles and reads as melted rather than turbulent.
     //
-    // u is clamped because twist diverges logarithmically at the centre; past ~6 the
-    // sincos below would lose the precision that keeps the frame continuous.
-    float ReferenceTwist(float rXY)
+    // InInherit scales it. 1 is the full gas twist; the halo uses a fraction.
+    //
+    // THE RAMP IS WHY THE HALO CAN HAVE ANY TWIST AT ALL. Raw twist grows as
+    // ln(R/r), so at r = 0.05R it is already 11 radians -- nearly two full turns,
+    // which would smear bulge noise into azimuthal streaks. Multiplying by r/R turns
+    // the product into a BUMP: zero at the centre, zero at the rim, peaking at
+    // r = R/e ~ 0.37R at about 1.4 rad. That peak sits exactly at the bulge/disc
+    // transition, where the shared kinematics actually are -- pseudobulges are
+    // rotationally supported and built from disc material, and boxy bulges are
+    // buckled bars that co-rotate. Zero at the centre is also what dispersion
+    // support implies, and what the numerics want.
+    //
+    // Hoisted to once per sample. It used to run inside every frame construction --
+    // twice per sample for warp and modulation -- each paying a log, a tan and a
+    // sincos.
+    float SpiralTwistAt(float rXY, float InInherit)
     {
-        float discR = DiscRadius;
+        if (InInherit == 0.0) { return 0.0; }
+
+        float discR = max(DiscRadius, 1e-6);
+        float rn = saturate(rXY / discR);
+
         float u = min(log(discR / max(rXY, 1e-5)), 6.0);
         float T = max(ArmPitchTightening, 0.0);
 
@@ -261,33 +309,59 @@ struct GalaxyDensitySampler
         float tanP = tan(radians(max(abs(pitchDeg), 1.0)));
         float k0 = ((pitchDeg < 0.0) ? -1.0 : 1.0) / tanP;
 
-        return k0 * (u + 0.5 * T * u * u);
+        return k0 * (u + 0.5 * T * u * u) * rn * InInherit;
     }
 
-    // --- POSITION IN THE UN-TWISTED, ANISOTROPICALLY SCALED NOISE FRAME ---
-    float3 NoiseFrame(float3 InPos, float rXY, float InScale)
+    // --- NOISE FRAME: UN-TWIST, THEN SCALE ANISOTROPICALLY ---
+    // One function for both frames. They were separate while the halo had no twist;
+    // now that it inherits a fraction, "halo" is just a smaller InTwist and a domain
+    // offset, not a different code path.
+    //
+    // InScale is (lateral, vertical). A vertical larger than lateral compresses z, so
+    // features read as sheets rather than blobs -- appropriate for the rotationally
+    // supported gas layers, and best left near 1:1 for the pressure supported ones,
+    // which apply their own flattening downstream.
+    //
+    // InOffset separates the two frames' domains so halo structure does not
+    // correlate with gas structure.
+    float3 NoiseFrame(float3 InPos, float InTwist, float2 InScale, float3 InOffset)
     {
-        float tw = ReferenceTwist(rXY);
         float st, ct;
-        sincos(tw, st, ct);
+        sincos(InTwist, st, ct);
 
-        float3 pn = float3( InPos.x * ct + InPos.y * st,
-                           -InPos.x * st + InPos.y * ct,
-                            InPos.z * max(NoiseVerticalScale, 1e-3));
-        return pn * max(InScale, 1e-6);
+        float lat  = max(InScale.x, 1e-6);
+        float vert = max(InScale.y, 1e-6);
+
+        return float3((InPos.x * ct + InPos.y * st) * lat,
+                     (-InPos.x * st + InPos.y * ct) * lat,
+                       InPos.z * vert) + InOffset;
     }
 
-    // --- POLYNOMIAL SMOOTH MAXIMUM ---
-    // No pow/exp, unlike SmoothMax3, because this runs once per arm per march step.
-    // k = 0 degenerates to a plain max.
+    // --- POLYNOMIAL SMOOTH MAXIMUM, RELATIVE BAND ---
+    // No pow or exp: this runs once per arm per march step, and again per layer.
+    // K = 0 degenerates to a plain max.
+    //
+    // K is a FRACTION of the larger operand, not an absolute density. With an
+    // absolute band the blend region was as wide at zero as at peak density, so
+    // smax(0,0) returned K/4 out of nothing -- and that floor COMPOUNDED across the
+    // arm loop's up-to-16 merges and Compose's chained pair, manufacturing background
+    // density in empty space. Exactly the failure the log-sum-exp had, just quieter.
+    //
+    // Scaling the band by max(A,B) makes the operator exact at zero and exact
+    // whenever either operand is zero, while still blending genuine overlaps. It is
+    // also scale-invariant, so K keeps its meaning as peak densities are retuned.
     float SmoothMaxPoly(float A, float B, float K)
     {
-        if (K <= 0.0) { return max(A, B); }
-        float h = saturate(0.5 + 0.5 * (A - B) / K);
-        return lerp(B, A, h) + K * h * (1.0 - h);
+        float m = max(A, B);
+
+        float k = K * m;
+        if (k <= 0.0) { return m; }
+
+        float h = saturate(0.5 + 0.5 * (A - B) / k);
+        return lerp(B, A, h) + k * h * (1.0 - h);
     }
 
-    // --- COMBINED HORIZONTAL ARM DENSITY ---
+    // --- COMBINED ARM DENSITY ---
     // Every arm contributes and the contributions are merged. This replaces a
     // nearest-arm search, which was C0-DISCONTINUOUS: the distance it returned was
     // continuous, but the WINNER'S attributes (ArmMult, pitch) flipped instantly
@@ -298,17 +372,36 @@ struct GalaxyDensitySampler
     // as the query point, so the in-plane distance is just the chord subtended by the
     // angular offset: 2 r sin(d/2). One sin, no cos/sqrt.
     //
-    // Z IS DELIBERATELY NOT FOLDED IN. Folding z into the distance metric before the
-    // core/envelope remap makes the vertical profile a scaled copy of the horizontal
-    // one, so the gradient in z ends up much steeper -- soft sides, vertical faces.
-    // The vertical profile is applied separably in SampleLayers, matching how
-    // SampleDiscDensity already works.
-    float SampleArmHorizontal(float3 InNormPos, float rXY)
+    // CROSS-SECTION IS A NORMALIZED ELLIPSE. Perpendicular and vertical offsets are
+    // each divided by their own half-extent, then combined into one coordinate q that
+    // reaches 1 at the arm surface. A single profile applied to q is what makes the
+    // arm genuinely tubular -- two separate profile functions cannot be round even
+    // when their extents match, which is why the old ArmVerticalFalloff and
+    // ArmCoreThickness are gone. Vertical extent is DERIVED as W * ArmVerticalRatio,
+    // so the arm thickens vertically as ArmRadialGrowth widens it, with no second
+    // flare control to fight the first.
+    float SampleArmDensity(float3 InNormPos, float rXY)
     {
         float discR = DiscRadius;
-        float armStart = ArmStartRadius * discR;
 
         if (rXY < 1e-6 || rXY > discR) { return 0.0; }
+
+        // --- CROSS-SECTION HALF-EXTENTS ---
+        // The guard above bounds rXY to (0, discR], so this needs no saturate.
+        float tRadial = rXY / max(discR, 1e-6);
+        float growthFactor = lerp(1.0, ArmRadialGrowth, tRadial);
+        float W = max(ArmWidth * growthFactor, 1e-6);
+        float H = max(W * max(ArmVerticalRatio, 1e-4), 1e-6);
+
+        // --- EXACT VERTICAL GATE ---
+        // q >= qz always, and the arm surface is q = 1, so qz >= 1 proves the density
+        // is zero for every arm at this sample. Bailing here skips the whole merge
+        // loop for the large majority of samples, which sit off the disc plane. Exact
+        // rather than a tuned cutoff, so it costs no accuracy at all.
+        float qz = abs(InNormPos.z) / H;
+        if (qz >= 1.0) { return 0.0; }
+
+        float qzSq = qz * qz;
 
         // --- LOGARITHMIC SPIRAL ---
         // twistAngle(r) IS the arm's angular position; its derivative is the winding
@@ -330,15 +423,11 @@ struct GalaxyDensitySampler
 
         float theta = atan2(InNormPos.y, InNormPos.x);
 
-        // --- RADIAL PROGRESS: 0 AT INNER EDGE, 1 AT DISC RIM ---
-        float tRadial = saturate((rXY - armStart) / max(discR - armStart, 1e-6));
-        float growthFactor = lerp(1.0, ArmRadialGrowth, tRadial);
-        float core = max(ArmCoreThickness * growthFactor, 0.0);
-        float envelope = max(ArmEnvelopeThickness * growthFactor, core + 1e-6);
-
-        float blendWidth = max(ArmStartBlendWidth, 1e-6);
         float fadeW = max(0.2 * discR, 1e-6);
         float mergeK = max(ArmMergeSmooth, 0.0);
+
+        const float TwoPi = 2.0 * GALAXY_PI;
+        const float InvTwoPi = 1.0 / TwoPi;
 
         float acc = 0.0;
 
@@ -351,41 +440,29 @@ struct GalaxyDensitySampler
 
             // Signed angular offset from this arm, wrapped to [-PI, PI]. Wrapping to
             // +/-PI rather than +/-armSpacing/2 is what makes uneven spacing safe.
-            float d = WrapPi(theta - (ki * uTerm + a.y));
+            // Inlined and branch-free: round-to-nearest beats fmod plus two compares,
+            // and this runs ArmN times per march step.
+            float dRaw = theta - (ki * uTerm + a.y);
+            float d = dRaw - TwoPi * round(dRaw * InvTwoPi);
 
-            // --- CHORD AT CONSTANT RADIUS ---
-            float xyDist = 2.0 * rXY * abs(sin(0.5 * d));
-
-            // --- SAME-RADIUS DISTANCE -> TRUE PERPENDICULAR DISTANCE ---
+            // --- CHORD AT CONSTANT RADIUS -> TRUE PERPENDICULAR DISTANCE ---
             // The chord is purely tangential; the spiral tangent makes angle p with
-            // that direction, so true perpendicular distance is xyDist / sqrt(1+k^2).
-            // Without this, arm width is inflated by 1/sin(p), and since p varies with
-            // radius when T > 0 the arms read inconsistently thick along their length.
+            // that direction, so perpendicular distance is chord / sqrt(1+k^2).
+            // Unconditional now: a fractional blend toward the tangential measure had
+            // no geometric meaning, and with the correction always applied ArmWidth is
+            // a true perpendicular half-width that no longer shifts when
+            // ArmPitchAngle changes.
             float kLocal = ki * uRate;
-            float dist = xyDist * lerp(1.0, rsqrt(1.0 + kLocal * kLocal), saturate(ArmWidthPerp));
+            float dPerp = 2.0 * rXY * abs(sin(0.5 * d)) * rsqrt(1.0 + kLocal * kLocal);
 
-            // --- FADE IN FROM ARM START RADIUS ---
-            if (rXY < armStart)
-            {
-                dist += (armStart - rXY);
-            }
-            else if (rXY < armStart + blendWidth)
-            {
-                float blend = (rXY - armStart) / blendWidth;
-                float smoothB = blend * blend * (3.0 - 2.0 * blend);
-                dist = lerp(dist + blendWidth, dist, smoothB);
-            }
+            // --- NORMALIZED ELLIPTICAL CROSS-SECTION COORDINATE ---
+            float qp = dPerp / W;
+            float q = sqrt(qp * qp + qzSq);
 
-            // --- CORE / ENVELOPE REMAP ---
             float w = 0.0;
-            if (dist <= core)
+            if (q < 1.0)
             {
-                w = 1.0;
-            }
-            else if (dist < envelope)
-            {
-                float t = (dist - core) / (envelope - core);
-                w = 1.0 - t * t * (3.0 - 2.0 * t);
+                w = 1.0 - q * q * (3.0 - 2.0 * q);
             }
 
             // --- PER-ARM STRENGTH, AND ARMS THAT PETER OUT EARLY ---
@@ -399,10 +476,10 @@ struct GalaxyDensitySampler
             acc = SmoothMaxPoly(acc, w * max(mult, 0.0), mergeK);
         }
 
-        // --- HORIZONTAL SHAPE ---
-        // ArmProfileExponent > 1 pulls density toward the centreline and lengthens
-        // the tail, removing the flat-topped plateau the bare remap produces once
-        // ArmRadialGrowth widens the core.
+        // --- CROSS-SECTION SHAPE ---
+        // Applied once to the merged result rather than per arm, so it stays a single
+        // pow per sample. Below 1 the core flattens toward a plateau; above 1 it
+        // sharpens and the tail lengthens.
         acc = PowSafe(acc, max(ArmProfileExponent, GALAXY_POW_EPSILON));
 
         // Peak density drops as the arm widens (mass conservation).
@@ -411,202 +488,291 @@ struct GalaxyDensitySampler
         return acc * (ArmPeakDensity / max(densityScale, 1e-6));
     }
 
-    // --- HERNQUIST BULGE IN OBLATE COORDINATES ---
-    // Normalised so density(r = BulgeScaleRadius) == BulgePeakDensity:
-    // hernquist(a) = 1/8, hence the *8. Hard cutoff keeps the 1/r^4 tail out of
-    // the disc/arm region; smoothstep avoids a cliff at the cutoff.
-    float SampleBulgeDensity(float3 InNormPos)
+    // --- COMPACT SQUASHED SPHEROID, SHARED BY BULGE AND BACKGROUND ---
+    //     d = InPeak * (1 - x^2)^p,   x = r_oblate / InRadius
+    //
+    // Bulge and background are the SAME OBJECT at different scales: a squashed
+    // spheroid with a density, a radius and a concentration. Sharing one function is
+    // the unified layer paradigm made literal, and halves what has to be ported.
+    //
+    // This replaced a Hernquist profile on the bulge, which was cusped -- rho ~ 1/x,
+    // reaching 776x peak at its x = 0.01 clamp. The saturate() that hid that was load
+    // bearing, and it meant BulgePeakDensity did not set a peak at all: it set the
+    // RADIUS OF A SATURATED BALL (0.04 -> solid out to x = 0.19; 0.3 -> out to 0.59).
+    // That is the "outsized, more geometric than density" behaviour the original C++
+    // params flagged. Here the centre value is exactly InPeak, with no clamp.
+    //
+    // Losing the cusp costs nothing architecturally: real bulges have extended wings,
+    // but the BACKGROUND already supplies those. Bulge is the concentrated core,
+    // background the extended halo, and they sum. Neither has to span both jobs.
+    //
+    // Three properties that matter in layers evaluated on nearly every march step:
+    //   COMPACT SUPPORT   exactly zero at x >= 1, self-terminating, free early-out
+    //   NO SQRT           works on r^2 directly
+    //   ONE EXPONENT      p < 1 fills the volume and drops at the rim; 1 parabolic;
+    //                     2 smooth bump; >2 concentrates toward the centre
+    float SampleSpheroid(float3 InNormPos, float InPeak, float InRadius,
+                         float InSquash, float InConcentration)
     {
-        if (BulgePeakDensity <= 0.0) { return 0.0; }
+        if (InPeak <= 0.0) { return 0.0; }
 
-        float a = max(BulgeScaleRadius, 1e-6);
-        float cutoff = max(BulgeCutoffRadius, a);
+        float a = max(InRadius, 1e-6);
+        float squashedZ = InNormPos.z / max(InSquash, 1e-3);
 
-        float squashedZ = InNormPos.z / max(BulgeVerticalSquash, 1e-4);
-        float r = sqrt(InNormPos.x * InNormPos.x
-                     + InNormPos.y * InNormPos.y
-                     + squashedZ * squashedZ);
+        float rSq = InNormPos.x * InNormPos.x
+                  + InNormPos.y * InNormPos.y
+                  + squashedZ * squashedZ;
 
-        if (r >= cutoff) { return 0.0; }
+        float x2 = rSq / (a * a);
+        if (x2 >= 1.0) { return 0.0; }
 
-        // Clamp rather than deal with the singularity at r = 0.
-        float rClamped = max(r, a * 0.01);
-        float rOverA = rClamped / a;
-
-        // pow(1 + rOverA, 3.0) as multiplies: exact on both sides.
-        float onePlus = 1.0 + rOverA;
-        float hernquist = 1.0 / (rOverA * onePlus * onePlus * onePlus);
-        float normalised = hernquist * 8.0;
-
-        float fadeStart = cutoff * 0.75;
-        float fade = 1.0;
-        if (r > fadeStart)
-        {
-            float t = (r - fadeStart) / (cutoff - fadeStart);
-            fade = 1.0 - t * t * (3.0 - 2.0 * t);
-        }
-
-        return saturate(BulgePeakDensity * normalised * fade);
+        return InPeak * PowSafe(1.0 - x2, max(InConcentration, GALAXY_POW_EPSILON));
     }
 
-    // --- SEPARABLE EXPONENTIAL DISC PROFILE ---
-    // Radial exp(-r/scaleLength) x vertical exp(-(|z|/h)^falloff).
-    // Hard cylinder boundary prevents leakage above/below into the arm region.
+    // --- SEPARABLE DISC PROFILE, LENS CROSS-SECTION ---
+    // Radial exp(-r/scaleLength) x vertical (1 - (z/h)^2)^falloff, with h tapering to
+    // zero at the rim.
+    //
+    // This had THREE hard cuts, all of which read as a machined slab:
+    //   RIM      exp(-r/scaleL) is still 0.135 of peak at r = discR (scaleL = 0.5R),
+    //            then cut -- a vertical cylinder wall
+    //   TOP/BOT  exp(-zNorm^v) is 0.368 at zNorm = 1, then cut -- a 37% cliff, and
+    //            the larger of the two artefacts
+    //   SHAPE    h did not depend on radius except through flare, so the vertical
+    //            cross-section was a RECTANGLE rather than a lens
+    //
+    // Same failure the bulge and background had: an exponential that never reaches
+    // zero, terminated by a boundary. Same fix -- compact support.
+    //
+    //   vertical  (1 - zNorm^2)^v reaches zero AT h with zero derivative, so the
+    //             surfaces round off. Matches BulgeConcentration's semantics and
+    //             drops an exp.
+    //   taper     h *= sqrt(1 - rn^2), an ellipsoidal envelope. This is the one that
+    //             kills "cylindrical" -- the cross-section becomes a lens. DiscFlare
+    //             still thickens the mid-disc on top of it.
+    //   radial    x (1 - rn^2), because with h -> 0 the plane z = 0 exactly would
+    //             otherwise leave a zero-thickness sheet of nonzero density at the rim.
     float SampleDiscDensity(float rXY, float absZ)
     {
         if (DiscBaseDensity <= 0.0) { return 0.0; }
 
-        float discR = DiscRadius;
-        float rn = saturate(rXY / max(discR, 1e-6));
+        float discR = max(DiscRadius, 1e-6);
+        if (rXY >= discR) { return 0.0; }
 
-        // --- FLARE ---
-        // Real discs thicken outward; a constant scale height is one of the strongest
-        // "machined" tells in an edge-on view.
-        float h = discR * max(DiscHeightRatio, 1e-6) * (1.0 + max(DiscFlare, 0.0) * rn);
-        float scaleL = discR * max(DiscRadialScaleLength, 1e-6);
+        float rn = rXY / discR;
+        float edge = 1.0 - rn * rn;             // 1 at the centre, 0 at the rim
 
-        if (rXY >= discR || absZ >= h) { return 0.0; }
+        // --- SCALE HEIGHT: FLARE OUTWARD, THEN TAPER TO ZERO AT THE RIM ---
+        float h = discR * max(DiscHeightRatio, 1e-6)
+                * (1.0 + max(DiscFlare, 0.0) * rn)
+                * sqrt(edge);
 
-        float radialProfile = exp(-rXY / scaleL);
+        if (absZ >= h) { return 0.0; }
 
-        // absZ == 0 is the galactic plane -- the most-sampled case in the field,
-        // so this pow() base guard is load-bearing, not defensive.
-        float zNorm = min(absZ / h, 1.0);
+        // --- SCALE LENGTH IS DERIVED FROM THE BULGE, NOT THE DISC RADIUS ---
+        // These were two numbers describing one relationship. The bulge-to-disc scale
+        // ratio is a real and well-measured quantity (R_e / h ~ 0.2-0.3), whereas
+        // DiscRadius is just where the disc is truncated -- tying the brightness
+        // profile to the truncation meant enlarging a galaxy also stretched its
+        // profile, which is not what happens.
+        //
+        // MULTIPLICATIVE so the relation is scale-invariant: double the bulge and the
+        // scale length follows, preserving the structure. An additive handle would
+        // break as soon as overall galaxy size changed.
+        //
+        // Keeping it as a ratio rather than collapsing it entirely leaves a handle
+        // for bulge-dominated vs disc-dominated galaxies, which is a real axis.
+        float scaleL = max(BulgeScaleRadius, 1e-6) * max(DiscScaleLengthRatio, 1e-6);
+        float radialProfile = exp(-rXY / scaleL) * edge;
+
+        float zNorm = absZ / h;
         float vExp = max(DiscVerticalFalloff, 0.1);
-        float verticalProfile = exp(-pow(max(zNorm, GALAXY_POW_EPSILON), vExp));
+        float verticalProfile = PowSafe(1.0 - zNorm * zNorm, vExp);
 
         return DiscBaseDensity * radialProfile * verticalProfile;
     }
 
     // --- EVALUATE ALL FOUR LAYERS INDEPENDENTLY ---
-    // Returns (bulge, disc, arm, background), each pre-multiplied by its debug
-    // scale. No composition, no bounds fade.
+    // Returns (arm, disc, bulge, background). No composition, no bounds fade.
+    //
+    // Two noise frames: gas (arms + disc) and halo (bulge + background). Same
+    // function, differing in twist and domain offset -- see SpiralTwistAt for why the
+    // halo inherits a ramped fraction of the twist rather than none or all of it.
     float4 SampleLayers(float3 InNormPos)
     {
-        float px = InNormPos.x;
-        float py = InNormPos.y;
-        float pz = InNormPos.z;
-
         float discR = DiscRadius;
+        int oct = (int)clamp(NoiseOctaves, 1.0, (float)GALAXY_MAX_OCTAVES);
 
-        // --- POSITIONAL WARP ---
-        // Bends the geometry itself. Applied to the gaseous layers only -- the bulge
-        // and halo are pressure-supported and smooth, so warping them just makes them
-        // wobble. Three offset lookups rather than three FBm calls: warp wants one
-        // low frequency, not a spectrum.
-        float3 gasPos = InNormPos;
-        if (WarpAmount > 0.0)
+        // --- GAS POSITIONAL WARP ---
+        // One fetch, not an FBm call: warp wants a single low frequency, and RGB
+        // supplies a three-component vector directly. Arms and disc share the FETCH
+        // but scale it independently, so they can warp by different amounts and in
+        // opposite directions for the price of one lookup.
+        // --- TWIST, ONCE PER SAMPLE ---
+        // Shared by the warp and modulation frames of each family. The halo takes a
+        // ramped fraction of the same field, so bulge and background pick up spiral
+        // shear near the disc transition without inheriting the runaway winding that
+        // the raw twist has toward the centre.
+        bool bNoise = NoiseEnable > 0.5;
+
+        float rXY0 = sqrt(InNormPos.x * InNormPos.x + InNormPos.y * InNormPos.y);
+        float gasTwist  = bNoise ? SpiralTwistAt(rXY0, 1.0) : 0.0;
+        float haloTwist = bNoise ? SpiralTwistAt(rXY0, HaloTwistInherit) : 0.0;
+
+        float3 armPos  = InNormPos;
+        float3 discPos = InNormPos;
+        if (bNoise && (WarpAmountArms != 0.0 || WarpAmountDisc != 0.0))
         {
-            float rW = max(sqrt(InNormPos.x * InNormPos.x + InNormPos.y * InNormPos.y), 1e-5);
-            float3 wf = NoiseFrame(InNormPos, rW, WarpScale) + NoiseOffset;
+            float3 wf = NoiseFrame(InNormPos, gasTwist, WarpScale.xy, NoiseOffset);
+            float3 wv = Texture3DSampleLevel(NoiseTex, NoiseTexSampler, wf, 0).rgb - 0.5;
 
-            // Three decorrelated channels from ONE fetch -- warp wants a vector, and
-            // RGB supplies one directly.
-            float3 wv = Texture3DSampleLevel(NoiseTex, NoiseTexSampler, wf, 0).rgb * 2.0 - 1.0;
-            gasPos += wv * WarpAmount;
+            armPos  += wv * WarpAmountArms;
+            discPos += wv * WarpAmountDisc;
         }
 
-        px = gasPos.x;
-        py = gasPos.y;
-        pz = gasPos.z;
+        // --- HALO POSITIONAL WARP ---
+        // Taken from the ORIGINAL position, not a gas-warped one, so the two
+        // displacements stay independent rather than compounding.
+        float3 bulgePos = InNormPos;
+        float3 bgPos    = InNormPos;
+        if (bNoise && (WarpAmountBulge != 0.0 || WarpAmountBackground != 0.0))
+        {
+            float3 hf = NoiseFrame(InNormPos, haloTwist, WarpScale.zw,
+                                   NoiseOffset + GALAXY_HALO_DOMAIN);
+            float3 hv = Texture3DSampleLevel(NoiseTex, NoiseTexSampler, hf, 0).rgb - 0.5;
 
-        float rXY = sqrt(px * px + py * py);
-        float rn = rXY / max(discR, 1e-6);
-        float theta = atan2(py, px);
+            bulgePos += hv * WarpAmountBulge;
+            bgPos    += hv * WarpAmountBackground;
+        }
 
-        // --- DISC WARP: THE INTEGRAL-SIGN m=1 VERTICAL MODE ---
-        // Grows as r^2 so the inner disc and bulge stay put. Applied to arms and
-        // disc only -- the bulge and halo are pressure-supported and do not warp.
-        float warpZ = DiscWarpAmplitude * rn * rn * sin(theta - DiscWarpPhase);
-        float3 discPos = float3(px, py, pz - warpZ);
-        float absZ = abs(discPos.z);
+        // --- GALAXY-SCALE m=1 MODES ---
+        // Computed once from the UNWARPED position and shared by both gas layers.
+        // These are properties of the galaxy, not of a layer: deriving them per layer
+        // would let positional warp rotate the lopsided axis differently for arms and
+        // disc, and would cost a second atan2 on the hot path.
+        float rn0 = rXY0 / max(discR, 1e-6);
+        float theta0 = atan2(InNormPos.y, InNormPos.x);
 
-        // --- LOPSIDEDNESS: THE m=1 IN-PLANE MODE ---
-        // Very common in real galaxies; one side of the disc is simply denser.
-        float lopsided = max(1.0 + DiscLopsidedAmount * cos(theta - DiscLopsidedPhase), 0.0);
+        // Integral-sign vertical warp. Grows as r^2 so the inner disc stays put --
+        // the bulge holds the inner disc rigid, which is exactly why the bulge itself
+        // does not warp: it is the plane the warp bends away from.
+        //
+        // STRICTLY m = 1. That is what makes it an integral sign, one side up and one
+        // down. An m = 2 mode would give a saddle, which is rare and reads as a bent
+        // potato rather than the recognisable S-curve.
+        //
+        // DiscWarpTwist precesses the LINE OF NODES with radius. Real warps are not
+        // planar: the bending wave differentially precesses, so the rising node
+        // rotates outward and the warp reads as a twisted ribbon rather than a bent
+        // card. Zero reproduces the planar warp exactly. Physically this is the same
+        // differential rotation that sets the arm pitch, so driving it from
+        // SpiralTwist.x is a defensible coupling.
+        float warpZ = DiscWarpAmplitude * rn0 * rn0
+                    * sin(theta0 - DiscWarpPhase - DiscWarpTwist * rn0);
+        armPos.z  -= warpZ;
+        discPos.z -= warpZ;
+
+        // Lopsidedness: one side of the disc is simply denser. Very common in real
+        // galaxies, and one of the cheapest asymmetries available.
+        //
+        // RAMPED BY rn, like the warp is by rn^2. Without a ramp this is an
+        // AZIMUTHAL SEAM ON THE AXIS: theta0 sweeps the full circle as r -> 0 while
+        // the disc's radial profile is at its maximum there, so density jumps between
+        // 1-A and 1+A across a single point. Currently invisible only because the
+        // bulge is far denser at the centre and Compose takes a max. It is also the
+        // more physical form -- the m=1 amplitude genuinely grows outward.
+        float lopsided = max(1.0 + DiscLopsidedAmount * rn0
+                                 * cos(theta0 - DiscLopsidedPhase), 0.0);
 
         // --- ARMS ---
-        // Skipped entirely when the arm layer is off. The arm merge is the most
-        // expensive thing in the field, so this makes debug isolation of the other
-        // layers cheap rather than merely correct.
+        // Gated on ArmPeakDensity, which is how the other layers already early-out.
+        // Zeroing a component of LayerDensity therefore both removes the layer and
+        // skips its cost. The arm merge is the most expensive thing in the field, so
+        // keeping this gate matters. The vertical gate lives inside SampleArmDensity,
+        // where it is exact.
         float ArmDensity = 0.0;
-        if (LayerScaleArm > 0.0)
+        if (ArmPeakDensity > 0.0)
         {
-            float armStart = ArmStartRadius * discR;
-            float tRadialArm = saturate((rXY - armStart) / max(discR - armStart, 1e-6));
-
-            // --- VERTICAL PROFILE, INDEPENDENT OF THE HORIZONTAL ONE ---
-            // Same separable form as SampleDiscDensity. ArmVerticalFalloff = 2 gives a
-            // Gaussian-like round cross-section; 1 is a peaky exponential; 4+ reads
-            // boxy. Thickness grows toward the rim via ArmHeightOuter and picks up
-            // DiscFlare so arms stay inside the disc they live in.
-            float armH = discR * max(ArmHeightRatio, 1e-6)
-                       * lerp(1.0, max(ArmHeightOuter, 1e-6), tRadialArm)
-                       * (1.0 + max(DiscFlare, 0.0) * saturate(rXY / max(discR, 1e-6)));
-
-            float zn = abs(discPos.z) / armH;
-            float vExpArm = max(ArmVerticalFalloff, 0.1);
-            float verticalProfile = exp(-pow(max(zn, GALAXY_POW_EPSILON), vExpArm));
-
-            // --- VERTICAL GATE ---
-            // The arm merge loop is the single most expensive thing in the field, and
-            // it was previously running at every step inside the disc radius --
-            // including the large majority of samples far off the plane, where the
-            // vertical profile annihilates the result anyway. Bail before the loop,
-            // not after.
-            if (verticalProfile > max(ArmVerticalCutoff, 0.0))
-            {
-                ArmDensity = SampleArmHorizontal(discPos, rXY) * verticalProfile * lopsided;
-            }
+            float rXYArm = sqrt(armPos.x * armPos.x + armPos.y * armPos.y);
+            ArmDensity = SampleArmDensity(armPos, rXYArm) * lopsided;
         }
 
-        float DiscDensity  = SampleDiscDensity(rXY, absZ) * lopsided;
-        float BulgeDensity = SampleBulgeDensity(InNormPos);
+        // --- DISC ---
+        float rXYDisc = sqrt(discPos.x * discPos.x + discPos.y * discPos.y);
+        float DiscDensity = SampleDiscDensity(rXYDisc, abs(discPos.z)) * lopsided;
 
-        // --- MULTIPLICATIVE MODULATION ---
-        // What actually makes the field read as gas: real arms are chains of star
-        // forming knots, not smooth ribbons. NoiseAmount above 1 drives the modulator
-        // negative in places, which is clamped to zero and breaks arms apart.
+        // --- GAS MODULATION ---
+        // What makes the field read as gas: real arms are chains of star forming
+        // knots, not smooth ribbons. Sampled at the UNWARPED position -- one fetch
+        // feeds two layers that are now warped differently, so picking either one's
+        // warped position would have been arbitrary, and sampling both would double
+        // the cost for no visible gain in a static field.
         //
-        // Gated on there being something to modulate. Most of the volume is empty, so
-        // this skips the octave loop for the majority of march steps -- the same
-        // early-out structure the universe layer will need.
-        if (NoiseAmount > 0.0 && (ArmDensity + DiscDensity) > 1e-4)
+        // Gated on there being something to modulate: most of the volume is empty, so
+        // this skips the octave loop for the majority of march steps.
+        // != 0.0, not > 0.0: a NEGATIVE amount is a valid inversion of the
+        // modulation, and testing for positive silently dropped it whenever every
+        // amount in the pair happened to be negative.
+        if (bNoise && (NoiseAmountArm != 0.0 || NoiseAmountDisc != 0.0)
+            && (ArmDensity + DiscDensity) > 1e-4)
         {
-            int oct = (int)clamp(NoiseOctaves, 1.0, (float)GALAXY_MAX_OCTAVES);
-            float3 nf = NoiseFrame(gasPos, max(rXY, 1e-5), NoiseScale) + NoiseOffset;
+            float3 nf = NoiseFrame(InNormPos, gasTwist, NoiseScale.xy, NoiseOffset);
             float n = FBm(nf, oct);
 
-            float modulator = 1.0 + NoiseAmount * n;
-            ArmDensity  *= max(lerp(1.0, modulator, saturate(NoiseArmMask)),  0.0);
-            DiscDensity *= max(lerp(1.0, modulator, saturate(NoiseDiscMask)), 0.0);
+            ArmDensity  *= max(1.0 + NoiseAmountArm  * n, 0.0);
+            DiscDensity *= max(1.0 + NoiseAmountDisc * n, 0.0);
         }
 
-        // --- BACKGROUND HALO ---
-        float BgDensity = 0.0;
-        if (BackgroundDensity > 0.0)
+        // --- BULGE AND BACKGROUND ---
+        // Same function, different scale: a squashed spheroid with a density, a
+        // radius and a concentration.
+        float BulgeDensity = SampleSpheroid(bulgePos, BulgePeakDensity,
+                                            BulgeScaleRadius, BulgeVerticalSquash,
+                                            BulgeConcentration);
+
+        float BgDensity = SampleSpheroid(bgPos, BackgroundDensity,
+                                         BackgroundCutoffRadius, BackgroundVerticalSquash,
+                                         BackgroundConcentration);
+
+        // --- HALO MODULATION ---
+        // Separate fetch in the isotropic frame, also at the unwarped position.
+        // Leaving the bulge and halo as clean analytic functions while the arms and
+        // disc are broken up reads as incongruous -- the smooth components give the
+        // whole galaxy away.
+        if (bNoise && (NoiseAmountBulge != 0.0 || NoiseAmountBackground != 0.0)
+            && (BulgeDensity + BgDensity) > 1e-4)
         {
-            float squashedZ = pz / max(BackgroundVerticalSquash, 0.01);
-            float rBg = sqrt(px * px + py * py + squashedZ * squashedZ);
-            float cutoff = BackgroundCutoffRadius;
+            float3 hf = NoiseFrame(InNormPos, haloTwist, NoiseScale.zw,
+                                   NoiseOffset + GALAXY_HALO_DOMAIN);
+            float nh = FBm(hf, oct);
 
-            if (rBg < cutoff)
-            {
-                float bgFadeStart = BackgroundFadeStart * cutoff;
-                float Fade = 1.0;
-                if (rBg > bgFadeStart)
-                {
-                    float t2 = (rBg - bgFadeStart) / (cutoff - bgFadeStart);
-                    Fade = 1.0 - t2 * t2 * (3.0 - 2.0 * t2);
-                }
-                BgDensity = BackgroundDensity * Fade;
-            }
+            BulgeDensity *= max(1.0 + NoiseAmountBulge      * nh, 0.0);
+            BgDensity    *= max(1.0 + NoiseAmountBackground * nh, 0.0);
         }
 
-        return float4(BulgeDensity * LayerScaleBulge,
-                      DiscDensity  * LayerScaleDisc,
-                      ArmDensity   * LayerScaleArm,
-                      BgDensity    * LayerScaleBackground);
+        // Layer order: arms, disc, bulge, background.
+        return float4(ArmDensity, DiscDensity, BulgeDensity, BgDensity);
+    }
+
+    // --- CENTRAL VOID: DENSITY REMOVED BY THE CENTRAL BLACK HOLE ---
+    // Returns a multiplier in [1 - VoidStrength, 1]. Deliberately spherical: the
+    // cleared region is set by accretion, not by disc rotation, so it should not
+    // inherit any layer's vertical squash.
+    //
+    // Compact support like SampleSpheroid, so it is exactly 1 outside VoidRadius and
+    // costs nothing there. Because it lives in Compose it also applies to the CPU
+    // particle path once this ports -- star systems should not spawn in the void
+    // either, and that falls out for free rather than needing its own rejection test.
+    float VoidFactor(float rBounds)
+    {
+        if (VoidStrength <= 0.0) { return 1.0; }
+
+        float a = max(VoidRadius, 1e-6);
+        float x2 = (rBounds * rBounds) / (a * a);
+        if (x2 >= 1.0) { return 1.0; }
+
+        return 1.0 - saturate(VoidStrength)
+                   * PowSafe(1.0 - x2, max(VoidConcentration, GALAXY_POW_EPSILON));
     }
 
     // --- SPHERICAL BOUNDS FADE ---
@@ -617,31 +783,20 @@ struct GalaxyDensitySampler
         return 1.0 - t * t * (3.0 - 2.0 * t);
     }
 
-    // --- COMPOSE LAYERS: UNION OF BULGE/DISC/ARMS, PLUS ADDITIVE BACKGROUND ---
+    // --- COMPOSE LAYERS ---
+    // Union by max, per your local edit. The central void is applied here rather than
+    // per layer: it is a property of the galaxy, so carving it once after the union
+    // costs one multiply instead of four.
     float Compose(float4 L, float rBounds)
     {
-        float Density;
+        float Density = max(max(max(L.x, L.y), L.z), L.w);
 
-        if (BlendMode < 0.5)
-        {
-            // K = 6 here, NOT the SmoothMax default of 8. Matches the C++ call site.
-            Density = SmoothMax3(L.x, L.y, L.z, 6.0);
-        }
-        else if (BlendMode < 1.5)
-        {
-            Density = max(L.x, max(L.y, L.z));
-        }
-        else
-        {
-            float p = max(BlendPower, 1.0);
-            float s = PowSafe(L.x, p) + PowSafe(L.y, p) + PowSafe(L.z, p);
-            Density = (s > 0.0) ? pow(s, 1.0 / p) : 0.0;
-        }
-
-        Density += L.w;
+        Density *= VoidFactor(rBounds);
         Density *= BoundsFade(rBounds);
 
-        return saturate(Density);
+        // NOT saturated: raw density out while the layers are still being tuned in
+        // isolation. Clamping belongs in the compositing pass, once that exists.
+        return Density;
     }
 
     float Sample(float3 InNormPos)
@@ -652,33 +807,7 @@ struct GalaxyDensitySampler
         return Compose(SampleLayers(InNormPos), rBounds);
     }
 
-    // --- ISOLATION: ONE LAYER, BOUNDS FADE ONLY, NO BLEND ---
-    // 0 = bulge, 1 = disc, 2 = arms, 3 = background.
-    float SampleLayer(float3 InNormPos, int InLayer)
-    {
-        float rBounds = length(InNormPos);
-        if (rBounds >= 1.0) { return 0.0; }
-
-        float4 L = SampleLayers(InNormPos);
-        float d = (InLayer == 0) ? L.x
-                : (InLayer == 1) ? L.y
-                : (InLayer == 2) ? L.z
-                                 : L.w;
-
-        return saturate(d * BoundsFade(rBounds));
-    }
-
-    // --- DENSITY FETCH, ROUTED BY DEBUG MODE ---
-    float FetchDensity(float3 InNormPos, int InDebugMode, float InNoisePower)
-    {
-        float d = (InDebugMode >= 3)
-            ? SampleLayer(InNormPos, InDebugMode - 3)
-            : Sample(InNormPos);
-
-        return pow(max(d, GALAXY_POW_EPSILON), InNoisePower);
-    }
-
-    // --- DEBUG RAYMARCH: ANALYTIC SPHERE-BOUNDED DENSITY ACCUMULATION ---
+    // --- RAYMARCH: ANALYTIC SPHERE-BOUNDED DENSITY ACCUMULATION ---
     // Marches only the chord where the field can be nonzero. There is NO box
     // bounds test: CurPos starts exactly on the proxy surface, so a component is
     // exactly 0.0 or 1.0 before any FP error, and a box test breaks on iteration
@@ -693,14 +822,14 @@ struct GalaxyDensitySampler
     // InMaxSteps     - samples across the chord
     // InDensityScale - global sigma multiplier (the "Density" material param)
     // InJitter       - [0,1] entry-point dither, resolves through temporal AA
-    // InNoisePower   - render-side shaping
-    // InDebugMode    - 0 composite, 1 max density, 2 optical depth,
-    //                  3 bulge, 4 disc, 5 arms, 6 background
+    // InNoisePower   - render-side shaping, no CPU counterpart
+    //
+    // Layer isolation is done by zeroing a component of LayerDensity: each layer
+    // guards on its own density, so that both removes it and skips its cost.
     //
     // Returns emissive in RGB, transmittance in A.
     float4 RayMarch(float3 InStartPos, float3 InViewVec, int InMaxSteps,
-                    float InDensityScale, float InJitter, float InNoisePower,
-                    int InDebugMode)
+                    float InDensityScale, float InJitter, float InNoisePower)
     {
         // Unit box [0,1] -> normalized galaxy space [-1,1]. Uniform scale, so a
         // direction is identical in both spaces.
@@ -738,17 +867,13 @@ struct GalaxyDensitySampler
 
         float transmittance = 1.0;
         float3 volumeColor = 0.0;
-        float maxDensity = 0.0;
-        float opticalDepth = 0.0;
 
         for (int i = 0; i < steps; i++)
         {
             float3 normPos = o + dir * t;
 
-            float density = FetchDensity(normPos, InDebugMode, InNoisePower);
-
-            maxDensity = max(maxDensity, density);
-            opticalDepth += density * InDensityScale * localStep;
+            float density = Sample(normPos);
+            density = pow(max(density, GALAXY_POW_EPSILON), InNoisePower);
 
             // --- OPACITY ---
             float sigma = density * InDensityScale;
@@ -763,9 +888,6 @@ struct GalaxyDensitySampler
             t += normStep;
         }
 
-        if (InDebugMode == 1) { return float4(maxDensity.xxx, 1.0 - saturate(maxDensity)); }
-        if (InDebugMode == 2) { return float4(opticalDepth.xxx, exp(-opticalDepth)); }
-
         return float4(volumeColor, transmittance);
     }
 };
@@ -774,77 +896,112 @@ struct GalaxyDensitySampler
 GalaxyDensitySampler gd;
 gd.BoundsFadeStart           = BoundsFadeStart;
 
-gd.BulgeScaleRadius          = BulgeScaleRadius;
-gd.BulgeCutoffRadius         = BulgeCutoffRadius;
-gd.BulgePeakDensity          = BulgePeakDensity;
-gd.BulgeVerticalSquash       = BulgeVerticalSquash;
-gd.LayerScaleBulge           = LayerScaleBulge;
+gd.BulgeConcentration        = BulgeConcentration;
 
-gd.DiscRadius                = DiscRadius;
-gd.DiscHeightRatio           = DiscHeightRatio;
-gd.DiscBaseDensity           = DiscBaseDensity;
-gd.DiscRadialScaleLength     = DiscRadialScaleLength;
+gd.DiscScaleLengthRatio      = DiscRadialScaleLength;
 gd.DiscVerticalFalloff       = DiscVerticalFalloff;
-gd.DiscFlare                 = 0;
-gd.DiscWarpAmplitude         = 0;
-gd.DiscWarpPhase             = 0;
-gd.DiscLopsidedAmount        = 0;
-gd.DiscLopsidedPhase         = 0;
-gd.LayerScaleDisc            = LayerScaleDisc;
+gd.DiscFlare                 = DiscFlare;
+gd.DiscWarpAmplitude         = DiscWarpAmplitude;
+gd.DiscWarpPhase             = DiscWarpPhase;
+gd.DiscWarpTwist             = DiscWarpTwist;
+gd.DiscLopsidedAmount        = DiscLopsidedAmount;
+gd.DiscLopsidedPhase         = DiscLopsidedPhase;
 
 gd.ArmCount                  = ArmCount;
-gd.ArmPitchAngle             = ArmPitchAngle;
-gd.ArmPitchTightening        = ArmPitchTightening;
-gd.ArmPhaseOffset            = ArmPhaseOffset;
-gd.ArmWidthPerp              = ArmWidthPerp;
-gd.ArmStartRadius            = ArmStartRadius;
-gd.ArmStartBlendWidth        = 0;
-gd.ArmHeightRatio            = ArmHeightRatio;
-gd.ArmHeightOuter            = ArmHeightOuter;
-gd.ArmVerticalFalloff        = ArmVerticalFalloff;
+// x = pitch angle (deg), y = tightening, z = phase offset (rad),
+// w = how much of the twist the halo frame inherits
+gd.ArmPitchAngle             = SpiralTwist.x;
+gd.ArmPitchTightening        = SpiralTwist.y;
+gd.ArmPhaseOffset            = SpiralTwist.z;
+gd.HaloTwistInherit          = SpiralTwist.w;
 gd.ArmProfileExponent        = ArmProfileExponent;
 gd.ArmMergeSmooth            = ArmMergeSmooth;
 
 gd.NoiseOffset               = NoiseOffset;
-gd.NoiseAmount               = NoiseAmount;
+// FRAME CONVENTION: x = disc lateral, y = disc vertical,
+//                   z = halo lateral, w = halo vertical
 gd.NoiseScale                = NoiseScale;
-gd.NoiseVerticalScale        = NoiseVerticalScale;
-gd.NoiseOctaves              = NoiseOctaves;
-gd.NoiseLacunarity           = NoiseLacunarity;
-gd.NoiseGain                 = NoiseGain;
-gd.NoiseRidged               = NoiseRidged;
-gd.NoiseArmMask              = NoiseArmMask;
-gd.NoiseDiscMask             = NoiseDiscMask;
-gd.WarpAmount                = WarpAmount;
 gd.WarpScale                 = WarpScale;
+gd.NoiseOctaves              = NoiseOctaves;
+gd.NoiseRidged               = NoiseRidged;
+gd.NoiseEnable               = NoiseEnable;
 gd.NoiseChannelWeights       = NoiseChannelWeights;
-gd.ArmVerticalCutoff         = ArmVerticalCutoff;
+
+// --- PER-LAYER FAMILIES, PACKED x = arms, y = disc, z = bulge, w = background ---
+//
+// Every layer is a body with a horizontal scale S and a vertical extent S * V.
+// The four vertical controls are all AXIS RATIOS despite looking different: the
+// bulge and background write it as z/squash, which puts the constant-density
+// surface at z = squash * a, so the parameter is c/a exactly as the disc's h/R and
+// the arm's H/W are. Smaller flattens, in all four.
+//
+// NOTE .y does double duty: DiscRadius is also the arm system's radial reference
+// (the spiral u = log(discR/rXY), tRadial, and the outer bound all read it). Arms
+// deliberately have no independent radius -- they live in the disc.
+gd.ArmWidth                  = LateralScale.x;
+gd.DiscRadius                = LateralScale.y;
+gd.BulgeScaleRadius          = LateralScale.z;
+gd.BackgroundCutoffRadius    = LateralScale.w;
+
+gd.ArmVerticalRatio          = VerticalScale.x;
+gd.DiscHeightRatio           = VerticalScale.y;
+gd.BulgeVerticalSquash       = VerticalScale.z;
+gd.BackgroundVerticalSquash  = VerticalScale.w;
+
+gd.NoiseAmountArm            = NoiseAmount.x;
+gd.NoiseAmountDisc           = NoiseAmount.y;
+gd.NoiseAmountBulge          = NoiseAmount.z;
+gd.NoiseAmountBackground     = NoiseAmount.w;
+
+gd.ArmPeakDensity            = LayerDensity.x;
+gd.DiscBaseDensity           = LayerDensity.y;
+gd.BulgePeakDensity          = LayerDensity.z;
+gd.BackgroundDensity         = LayerDensity.w;
+
+// ArmAsymSeed stays a separate pin: it is an index, not an amount.
+gd.ArmAsymPitch              = ArmAsym.x;
+gd.ArmAsymPhase              = ArmAsym.y;
+gd.ArmAsymDensity            = ArmAsym.z;
+gd.ArmAsymLength             = ArmAsym.w;
+
+gd.WarpAmountArms            = WarpAmount.x;
+gd.WarpAmountDisc            = WarpAmount.y;
+gd.WarpAmountBulge           = WarpAmount.z;
+gd.WarpAmountBackground      = WarpAmount.w;
+
+// x = radius, y = strength, z = concentration
+gd.VoidRadius                = CentralVoid.x;
+gd.VoidStrength              = CentralVoid.y;
+gd.VoidConcentration         = CentralVoid.z;
 
 gd.NoiseTex                  = NoiseTex;
 gd.NoiseTexSampler           = NoiseTexSampler;
 gd.ArmRadialGrowth           = ArmRadialGrowth;
 gd.ArmDensityFalloffExponent = ArmDensityFalloffExponent;
-gd.ArmCoreThickness          = ArmCoreThickness;
-gd.ArmEnvelopeThickness      = ArmEnvelopeThickness;
-gd.ArmPeakDensity            = ArmPeakDensity;
 gd.ArmAsymSeed               = ArmAsymSeed;
-gd.ArmAsymPitch              = ArmAsymPitch;
-gd.ArmAsymPhase              = ArmAsymPhase;
-gd.ArmAsymDensity            = ArmAsymDensity;
-gd.ArmAsymLength             = ArmAsymLength;
-gd.LayerScaleArm             = LayerScaleArm;
 
-gd.BackgroundDensity         = BackgroundDensity;
-gd.BackgroundVerticalSquash  = BackgroundVerticalSquash;
-gd.BackgroundCutoffRadius    = BackgroundCutoffRadius;
-gd.BackgroundFadeStart       = BackgroundFadeStart;
-gd.LayerScaleBackground      = LayerScaleBackground;
+gd.BackgroundConcentration   = BackgroundConcentration;
 
-gd.BlendMode                 = BlendMode;   // 0 LSE (parity), 1 hard max, 2 p-norm
-gd.BlendPower                = BlendPower;
 
 // --- HOIST PER-ARM CONSTANTS: ONCE PER PIXEL, NOT ONCE PER MARCH STEP ---
-gd.PrepareArms();
+// Every slot is filled, not just the first ArmN, so none is ever read
+// uninitialised. Cost is a handful of hashes once, against N x MaxSteps before.
+gd.ArmN = (int)clamp(ArmCount, 1.0, (float)GALAXY_MAX_ARMS);
+
+float armSpacing = 2.0 * GALAXY_PI / float(gd.ArmN);
+int armSeed = (int)ArmAsymSeed;
+
+for (int ai = 0; ai < GALAXY_MAX_ARMS; ai++)
+{
+    float4 h = gd.ArmHash(ai, armSeed);
+
+    gd.ArmData[ai] = float4(
+        1.0 + gd.ArmAsymPitch * (2.0 * h.x - 1.0),
+        gd.ArmPhaseOffset + float(ai) * armSpacing
+            + gd.ArmAsymPhase * armSpacing * (2.0 * h.y - 1.0),
+        max(1.0 + gd.ArmAsymDensity * (2.0 * h.z - 1.0), 0.0),
+        gd.DiscRadius * (1.0 - gd.ArmAsymLength * h.w));
+}
 
 // --- DITHER: ENTRY-POINT OFFSET, RESOLVES THROUGH TEMPORAL AA ---
 int3 randpos = int3(Parameters.SvPosition.xy, View.StateFrameIndexMod8);
@@ -854,8 +1011,7 @@ return gd.RayMarch(
     CurPos,
     LocalCamVec,      // raw, not normalized -- the method handles it
     (int)MaxSteps,
-    1,            // InDensityScale
-    rand,             // InJitter; pass 0.0 to disable dither
-    1,                // InNoisePower
-    1                 // InDebugMode
+    MasterDensityScale,   // InDensityScale
+    rand,                 // InJitter; pass 0.0 to disable dither
+    MasterDensityPower    // InNoisePower
 );
