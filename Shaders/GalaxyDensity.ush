@@ -1,0 +1,220 @@
+#pragma once
+
+// GalaxyDensity.ush
+// Shader-side wrapper around GalaxyDensityCore.ush. Everything here touches a
+// texture, which is exactly what the core cannot do if C++ is to compile it.
+//
+// The seam is the same one NoiseEnable already draws: with noise off, this file
+// degenerates to GalaxyDensityParams::SampleAnalytic, which is what the CPU
+// rejection sampler runs.
+//
+// Nothing here touches Parameters or View -- those exist only inside the generated
+// material function, so the dither that needs them stays in the Custom node body.
+
+#include "/UltraLargeScale/GalaxyDensityCore.ush"
+
+// --- VOLUME TEXTURE LOOKUP, SIGNED ---
+// SampleLevel, not Sample: inside a dynamic loop the derivatives driving mip
+// selection are undefined. Called as a method rather than through the
+// Texture3DSampleLevel macro so this file does not depend on Common.ush having been
+// included ahead of it.
+//
+// Channels are centred to [-1,1] BEFORE weighting, which is what lets a weight act
+// as a mixer: positive takes the channel, negative inverts it, |w| > 1 is gain,
+// all-zero returns 0. Weighting first would need a signed-sum divide that blows up
+// for (1,-1,0,0).
+//
+// Output is deliberately NOT bounded to [-1,1] -- sum|w| > 1 exceeds it. The
+// downstream modulator is 1 + Amount * n, so large |n| spikes density as well as
+// clamping it to zero. Keep sum|w| near 1 unless gain is wanted.
+//
+// Ridging happens HERE, per channel, not on the weighted sum: the 1-2|c| fold only
+// maps back into [-1,1] when its input is already bounded there, which each centred
+// channel is and the weighted sum is not.
+float GalaxySampleNoiseTex(GalaxyDensityParams P, Texture3D InTex,
+                           SamplerState InSampler, float3 Pos)
+{
+    float4 t = InTex.SampleLevel(InSampler, Pos, 0);
+    float4 c = t * 2.0 - 1.0;
+
+    c = lerp(c, 1.0 - 2.0 * abs(c), P.NoiseRidged);
+
+    return dot(P.NoiseChannelWeights, c);
+}
+ 
+float GalaxyFBm(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 Pos)
+{
+    float sum = 0.0;
+    float amp = 1.0;
+
+    for (int o = 0; o < GALAXY_MAX_OCTAVES; o++)
+    {
+        if (o >= P.NoiseOctaveCount) { break; }
+
+        // A texture has no seed, so octaves decorrelate by offset.
+        sum += GalaxySampleNoiseTex(P, InTex, InSampler,
+                                    Pos + float3(17.3, 11.7, 23.1) * float(o)) * amp;
+        Pos *= GALAXY_NOISE_LACUNARITY;
+        amp *= GALAXY_NOISE_GAIN;
+    }
+
+    return sum * P.InvNoiseNorm;
+}
+
+// Full field: analytic layers, positionally warped, then modulated.
+//
+// The ORDER matters for cost. Warp has to be sampled before the layers because it
+// displaces the position they are evaluated at, but modulation is sampled AFTER,
+// gated on the layers being non-zero -- most of the volume is empty, so that gate
+// skips the octave loop for the majority of march steps.
+float GalaxySample(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler,
+                   float3 NormPos)
+{
+    // Squared, so out-of-bounds samples never pay for the sqrt.
+    float rBoundsSq = dot(NormPos, NormPos);
+    if (rBoundsSq >= 1.0) { return 0.0; }
+
+    bool bNoise = P.NoiseEnable > 0.5;
+
+    // Split so neither twist is built when nothing consumes it.
+    bool bGasNoise  = bNoise && (P.WarpAmountArms != 0.0 || P.WarpAmountDisc != 0.0
+                              || P.NoiseAmountArm != 0.0 || P.NoiseAmountDisc != 0.0);
+    bool bHaloNoise = bNoise && (P.WarpAmountBulge != 0.0 || P.WarpAmountBackground != 0.0
+                              || P.NoiseAmountBulge != 0.0 || P.NoiseAmountBackground != 0.0);
+
+    float gasTwist  = 0.0;
+    float haloTwist = 0.0;
+
+    if (bGasNoise || bHaloNoise)
+    {
+        // One log for both twists: they share this radius.
+        float rXY0 = sqrt(NormPos.x * NormPos.x + NormPos.y * NormPos.y);
+        float rn0 = saturate(rXY0 * P.InvDiscRadius);
+        float u0 = min(-log(max(rn0, 1e-5)), 6.0);
+
+        gasTwist  = bGasNoise  ? P.SpiralTwistAt(u0, rn0, 1.0) : 0.0;
+        haloTwist = bHaloNoise ? P.SpiralTwistAt(u0, rn0, P.HaloTwistInherit) : 0.0;
+    }
+
+    // One fetch per family, not an FBm call: warp wants a single low frequency, and
+    // RGB supplies a three-component vector directly. The two layers in a family
+    // share the fetch and scale it independently, so they can warp in opposite
+    // directions for the price of one lookup.
+    float3 gasWarp  = float3(0.0, 0.0, 0.0);
+    float3 haloWarp = float3(0.0, 0.0, 0.0);
+
+    if (bGasNoise && (P.WarpAmountArms != 0.0 || P.WarpAmountDisc != 0.0))
+    {
+        float3 wf = P.NoiseFrame(NormPos, gasTwist, P.WarpScale.xy, P.NoiseOffset);
+        gasWarp = InTex.SampleLevel(InSampler, wf, 0).rgb - 0.5;
+    }
+
+    // From the ORIGINAL position, not a gas-warped one, so the two displacements stay
+    // independent rather than compounding.
+    if (bHaloNoise && (P.WarpAmountBulge != 0.0 || P.WarpAmountBackground != 0.0))
+    {
+        float3 hf = P.NoiseFrame(NormPos, haloTwist, P.WarpScale.zw,
+                                 P.NoiseOffset + GALAXY_HALO_DOMAIN);
+        haloWarp = InTex.SampleLevel(InSampler, hf, 0).rgb - 0.5;
+    }
+
+    float4 L = P.SampleLayersWarped(NormPos, gasWarp, haloWarp);
+
+    // Sampled at the UNWARPED position: one fetch feeds two layers that are warped
+    // differently, so either warped position would be an arbitrary choice and
+    // sampling both would double the cost for no visible gain.
+    //
+    // != 0.0 rather than > 0.0, so a negative amount -- a valid inversion of the
+    // modulation -- is not silently dropped. Zero means "gate rejected", and
+    // ApplyModulation leaves those layers untouched.
+    float gasNoise  = 0.0;
+    float haloNoise = 0.0;
+
+    if (bGasNoise && (P.NoiseAmountArm != 0.0 || P.NoiseAmountDisc != 0.0)
+        && (L.x + L.y) > 1e-4)
+    {
+        float3 nf = P.NoiseFrame(NormPos, gasTwist, P.NoiseScale.xy, P.NoiseOffset);
+        gasNoise = GalaxyFBm(P, InTex, InSampler, nf);
+    }
+
+    if (bHaloNoise && (P.NoiseAmountBulge != 0.0 || P.NoiseAmountBackground != 0.0)
+        && (L.z + L.w) > 1e-4)
+    {
+        float3 hf = P.NoiseFrame(NormPos, haloTwist, P.NoiseScale.zw,
+                                 P.NoiseOffset + GALAXY_HALO_DOMAIN);
+        haloNoise = GalaxyFBm(P, InTex, InSampler, hf);
+    }
+
+    L = P.ApplyModulation(L, gasNoise, haloNoise);
+
+    return P.Compose(L, rBoundsSq);
+}
+
+// --- RAYMARCH: ANALYTIC SPHERE-BOUNDED DENSITY ACCUMULATION ---
+// The proxy mesh decides which pixels run; the unit sphere decides where to march.
+// Step length adapts to chord length, so quality does not vary with view angle and no
+// trailing partial step is needed.
+//
+// Do not add a box bounds test on the marched position. InStartPos sits exactly on
+// the proxy surface, so a component is exactly 0 or 1 before any FP error, and such a
+// test breaks on iteration zero wherever rounding pushes it outside -- view-direction
+// dependent, so it shows as angle-dependent dropout at silhouettes.
+//
+// InViewVec is the LOCAL camera vector, surface toward camera, need not be
+// normalized. Returns emissive in RGB, transmittance in A.
+float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler,
+                      float3 InStartPos, float3 InViewVec, int InMaxSteps,
+                      float InDensityScale, float InJitter, float InNoisePower)
+{
+    // Unit box [0,1] -> normalized galaxy space [-1,1]. Uniform scale, so a direction
+    // is identical in both.
+    float3 o = 2.0 * (InStartPos - 0.5);
+    float3 dir = normalize(-InViewVec);
+
+    float b = dot(o, dir);
+    float c = dot(o, o) - 1.0;
+    float disc = b * b - c;
+    if (disc <= 0.0) { return float4(0.0, 0.0, 0.0, 1.0); }
+
+    float sq = sqrt(disc);
+
+    // Origin inside the sphere: clamp the near end. Outside: take the whole chord
+    // WITHOUT clamping to zero, because with an inverted-normal proxy the shaded
+    // point is the far face and the chord lies at negative t.
+    float tEnter = (c < 0.0) ? 0.0 : (-b - sq);
+    float tExit  = -b + sq;
+    if (tExit <= tEnter) { return float4(0.0, 0.0, 0.0, 1.0); }
+
+    int steps = max(InMaxSteps, 1);
+    float normStep = (tExit - tEnter) / float(steps);
+
+    // Optical path is in LOCAL units and normalized space is 2x local.
+    float localStep = normStep * 0.5;
+
+    // Dither the entry point, not the step length, so every ray keeps an identical
+    // total path and density does not shimmer with the noise.
+    float t = tEnter + InJitter * normStep;
+
+    bool bShape = (InNoisePower != 1.0);
+
+    float transmittance = 1.0;
+    float emission = 0.0;
+
+    for (int i = 0; i < steps; i++)
+    {
+        float density = GalaxySample(P, InTex, InSampler, o + dir * t);
+        if (bShape) { density = P.PowSafe(density, InNoisePower); }
+
+        float alpha = 1.0 - exp(-density * InDensityScale * localStep);
+
+        // Flat white emission: structure only.
+        emission += alpha * transmittance;
+        transmittance *= 1.0 - alpha;
+
+        if (transmittance < 0.001) { break; }
+
+        t += normStep;
+    }
+
+    return float4(emission.xxx, transmittance);
+}

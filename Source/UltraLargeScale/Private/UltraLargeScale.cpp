@@ -1,11 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
-
 #include "UltraLargeScale.h"
 #include "Misc/MessageDialog.h"
 #include "Modules/ModuleManager.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 #include "HAL/PlatformProcess.h"
+#include "ShaderCore.h"
 
 DEFINE_LOG_CATEGORY(LogSVOPerf);
 
@@ -13,10 +13,24 @@ DEFINE_LOG_CATEGORY(LogSVOPerf);
 
 void FUltraLargeScaleModule::StartupModule()
 {
-	// This code will execute after your module is loaded into memory; the exact timing is specified in the .uplugin file per-module
+	// Map /UltraLargeScale/... in shader include paths onto <Plugin>/Shaders/...
+	// so material Custom nodes can #include from this plugin.
+	const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("UltraLargeScale"));
+	if (!Plugin.IsValid())
+	{
+		UE_LOG(LogSVOPerf, Error,
+			TEXT("UltraLargeScale plugin not found; shader include path not registered."));
+		return;
+	}
 
-	// Get the base directory of this plugin
-	FString BaseDir = IPluginManager::Get().FindPlugin("UltraLargeScale")->GetBaseDir();
+	const FString ShaderDir = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Shaders"));
+
+	// Registering the same virtual path twice asserts, so this is guarded for
+	// live-coding reloads, which re-run StartupModule without unregistering.
+	if (!AllShaderSourceDirectoryMappings().Contains(TEXT("/UltraLargeScale")))
+	{
+		AddShaderSourceDirectoryMapping(TEXT("/UltraLargeScale"), ShaderDir);
+	}
 }
 
 void FUltraLargeScaleModule::ShutdownModule()
