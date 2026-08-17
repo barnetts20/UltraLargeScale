@@ -33,7 +33,7 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	/** Disc radius in normalized space. Doubles as the arm system's radial
 	 *  reference: arms live in the disc and have no radius of their own. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Scale", meta = (ClampMin = "0.0"))
-	float DiscRadius = 0.8f;
+	float DiscRadius = 0.7f;
 
 	/** Bulge zero-density radius, as a fraction of DiscRadius. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Scale", meta = (ClampMin = "0.0"))
@@ -50,7 +50,7 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	float ArmVerticalRatio = 0.75f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Scale", meta = (ClampMin = "0.0"))
-	float DiscVerticalRatio = 0.015f;
+	float DiscVerticalRatio = 0.01f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Scale", meta = (ClampMin = "0.0"))
 	float BulgeVerticalRatio = 0.6f;
@@ -150,7 +150,7 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	/** Coefficient on DiscFlare: arms widen outward in step with the disc thickening.
 	 *  1.0 means they taper together. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms", meta = (ClampMin = "0.0"))
-	float ArmRadialGrowth = 1.0f;
+	float ArmRadialGrowth = 2.0f;
 
 	/** How strongly arm strength follows the disc's radial profile.
 	 *  0 = independent, 1 = fades exactly with the disc, >1 faster. */
@@ -305,6 +305,25 @@ USTRUCT(BlueprintType)
 struct ULTRALARGESCALE_API FGalaxyMaterialParams
 {
 	GENERATED_BODY()
+	/** Bake the density field into a pseudovolume texture.
+	 *
+	 *  Only the OLD raymarch material reads it; the analytic material evaluates the
+	 *  field directly. Off by default: baking costs a full 256^3 evaluation plus a
+	 *  4096^2 upscale and upload on every spawn, and ~64 MB resident per galaxy.
+	 *
+	 *  Kept as an INDEPENDENT cross-check of the CPU implementation rather than as a
+	 *  render path -- the CPU evaluates and bakes, the old material renders the
+	 *  texture, and that should agree with the analytic material evaluating the same
+	 *  parameters live. Set BakeDensityReference on the density params first: the
+	 *  field is an unbounded optical depth and this channel is a byte. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	bool bBakeDensityVolume = false;
+
+	/** March steps across the chord. Step length adapts to chord length, so this is
+	 *  quality, not scale -- and because LayerDensity is an optical depth normalised
+	 *  by path, changing it no longer requires retuning any density. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	float VolumeMaxSteps = 128.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
 	int32 DensityVolumeResolution = 256;

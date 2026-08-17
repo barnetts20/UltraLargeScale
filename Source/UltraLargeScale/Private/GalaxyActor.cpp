@@ -149,7 +149,7 @@ void AGalaxyActor::ResetForSpawn()
 void AGalaxyActor::InitializeData()
 {
 	double StartTime = FPlatformTime::Seconds();
-	
+
 	// MaxEntityScale is a fixed absolute world-cm value on FGalaxyParams. DeriveScaleRanges cascades it through the tier depth sequence to set MinScale/MaxScale per tier. No per-instance derivation needed.
 	GalaxyGenerator.Params = Params;
 	GalaxyGenerator.Params.DeriveScaleRanges();
@@ -157,11 +157,23 @@ void AGalaxyActor::InitializeData()
 
 	if (InitializationState == ELifecycleState::Pooling) return;
 
-	TArray<uint8> VolumeData = GalaxyGenerator.SampleNoiseVolume(Params.MaterialParams.DensityVolumeResolution);
+	// The analytic material evaluates the field directly, so nothing reads this
+	// texture. Baking it costs a full 256^3 evaluation plus a 4096^2 upscale and
+	// upload on every spawn, and roughly 64 MB resident per galaxy -- which is most
+	// of what keeps galaxies from being loaded further out.
+	//
+	// Kept behind a flag rather than deleted: it is an INDEPENDENT cross-check of the
+	// CPU implementation. The CPU evaluates and bakes, the old material renders the
+	// texture, and that should agree with the new material evaluating the same
+	// parameters live.
+	if (Params.MaterialParams.bBakeDensityVolume)
+	{
+		TArray<uint8> VolumeData = GalaxyGenerator.SampleNoiseVolume(Params.MaterialParams.DensityVolumeResolution);
 
-	if (InitializationState == ELifecycleState::Pooling) return;
+		if (InitializationState == ELifecycleState::Pooling) return;
 
-	PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(FVolumeTextureUtils::PackToPseudoVolumeLayout(FVolumeTextureUtils::UpscaleVolumeData(VolumeData, Params.MaterialParams.DensityVolumeResolution)));
+		PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(FVolumeTextureUtils::PackToPseudoVolumeLayout(FVolumeTextureUtils::UpscaleVolumeData(VolumeData, Params.MaterialParams.DensityVolumeResolution)));
+	}
 
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeData took: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
 }
@@ -186,31 +198,31 @@ void AGalaxyActor::InitializeVolumetric()
 			UMaterialInterface* ParentMat = LoadObject<UMaterialInterface>(nullptr, *Self->VolumetricMaterialPath);
 			UVolumeTexture* NoiseTex = LoadObject<UVolumeTexture>(nullptr, *Self->Params.MaterialParams.VolumeNoise);
 
-			if (!BoxMesh || !ParentMat || !Self->PseudoVolumeTexture)
+			// PseudoVolumeTexture is NOT required: the analytic material evaluates the
+			// field rather than sampling a bake, so gating on it here would keep the
+			// bake on the critical path for a texture nothing reads.
+			if (!BoxMesh || !ParentMat)
 			{
-				UE_LOG(LogTemp, Error, TEXT("AGalaxyActor::InitializeVolumetric - ABORT, required assets unresolved. ") TEXT("mesh=%s material=%s pseudovolume=%s"), BoxMesh ? TEXT("ok") : TEXT("NULL /UltraLargeScale/UnitBoxInvertedNormals"), ParentMat ? TEXT("ok") : *FString::Printf(TEXT("NULL %s"), *Self->VolumetricMaterialPath), Self->PseudoVolumeTexture ? TEXT("ok") : TEXT("NULL (InitializeData failed - see its own error)"));
+				UE_LOG(LogTemp, Error, TEXT("AGalaxyActor::InitializeVolumetric - ABORT, required assets unresolved. ") TEXT("mesh=%s material=%s"), BoxMesh ? TEXT("ok") : TEXT("NULL /UltraLargeScale/UnitBoxInvertedNormals"), ParentMat ? TEXT("ok") : *FString::Printf(TEXT("NULL %s"), *Self->VolumetricMaterialPath));
 				CompletionPromise.SetValue();
 				return;
 			}
 			if (!NoiseTex)
 			{
-				UE_LOG(LogTemp, Warning, TEXT("AGalaxyActor::InitializeVolumetric - noise texture '%s' unresolved; ") TEXT("raymarcher will run without detail noise."), *Self->Params.MaterialParams.VolumeNoise);
+				UE_LOG(LogTemp, Warning, TEXT("AGalaxyActor::InitializeVolumetric - noise texture '%s' unresolved; ") TEXT("the field will render without modulation or positional warp."), *Self->Params.MaterialParams.VolumeNoise);
 			}
-			
+
 			Self->VolumeMaterial = UMaterialInstanceDynamic::Create(ParentMat, Self);
-			Self->VolumeMaterial->SetTextureParameterValue(FName("VolumeTexture"), Self->PseudoVolumeTexture);
-			if (NoiseTex) Self->VolumeMaterial->SetTextureParameterValue(FName("NoiseTexture"), NoiseTex);
-			Self->VolumeMaterial->SetVectorParameterValue(FName("AmbientColor"), Self->Params.MaterialParams.VolumeAmbientColor);
-			Self->VolumeMaterial->SetVectorParameterValue(FName("CoolShift"), Self->Params.MaterialParams.VolumeCoolShift);
-			Self->VolumeMaterial->SetVectorParameterValue(FName("HotShift"), Self->Params.MaterialParams.VolumeHotShift);
-			Self->VolumeMaterial->SetScalarParameterValue(FName("HueVariance"), Self->Params.MaterialParams.VolumeHueVariance);
-			Self->VolumeMaterial->SetScalarParameterValue(FName("HueVarianceScale"), Self->Params.MaterialParams.VolumeHueVarianceScale);
-			Self->VolumeMaterial->SetScalarParameterValue(FName("SaturationVariance"), Self->Params.MaterialParams.VolumeSaturationVariance);
-			Self->VolumeMaterial->SetScalarParameterValue(FName("TemperatureInfluence"), Self->Params.MaterialParams.VolumeTemperatureInfluence);
-			Self->VolumeMaterial->SetScalarParameterValue(FName("TemperatureScale"), Self->Params.MaterialParams.VolumeTemperatureScale);
-			Self->VolumeMaterial->SetScalarParameterValue(FName("ScaleFactor"), Self->Params.MaterialParams.VolumeDensity);
-			Self->VolumeMaterial->SetScalarParameterValue(FName("WarpAmount"), Self->Params.MaterialParams.VolumeWarpAmount);
-			Self->VolumeMaterial->SetScalarParameterValue(FName("WarpScale"), Self->Params.MaterialParams.VolumeWarpScale);
+			if (NoiseTex) Self->VolumeMaterial->SetTextureParameterValue(FName("NoiseTex"), NoiseTex);
+
+			// One call, one source of truth. See PushDensityParams.
+			Self->PushDensityParams(Self->VolumeMaterial);
+
+			// The colour parameters the pseudovolume material took -- AmbientColor,
+			// CoolShift, HotShift, HueVariance, SaturationVariance, Temperature*,
+			// ScaleFactor, Warp* -- do not exist on the analytic material, which
+			// returns flat white emission. Pushing them would be silent no-ops.
+			// Colour belongs to the shading pass, not the density field.
 
 			Self->VolumetricComponent = NewObject<UStaticMeshComponent>(Self);
 			Self->VolumetricComponent->SetVisibility(false);
@@ -233,19 +245,115 @@ void AGalaxyActor::InitializeVolumetric()
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeVolumetric took: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
 }
 
+void AGalaxyActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
+{
+	if (!InMID) return;
+
+	const FGalaxyDensityParams& D = Params.DensityParams;
+
+	// --- LATERAL SCALES ---
+	InMID->SetScalarParameterValue(TEXT("ArmRadius"), D.ArmRadius);
+	InMID->SetScalarParameterValue(TEXT("DiscRadius"), D.DiscRadius);
+	InMID->SetScalarParameterValue(TEXT("BulgeRadius"), D.BulgeRadius);
+	InMID->SetScalarParameterValue(TEXT("BackgroundRadius"), D.BackgroundRadius);
+
+	// --- VERTICAL RATIOS ---
+	InMID->SetScalarParameterValue(TEXT("ArmVerticalRatio"), D.ArmVerticalRatio);
+	InMID->SetScalarParameterValue(TEXT("DiscVerticalRatio"), D.DiscVerticalRatio);
+	InMID->SetScalarParameterValue(TEXT("BulgeVerticalRatio"), D.BulgeVerticalRatio);
+	InMID->SetScalarParameterValue(TEXT("BackgroundVerticalRatio"), D.BackgroundVerticalRatio);
+
+	// --- LAYER OPTICAL DEPTHS ---
+	InMID->SetScalarParameterValue(TEXT("ArmDensity"), D.ArmDensity);
+	InMID->SetScalarParameterValue(TEXT("DiscDensity"), D.DiscDensity);
+	InMID->SetScalarParameterValue(TEXT("BulgeDensity"), D.BulgeDensity);
+	InMID->SetScalarParameterValue(TEXT("BackgroundDensity"), D.BackgroundDensity);
+
+	// --- NOISE RESPONSE (render only: the CPU evaluates the analytic field) ---
+	InMID->SetScalarParameterValue(TEXT("ArmNoiseAmount"), D.ArmNoiseAmount);
+	InMID->SetScalarParameterValue(TEXT("DiscNoiseAmount"), D.DiscNoiseAmount);
+	InMID->SetScalarParameterValue(TEXT("BulgeNoiseAmount"), D.BulgeNoiseAmount);
+	InMID->SetScalarParameterValue(TEXT("BackgroundNoiseAmount"), D.BackgroundNoiseAmount);
+	InMID->SetScalarParameterValue(TEXT("WarpAmountArms"), D.WarpAmountArms);
+	InMID->SetScalarParameterValue(TEXT("WarpAmountDisc"), D.WarpAmountDisc);
+	InMID->SetScalarParameterValue(TEXT("WarpAmountBulge"), D.WarpAmountBulge);
+	InMID->SetScalarParameterValue(TEXT("WarpAmountBackground"), D.WarpAmountBackground);
+
+	// --- ARM ASYMMETRY ---
+	InMID->SetScalarParameterValue(TEXT("ArmAsymPitch"), D.ArmAsymPitch);
+	InMID->SetScalarParameterValue(TEXT("ArmAsymPhase"), D.ArmAsymPhase);
+	InMID->SetScalarParameterValue(TEXT("ArmAsymDensity"), D.ArmAsymDensity);
+	InMID->SetScalarParameterValue(TEXT("ArmAsymLength"), D.ArmAsymLength);
+	InMID->SetScalarParameterValue(TEXT("ArmAsymSeed"), D.ArmAsymSeed);
+
+	// --- SPIRAL ---
+	InMID->SetScalarParameterValue(TEXT("ArmPitchAngle"), D.ArmPitchAngle);
+	InMID->SetScalarParameterValue(TEXT("ArmPitchTightening"), D.ArmPitchTightening);
+	InMID->SetScalarParameterValue(TEXT("ArmPhaseOffset"), D.ArmPhaseOffset);
+	InMID->SetScalarParameterValue(TEXT("HaloTwistInherit"), D.HaloTwistInherit);
+	InMID->SetScalarParameterValue(TEXT("ArmCount"), D.ArmCount);
+	InMID->SetScalarParameterValue(TEXT("ArmProfileExponent"), D.ArmProfileExponent);
+	InMID->SetScalarParameterValue(TEXT("ArmRadialGrowth"), D.ArmRadialGrowth);
+	InMID->SetScalarParameterValue(TEXT("ArmHostFalloff"), D.ArmHostFalloff);
+
+	// --- DISC SHAPE AND ASYMMETRY ---
+	InMID->SetScalarParameterValue(TEXT("DiscScaleRatio"), D.DiscScaleRatio);
+	InMID->SetScalarParameterValue(TEXT("DiscVerticalFalloff"), D.DiscVerticalFalloff);
+	InMID->SetScalarParameterValue(TEXT("DiscFlare"), D.DiscFlare);
+	InMID->SetScalarParameterValue(TEXT("DiscWarpAmplitude"), D.DiscWarpAmplitude);
+	InMID->SetScalarParameterValue(TEXT("DiscWarpPhase"), D.DiscWarpPhase);
+	InMID->SetScalarParameterValue(TEXT("DiscWarpTwist"), D.DiscWarpTwist);
+	InMID->SetScalarParameterValue(TEXT("DiscLopsidedAmount"), D.DiscLopsidedAmount);
+	InMID->SetScalarParameterValue(TEXT("DiscLopsidedPhase"), D.DiscLopsidedPhase);
+
+	// --- PROFILE EXPONENTS AND BOUNDS ---
+	InMID->SetScalarParameterValue(TEXT("BulgeConcentration"), D.BulgeConcentration);
+	InMID->SetScalarParameterValue(TEXT("BackgroundConcentration"), D.BackgroundConcentration);
+	InMID->SetScalarParameterValue(TEXT("BoundsFadeStart"), D.BoundsFadeStart);
+
+	// --- CENTRAL VOID ---
+	InMID->SetScalarParameterValue(TEXT("CentralVoidRadius"), D.CentralVoidRadius);
+	InMID->SetScalarParameterValue(TEXT("CentralVoidAmount"), D.CentralVoidAmount);
+	InMID->SetScalarParameterValue(TEXT("CentralVoidExponent"), D.CentralVoidExponent);
+
+	// --- NOISE FIELD SHAPE ---
+	InMID->SetScalarParameterValue(TEXT("NoiseDiscLateralScale"), D.NoiseDiscLateralScale);
+	InMID->SetScalarParameterValue(TEXT("NoiseDiscVerticalScale"), D.NoiseDiscVerticalScale);
+	InMID->SetScalarParameterValue(TEXT("NoiseHaloLateralScale"), D.NoiseHaloLateralScale);
+	InMID->SetScalarParameterValue(TEXT("NoiseHaloVerticalScale"), D.NoiseHaloVerticalScale);
+	InMID->SetScalarParameterValue(TEXT("WarpDiscLateralScale"), D.WarpDiscLateralScale);
+	InMID->SetScalarParameterValue(TEXT("WarpDiscVerticalScale"), D.WarpDiscVerticalScale);
+	InMID->SetScalarParameterValue(TEXT("WarpHaloLateralScale"), D.WarpHaloLateralScale);
+	InMID->SetScalarParameterValue(TEXT("WarpHaloVerticalScale"), D.WarpHaloVerticalScale);
+	InMID->SetVectorParameterValue(TEXT("NoiseChannelWeights"), D.NoiseChannelWeights);
+	InMID->SetVectorParameterValue(TEXT("NoiseOffset"), FLinearColor(D.NoiseOffset.X, D.NoiseOffset.Y, D.NoiseOffset.Z, 0.0f));
+	InMID->SetScalarParameterValue(TEXT("NoiseOctaves"), D.NoiseOctaves);
+	InMID->SetScalarParameterValue(TEXT("NoiseRidged"), D.NoiseRidged);
+
+	// --- RENDER ---
+	InMID->SetScalarParameterValue(TEXT("MasterDensityScale"), D.MasterDensityScale);
+	InMID->SetScalarParameterValue(TEXT("MasterDensityPower"), D.MasterDensityPower);
+	InMID->SetScalarParameterValue(TEXT("MaxSteps"), Params.MaterialParams.VolumeMaxSteps);
+
+	// NOT PUSHED: EnableNoise. It is a StaticSwitchParameter, resolved at material
+	// compile time -- a MID cannot change one, and setting it silently does nothing.
+	// It stays a material-asset setting. Making it per-galaxy would mean converting it
+	// back to a scalar, which costs the dead-stripping of the texture reads.
+}
+
 void AGalaxyActor::InitializeNiagara()
 {
 	double StartTime = FPlatformTime::Seconds();
 	BuildTierConfigs();
-	
+
 	const FTierStreamingContext Ctx = BuildStreamingContext();
 
 	FTierStreamingSystem::InitializeTier(Ctx, LargeTierConfig, LargeTierState, TierNiagaraComponents);
 	if (InitializationState == ELifecycleState::Pooling) return;
-	
+
 	FTierStreamingSystem::InitializeTier(Ctx, MidTierConfig, MidTierState, TierNiagaraComponents);
 	if (InitializationState == ELifecycleState::Pooling) return;
-	
+
 	FTierStreamingSystem::InitializeTier(Ctx, SmallTierConfig, SmallTierState, TierNiagaraComponents);
 
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeNiagara total: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
@@ -300,7 +408,7 @@ void AGalaxyActor::BuildTierConfigs()
 		const FVector NodeCenter = GridCoordToCenter(Coord, MidTierConfig.GridDepth);
 		const double CellExt = GetGridCellExtent(MidTierConfig.GridDepth);
 		GalaxyGenerator.GenerateTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter, CellExt, Params.MidTier, 7, MidTierState.SlotCounts[SlotIndex]);
-	};
+		};
 
 	// --- Small tier: neighborhood streaming ---
 	SmallTierConfig.TierName = TEXT("Small");
@@ -317,13 +425,13 @@ void AGalaxyActor::BuildTierConfigs()
 		const double CellExt = GetGridCellExtent(SmallTierConfig.GridDepth);
 		GalaxyGenerator.GenerateTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter,
 			CellExt, Params.SmallTier, 23, SmallTierState.SlotCounts[SlotIndex]);
-	};
+		};
 
 	// Shared bounds convention — see the derivation in AUniverseActor::BuildTierConfigs. Tight half-bound is (2R+2) * CellHalfExtent; we provision 2 * (2R+1) to match the universe tiers. The previous (2R+1) * CellHalfExtent under-bounded by up to one half-cell when VT sat near a cell boundary, risking edge-cell culling pops.
 	auto MakeBounds = [this](const FParticleTierConfig& Config) {
 		const double HalfExt = GetGridCellExtent(Config.GridDepth) * (2 * Config.NeighborhoodRadius + 1) * 2.0;
 		return FBox(FVector(-HalfExt), FVector(HalfExt));
-	};
+		};
 
 	LargeTierConfig.ComputeBounds = [this]() { return FBox(FVector(-Params.Extent), FVector(Params.Extent)); };
 	MidTierConfig.ComputeBounds = [this, MakeBounds]() { return MakeBounds(MidTierConfig); };
@@ -562,7 +670,7 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 
 	UActorPoolManager* PM = GetPoolManager();
 	if (!PM) return;
-	
+
 	AStarSystemActor* System = PM->Acquire<AStarSystemActor>();
 	if (!System) return;
 

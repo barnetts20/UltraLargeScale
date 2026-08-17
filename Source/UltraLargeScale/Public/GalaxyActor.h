@@ -124,7 +124,19 @@ protected:
 #pragma endregion
 
 #pragma region Volumetric
-	FString VolumetricMaterialPath = FString("/UltraLargeScale/Galaxy/MT_GalaxyRaymarchPseudoVolume_Inst.MT_GalaxyRaymarchPseudoVolume_Inst");
+	/** The analytic raymarcher: evaluates GalaxyDensityCore.ush directly rather than
+	 *  sampling a baked pseudovolume, so it needs no texture and its structure is the
+	 *  same function the CPU rejection-samples. */
+	FString VolumetricMaterialPath = FString("/UltraLargeScale/Galaxy/MT_GalaxyRaymarchAnalytic_Inst.MT_GalaxyRaymarchAnalytic_Inst");
+
+	/** Pushes the density parameter set onto a material instance.
+	 *
+	 *  The material graph is a PASS-THROUGH: these are the identical raw values
+	 *  FGalaxyDensityParams::ToDerived hands MakeGalaxyDensityParams, and every
+	 *  correlation between them is resolved inside that shared derivation. Scaling or
+	 *  combining anything here instead would desync the render from star placement,
+	 *  which is exactly what the shared field exists to prevent. */
+	void PushDensityParams(UMaterialInstanceDynamic* InMID) const;
 #pragma endregion
 
 #pragma region Star System Placement

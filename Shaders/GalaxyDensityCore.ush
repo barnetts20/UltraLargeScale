@@ -207,7 +207,15 @@ struct GalaxyDensityParams
 
         // The guard above bounds rXY to (0, DiscRadius), so no saturate is needed.
         float tRadial = rXY * InvDiscRadius;
-        float growthFactor = lerp(1.0f, ArmRadialGrowth, tRadial);
+        float edge = 1.0f - tRadial * tRadial;
+
+        // Arms take the SAME sqrt(edge) lens taper as the disc. Without it the two
+        // diverge exactly where the taper bites: the disc closes to zero at the rim
+        // while the arm keeps widening at ArmRadialGrowth, so past rn ~ 0.85 the arms
+        // bulge outside the disc they are supposed to live in and read as a thick
+        // collar. ArmHostFalloff dims that but does not thin it -- brightness cannot
+        // fix a geometry mismatch.
+        float growthFactor = lerp(1.0f, ArmRadialGrowth, tRadial) * sqrt(edge);
         float invW = 1.0f / max(ArmWidth * growthFactor, 1e-6f);
 
         // Exact vertical gate: q >= qz always and the surface is q = 1, so qz >= 1
@@ -223,7 +231,6 @@ struct GalaxyDensityParams
 
         // Arms are a compression wave in the disc, so their strength follows the disc
         // hosting them. Evaluated before the loop so a negligible host skips it.
-        float edge = 1.0f - tRadial * tRadial;
         float host = PowSafe(DiscRadialProfile(rXY, edge), ArmHostFalloff);
         if (host <= 0.0f)
         {
