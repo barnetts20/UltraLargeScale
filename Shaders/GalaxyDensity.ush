@@ -10,7 +10,6 @@
 //
 // Nothing here touches Parameters or View -- those exist only inside the generated
 // material function, so the dither that needs them stays in the Custom node body.
-
 #include "/UltraLargeScale/GalaxyDensityCore.ush"
 
 // --- VOLUME TEXTURE LOOKUP, SIGNED ---
@@ -61,7 +60,6 @@ float GalaxyFBm(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, 
 }
 
 // Full field: analytic layers, positionally warped, then modulated.
-//
 // The ORDER matters for cost. Warp has to be sampled before the layers because it
 // displaces the position they are evaluated at, but modulation is sampled AFTER,
 // gated on the layers being non-zero -- most of the volume is empty, so that gate
