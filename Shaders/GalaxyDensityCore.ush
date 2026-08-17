@@ -633,15 +633,21 @@ GalaxyDensityParams MakeGalaxyDensityParams(
     // flattens. LateralScale.y does double duty: the disc radius is also the arm
     // system's radial reference, since arms live in the disc and have no radius of
     // their own.
-    P.ArmWidth = max(InLateralScale.x, 1e-6f);
+    // CORRELATED INPUTS are resolved here, not in the material graph, so the
+    // shader and C++ receive the identical raw parameter set:
+    //   arm width      is a fraction of the disc's scale height
+    //   bulge radius   is a fraction of the disc radius
+    //   void radius    is a fraction of the disc radius
+    //   arm growth     is a coefficient on the disc's flare
+    P.DiscHeightRatio = max(InVerticalScale.y, 1e-6f);
     P.DiscRadius = max(InLateralScale.y, 1e-6f);
     P.InvDiscRadius = 1.0f / P.DiscRadius;
+    P.ArmWidth = max(InLateralScale.x * P.DiscHeightRatio, 1e-6f);
 
-    float bulgeR = max(InLateralScale.z, 1e-6f);
+    float bulgeR = max(InLateralScale.z * P.DiscRadius, 1e-6f);
     float bgR = max(InLateralScale.w, 1e-6f);
 
     P.InvArmVerticalRatio = 1.0f / max(InVerticalScale.x, 1e-4f);
-    P.DiscHeightRatio = max(InVerticalScale.y, 1e-6f);
     P.BulgeInvSquash = 1.0f / max(InVerticalScale.z, 1e-3f);
     P.BackgroundInvSquash = 1.0f / max(InVerticalScale.w, 1e-3f);
 
@@ -658,7 +664,7 @@ GalaxyDensityParams MakeGalaxyDensityParams(
     P.BackgroundConcentration = max(InBackgroundConcentration, GALAXY_POW_EPSILON);
     P.DiscVerticalFalloff = max(InDiscVerticalFalloff, 0.1f);
     P.ArmProfileExponent = max(InArmProfileExponent, GALAXY_POW_EPSILON);
-    P.ArmRadialGrowth = InArmRadialGrowth;
+    P.ArmRadialGrowth = InArmRadialGrowth * InDiscFlare;
     P.ArmHostFalloff = max(InArmHostFalloff, 0.0f);
 
     // --- DISC ASYMMETRY ---
@@ -678,7 +684,7 @@ GalaxyDensityParams MakeGalaxyDensityParams(
     P.ArmPitchFactorMax = 1.0f + abs(InArmAsym.x);
 
     // --- CENTRAL VOID ---
-    float voidR = max(InCentralVoid.x, 1e-6f);
+    float voidR = max(InCentralVoid.x * P.DiscRadius, 1e-6f);
     P.InvVoidRadiusSq = 1.0f / (voidR * voidR);
     P.VoidStrength = saturate(InCentralVoid.y);
     P.VoidConcentration = max(InCentralVoid.z, GALAXY_POW_EPSILON);

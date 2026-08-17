@@ -1,6 +1,11 @@
 ﻿// GalaxyDataGenerator.h
-// Galaxy density field (spiral SDF + bulge/disc/background), tier generation,
-// and volume texture sampling.
+// Galaxy density field and tier generation.
+//
+// The density field itself lives in Shaders/GalaxyDensityCore.ush and is compiled by
+// BOTH the shader and this module, so star placement and the rendered gas are one
+// function rather than two implementations kept in agreement by hand. Only
+// GalaxyDataGenerator.cpp compiles it, inside namespace GalaxyHLSL -- see
+// GalaxyHLSLShim.h for why that namespace must not be opened.
 
 #pragma once
 
@@ -13,162 +18,106 @@
 #include "FVolumeTextureUtils.h"
 #include "FNiagaraParticleBuffer.h"
 
+/** Declared in GalaxyDensityCore.ush, compiled inside namespace GalaxyHLSL by
+ *  GalaxyDataGenerator.cpp. Held by pointer so this header needs neither the shim nor
+ *  the field itself. */
+namespace GalaxyHLSL { struct GalaxyDensityParams; }
 
-/** Owns noise composition and tier generation for the galaxy layer; mirrors
- *  UniverseDataGenerator. The galaxy actor wires tier callbacks that delegate
- *  here; this class has no knowledge of actors, Niagara, octrees, or the
- *  streaming pipeline. */
-
+/** Owns density evaluation and tier generation for the galaxy layer; mirrors
+ *  UniverseDataGenerator. The galaxy actor wires tier callbacks that delegate here;
+ *  this class has no knowledge of actors, Niagara, octrees, or streaming. */
 class ULTRALARGESCALE_API GalaxyDataGenerator
 {
 public:
-	GalaxyDataGenerator() {};
-	GalaxyDataGenerator(FGalaxyParams InParams) : Params(InParams) {};
+	GalaxyDataGenerator();
+	explicit GalaxyDataGenerator(FGalaxyParams InParams);
+
+	// Out of line, and move-only: TUniquePtr needs GalaxyDensityParams complete at
+	// the point of destruction, which is only true inside the .cpp.
+	~GalaxyDataGenerator();
+	GalaxyDataGenerator(GalaxyDataGenerator&&) noexcept;
+	GalaxyDataGenerator& operator=(GalaxyDataGenerator&&) noexcept;
+	GalaxyDataGenerator(const GalaxyDataGenerator&) = delete;
+	GalaxyDataGenerator& operator=(const GalaxyDataGenerator&) = delete;
 
 	FGalaxyParams Params;
 	FastNoise::SmartNode<> DensityNoise;
 
-#pragma region Math Helpers
-
-	/** Smooth maximum of three values (A, B, C) via the log-sum-exp form:
-	 *  SmoothMax ~ max(A, B, C) with a differentiable blend zone of radius ~1/K
-	 *  around each crossing (higher K = sharper, approaching hard max; lower K =
-	 *  softer). K > 0, typically 2-16.
-	 *
-	 *  LSE form: (1/K) * log(exp(K*A) + exp(K*B) + exp(K*C)), numerically
-	 *  stabilized by subtracting the running max before exponentiation so the
-	 *  result never overflows regardless of K. */
-	static FORCEINLINE float SmoothMax(float A, float B, float C, float K = 8.0f)
-	{
-		const float M = FMath::Max3(A, B, C);
-		const float ExpA = FMath::Exp(K * (A - M));
-		const float ExpB = FMath::Exp(K * (B - M));
-		const float ExpC = FMath::Exp(K * (C - M));
-		return M + FMath::Loge(ExpA + ExpB + ExpC) / K;
-	}
-
-#pragma endregion
-
-#pragma region Signed Distance Fields & Analytic Density
-	/** Arms use a two-phase approach: SampleArmSDF returns unsigned distance from
-	 *  the centerline, then SampleDensity remaps through core/envelope thresholds.
-	 *  The disc and bulge are rotationally symmetric so they use direct analytic
-	 *  profiles instead of SDF remapping. */
-
-	 /** Unsigned distance from the nearest arm centerline at query radius rXY
-	  *  (pre-computed cylindrical radius) for InNormPos in [-1, 1] normalized
-	  *  galaxy space. */
-	float SampleArmSDF(const FVector& InNormPos, double rXY) const;
-
-	/** Signed distance to the bulge ellipsoid. Positive inside.
-	 *  Used as a hard boundary guard; actual bulge density uses a Hernquist profile. */
-	float SampleBulgeSDF(const FVector& InNormPos) const;
-
-	/** Analytic bulge density using a Hernquist profile in oblate coordinates.
-	 *  Returns density in [0, 1]; hard zero outside BulgeCutoffRadius. */
-	float SampleBulgeDensity(const FVector& InNormPos) const;
-
-	/** Signed distance to the disc cylinder. Positive inside.
-	 *  Used as a hard boundary guard in SampleDiscDensity. */
-	float SampleDiscSDF(const FVector& InNormPos, double rXY, double absZ) const;
-
-	/** Analytic disc density at the given cylindrical coordinates.
-	 *  Separable exponential radial x exp(-|z/h|^falloff) vertical profile.
-	 *  Returns density in [0, 1]; hard zero outside the disc cylinder. */
-	float SampleDiscDensity(double rXY, double absZ) const;
-
-#pragma endregion
+	/** Clamped, pre-inverted fields plus the 16 per-arm records, derived once in
+	 *  Initialize(). Rebuilding it per sample would repeat 16 hashes, a tan and every
+	 *  reciprocal on every candidate. */
+	TUniquePtr<GalaxyHLSL::GalaxyDensityParams> Derived;
 
 #pragma region Density Sampling
-	/** Composites all active layers into a single [0, 1] density value. Arms,
-	 *  disc, and bulge are max-blended (union); background is additive.
-	 *    Arms:  SDF-based, core/envelope remap + radial growth.
-	 *    Disc:  Analytic exponential radial x vertical profile.
-	 *    Bulge: Hernquist profile in oblate coordinates.
-	 *    BG:    Additive halo (zeroed until compositing phase). */
 
-	 /** Sample density at a single normalized position.
-	  *  InNormPos is in [-1, 1] noise space (position / Extent).
-	  *  Returns density in [0, 1]. */
+	/** Raw field value at a normalized position, InNormPos in [-1,1] (position /
+	 *  Extent).
+	 *
+	 *  UNBOUNDED. This is an OPTICAL DEPTH, not a probability: it peaks near 260 at
+	 *  the default tuning while most of the volume sits below 0.01. Feeding it
+	 *  straight to a rejection test accepts every candidate above 1.0 -- the arms,
+	 *  the inner disc and the whole bulge -- erasing the structure it describes.
+	 *  Always route it through FGalaxyDensityParams::ToSpawnProbability first. */
 	float SampleDensity(const FVector& InNormPos) const;
 
-	/** Batch-evaluate the density field for an array of positions. */
-	void SampleDensityBatch(float* OutDensity, int32 InCount, const float* InX, const float* InY, const float* InZ) const;
+	/** Batch form. Same contract: raw optical depth out. */
+	void SampleDensityBatch(float* OutDensity, int32 InCount,
+		const float* InX, const float* InY, const float* InZ) const;
 
 #pragma endregion
 
 #pragma region Initialization
 
-	/** Build the encoded noise graph (kept for future use) and mark ready. */
+	/** Derive the density parameters and build the encoded noise graph. MUST run
+	 *  before any sampling; SampleDensity returns zero until it does. */
 	void Initialize();
 
-	/** Build noise from encoded tree. Kept for future FastNoise swap-in. */
+	/** Build noise from encoded tree. Kept for a future FastNoise swap-in. */
 	FastNoise::SmartNode<> BuildNoise() const;
 
-	/** Sample the density field into a CPU-side BGRA8 volume texture buffer.
-	 *  Uses the C++ SampleDensity path directly rather than going through
-	 *  FVolumeTextureUtils::SampleNoiseToVolume. */
+	/** Sample the field into a CPU-side BGRA8 volume buffer.
+	 *
+	 *  TRANSITIONAL. Once the raymarch material evaluates the field directly there is
+	 *  nothing to bake, and removing this path also removes the async upload, the
+	 *  upscale, and roughly 320 MB of resident volume texture. It is kept for now as
+	 *  an independent cross-check: the CPU evaluates and bakes, the old material
+	 *  renders the texture, and that should match the new material evaluating the
+	 *  same parameters live. */
 	TArray<uint8> SampleNoiseVolume(int InNoiseResolution) const;
 
 #pragma endregion
 
 #pragma region Tier Generation Callbacks
-	/** Self-contained generation functions that write directly into particle
-	 *  buffers; the galaxy actor's tier system calls them via
+	/** Self-contained generation functions that write directly into particle buffers;
+	 *  the galaxy actor's tier system calls them via
 	 *  FParticleTierConfig::GenerateCallback lambdas.
 	 *
-	 *  A single generation function serves all tiers; Large/Mid/Small differ only
-	 *  in the candidate volume (full extent vs cell-local), the tier params (scale
-	 *  range, density curve), and the seed offset for stream isolation. */
+	 *  A single function serves all tiers; Large/Mid/Small differ only in the
+	 *  candidate volume (full extent vs cell-local), the tier params (scale range,
+	 *  density curve), and the seed offset for stream isolation. */
+	void GenerateTierNode(const FIntVector& InCoord, int32 InSlotIndex,
+		FNiagaraParticleBuffer& InBuffer, const FVector& InNodeCenter,
+		double InCellExtent, const FTierParams& InTierParams,
+		int32 InSeedOffset, int32& OutSlotCount) const;
 
-	 /** Generates particles for a single tier cell (InCoord, InSlotIndex) via
-	  *  batched noise rejection sampling: candidates are distributed uniformly
-	  *  within InCellExtent around InNodeCenter, density-gated by SampleDensity,
-	  *  and written into InBuffer at the slot region for InSlotIndex. InTierParams
-	  *  supplies the scale range and density curve; InSeedOffset is added to
-	  *  Params.Seed for stream isolation between tiers; OutSlotCount receives the
-	  *  accepted particle count. For the Large tier (full galaxy), pass
-	  *  InNodeCenter = ZeroVector and InCellExtent = Params.Extent. */
-	void GenerateTierNode(const FIntVector& InCoord, int32 InSlotIndex, FNiagaraParticleBuffer& InBuffer, const FVector& InNodeCenter, double InCellExtent, const FTierParams& InTierParams, int32 InSeedOffset, int32& OutSlotCount) const;
+	void GenerateLargeTierSlot(int32 InSlotIndex, FNiagaraParticleBuffer& InBuffer,
+		int32& OutSlotCount) const;
 
 #pragma endregion
 
-#pragma region Large Tier SDF Culling
+#pragma region Large Tier Culling
 
-	/** One active cell in the large tier culling grid. */
 	struct FActiveLargeTierCell
 	{
-		/** Galaxy-local center (not normalized). */
-		FVector Center;
-
-		/** Half-extent of the cell (same on all axes). */
-		double HalfExt;
-
-		/** Integer grid coordinate at LargeTierCullDepth. */
-		FIntVector GridCoord;
+		FVector Center = FVector::ZeroVector;
+		double HalfExt = 0.0;
+		FIntVector GridCoord = FIntVector::ZeroValue;
 	};
 
-	/** Subdivide the galaxy volume into a uniform grid at Params.LargeTierCullDepth
-	 *  and return only cells where at least one corner has non-zero composite
-	 *  density. Cells whose all 8 corners evaluate to SampleDensity == 0 are
-	 *  entirely outside all SDF envelopes and can never produce accepted candidates.
-	 *
-	 *  Grid covers [-Extent, +Extent] on each axis (galaxy-local). Corner
-	 *  positions are converted to normalized [-1, 1] space before testing. */
+	/** Cells whose eight corners are all zero-density are skipped entirely,
+	 *  concentrating candidates on arms, disc and bulge. Corners rather than centres,
+	 *  so a cell straddling an envelope boundary is never wrongly discarded. */
 	TArray<FActiveLargeTierCell> CollectActiveLargeTierCells() const;
-
-	/** Generate the full large tier slot by iterating over SDF-active cells.
-	 *  Candidates are distributed proportionally: each active cell receives
-	 *  ceil(SlotCapacity / ActiveCellCount) candidates, capped at SlotCapacity
-	 *  total. This concentrates sampling on arms/disc/bulge and avoids wasting
-	 *  rejection attempts on empty inter-arm space.
-	 *
-	 *  Writes into InBuffer at the slot region for InSlotIndex. Pads remaining
-	 *  entries dead. Sets OutSlotCount to the accepted particle count. */
-	void GenerateLargeTierSlot(
-		int32 InSlotIndex,
-		FNiagaraParticleBuffer& InBuffer,
-		int32& OutSlotCount) const;
 
 #pragma endregion
 };
