@@ -315,8 +315,7 @@ struct GalaxyDensityParams
     // Do not swap this for a cusped profile such as Hernquist. It diverges at the
     // centre, needs a clamp to stay finite, and the clamp turns the peak parameter
     // into a control over the radius of a saturated ball instead of a density.
-    float SampleSpheroid(float3 InNormPos, float InDensityOverPath, float InInvRadiusSq,
-                         float InInvSquash, float InConcentration)
+    float SampleSpheroid(float3 InNormPos, float InDensityOverPath, float InInvRadiusSq, float InInvSquash, float InConcentration)
     {
         if (InDensityOverPath <= 0.0) { return 0.0; }
 
@@ -541,46 +540,47 @@ struct GalaxyDensityParams
 // than merely intended to match.
 // ==========================================================================
 GalaxyDensityParams MakeGalaxyDensityParams(
-    float4 InLateralScale,          // x arm width, y disc radius,
-                                    // z bulge radius, w background radius
+    float4 InLateralScale,          // x arm width, y disc radius, z bulge radius, w background radius
     float4 InVerticalScale,         // per-layer axis ratios, same order
     float4 InLayerDensity,          // per-layer OPTICAL DEPTH, same order
     float4 InNoiseAmount,           // per-layer modulation depth, same order
     float4 InWarpAmount,            // per-layer warp amount, signed, same order
     float4 InArmAsym,               // x pitch, y phase, z density, w length
-    float4 InSpiralTwist,           // x pitch deg, y tightening,
-                                    // z phase offset, w halo inherit
+    float4 InSpiralTwist,           // x pitch deg, y tightening, z phase offset, w halo inherit
     float3 InCentralVoid,           // x radius, y strength, z concentration
     float4 InNoiseScale,            // frame convention
     float4 InWarpScale,             // frame convention
     float4 InNoiseChannelWeights,
     float3 InNoiseOffset,
-    float InBoundsFadeStart,
-    float InDiscScaleLengthRatio,   // multiple of the bulge radius
-    float InDiscVerticalFalloff,
-    float InDiscFlare,
-    float InDiscWarpAmplitude,
-    float InDiscWarpPhase,
-    float InDiscWarpTwist,
-    float InDiscLopsidedAmount,
-    float InDiscLopsidedPhase,
-    float InArmCount,
-    float InArmAsymSeed,
-    float InArmProfileExponent,
-    float InArmRadialGrowth,
-    float InArmHostFalloff,
-    float InArmMergeSmooth,
-    float InBulgeConcentration,
-    float InBackgroundConcentration,
-    float InNoiseOctaves,
-    float InNoiseRidged,
-    float InNoiseEnable)
+    float  InBoundsFadeStart,
+    float  InDiscScaleLengthRatio,
+    float  InDiscVerticalFalloff,
+    float  InDiscFlare,
+    float  InDiscWarpAmplitude,
+    float  InDiscWarpPhase,
+    float  InDiscWarpTwist,
+    float  InDiscLopsidedAmount,
+    float  InDiscLopsidedPhase,
+    float  InArmCount,
+    float  InArmAsymSeed,
+    float  InArmProfileExponent,
+    float  InArmRadialGrowth,
+    float  InArmHostFalloff,
+    float  InArmMergeSmooth,
+    float  InBulgeConcentration,
+    float  InBackgroundConcentration,
+    float  InNoiseOctaves,
+    float  InNoiseRidged,
+    float  InNoiseEnable)
 {
     GalaxyDensityParams P;
-
-    P.BoundsFadeStart    = InBoundsFadeStart;
-    P.BoundsFadeStartSq  = InBoundsFadeStart * InBoundsFadeStart;
-    P.InvBoundsFadeSpan  = 1.0 / max(1.0 - InBoundsFadeStart, 1e-6);
+    //CentralVoidRadius is multiplied by DiscRadius before getting fed to the function
+    //ArmRadius is multiplied by DiscVerticalRatio
+    //BulgeRadius is multiplied by DiscRadius
+    //ArmRadialGrowth is multiplied by DiscFlare
+    P.BoundsFadeStart           = InBoundsFadeStart;
+    P.BoundsFadeStartSq         = InBoundsFadeStart * InBoundsFadeStart;
+    P.InvBoundsFadeSpan         = 1.0 / max(1.0 - InBoundsFadeStart, 1e-6);
 
     // --- LATERAL AND VERTICAL SCALES ---
     // Every layer is a body with a lateral scale S and a vertical extent S * V. The
@@ -588,123 +588,106 @@ GalaxyDensityParams MakeGalaxyDensityParams(
     // flattens. LateralScale.y does double duty: the disc radius is also the arm
     // system's radial reference, since arms live in the disc and have no radius of
     // their own.
-    P.ArmWidth      = max(InLateralScale.x, 1e-6);
-    P.DiscRadius    = max(InLateralScale.y, 1e-6);
-    P.InvDiscRadius = 1.0 / P.DiscRadius;
+    P.DiscHeightRatio           = max(InVerticalScale.y, 1e-6);
+    P.DiscRadius                = max(InLateralScale.y, 1e-6);
+    P.ArmWidth                  = max(InLateralScale.x * P.DiscHeightRatio, 1e-6);
 
-    float bulgeR = max(InLateralScale.z, 1e-6);
-    float bgR    = max(InLateralScale.w, 1e-6);
-
-    P.InvArmVerticalRatio    = 1.0 / max(InVerticalScale.x, 1e-4);
-    P.DiscHeightRatio        = max(InVerticalScale.y, 1e-6);
-    P.BulgeInvSquash         = 1.0 / max(InVerticalScale.z, 1e-3);
-    P.BackgroundInvSquash    = 1.0 / max(InVerticalScale.w, 1e-3);
-
-    P.BulgeInvRadiusSq       = 1.0 / (bulgeR * bulgeR);
-    P.BackgroundInvRadiusSq  = 1.0 / (bgR * bgR);
+    P.InvDiscRadius             = 1.0 / P.DiscRadius;
+    float bulgeR                = max(InLateralScale.z * P.DiscRadius, 1e-6);
+    float bgR                   = max(InLateralScale.w, 1e-6);
+    P.InvArmVerticalRatio       = 1.0 / max(InVerticalScale.x, 1e-4);
+    P.BulgeInvSquash            = 1.0 / max(InVerticalScale.z, 1e-3);
+    P.BackgroundInvSquash       = 1.0 / max(InVerticalScale.w, 1e-3);
+    P.BulgeInvRadiusSq          = 1.0 / (bulgeR * bulgeR);
+    P.BackgroundInvRadiusSq     = 1.0 / (bgR * bgR);
 
     // Scale length is derived from the bulge rather than the disc radius: the
     // bulge-to-disc scale ratio is a real measured quantity, while the disc radius is
     // just where the disc is truncated.
-    P.InvDiscScaleL = 1.0 / max(bulgeR * max(InDiscScaleLengthRatio, 1e-6), 1e-6);
+    P.InvDiscScaleL             = 1.0 / max(bulgeR * max(InDiscScaleLengthRatio, 1e-6), 1e-6);
 
     // --- PROFILE EXPONENTS ---
-    P.BulgeConcentration      = max(InBulgeConcentration, GALAXY_POW_EPSILON);
-    P.BackgroundConcentration = max(InBackgroundConcentration, GALAXY_POW_EPSILON);
-    P.DiscVerticalFalloff     = max(InDiscVerticalFalloff, 0.1);
-    P.ArmProfileExponent      = max(InArmProfileExponent, GALAXY_POW_EPSILON);
-    P.ArmRadialGrowth         = InArmRadialGrowth;
-    P.ArmHostFalloff          = max(InArmHostFalloff, 0.0);
+    P.BulgeConcentration        = max(InBulgeConcentration, GALAXY_POW_EPSILON);
+    P.BackgroundConcentration   = max(InBackgroundConcentration, GALAXY_POW_EPSILON);
+    P.DiscVerticalFalloff       = max(InDiscVerticalFalloff, 0.1);
+    P.ArmProfileExponent        = max(InArmProfileExponent, GALAXY_POW_EPSILON);
+    P.ArmRadialGrowth           = InArmRadialGrowth * InDiscFlare;
+    P.ArmHostFalloff            = max(InArmHostFalloff, 0.0);
 
     // Saturated, not just floored: above 1 the blend band exceeds the value and
     // SmoothMaxPoly stops returning A for smax(A, 0), so merging a zero-contribution
     // arm would inflate the accumulator.
-    P.ArmMergeSmooth = saturate(InArmMergeSmooth);
+    P.ArmMergeSmooth            = saturate(InArmMergeSmooth);
 
     // --- DISC ASYMMETRY ---
-    P.DiscFlare           = max(InDiscFlare, 0.0);
-    P.DiscWarpAmplitude   = InDiscWarpAmplitude;
-    P.DiscWarpPhase       = InDiscWarpPhase;
-    P.DiscWarpTwist       = InDiscWarpTwist;
-    P.DiscLopsidedAmount  = InDiscLopsidedAmount;
-    P.DiscLopsidedPhase   = InDiscLopsidedPhase;
+    P.DiscFlare                 = max(InDiscFlare, 0.0);
+    P.DiscWarpAmplitude         = InDiscWarpAmplitude;
+    P.DiscWarpPhase             = InDiscWarpPhase;
+    P.DiscWarpTwist             = InDiscWarpTwist;
+    P.DiscLopsidedAmount        = InDiscLopsidedAmount;
+    P.DiscLopsidedPhase         = InDiscLopsidedPhase;
 
     // --- SPIRAL ---
-    float pitchDeg = clamp(InSpiralTwist.x, -89.0, 89.0);
-    float tanP = tan(radians(max(abs(pitchDeg), 1.0)));
-    P.ArmSpiralK0        = ((pitchDeg < 0.0) ? -1.0 : 1.0) / tanP;
-    P.ArmPitchTightening = max(InSpiralTwist.y, 0.0);
-    P.HaloTwistInherit   = InSpiralTwist.w;
-    P.ArmPitchFactorMax  = 1.0 + abs(InArmAsym.x);
+    float pitchDeg              = clamp(InSpiralTwist.x, -89.0, 89.0);
+    float tanP                  = tan(radians(max(abs(pitchDeg), 1.0)));
+    P.ArmSpiralK0               = ((pitchDeg < 0.0) ? -1.0 : 1.0) / tanP;
+    P.ArmPitchTightening        = max(InSpiralTwist.y, 0.0);
+    P.HaloTwistInherit          = InSpiralTwist.w;
+    P.ArmPitchFactorMax         = 1.0 + abs(InArmAsym.x);
 
     // --- CENTRAL VOID ---
-    float voidR = max(InCentralVoid.x, 1e-6);
-    P.InvVoidRadiusSq   = 1.0 / (voidR * voidR);
-    P.VoidStrength      = saturate(InCentralVoid.y);
-    P.VoidConcentration = max(InCentralVoid.z, GALAXY_POW_EPSILON);
+    float voidR                 = max(InCentralVoid.x * P.DiscRadius, 1e-6);
+    P.InvVoidRadiusSq           = 1.0 / (voidR * voidR);
+    P.VoidStrength              = saturate(InCentralVoid.y);
+    P.VoidConcentration         = max(InCentralVoid.z, GALAXY_POW_EPSILON);
 
     // --- PER-LAYER NOISE RESPONSE ---
-    P.NoiseAmountArm        = InNoiseAmount.x;
-    P.NoiseAmountDisc       = InNoiseAmount.y;
-    P.NoiseAmountBulge      = InNoiseAmount.z;
-    P.NoiseAmountBackground = InNoiseAmount.w;
-
-    P.WarpAmountArms        = InWarpAmount.x;
-    P.WarpAmountDisc        = InWarpAmount.y;
-    P.WarpAmountBulge       = InWarpAmount.z;
-    P.WarpAmountBackground  = InWarpAmount.w;
+    P.NoiseAmountArm            = InNoiseAmount.x;
+    P.NoiseAmountDisc           = InNoiseAmount.y;
+    P.NoiseAmountBulge          = InNoiseAmount.z;
+    P.NoiseAmountBackground     = InNoiseAmount.w;
+    P.WarpAmountArms            = InWarpAmount.x;
+    P.WarpAmountDisc            = InWarpAmount.y;
+    P.WarpAmountBulge           = InWarpAmount.z;
+    P.WarpAmountBackground      = InWarpAmount.w;
 
     // --- NOISE FIELD ---
-    P.NoiseOffset         = InNoiseOffset;
-    P.NoiseScale          = max(InNoiseScale, 1e-6);
-    P.WarpScale           = max(InWarpScale, 1e-6);
-    P.NoiseChannelWeights = InNoiseChannelWeights;
-    P.NoiseRidged         = saturate(InNoiseRidged);
-    P.NoiseEnable         = InNoiseEnable;
-    P.NoiseOctaveCount    = (int)clamp(InNoiseOctaves, 1.0, (float)GALAXY_MAX_OCTAVES);
+    P.NoiseOffset               = InNoiseOffset;
+    P.NoiseScale                = max(InNoiseScale, 1e-6);
+    P.WarpScale                 = max(InWarpScale, 1e-6);
+    P.NoiseChannelWeights       = InNoiseChannelWeights;
+    P.NoiseRidged               = saturate(InNoiseRidged);
+    P.NoiseEnable               = InNoiseEnable;
+    P.NoiseOctaveCount          = (int)clamp(InNoiseOctaves, 1.0, (float)GALAXY_MAX_OCTAVES);
 
     // The amplitude sum depends only on the octave count. Tied to
     // GALAXY_NOISE_GAIN = 0.5 and GALAXY_MAX_OCTAVES = 2; change either and this
     // expression must follow.
-    P.InvNoiseNorm = 1.0 / ((P.NoiseOctaveCount >= 2) ? 1.5 : 1.0);
+    P.InvNoiseNorm              = 1.0 / ((P.NoiseOctaveCount >= 2) ? 1.5 : 1.0);
 
     // --- OPTICAL DEPTH NORMALISATION ---
     // LayerDensity is an optical depth per layer, not a density: what you would
     // measure looking through that layer along its natural axis. Dividing by the
     // layer's own path length here makes the four values comparable and independent
     // of the march step count.
-    P.ArmDensityOverPath = InLayerDensity.x / (0.5 * P.ArmWidth);
-
-    P.DiscDensityOverPath = InLayerDensity.y
-        / max(0.5 * P.CompactProfileIntegral(P.DiscVerticalFalloff), 1e-6);
-
-    P.BulgeDensityOverPath = InLayerDensity.z
-        / max(0.5 * bulgeR * P.CompactProfileIntegral(P.BulgeConcentration), 1e-6);
-
-    P.BackgroundDensityOverPath = InLayerDensity.w
-        / max(0.5 * bgR * P.CompactProfileIntegral(P.BackgroundConcentration), 1e-6);
+    P.ArmDensityOverPath        = InLayerDensity.x / (0.5 * P.ArmWidth);
+    P.DiscDensityOverPath       = InLayerDensity.y / max(0.5 * P.CompactProfileIntegral(P.DiscVerticalFalloff), 1e-6);
+    P.BulgeDensityOverPath      = InLayerDensity.z / max(0.5 * bulgeR * P.CompactProfileIntegral(P.BulgeConcentration), 1e-6);
+    P.BackgroundDensityOverPath = InLayerDensity.w / max(0.5 * bgR * P.CompactProfileIntegral(P.BackgroundConcentration), 1e-6);
 
     // --- PER-ARM RECORDS ---
     // Invariant along a ray, so hashing them per sample would repeat identical work.
     // Every slot is filled, not just the first ArmN, so none is read uninitialised.
-    P.ArmN = (int)clamp(InArmCount, 1.0, (float)GALAXY_MAX_ARMS);
-
-    float armFadeW = max(0.2 * P.DiscRadius, 1e-6);
-    P.InvArmFadeW = 1.0 / armFadeW;
-
-    float armSpacing = 2.0 * GALAXY_PI / float(P.ArmN);
-    int armSeed = (int)InArmAsymSeed;
+    P.ArmN                      = (int)clamp(InArmCount, 1.0, (float)GALAXY_MAX_ARMS);
+    float armFadeW              = max(0.2 * P.DiscRadius, 1e-6);
+    P.InvArmFadeW               = 1.0 / armFadeW;
+    float armSpacing            = 2.0 * GALAXY_PI / float(P.ArmN);
+    int armSeed                 = (int)InArmAsymSeed;
 
     for (int ai = 0; ai < GALAXY_MAX_ARMS; ai++)
     {
         float4 h = P.ArmHash(ai, armSeed);
-
-        P.ArmData[ai] = float4(
-            1.0 + InArmAsym.x * (2.0 * h.x - 1.0),
-            InSpiralTwist.z + float(ai) * armSpacing
-                + InArmAsym.y * armSpacing * (2.0 * h.y - 1.0),
-            max(1.0 + InArmAsym.z * (2.0 * h.z - 1.0), 0.0),
-            P.DiscRadius * (1.0 - InArmAsym.w * h.w) - armFadeW);
+        P.ArmData[ai] = float4(1.0 + InArmAsym.x * (2.0 * h.x - 1.0), InSpiralTwist.z + float(ai) * armSpacing + InArmAsym.y * armSpacing * (2.0 * h.y - 1.0), max(1.0 + InArmAsym.z * (2.0 * h.z - 1.0), 0.0), P.DiscRadius * (1.0 - InArmAsym.w * h.w) - armFadeW);
     }
 
     return P;

@@ -31,8 +31,7 @@
 // Ridging happens HERE, per channel, not on the weighted sum: the 1-2|c| fold only
 // maps back into [-1,1] when its input is already bounded there, which each centred
 // channel is and the weighted sum is not.
-float GalaxySampleNoiseTex(GalaxyDensityParams P, Texture3D InTex,
-                           SamplerState InSampler, float3 Pos)
+float GalaxySampleNoiseTex(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 Pos)
 {
     float4 t = InTex.SampleLevel(InSampler, Pos, 0);
     float4 c = t * 2.0 - 1.0;
@@ -67,8 +66,7 @@ float GalaxyFBm(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, 
 // displaces the position they are evaluated at, but modulation is sampled AFTER,
 // gated on the layers being non-zero -- most of the volume is empty, so that gate
 // skips the octave loop for the majority of march steps.
-float GalaxySample(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler,
-                   float3 NormPos)
+float GalaxySample(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 NormPos)
 {
     // Squared, so out-of-bounds samples never pay for the sqrt.
     float rBoundsSq = dot(NormPos, NormPos);
@@ -109,8 +107,7 @@ float GalaxySample(GalaxyDensityParams P, Texture3D InTex, SamplerState InSample
         gasWarp = InTex.SampleLevel(InSampler, wf, 0).rgb - 0.5;
     }
 
-    // From the ORIGINAL position, not a gas-warped one, so the two displacements stay
-    // independent rather than compounding.
+    // From the ORIGINAL position, not a gas-warped one, so the two displacements stay independent rather than compounding.
     if (bHaloNoise && (P.WarpAmountBulge != 0.0 || P.WarpAmountBackground != 0.0))
     {
         float3 hf = P.NoiseFrame(NormPos, haloTwist, P.WarpScale.zw,
@@ -162,12 +159,9 @@ float GalaxySample(GalaxyDensityParams P, Texture3D InTex, SamplerState InSample
 //
 // InViewVec is the LOCAL camera vector, surface toward camera, need not be
 // normalized. Returns emissive in RGB, transmittance in A.
-float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler,
-                      float3 InStartPos, float3 InViewVec, int InMaxSteps,
-                      float InDensityScale, float InJitter, float InNoisePower)
+float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 InStartPos, float3 InViewVec, int InMaxSteps, float InDensityScale, float InJitter, float InNoisePower)
 {
-    // Unit box [0,1] -> normalized galaxy space [-1,1]. Uniform scale, so a direction
-    // is identical in both.
+    // Unit box [0,1] -> normalized galaxy space [-1,1]. Uniform scale, so a direction is identical in both.
     float3 o = 2.0 * (InStartPos - 0.5);
     float3 dir = normalize(-InViewVec);
 
@@ -178,9 +172,7 @@ float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSam
 
     float sq = sqrt(disc);
 
-    // Origin inside the sphere: clamp the near end. Outside: take the whole chord
-    // WITHOUT clamping to zero, because with an inverted-normal proxy the shaded
-    // point is the far face and the chord lies at negative t.
+    // Origin inside the sphere: clamp the near end. Outside: take the whole chord WITHOUT clamping to zero, because with an inverted-normal proxy the shaded point is the far face and the chord lies at negative t.
     float tEnter = (c < 0.0) ? 0.0 : (-b - sq);
     float tExit  = -b + sq;
     if (tExit <= tEnter) { return float4(0.0, 0.0, 0.0, 1.0); }
@@ -191,8 +183,7 @@ float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSam
     // Optical path is in LOCAL units and normalized space is 2x local.
     float localStep = normStep * 0.5;
 
-    // Dither the entry point, not the step length, so every ray keeps an identical
-    // total path and density does not shimmer with the noise.
+    // Dither the entry point, not the step length, so every ray keeps an identical total path and density does not shimmer with the noise.
     float t = tEnter + InJitter * normStep;
 
     bool bShape = (InNoisePower != 1.0);
