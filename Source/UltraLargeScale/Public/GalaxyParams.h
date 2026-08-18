@@ -275,7 +275,7 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	 *  Dividing by this reference restores a probability. Star count scales roughly
 	 *  as 1/reference, so retune tier capacities alongside it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Spawn", meta = (ClampMin = "0.001"))
-	float SpawnDensityReference = 20.0f;
+	float SpawnDensityReference = 10.0f;
 
 	/** Compresses the spawn probability rather than scaling it linearly:
 	 *      0 = linear,  d / reference        star density tracks gas density
@@ -323,7 +323,7 @@ struct ULTRALARGESCALE_API FGalaxyMaterialParams
 	 *  quality, not scale -- and because LayerDensity is an optical depth normalised
 	 *  by path, changing it no longer requires retuning any density. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	float VolumeMaxSteps = 128.0f;
+	float VolumeMaxSteps = 64.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
 	int32 DensityVolumeResolution = 256;

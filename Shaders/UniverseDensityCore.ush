@@ -1,0 +1,326 @@
+#pragma once
+
+// UniverseDensityCore.ush
+// Analytic cosmic-web density field. NO RESOURCES: no Texture3D, SamplerState or
+// texture fetch, so C++ compiles it behind GalaxyHLSLShim.h as well as the shader
+// compiler does. Texture sampling and the ray march live in UniverseDensity.ush.
+//
+// PARITY RULES -- both compilers see this file:
+//   - Suffix every float literal (0.5f, not 0.5). C++ types an unsuffixed literal as
+//     double, which promotes whole expressions and rounds differently from the GPU.
+//   - Guard every pow() base away from zero.
+//   - No swizzles beyond .x/.y/.z/.w, no integer vectors, no HLSL-only intrinsics
+//     outside the shim.
+//
+// STRUCTURE: the web is cellular. Space is divided into cells; each cell holds one
+// hashed node position. Ranked distances to the nearest few nodes give the whole
+// morphology, because what separates the features is HOW MANY nodes are equidistant:
+//
+//   1 node closest        cluster    -- the interior of a cell, a galaxy group
+//   2 nodes equidistant   wall       -- a sheet between two cells
+//   3 nodes equidistant   filament   -- a strand where three sheets meet
+//
+// So F2-F1 measures wall-ness and F3-F1 measures filament-ness, and both fall out of
+// one neighbourhood search. Voids are simply where none of those are small.
+//
+// COORDINATES: sampled as an integer cell plus a fractional offset, not a single
+// float3. That is not premature -- virtual traversal reaches magnitudes near 1e11,
+// where float32 has no fractional precision left and a cell-relative formulation is
+// the only thing that survives. SampleAtPosition does the decomposition for now;
+// when traversal lands, the caller supplies cell and frac directly and that helper
+// goes away rather than being unpicked.
+
+#define UNIVERSE_PI 3.14159265358979323846f
+#define UNIVERSE_POW_EPSILON 1e-6f
+#define UNIVERSE_MAX_OCTAVES 2
+
+#define UNIVERSE_NOISE_LACUNARITY 2.0f
+#define UNIVERSE_NOISE_GAIN 0.5f
+
+struct UniverseDensityParams
+{
+    // --- WEB GEOMETRY ---
+    float InvCellSize; // cells per normalized unit; larger = finer web
+    float InvNodeRadius; // 1 / cluster core radius, in CELL units
+    float NodeConcentration; // cluster profile exponent; >1 concentrates
+    float InvWallWidth; // 1 / (F2-F1) band that still counts as a wall
+    float InvFilamentWidth; // 1 / (F3-F1) band that still counts as a filament
+
+    // --- WEB DENSITY ---
+    float NodeDensity;
+    float WallDensity;
+    float FilamentDensity;
+    float VoidFloor; // ambient everywhere; keeps voids from being empty
+
+    int Seed;
+
+    // --- BOUNDS ---
+    // The field itself is unbounded and tiles forever through the cell hash. This
+    // fade exists only to keep a finite proxy from cutting it off with a hard edge.
+    // Set BoundsFadeStart >= 1 to disable.
+    float BoundsFadeStart;
+    float BoundsFadeStartSq;
+    float InvBoundsFadeSpan;
+
+    // --- NOISE (consumed by UniverseDensity.ush) ---
+    float3 NoiseOffset;
+    float4 NoiseScale; // xyz lateral/vertical scale, w reserved
+    float4 NoiseChannelWeights;
+    float NoiseAmount;
+    float NoiseRidged;
+    float NoiseEnable;
+    float InvNoiseNorm;
+    int NoiseOctaveCount;
+
+    // ======================================================================
+    // HELPERS
+    // ======================================================================
+
+    float PowSafe(float x, float p)
+    {
+        return (x > UNIVERSE_POW_EPSILON) ? pow(x, p) : 0.0f;
+    }
+
+    // PCG-style integer hash. uint arithmetic wraps identically in C++ and HLSL, so
+    // this is bit-exact across both -- which is what lets the CPU place objects at
+    // the same nodes the shader draws. Returns four values in [0,1): xyz is the
+    // node's offset within its cell, w is a per-node strength.
+    float4 CellHash(int InX, int InY, int InZ)
+    {
+        uint n = (uint) (InX * 73856093) ^ (uint) (InY * 19349663) ^ (uint) (InZ * 83492791);
+        n ^= (uint) (Seed * 2654435761);
+
+        uint a = n * 1664525u + 1013904223u;
+        uint b = a * 1664525u + 1013904223u;
+        uint c = b * 1664525u + 1013904223u;
+        uint d = c * 1664525u + 1013904223u;
+
+        a ^= a >> 16u;
+        b ^= b >> 16u;
+        c ^= c >> 16u;
+        d ^= d >> 16u;
+        a *= 1664525u;
+        b *= 1664525u;
+        c *= 1664525u;
+        d *= 1664525u;
+        a ^= a >> 16u;
+        b ^= b >> 16u;
+        c ^= c >> 16u;
+        d ^= d >> 16u;
+
+        const float Inv32 = 1.0f / 4294967296.0f;
+        return float4(float(a) * Inv32, float(b) * Inv32,
+                      float(c) * Inv32, float(d) * Inv32);
+    }
+
+    // ======================================================================
+    // THE WEB
+    // ======================================================================
+
+    // Ranked distances to the three nearest nodes, searched over the 3x3x3
+    // neighbourhood of the cell containing InFrac.
+    //
+    // 27 cells is the correct radius: a node can sit anywhere in its cell, so a point
+    // at a corner of its own cell can be closer to a node two cells away only if that
+    // node sits at the far corner -- which the 3x3x3 span already covers. Going wider
+    // costs hashes for candidates that cannot win.
+    //
+    // Returns (F1, F2, F3, winning node's strength). Packed into the return rather
+    // than an out parameter: HLSL's `out` has no C++ equivalent, and a reference
+    // parameter would have to be spelled differently in each language -- which is
+    // exactly the kind of divergence the shared file exists to prevent.
+    float4 RankedNodeDistances(int InCellX, int InCellY, int InCellZ, float3 InFrac)
+    {
+        float f1 = 1e9f;
+        float f2 = 1e9f;
+        float f3 = 1e9f;
+        float f4 = 1e9f;
+
+        for (int oz = -1; oz <= 1; oz++)
+        {
+            for (int oy = -1; oy <= 1; oy++)
+            {
+                for (int ox = -1; ox <= 1; ox++)
+                {
+                    float4 h = CellHash(InCellX + ox, InCellY + oy, InCellZ + oz);
+
+                    float dx = float(ox) + h.x - InFrac.x;
+                    float dy = float(oy) + h.y - InFrac.y;
+                    float dz = float(oz) + h.z - InFrac.z;
+
+                    float dist = sqrt(dx * dx + dy * dy + dz * dz);
+
+                    if (dist < f1)
+                    {
+                        f4 = f3;
+                        f3 = f2;
+                        f2 = f1;
+                        f1 = dist;
+                    }
+                    else if (dist < f2)
+                    {
+                        f4 = f3;
+                        f3 = f2;
+                        f2 = dist;
+                    }
+                    else if (dist < f3)
+                    {
+                        f4 = f3;
+                        f3 = dist;
+                    }
+                    else if (dist < f4)
+                    {
+                        f4 = dist;
+                    }
+                }
+            }
+        }
+
+        return float4(f1, f2, f3, f4);
+    }
+
+    // Density from the ranked distances.
+    //
+    // Each feature is a compact profile on a normalized coordinate that reaches 1 at
+    // the feature's surface -- the same shape the galaxy layers settled on, for the
+    // same reasons: exactly zero outside, no cliff at the boundary, and one exponent
+    // controlling concentration.
+    float DensityFromWeb(float4 InF)
+    {
+        float f1 = InF.x;
+        float f2 = InF.y;
+        float f3 = InF.z;
+        float f4 = InF.w;
+
+        // ---------------------------------------------------------------------
+        // CLUSTERS
+        //
+        // Voronoi vertices occur where four cells are simultaneously nearest.
+        // F4-F1 approaches zero at those junctions.
+        //
+        // This relocates clusters from the hashed cell sites themselves to the
+        // conjunctions of filaments and walls, producing a proper cosmic web.
+        // ---------------------------------------------------------------------
+
+        float xn = (f4 - f1) * (InvNodeRadius * 4.0f);
+
+        float node = 0.0f;
+
+        if (xn < 1.0f)
+        {
+            node = NodeDensity *
+           PowSafe(1.0f - xn * xn, NodeConcentration);
+        }
+
+        // --- WALLS: two nodes equidistant ---
+        // f2 - f1 is zero exactly on the bisecting plane and grows away from it.
+        float xw = (f2 - f1) * InvWallWidth;
+        float wall = (xw < 1.0f) ? WallDensity * (1.0f - xw * xw) * (1.0f - xw * xw) : 0.0f;
+
+        // --- FILAMENTS: three nodes equidistant ---
+        // Where three walls meet. Narrower and brighter than a wall, which is what
+        // makes the web read as strands rather than foam.
+        float xf = (f3 - f1) * InvFilamentWidth;
+        float filament = (xf < 1.0f)
+            ? FilamentDensity * (1.0f - xf * xf) * (1.0f - xf * xf) : 0.0f;
+
+        // Additive, as in the galaxy: these genuinely overlap, and a node sits at the
+        // intersection of filaments rather than replacing them.
+        return node + wall + filament + VoidFloor;
+    }
+
+    float BoundsFade(float rBoundsSq)
+    {
+        if (rBoundsSq <= BoundsFadeStartSq)
+        {
+            return 1.0f;
+        }
+
+        float t = (sqrt(rBoundsSq) - BoundsFadeStart) * InvBoundsFadeSpan;
+        return 1.0f - t * t * (3.0f - 2.0f * t);
+    }
+
+    // Cell-relative entry point. This is the one that survives virtual traversal:
+    // the integer part carries magnitude, the fraction carries precision, and
+    // neither ever has to hold 1e11 in a float32.
+    float SampleCell(int InCellX, int InCellY, int InCellZ, float3 InFrac)
+    {
+        return DensityFromWeb(RankedNodeDistances(InCellX, InCellY, InCellZ, InFrac));
+    }
+
+    // Convenience entry point for a bounded proxy, where a single float3 still has
+    // the precision to hold the position. Decomposes and forwards.
+    //
+    // TRANSITIONAL: when virtual traversal lands the caller already holds the cell
+    // and the fraction separately, and this helper is deleted rather than adapted.
+    float SampleAtPosition(float3 InNormPos)
+    {
+        float rBoundsSq = dot(InNormPos, InNormPos);
+
+        float3 cellPos = InNormPos * InvCellSize;
+
+        // floor, not truncation: truncation folds the cell boundary at zero and
+        // mirrors the web across every axis through the origin.
+        float fx = floor(cellPos.x);
+        float fy = floor(cellPos.y);
+        float fz = floor(cellPos.z);
+
+        float3 frac = float3(cellPos.x - fx, cellPos.y - fy, cellPos.z - fz);
+
+        float d = SampleCell((int) fx, (int) fy, (int) fz, frac);
+        return d * BoundsFade(rBoundsSq);
+    }
+};
+
+// ==========================================================================
+// DERIVATION
+// The single place clamping and inversion happen. Both the shader and C++ call
+// this, which is what keeps their fields identical rather than merely intended
+// to match.
+// ==========================================================================
+UniverseDensityParams MakeUniverseDensityParams(
+    float4 InWebScale, // x cell size, y node radius, z wall width, w filament width
+                            //   node radius and the two widths are in CELL units
+    float4 InWebDensity, // x node, y wall, z filament, w void floor
+    float4 InWebShape, // x node concentration, y seed, z bounds fade start, w unused
+    float4 InNoiseScale,
+    float4 InNoiseChannelWeights,
+    float3 InNoiseOffset,
+    float InNoiseAmount,
+    float InNoiseOctaves,
+    float InNoiseRidged,
+    float InNoiseEnable)
+{
+    UniverseDensityParams P;
+
+    P.InvCellSize = 1.0f / max(InWebScale.x, 1e-6f);
+    P.InvNodeRadius = 1.0f / max(InWebScale.y, 1e-4f);
+    P.InvWallWidth = 1.0f / max(InWebScale.z, 1e-4f);
+    P.InvFilamentWidth = 1.0f / max(InWebScale.w, 1e-4f);
+
+    P.NodeDensity = InWebDensity.x;
+    P.WallDensity = InWebDensity.y;
+    P.FilamentDensity = InWebDensity.z;
+    P.VoidFloor = max(InWebDensity.w, 0.0f);
+
+    P.NodeConcentration = max(InWebShape.x, UNIVERSE_POW_EPSILON);
+    P.Seed = (int) InWebShape.y;
+
+    P.BoundsFadeStart = InWebShape.z;
+    P.BoundsFadeStartSq = InWebShape.z * InWebShape.z;
+    P.InvBoundsFadeSpan = 1.0f / max(1.0f - InWebShape.z, 1e-6f);
+
+    P.NoiseOffset = InNoiseOffset;
+    P.NoiseScale = max(InNoiseScale, 1e-6f);
+    P.NoiseChannelWeights = InNoiseChannelWeights;
+    P.NoiseAmount = InNoiseAmount;
+    P.NoiseRidged = saturate(InNoiseRidged);
+    P.NoiseEnable = InNoiseEnable;
+    P.NoiseOctaveCount = (int) clamp(InNoiseOctaves, 1.0f, (float) UNIVERSE_MAX_OCTAVES);
+
+    // Amplitude sum depends only on octave count. Tied to UNIVERSE_NOISE_GAIN = 0.5
+    // and UNIVERSE_MAX_OCTAVES = 2; change either and this must follow.
+    P.InvNoiseNorm = 1.0f / ((P.NoiseOctaveCount >= 2) ? 1.5f : 1.0f);
+
+    return P;
+}

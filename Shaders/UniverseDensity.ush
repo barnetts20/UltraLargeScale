@@ -1,0 +1,162 @@
+#pragma once
+
+// UniverseDensity.ush
+// Shader-side wrapper around UniverseDensityCore.ush. Everything here touches a
+// texture, which is exactly what the core cannot do if C++ is to compile it.
+//
+// The noise path is deliberately thin for now: one modulation fetch, no positional
+// warp. The web's structure comes from the cellular field, and noise is there to
+// break up the analytic smoothness rather than to create shape. Warp can be added
+// later on the galaxy's pattern if the strands read as too clean.
+//
+// Nothing here touches Parameters or View -- those exist only inside the generated
+// material function, so the dither that needs them stays in the Custom node body.
+
+#include "/UltraLargeScale/UniverseDensityCore.ush"
+
+// Channels are centred to [-1,1] BEFORE weighting, so a weight acts as a mixer:
+// positive takes the channel, negative inverts it, |w| > 1 is gain. Ridging happens
+// per channel for the same reason it does in the galaxy -- the 1-2|c| fold only maps
+// back into [-1,1] when its input is already bounded there.
+float UniverseSampleNoiseTex(UniverseDensityParams P, Texture3D InTex,
+                             SamplerState InSampler, float3 Pos)
+{
+    float4 t = InTex.SampleLevel(InSampler, Pos, 0);
+    float4 c = t * 2.0 - 1.0;
+
+    c = lerp(c, 1.0 - 2.0 * abs(c), P.NoiseRidged);
+
+    return dot(P.NoiseChannelWeights, c);
+}
+
+float UniverseFBm(UniverseDensityParams P, Texture3D InTex, SamplerState InSampler, float3 Pos)
+{
+    float sum = 0.0;
+    float amp = 1.0;
+
+    for (int o = 0; o < UNIVERSE_MAX_OCTAVES; o++)
+    {
+        if (o >= P.NoiseOctaveCount)
+        {
+            break;
+        }
+
+        // A texture has no seed, so octaves decorrelate by offset.
+        sum += UniverseSampleNoiseTex(P, InTex, InSampler,
+                                      Pos + float3(17.3, 11.7, 23.1) * float(o)) * amp;
+        Pos *= UNIVERSE_NOISE_LACUNARITY;
+        amp *= UNIVERSE_NOISE_GAIN;
+    }
+
+    return sum * P.InvNoiseNorm;
+}
+
+// Analytic web, then modulation.
+//
+// Gated on the web being non-zero, as in the galaxy: most of the volume is void, so
+// the gate skips the fetch for the majority of march steps. The void floor makes
+// "non-zero" almost everywhere though, so the threshold is against the floor rather
+// than against zero -- otherwise the gate never fires and costs a comparison for
+// nothing.
+float UniverseSample(UniverseDensityParams P, Texture3D InTex, SamplerState InSampler,
+                     float3 NormPos)
+{
+    float d = P.SampleAtPosition(NormPos);
+
+    bool bNoise = (P.NoiseEnable > 0.5) && (P.NoiseAmount != 0.0);
+    if (bNoise && d > P.VoidFloor * 1.001)
+    {
+        float3 nf = NormPos * P.NoiseScale.x + P.NoiseOffset;
+        nf.z = NormPos.z * P.NoiseScale.y + P.NoiseOffset.z;
+
+        float n = UniverseFBm(P, InTex, InSampler, nf);
+        d *= max(1.0 + P.NoiseAmount * n, 0.0);
+    }
+
+    return d;
+}
+
+// --- RAYMARCH: ANALYTIC SPHERE-BOUNDED DENSITY ACCUMULATION ---
+// Unchanged from the galaxy layer. The proxy mesh decides which pixels run; the unit
+// sphere decides where to march. Step length adapts to chord length, so quality does
+// not vary with view angle and no trailing partial step is needed.
+//
+// Do not add a box bounds test on the marched position. InStartPos sits exactly on
+// the proxy surface, so a component is exactly 0 or 1 before any FP error, and such a
+// test breaks on iteration zero wherever rounding pushes it outside -- view-direction
+// dependent, so it shows as angle-dependent dropout at silhouettes.
+//
+// WILL CHANGE: the universe proxy is a sphere centred on the CAMERA, so the chord is
+// a constant length and the entry/exit maths collapses to a fixed span rather than an
+// intersection. Correct as written for a fixed test volume; not the final bounding.
+//
+// InViewVec is the LOCAL camera vector, surface toward camera, need not be
+// normalized. Returns emissive in RGB, transmittance in A.
+float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState InSampler,
+                        float3 InStartPos, float3 InViewVec, int InMaxSteps,
+                        float InDensityScale, float InJitter, float InNoisePower)
+{
+    // Unit box [0,1] -> normalized space [-1,1]. Uniform scale, so a direction is
+    // identical in both.
+    float3 o = 2.0 * (InStartPos - 0.5);
+    float3 dir = normalize(-InViewVec);
+
+    float b = dot(o, dir);
+    float c = dot(o, o) - 1.0;
+    float disc = b * b - c;
+    if (disc <= 0.0)
+    {
+        return float4(0.0, 0.0, 0.0, 1.0);
+    }
+
+    float sq = sqrt(disc);
+
+    // Origin inside the sphere: clamp the near end. Outside: take the whole chord
+    // WITHOUT clamping to zero, because with an inverted-normal proxy the shaded
+    // point is the far face and the chord lies at negative t.
+    float tEnter = (c < 0.0) ? 0.0 : (-b - sq);
+    float tExit = -b + sq;
+    if (tExit <= tEnter)
+    {
+        return float4(0.0, 0.0, 0.0, 1.0);
+    }
+
+    int steps = max(InMaxSteps, 1);
+    float normStep = (tExit - tEnter) / float(steps);
+
+    // Optical path is in LOCAL units and normalized space is 2x local.
+    float localStep = normStep * 0.5;
+
+    // Dither the entry point, not the step length, so every ray keeps an identical
+    // total path and density does not shimmer with the noise.
+    float t = tEnter + InJitter * normStep;
+
+    bool bShape = (InNoisePower != 1.0);
+
+    float transmittance = 1.0;
+    float emission = 0.0;
+
+    for (int i = 0; i < steps; i++)
+    {
+        float density = UniverseSample(P, InTex, InSampler, o + dir * t);
+        if (bShape)
+        {
+            density = P.PowSafe(density, InNoisePower);
+        }
+
+        float alpha = 1.0 - exp(-density * InDensityScale * localStep);
+
+        // Flat white emission: structure only.
+        emission += alpha * transmittance;
+        transmittance *= 1.0 - alpha;
+
+        if (transmittance < 0.001)
+        {
+            break;
+        }
+
+        t += normStep;
+    }
+
+    return float4(emission.xxx, transmittance);
+}
