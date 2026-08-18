@@ -154,6 +154,51 @@ void GalaxyDataGenerator::Initialize()
 	// reciprocal; per-candidate it would dominate generation.
 	Derived = MakeUnique<GalaxyDensityParams>(Params.DensityParams.ToDerived());
 
+	// PARITY PROBE.
+	// The shader runs this same derivation on the values PushDensityParams sends, so
+	// if the render and the star placement disagree the cause is the INPUTS, not the
+	// maths. Several property names survived the FGalaxyDensityParams rewrite --
+	// DiscRadius, ArmVerticalRatio, ArmProfileExponent, ArmRadialGrowth, ArmCount,
+	// ArmPitchAngle, ArmPitchTightening, ArmPhaseOffset, DiscVerticalFalloff,
+	// BackgroundDensity, BoundsFadeStart, ArmAsym* -- and UE keeps the SERIALIZED
+	// value for a name that still exists, so those silently carry old data while only
+	// the genuinely new names fall through to the C++ defaults.
+	//
+	// Compare this against the material instance's parameter values. A mismatch on a
+	// carried-over name is the expected failure.
+	{
+		const FGalaxyDensityParams& D = Params.DensityParams;
+		UE_LOG(LogTemp, Log, TEXT("=== GalaxyDensity inputs (seed %d) ==="), Params.Seed);
+		UE_LOG(LogTemp, Log, TEXT("  lateral   arm %.4f  disc %.4f  bulge %.4f  bg %.4f"),
+			D.ArmRadius, D.DiscRadius, D.BulgeRadius, D.BackgroundRadius);
+		UE_LOG(LogTemp, Log, TEXT("  vertical  arm %.4f  disc %.4f  bulge %.4f  bg %.4f"),
+			D.ArmVerticalRatio, D.DiscVerticalRatio, D.BulgeVerticalRatio, D.BackgroundVerticalRatio);
+		UE_LOG(LogTemp, Log, TEXT("  density   arm %.4f  disc %.4f  bulge %.4f  bg %.4f"),
+			D.ArmDensity, D.DiscDensity, D.BulgeDensity, D.BackgroundDensity);
+		UE_LOG(LogTemp, Log, TEXT("  arms      count %.2f  pitch %.2f  tighten %.2f  growth %.3f  host %.3f  profile %.3f"),
+			D.ArmCount, D.ArmPitchAngle, D.ArmPitchTightening, D.ArmRadialGrowth, D.ArmHostFalloff, D.ArmProfileExponent);
+		UE_LOG(LogTemp, Log, TEXT("  disc      flare %.3f  scaleRatio %.3f  vFalloff %.3f  boundsFade %.3f"),
+			D.DiscFlare, D.DiscScaleRatio, D.DiscVerticalFalloff, D.BoundsFadeStart);
+
+		UE_LOG(LogTemp, Log, TEXT("=== derived ==="));
+		UE_LOG(LogTemp, Log, TEXT("  ArmWidth %.6f   ArmRadialGrowth %.3f   ArmN %d   K0 %.4f"),
+			Derived->ArmWidth, Derived->ArmRadialGrowth, Derived->ArmN, Derived->ArmSpiralK0);
+		UE_LOG(LogTemp, Log, TEXT("  OverPath  arm %.2f  disc %.2f  bulge %.2f  bg %.4f"),
+			Derived->ArmDensityOverPath, Derived->DiscDensityOverPath,
+			Derived->BulgeDensityOverPath, Derived->BackgroundDensityOverPath);
+
+		// Half-heights at mid-disc, the two numbers the silhouette is made of.
+		const float rn = 0.5f;
+		const float edge = 1.0f - rn * rn;
+		const float DiscH = Derived->DiscRadius * Derived->DiscHeightRatio
+			* (1.0f + Derived->DiscFlare * rn) * FMath::Sqrt(edge);
+		const float ArmH = Derived->ArmWidth
+			* FMath::Lerp(1.0f, Derived->ArmRadialGrowth, rn) * FMath::Sqrt(edge)
+			/ FMath::Max(Derived->InvArmVerticalRatio, 1e-6f);
+		UE_LOG(LogTemp, Log, TEXT("  at rn=0.5: disc h %.5f   arm H %.5f   ratio %.2f"),
+			DiscH, ArmH, DiscH > 1e-9f ? ArmH / DiscH : 0.0f);
+	}
+
 	// Kept for a future FastNoise swap-in; unused on the active path.
 	DensityNoise = BuildNoise();
 }
@@ -338,17 +383,22 @@ void GalaxyDataGenerator::GenerateTierNode(
 TArray<GalaxyDataGenerator::FActiveLargeTierCell> GalaxyDataGenerator::CollectActiveLargeTierCells() const
 {
 	// -----------------------------------------------------------------------
-	// Subdivide [-Extent, +Extent]^3 into a uniform grid at LargeTierCullDepth.
-	// For each cell, evaluate SampleDensity at all 8 corners (in normalized
-	// [-1, 1] space). If every corner returns zero, the cell is entirely
-	// outside every layer's support and is skipped. Any cell with at least one
-	// corner > 0 is kept.
+	// Subdivide [-Extent, +Extent]^3 into a uniform grid at LargeTierCullDepth and,
+	// for each cell, find the PEAK density inside it. A cell whose peak is zero lies
+	// entirely outside every layer's support and is skipped; the rest carry their
+	// peak forward as a local rejection envelope.
 	//
-	// We intentionally test corners rather than the cell center so that cells
-	// straddling a boundary are never wrongly discarded. A cell whose center
-	// happens to fall in the gap between two arms but whose corner clips an arm
-	// edge will still be included - candidates generated inside it will simply
-	// fail the per-candidate rejection gate as normal, at very low cost.
+	// Sampling corners alone is not enough for either job. An arm is narrower than a
+	// cell through most of the disc, so one can pass through a cell's interior
+	// without reaching any vertex -- which discards a live cell outright, and
+	// under-estimates the envelope of the cells it does keep. An under-estimated
+	// envelope clips the peak, flattening exactly the structure the field describes.
+	// A jittered interior set costs a few more evaluations in a prepass that runs
+	// once per galaxy.
+	//
+	// The peak is padded because it remains an estimate from a finite sample. Erring
+	// high costs acceptance rate; erring low costs fidelity, and only one of those is
+	// recoverable.
 	// -----------------------------------------------------------------------
 
 	const int32 CullDepth = FMath::Max(Params.LargeTierCullDepth, 1);
@@ -367,6 +417,11 @@ TArray<GalaxyDataGenerator::FActiveLargeTierCell> GalaxyDataGenerator::CollectAc
 		FVector(-1,  1,  1), FVector(1,  1,  1),
 	};
 
+	// Interior probes per cell, on top of the 8 corners. Deterministic so the cell set
+	// is reproducible for a given seed.
+	const int32 InteriorProbes = 24;
+	const float EnvelopePad = 1.5f;
+
 	const int32 TotalCells = GridSide * GridSide * GridSide;
 	TArray<FActiveLargeTierCell> ActiveCells;
 	ActiveCells.Reserve(TotalCells / 4); // rough estimate; arms ~ 25% fill
@@ -383,37 +438,56 @@ TArray<GalaxyDataGenerator::FActiveLargeTierCell> GalaxyDataGenerator::CollectAc
 					-FullExtent + HalfCell + static_cast<double>(iy) * CellFull,
 					-FullExtent + HalfCell + static_cast<double>(iz) * CellFull);
 
-				// Test all 8 corners in normalized space. Early-out as soon as
-				// any corner has non-zero density.
-				bool bAnyActive = false;
+				// No early-out: we need the PEAK, not merely "is anything here".
+				float CellMax = 0.0f;
+
 				for (int32 c = 0; c < 8; ++c)
 				{
-					const FVector CornerWorld = Center + CornerOffsets[c] * HalfCell;
-					const FVector CornerNorm = CornerWorld * InvExtent;
+					const FVector CornerNorm = (Center + CornerOffsets[c] * HalfCell) * InvExtent;
 
-					// Hard bounds check: SampleDensity already returns 0 beyond
-					// the unit sphere, but an explicit check lets us skip the
-					// full evaluation for corners clearly outside the extents.
+					// Hard bounds check: SampleDensity already returns 0 beyond the
+					// unit sphere, but an explicit check skips the full evaluation
+					// for corners clearly outside the extents.
 					if (FMath::Abs(CornerNorm.X) > 1.0 ||
 						FMath::Abs(CornerNorm.Y) > 1.0 ||
 						FMath::Abs(CornerNorm.Z) > 1.0)
 					{
-						continue; // This corner is outside - try next
+						continue;
 					}
 
-					if (SampleDensity(CornerNorm) > 0.0f)
-					{
-						bAnyActive = true;
-						break;
-					}
+					CellMax = FMath::Max(CellMax, SampleDensity(CornerNorm));
 				}
 
-				if (bAnyActive)
+				// Interior probes. Seeded from the grid coordinate so the same cell
+				// yields the same probes on every regeneration.
+				const int32 CellHash = HashCombine(
+					HashCombine(GetTypeHash(ix), GetTypeHash(iy)), GetTypeHash(iz));
+				FRandomStream ProbeStream(HashCombine(Params.Seed, CellHash));
+
+				for (int32 p = 0; p < InteriorProbes; ++p)
+				{
+					const FVector ProbeNorm = (Center + FVector(
+						ProbeStream.FRandRange(-HalfCell, HalfCell),
+						ProbeStream.FRandRange(-HalfCell, HalfCell),
+						ProbeStream.FRandRange(-HalfCell, HalfCell))) * InvExtent;
+
+					if (FMath::Abs(ProbeNorm.X) > 1.0 ||
+						FMath::Abs(ProbeNorm.Y) > 1.0 ||
+						FMath::Abs(ProbeNorm.Z) > 1.0)
+					{
+						continue;
+					}
+
+					CellMax = FMath::Max(CellMax, SampleDensity(ProbeNorm));
+				}
+
+				if (CellMax > 0.0f)
 				{
 					FActiveLargeTierCell Cell;
 					Cell.Center = Center;
 					Cell.HalfExt = HalfCell;
 					Cell.GridCoord = FIntVector(ix, iy, iz);
+					Cell.MaxDensity = CellMax * EnvelopePad;
 					ActiveCells.Add(Cell);
 				}
 			}
@@ -434,25 +508,32 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 	int32& OutSlotCount) const
 {
 	// -----------------------------------------------------------------------
-	// Collect active cells, then distribute the slot's candidate budget
-	// proportionally to each cell's mean corner density. Dense arm-core cells
-	// receive more candidates than cells that merely clip an edge, so the final
-	// particle distribution mirrors the density field rather than treating all
-	// active cells equally.
+	// Collect active cells, then distribute the slot's candidate budget across them
+	// and rejection-sample inside each against ITS OWN peak density.
 	//
-	// Budget allocation:
-	//   CellWeight[i]     = mean SampleDensity of the cell's 8 corners
-	//   CellCandidates[i] = round( SlotCapacity * CellWeight[i] / TotalWeight )
+	// The two halves have to be paired correctly or the distribution is wrong.
+	// Accepted count per cell is budget x mean(d)/envelope, and what we want is
+	// proportional to cell mass, i.e. to mean(d):
 	//
-	// with a minimum of 1 candidate per active cell so no cell is silently
-	// skipped, and a final clamp so the sum never exceeds SlotCapacity.
+	//   budget ~ max,  envelope = cellMax   -> accepted ~ mean          EXACT
+	//   budget ~ mean, envelope = globalRef -> accepted ~ mean^2        1.7x biased
+	//   budget ~ mean, envelope = cellMax   -> accepted ~ mean^2/max    3.9x biased
 	//
-	// The weights are RAW density, deliberately: the allocation is proportional,
-	// so an unbounded scale cancels in CellWeight/TotalWeight. Only the
-	// per-candidate gate needs a probability.
+	// So the budget weights on cell MAX, not cell mean. Weighting by mean while also
+	// rejecting by density counts the same factor twice and over-concentrates in the
+	// arms quadratically -- which is what the previous pairing did.
 	//
-	// Writing is sequential into the slot region. Dead padding applied once at
-	// the end.
+	// A local envelope is also what makes this affordable: the field spans four
+	// decades across the galaxy but a narrow band within one cell, so acceptance
+	// rises from a fraction of a percent to roughly a quarter.
+	//
+	// Weights are RAW density, deliberately -- the allocation is proportional, so an
+	// unbounded scale cancels in CellWeight/TotalWeight. Only the per-candidate gate
+	// needs a probability, and it gets one by dividing by the cell's own envelope.
+	//
+	// Minimum of 1 candidate per active cell so none is silently skipped, and a final
+	// clamp so the sum never exceeds SlotCapacity. Writing is sequential into the
+	// slot region; dead padding applied once at the end.
 	// -----------------------------------------------------------------------
 
 	const TArray<FActiveLargeTierCell> ActiveCells = CollectActiveLargeTierCells();
@@ -468,15 +549,10 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 		return;
 	}
 
-	// Compute per-cell mean corner density and total weight
+	// Budget weights: the cell's ENVELOPE, already computed by the collector. No
+	// resampling needed, and pairing envelope-weighted budgets with envelope-relative
+	// acceptance is what makes the result exactly proportional to the field.
 	const double InvExtent = 1.0 / static_cast<double>(Params.Extent);
-	static const FVector CornerOffsets[8] =
-	{
-		FVector(-1,-1,-1), FVector(1,-1,-1),
-		FVector(-1, 1,-1), FVector(1, 1,-1),
-		FVector(-1,-1, 1), FVector(1,-1, 1),
-		FVector(-1, 1, 1), FVector(1, 1, 1),
-	};
 
 	TArray<float> CellWeights;
 	CellWeights.SetNumUninitialized(ActiveCells.Num());
@@ -484,19 +560,7 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 
 	for (int32 ci = 0; ci < ActiveCells.Num(); ++ci)
 	{
-		const FActiveLargeTierCell& Cell = ActiveCells[ci];
-		float CornerSum = 0.0f;
-		for (int32 c = 0; c < 8; ++c)
-		{
-			const FVector CornerNorm = (Cell.Center + CornerOffsets[c] * Cell.HalfExt) * InvExtent;
-			if (FMath::Abs(CornerNorm.X) <= 1.0 &&
-				FMath::Abs(CornerNorm.Y) <= 1.0 &&
-				FMath::Abs(CornerNorm.Z) <= 1.0)
-			{
-				CornerSum += SampleDensity(CornerNorm);
-			}
-		}
-		CellWeights[ci] = FMath::Max(CornerSum / 8.0f, 1e-6f); // minimum weight so cell isn't starved
+		CellWeights[ci] = FMath::Max(ActiveCells[ci].MaxDensity, 1e-6f); // never starve a cell
 		TotalWeight += CellWeights[ci];
 	}
 
@@ -566,9 +630,14 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 		{
 			if (TotalAccepted >= SlotCapacity) break;
 
-			// See GenerateTierNode: the field is an optical depth, so it must be
-			// mapped to a probability before gating rather than clamped.
-			const float RawDensity = Params.DensityParams.ToSpawnProbability(NoiseOut[i]);
+			// Rejection against the CELL'S OWN envelope rather than a global
+			// reference. This is the whole point of the local envelope: the ratio is
+			// order-1 across the cell instead of order-1e-3, so most candidates land.
+			//
+			// SpawnDensityReference is deliberately not used here; it remains the
+			// mapping for the mid and small tiers, which have no prepass to derive a
+			// local bound from.
+			const float RawDensity = FMath::Clamp(NoiseOut[i] / Cell.MaxDensity, 0.0f, 1.0f);
 
 			// Density response curve gates spawning only.
 			const float SpawnDensity = (dCurve && dCurve->GetNumKeys() > 0)

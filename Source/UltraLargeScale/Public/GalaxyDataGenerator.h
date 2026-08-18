@@ -112,11 +112,25 @@ public:
 		FVector Center = FVector::ZeroVector;
 		double HalfExt = 0.0;
 		FIntVector GridCoord = FIntVector::ZeroValue;
+
+		/** Highest density found in this cell -- the REJECTION ENVELOPE for
+		 *  candidates generated inside it. A local envelope is what takes acceptance
+		 *  from a fraction of a percent to roughly a quarter: the field spans four
+		 *  decades globally but only a narrow band within one cell.
+		 *
+		 *  It is an estimate from a finite sample, so it can under-shoot the true
+		 *  maximum and clip a peak. Erring high costs only acceptance rate, which is
+		 *  why the estimate is padded. */
+		float MaxDensity = 0.0f;
 	};
 
-	/** Cells whose eight corners are all zero-density are skipped entirely,
-	 *  concentrating candidates on arms, disc and bulge. Corners rather than centres,
-	 *  so a cell straddling an envelope boundary is never wrongly discarded. */
+	/** Cells with no density anywhere are skipped entirely, concentrating candidates
+	 *  on arms, disc and bulge. Also records each surviving cell's peak density for
+	 *  use as a local rejection envelope.
+	 *
+	 *  Samples corners AND interior points: corners alone miss an arm that passes
+	 *  through the middle of a cell without reaching any vertex, which both discards
+	 *  live cells and under-estimates the envelope of the ones it keeps. */
 	TArray<FActiveLargeTierCell> CollectActiveLargeTierCells() const;
 
 #pragma endregion
