@@ -21,7 +21,12 @@
 /** Declared in GalaxyDensityCore.ush, compiled inside namespace GalaxyHLSL by
  *  GalaxyDataGenerator.cpp. Held by pointer so this header needs neither the shim nor
  *  the field itself. */
-namespace GalaxyHLSL { struct GalaxyDensityParams; }
+namespace GalaxyHLSL
+{
+	struct GalaxyDensityParams;
+	struct GalaxyPlacement;
+	struct GalaxyEntity;
+}
 
 /** Owns density evaluation and tier generation for the galaxy layer; mirrors
  *  UniverseDataGenerator. The galaxy actor wires tier callbacks that delegate here;
@@ -57,10 +62,15 @@ public:
 	 *  the default tuning while most of the volume sits below 0.01. Feeding it
 	 *  straight to a rejection test accepts every candidate above 1.0 -- the arms,
 	 *  the inner disc and the whole bulge -- erasing the structure it describes.
-	 *  Always route it through FGalaxyDensityParams::ToSpawnProbability first. */
+	 *  Always route it through GalaxyDensityParams::SpawnProbability first. */
 	float SampleDensity(const FVector& InNormPos) const;
 
-	/** Batch form. Same contract: raw optical depth out. */
+	/** Batch form. Same contract: raw optical depth out.
+	 *
+	 *  No longer used by generation. A slot must be decidable in isolation, so
+	 *  SampleEntity evaluates the field itself per candidate; batching would force
+	 *  the caller to hold every candidate before deciding any of them. Retained for
+	 *  the volume texture bake. */
 	void SampleDensityBatch(float* OutDensity, int32 InCount,
 		const float* InX, const float* InY, const float* InZ) const;
 
@@ -94,7 +104,12 @@ public:
 	 *
 	 *  A single function serves all tiers; Large/Mid/Small differ only in the
 	 *  candidate volume (full extent vs cell-local), the tier params (scale range,
-	 *  density curve), and the seed offset for stream isolation. */
+	 *  spawn and extent exponents), and the seed offset that separates tiers sharing
+	 *  a coordinate.
+	 *
+	 *  Placement itself lives in GalaxyDensityCore.ush, so where a star spawns and
+	 *  where gas is drawn are one function rather than two kept in agreement by
+	 *  hand, and the eventual compute dispatch needs no second implementation. */
 	void GenerateTierNode(const FIntVector& InCoord, int32 InSlotIndex,
 		FNiagaraParticleBuffer& InBuffer, const FVector& InNodeCenter,
 		double InCellExtent, const FTierParams& InTierParams,
@@ -102,6 +117,16 @@ public:
 
 	void GenerateLargeTierSlot(int32 InSlotIndex, FNiagaraParticleBuffer& InBuffer,
 		int32& OutSlotCount) const;
+
+	/** Per-tier placement rules: acceptance mapping and extent range.
+	 *
+	 *  Separate from GalaxyDensityParams because these change per tier while the
+	 *  field does not, and because the large tier substitutes its own per-cell peak
+	 *  density for InDensityReference -- which a field-level parameter could not
+	 *  express. Built per call rather than cached: six floats and a reciprocal,
+	 *  against a derivation that runs sixteen arm hashes and a tan. */
+	GalaxyHLSL::GalaxyPlacement MakePlacement(const FTierParams& InTierParams,
+		float InDensityReference) const;
 
 #pragma endregion
 

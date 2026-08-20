@@ -43,21 +43,55 @@ struct ULTRALARGESCALE_API FTierParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming")
 	int32 NeighborhoodRadius = 1;
 
-	/** Max particles per slot (candidate count before rejection). */
+	/** Max particles per slot. This is now a CAP on accepted entities only; the
+	 *  number of candidates drawn is CandidateBudget below.
+	 *
+	 *  They used to be the same value, which made a cell's yield depend on how full
+	 *  the buffer already was rather than on the field, so the same cell produced
+	 *  different counts depending on visit order. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming")
 	int32 SlotCapacity = 500;
 
-	/** Maps a uniform [0,1] sample to a [0,1] t-value lerping between MinScale
-	 *  and MaxScale, controlling the tier's particle size distribution.
-	 *  Defaults to identity (linear). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distribution")
+	/** Candidate draws per cell, independent of SlotCapacity. Fixed budget, variable
+	 *  acceptance: how hard a cell is probed is authored, how many entities survive
+	 *  is decided by the field, and the result is reproducible from (cell, slot)
+	 *  alone -- which is what a compute dispatch needs to size itself. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming",
+		meta = (ClampMin = "1"))
+	int32 CandidateBudget = 500;
+
+	/** Shapes the tier's particle size distribution between MinScale and MaxScale.
+	 *  Below 1 biases toward MinScale, above 1 toward MaxScale, 1 is uniform.
+	 *
+	 *  Replaces the ScaleDistribution curve. A UCurveFloat is an authored asset no
+	 *  shader can evaluate, and placement now lives in GalaxyDensityCore.ush so that
+	 *  both sides read the same rule. Placeholder until each layer gets a size
+	 *  distribution with a physical basis; a shaped uniform is honest until then. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distribution",
+		meta = (ClampMin = "0.01"))
+	float ExtentExponent = 1.0f;
+
+	/** Shapes how aggressively the density field is read before the rejection gate.
+	 *  Above 1 concentrates entities into the dense regions, below 1 lifts the faint
+	 *  ones, 1 is the raw response.
+	 *
+	 *  Replaces the DensityResponse curve, for the same reason. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distribution",
+		meta = (ClampMin = "0.01"))
+	float SpawnExponent = 1.0f;
+
+	// TRANSITIONAL. FTierParams is shared, and UniverseDataGenerator still reads both
+	// curves; the galaxy layer no longer does. They go when the universe layer moves
+	// its placement into UniverseDensityCore.ush as well. Until then a tier authored
+	// for the galaxy configures the exponents and a tier authored for the universe
+	// configures the curves, and neither reads the other's.
+
+	/** UNIVERSE LAYER ONLY. Superseded by ExtentExponent for the galaxy. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distribution|Legacy")
 	FRuntimeFloatCurve ScaleDistribution;
 
-	/** Maps raw noise density [0,1] to modified density [0,1] before the
-	 *  rejection gate, controlling how aggressively the noise field is read (a
-	 *  steep curve concentrates particles in high-density regions, a flat curve
-	 *  spreads them). Values > 1.0 are clamped. Defaults to identity. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distribution")
+	/** UNIVERSE LAYER ONLY. Superseded by SpawnExponent for the galaxy. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distribution|Legacy")
 	FRuntimeFloatCurve DensityResponse;
 
 	/** Largest entity scale this tier represents. Derived by DeriveTierScaleRanges. */
@@ -66,7 +100,7 @@ struct ULTRALARGESCALE_API FTierParams
 	/** Smallest entity scale this tier represents. Derived by DeriveTierScaleRanges. */
 	double MinScale = 0.0;
 
-	/** Initializes both curves to identity: f(x) = x. */
+	/** Initializes the legacy curves to identity: f(x) = x. */
 	FTierParams()
 	{
 		ScaleDistribution.GetRichCurve()->AddKey(0.0f, 0.0f);

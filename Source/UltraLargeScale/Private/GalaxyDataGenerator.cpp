@@ -25,6 +25,8 @@ using GalaxyHLSL::float3;
 using GalaxyHLSL::float4;
 using GalaxyHLSL::GalaxyDensityParams;
 using GalaxyHLSL::MakeGalaxyDensityParams;
+using GalaxyHLSL::GalaxyEntity;
+using GalaxyHLSL::GalaxyPlacement;
 
 #pragma region Lifetime
 
@@ -80,28 +82,23 @@ GalaxyHLSL::GalaxyDensityParams FGalaxyDensityParams::ToDerived() const
 		bEnableNoise ? 1.0f : 0.0f);
 }
 
-float FGalaxyDensityParams::ToSpawnProbability(float InDensity) const
+GalaxyHLSL::GalaxyPlacement GalaxyDataGenerator::MakePlacement(
+	const FTierParams& InTierParams,
+	float InDensityReference) const
 {
-	if (InDensity <= 0.0f)
-	{
-		return 0.0f;
-	}
+	// Extent converts through UnitScale HERE, so the field stays unit-agnostic and
+	// the conversion happens once in the place UnitScale already lives. AUTHORED SIZE
+	// IS TRUTH still holds: the real-unit range passes through UnitScale exactly once
+	// and nothing downstream reconstructs size from a quantized octree depth.
+	const double InvUnit = 1.0 / FMath::Max(Params.UnitScale, UE_DOUBLE_SMALL_NUMBER);
 
-	const float Ratio = InDensity / FMath::Max(SpawnDensityReference, 0.001f);
-
-	// Linear keeps star number density proportional to gas density: accepted count is
-	// candidates * p, so only p ~ d gives a region twice as dense twice the stars.
-	const float Linear = FMath::Min(Ratio, 1.0f);
-
-	// Beer-Lambert deliberately breaks that proportionality. It is the same form the
-	// renderer uses for alpha, so "looks opaque" and "certainly spawns" become the
-	// same statement, and dense cores fill evenly rather than becoming a wall of
-	// sprites while the faint halo spawns almost nothing.
-	const float Compressed = 1.0f - FMath::Exp(-Ratio);
-
-	return FMath::Clamp(
-		FMath::Lerp(Linear, Compressed, FMath::Clamp(SpawnCompression, 0.0f, 1.0f)),
-		0.0f, 1.0f);
+	return GalaxyHLSL::MakeGalaxyPlacement(
+		InDensityReference,
+		Params.DensityParams.SpawnCompression,
+		InTierParams.SpawnExponent,
+		static_cast<float>(InTierParams.MinScale * InvUnit),
+		static_cast<float>(InTierParams.MaxScale * InvUnit),
+		InTierParams.ExtentExponent);
 }
 
 #pragma endregion
@@ -274,102 +271,81 @@ void GalaxyDataGenerator::GenerateTierNode(
 	int32& OutSlotCount) const
 {
 	// -----------------------------------------------------------------------
-	// Three-phase batched generation matching UniverseDataGenerator pattern:
-	//   1. Generate candidate positions + normalized coords.
-	//   2. Batch density evaluation via SampleDensityBatch.
-	//   3. Walk results, rejection-gate, write accepted to slot buffers.
+	// One slot at a time, decided entirely by its own key.
 	//
-	// For the large tier, InNodeCenter is ZeroVector and InCellExtent is
-	// Params.Extent, so candidates span the full galaxy volume. For mid/small
-	// tiers, candidates are local to the cell.
+	// FRandomStream is gone, and that is not merely a port. A stream made candidate
+	// i depend on every draw before it, so no entity could be produced without
+	// producing all of its predecessors -- fine in a loop, impossible for one thread
+	// per slot. Keying on (coord, slot) instead makes any entity recomputable alone
+	// and stops identity being "position in the append order", so a region
+	// regenerates identically after the player leaves and comes back.
+	//
+	// The three-phase batch that used to live here is gone with it: a slot has to be
+	// decidable in isolation, and batching would force every candidate to be held
+	// before any of them could be judged.
 	// -----------------------------------------------------------------------
+
+	if (!Derived)
+	{
+		InBuffer.PadSlotDead(InSlotIndex, 0);
+		OutSlotCount = 0;
+		return;
+	}
 
 	const int32 BufferStart = InSlotIndex * InBuffer.SlotCapacity;
 
-	const int32 CoordHash = HashCombine(
-		HashCombine(GetTypeHash(InCoord.X), GetTypeHash(InCoord.Y)),
-		GetTypeHash(InCoord.Z));
-	const int32 NodeSeed = HashCombine(Params.Seed + InSeedOffset, CoordHash);
-	FRandomStream Stream(NodeSeed);
+	// Fixed budget, variable acceptance. The candidate count no longer tracks the
+	// buffer's remaining room, so a cell's yield depends on the field there and
+	// nothing else.
+	const int32 NumCandidates = FMath::Max(InTierParams.CandidateBudget, 1);
+	const int32 MaxAccepted = InBuffer.SlotCapacity;
 
-	const int32 NumCandidates = InBuffer.SlotCapacity;
-	const double InvExtent = 1.0 / static_cast<double>(Params.Extent);
+	const float InvExtent = static_cast<float>(1.0 / static_cast<double>(Params.Extent));
 
-	// Phase 1: generate candidates + normalized coords
-	TArray<FVector> CandidatePositions;
-	TArray<float> NoiseX, NoiseY, NoiseZ;
-	CandidatePositions.SetNumUninitialized(NumCandidates);
-	NoiseX.SetNumUninitialized(NumCandidates);
-	NoiseY.SetNumUninitialized(NumCandidates);
-	NoiseZ.SetNumUninitialized(NumCandidates);
+	const GalaxyPlacement Place = MakePlacement(
+		InTierParams, Params.DensityParams.SpawnDensityReference);
 
-	for (int32 i = 0; i < NumCandidates; ++i)
-	{
-		FVector Candidate(
-			Stream.FRandRange(-InCellExtent, InCellExtent),
-			Stream.FRandRange(-InCellExtent, InCellExtent),
-			Stream.FRandRange(-InCellExtent, InCellExtent));
-		Candidate += InNodeCenter;
-		CandidatePositions[i] = Candidate;
+	// InSeedOffset separates tiers that share a coordinate; the galaxy seed separates
+	// galaxies. Both fold into the key rather than into a stream, so nothing here is
+	// order dependent.
+	const int32 KeySeed = Params.Seed + InSeedOffset;
 
-		// Normalize to [-1, 1] relative to galaxy center. The galaxy is
-		// self-contained so no cross-cell snapping is needed.
-		NoiseX[i] = static_cast<float>(Candidate.X * InvExtent);
-		NoiseY[i] = static_cast<float>(Candidate.Y * InvExtent);
-		NoiseZ[i] = static_cast<float>(Candidate.Z * InvExtent);
-	}
+	const float3 Centre(
+		static_cast<float>(InNodeCenter.X),
+		static_cast<float>(InNodeCenter.Y),
+		static_cast<float>(InNodeCenter.Z));
 
-	// Phase 2: batch density evaluation
-	TArray<float> NoiseOut;
-	NoiseOut.SetNumUninitialized(NumCandidates);
-	SampleDensityBatch(
-		NoiseOut.GetData(), NumCandidates,
-		NoiseX.GetData(), NoiseY.GetData(), NoiseZ.GetData());
-
-	NoiseX.Empty();
-	NoiseY.Empty();
-	NoiseZ.Empty();
-
-	// Phase 3: accept/reject + write to slot
 	int32 ActualCount = 0;
-	auto dCurve = InTierParams.DensityResponse.GetRichCurveConst();
-	for (int32 i = 0; i < NumCandidates; ++i)
+
+	for (int32 i = 0; i < NumCandidates && ActualCount < MaxAccepted; ++i)
 	{
-		// The field is an optical depth, not a probability: it peaks in the
-		// hundreds while most of the volume sits below 0.01. Clamping it to [0,1]
-		// here would accept every candidate across the arms, the inner disc and
-		// the bulge, flattening the distribution exactly where the structure is.
-		const float RawDensity = Params.DensityParams.ToSpawnProbability(NoiseOut[i]);
+		const GalaxyEntity E = Derived->SampleEntity(
+			Place, Centre,
+			static_cast<float>(InCellExtent), InvExtent,
+			InCoord.X, InCoord.Y, InCoord.Z,
+			i * 977 + KeySeed);
 
-		// Response curve gates spawning only; it now sees a value genuinely in
-		// [0,1]. Raw density is used for particle sizing below and never feeds
-		// the pseudovolume texture.
-		const float SpawnDensity = (dCurve && dCurve->GetNumKeys() > 0)
-			? FMath::Clamp(dCurve->Eval(RawDensity), 0.0f, 1.0f)
-			: RawDensity;
-		if (Stream.FRand() > SpawnDensity) continue;
-
-		const float ScaleSample = Stream.FRand();
-		const double Scale = FPointData::SampleScaleFromDistribution(
-			InTierParams.MinScale, InTierParams.MaxScale,
-			ScaleSample, InTierParams.ScaleDistribution);
-
-		// AUTHORED SIZE IS TRUTH: convert the real-unit Scale through the
-		// layer's constant UnitScale exactly once. Octree insert depth is
-		// derived later, at insert time, by InsertParticleIntoOctree, so no
-		// FPointData is needed here. Never reconstruct size from the quantized
-		// depth: that would inflate every particle to its power-of-two node
-		// extent and make sprite sizes octave-step with UnitScale.
-		const float FinalExtent = static_cast<float>(Scale / Params.UnitScale);
-
-		const FVector CompVec = Stream.GetUnitVector();
+		if (E.bValid < 0.5f)
+		{
+			continue;
+		}
 
 		const int32 Idx = BufferStart + ActualCount;
-		InBuffer.Positions[Idx] = CandidatePositions[i];
-		InBuffer.Extents[Idx] = FinalExtent;
-		InBuffer.Colors[Idx] = FLinearColor(FMath::Abs(CompVec.X), FMath::Abs(CompVec.Y), FMath::Abs(CompVec.Z));
 
-		ActualCount++;
+		InBuffer.Positions[Idx] = FVector(E.Pos.x, E.Pos.y, E.Pos.z);
+
+		// AUTHORED SIZE IS TRUTH: Extent already carries the real-unit range divided
+		// by UnitScale exactly once, in MakePlacement. Octree insert depth is derived
+		// later at insert time; never reconstruct size from the quantized depth, which
+		// would inflate every particle to its node extent and make sprite sizes
+		// octave-step with UnitScale.
+		InBuffer.Extents[Idx] = E.Extent;
+
+		// Three decorrelated uniforms on a second key, so colour is stable for a given
+		// entity without being tied to where it landed.
+		InBuffer.Colors[Idx] = FLinearColor(E.Decor.x, E.Decor.y, E.Decor.z);
+
+		++ActualCount;
 	}
 
 	InBuffer.PadSlotDead(InSlotIndex, ActualCount);
@@ -521,145 +497,79 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 	//
 	// So the budget weights on cell MAX, not cell mean. Weighting by mean while also
 	// rejecting by density counts the same factor twice and over-concentrates in the
-	// arms quadratically -- which is what the previous pairing did.
+	// arms quadratically.
 	//
-	// A local envelope is also what makes this affordable: the field spans four
-	// decades across the galaxy but a narrow band within one cell, so acceptance
-	// rises from a fraction of a percent to roughly a quarter.
-	//
-	// Weights are RAW density, deliberately -- the allocation is proportional, so an
-	// unbounded scale cancels in CellWeight/TotalWeight. Only the per-candidate gate
-	// needs a probability, and it gets one by dividing by the cell's own envelope.
-	//
-	// Minimum of 1 candidate per active cell so none is silently skipped, and a final
-	// clamp so the sum never exceeds SlotCapacity. Writing is sequential into the
-	// slot region; dead padding applied once at the end.
+	// The per-cell envelope is why the acceptance mapping lives in GalaxyPlacement
+	// rather than in the derived field: this tier substitutes its own reference,
+	// which a field-level parameter could not express. SpawnDensityReference stays
+	// the mapping for mid and small, which have no prepass to derive a local bound
+	// from; substituting it here would collapse acceptance by three orders.
 	// -----------------------------------------------------------------------
 
+	if (!Derived)
+	{
+		InBuffer.PadSlotDead(InSlotIndex, 0);
+		OutSlotCount = 0;
+		return;
+	}
+
 	const TArray<FActiveLargeTierCell> ActiveCells = CollectActiveLargeTierCells();
-
-	const int32 SlotCapacity = InBuffer.SlotCapacity;
-	const int32 BufferStart = InSlotIndex * SlotCapacity;
-
 	if (ActiveCells.Num() == 0)
 	{
 		InBuffer.PadSlotDead(InSlotIndex, 0);
 		OutSlotCount = 0;
-		UE_LOG(LogTemp, Warning, TEXT("GalaxyDataGenerator::GenerateLargeTierSlot - no active cells found (check density params)"));
 		return;
 	}
 
-	// Budget weights: the cell's ENVELOPE, already computed by the collector. No
-	// resampling needed, and pairing envelope-weighted budgets with envelope-relative
-	// acceptance is what makes the result exactly proportional to the field.
-	const double InvExtent = 1.0 / static_cast<double>(Params.Extent);
+	const int32 BufferStart = InSlotIndex * InBuffer.SlotCapacity;
+	const int32 MaxAccepted = InBuffer.SlotCapacity;
+	const float InvExtent = static_cast<float>(1.0 / static_cast<double>(Params.Extent));
 
-	TArray<float> CellWeights;
-	CellWeights.SetNumUninitialized(ActiveCells.Num());
-	float TotalWeight = 0.0f;
+	// Never fewer candidates than cells: a cell that survived the prepass has
+	// structure in it and should get at least one draw.
+	const int32 Budget = FMath::Max(Params.LargeTier.CandidateBudget, ActiveCells.Num());
 
-	for (int32 ci = 0; ci < ActiveCells.Num(); ++ci)
+	double TotalWeight = 0.0;
+	for (const FActiveLargeTierCell& Cell : ActiveCells)
 	{
-		CellWeights[ci] = FMath::Max(ActiveCells[ci].MaxDensity, 1e-6f); // never starve a cell
-		TotalWeight += CellWeights[ci];
+		TotalWeight += FMath::Max(static_cast<double>(Cell.MaxDensity), 1e-6);
 	}
 
-	// Allocate candidate counts proportional to weight
-	TArray<int32> CandidateCounts;
-	CandidateCounts.SetNumZeroed(ActiveCells.Num());
-	int32 TotalAllocated = 0;
-
-	for (int32 ci = 0; ci < ActiveCells.Num(); ++ci)
-	{
-		const int32 Count = FMath::Max(1,
-			FMath::RoundToInt(static_cast<float>(SlotCapacity) * CellWeights[ci] / TotalWeight));
-		CandidateCounts[ci] = Count;
-		TotalAllocated += Count;
-	}
-
-	// Trim or top-up the last cell to hit exactly SlotCapacity.
-	// Rounding errors are typically +/-1 per cell so the delta is small.
-	const int32 Delta = SlotCapacity - TotalAllocated;
-	CandidateCounts.Last() = FMath::Max(1, CandidateCounts.Last() + Delta);
-
-	// Generate per cell
-	auto dCurve = Params.LargeTier.DensityResponse.GetRichCurveConst();
 	int32 TotalAccepted = 0;
 
-	for (int32 ci = 0; ci < ActiveCells.Num(); ++ci)
+	for (int32 ci = 0; ci < ActiveCells.Num() && TotalAccepted < MaxAccepted; ++ci)
 	{
-		if (TotalAccepted >= SlotCapacity) break;
-
 		const FActiveLargeTierCell& Cell = ActiveCells[ci];
-		const int32 NumCandidates = FMath::Min(CandidateCounts[ci], SlotCapacity - TotalAccepted);
 
-		// Stable per-cell seed derived from grid coordinate.
-		const int32 CoordHash = HashCombine(
-			HashCombine(GetTypeHash(Cell.GridCoord.X), GetTypeHash(Cell.GridCoord.Y)),
-			GetTypeHash(Cell.GridCoord.Z));
-		FRandomStream Stream(HashCombine(Params.Seed, CoordHash));
+		const double Weight = FMath::Max(static_cast<double>(Cell.MaxDensity), 1e-6);
+		const int32 NumCandidates = FMath::Max(1,
+			FMath::RoundToInt(static_cast<double>(Budget) * Weight / TotalWeight));
 
-		// Phase 1: candidates
-		TArray<FVector> CandidatePositions;
-		TArray<float> NoiseX, NoiseY, NoiseZ;
-		CandidatePositions.SetNumUninitialized(NumCandidates);
-		NoiseX.SetNumUninitialized(NumCandidates);
-		NoiseY.SetNumUninitialized(NumCandidates);
-		NoiseZ.SetNumUninitialized(NumCandidates);
+		const GalaxyPlacement Place = MakePlacement(Params.LargeTier, Cell.MaxDensity);
 
-		for (int32 i = 0; i < NumCandidates; ++i)
+		const float3 Centre(
+			static_cast<float>(Cell.Center.X),
+			static_cast<float>(Cell.Center.Y),
+			static_cast<float>(Cell.Center.Z));
+
+		for (int32 i = 0; i < NumCandidates && TotalAccepted < MaxAccepted; ++i)
 		{
-			const FVector Candidate(
-				Cell.Center.X + Stream.FRandRange(-Cell.HalfExt, Cell.HalfExt),
-				Cell.Center.Y + Stream.FRandRange(-Cell.HalfExt, Cell.HalfExt),
-				Cell.Center.Z + Stream.FRandRange(-Cell.HalfExt, Cell.HalfExt));
-			CandidatePositions[i] = Candidate;
-			NoiseX[i] = static_cast<float>(Candidate.X * InvExtent);
-			NoiseY[i] = static_cast<float>(Candidate.Y * InvExtent);
-			NoiseZ[i] = static_cast<float>(Candidate.Z * InvExtent);
-		}
+			const GalaxyEntity E = Derived->SampleEntity(
+				Place, Centre,
+				static_cast<float>(Cell.HalfExt), InvExtent,
+				Cell.GridCoord.X, Cell.GridCoord.Y, Cell.GridCoord.Z,
+				i * 977 + Params.Seed);
 
-		// Phase 2: batch density eval
-		TArray<float> NoiseOut;
-		NoiseOut.SetNumUninitialized(NumCandidates);
-		SampleDensityBatch(NoiseOut.GetData(), NumCandidates,
-			NoiseX.GetData(), NoiseY.GetData(), NoiseZ.GetData());
-
-		// Phase 3: accept/reject + write
-		for (int32 i = 0; i < NumCandidates; ++i)
-		{
-			if (TotalAccepted >= SlotCapacity) break;
-
-			// Rejection against the CELL'S OWN envelope rather than a global
-			// reference. This is the whole point of the local envelope: the ratio is
-			// order-1 across the cell instead of order-1e-3, so most candidates land.
-			//
-			// SpawnDensityReference is deliberately not used here; it remains the
-			// mapping for the mid and small tiers, which have no prepass to derive a
-			// local bound from.
-			const float RawDensity = FMath::Clamp(NoiseOut[i] / Cell.MaxDensity, 0.0f, 1.0f);
-
-			// Density response curve gates spawning only.
-			const float SpawnDensity = (dCurve && dCurve->GetNumKeys() > 0)
-				? FMath::Clamp(dCurve->Eval(RawDensity), 0.0f, 1.0f)
-				: RawDensity;
-			if (Stream.FRand() > SpawnDensity) continue;
-
-			const float ScaleSample = Stream.FRand();
-			const double Scale = FPointData::SampleScaleFromDistribution(
-				Params.LargeTier.MinScale, Params.LargeTier.MaxScale,
-				ScaleSample, Params.LargeTier.ScaleDistribution);
-			// Authored size is truth (see the tier note above). No FPointData
-			// here - insert depth is derived at octree-insert time.
-			const float FinalExtent = static_cast<float>(Scale / Params.UnitScale);
-
-			const FVector CompVec = Stream.GetUnitVector();
+			if (E.bValid < 0.5f)
+			{
+				continue;
+			}
 
 			const int32 Idx = BufferStart + TotalAccepted;
-			InBuffer.Positions[Idx] = CandidatePositions[i];
-			InBuffer.Extents[Idx] = FinalExtent;
-			InBuffer.Colors[Idx] = FLinearColor(
-				FMath::Abs(CompVec.X), FMath::Abs(CompVec.Y), FMath::Abs(CompVec.Z));
+
+			InBuffer.Positions[Idx] = FVector(E.Pos.x, E.Pos.y, E.Pos.z);
+			InBuffer.Extents[Idx] = E.Extent;
+			InBuffer.Colors[Idx] = FLinearColor(E.Decor.x, E.Decor.y, E.Decor.z);
 
 			++TotalAccepted;
 		}
@@ -667,10 +577,6 @@ void GalaxyDataGenerator::GenerateLargeTierSlot(
 
 	InBuffer.PadSlotDead(InSlotIndex, TotalAccepted);
 	OutSlotCount = TotalAccepted;
-
-	UE_LOG(LogTemp, Log,
-		TEXT("GalaxyDataGenerator::GenerateLargeTierSlot - %d active cells, %d/%d particles accepted"),
-		ActiveCells.Num(), TotalAccepted, SlotCapacity);
 }
 
 #pragma endregion

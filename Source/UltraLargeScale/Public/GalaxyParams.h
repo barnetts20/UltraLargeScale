@@ -296,8 +296,14 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	 *  translation unit that compiles the shim and the .ush. */
 	GalaxyHLSL::GalaxyDensityParams ToDerived() const;
 
-	/** Map a raw field value to a spawn probability in [0,1]. */
-	float ToSpawnProbability(float InDensity) const;
+	/** Pack the acceptance mapping and a tier's size range into the shared placement
+	 *  rules. Defined in GalaxyDataGenerator.cpp alongside ToDerived().
+	 *
+	 *  The old ToSpawnProbability lived here and could not be reached from a shader.
+	 *  Its body is now GalaxyDensityParams::SpawnProbability, so where a star spawns
+	 *  and where gas is drawn are one function. The two inputs below are passed per
+	 *  call rather than baked into the derived field, which is what lets the large
+	 *  tier substitute its own per-cell density envelope. */
 };
 
 //TODO: DESCRIPTION COMMENT - THIS FORMS THE PARAMETER INTERFACE WITH THE RAYMARCH MATERIAL OUR RAYMARCHER IS NOT MATURE AT THIS POINT SO THIS WILL CHANGE, MANY OF THESE VALUES CURRENTLY HAVE NO EFFECT - THATS FINE, IT WILL NEED REFACTORING WHEN WE DO A GALAXY RAYMARCHER DEEP DIVE ANYWAY

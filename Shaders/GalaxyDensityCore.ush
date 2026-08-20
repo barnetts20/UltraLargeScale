@@ -45,6 +45,72 @@
 // correlate. Arbitrary; only needs to be large against feature size.
 #define GALAXY_HALO_DOMAIN float3(53.7f, 29.1f, 71.3f)
 
+// One placed entity. Returned BY VALUE, one slot at a time, rather than filling an
+// output array: an array would need `out float3 A[N]` in HLSL and a pointer in C++,
+// which is exactly the spelled-differently-in-each-language divergence the no-`out`
+// rule exists to prevent.
+//
+// Colour and rotation are deliberately absent. Everything decorative derives from
+// Hash downstream, which keeps them bit-identical on both sides for free and lets
+// new attributes be added without touching this signature.
+// Per-tier placement rules. Separate from GalaxyDensityParams because these change
+// per tier while the field does not, and because both of the curves they replace --
+// DensityResponse and ScaleDistribution -- were UCurveFloat assets that no shader can
+// read. An exponent covers what those curves were doing, bending the response toward
+// or away from the dense end, without a LUT or a second authored asset only one side
+// can evaluate.
+//
+// Extent is in the caller's FINAL units: divide by UnitScale before filling this in,
+// so the field stays unit-agnostic and the conversion happens once where UnitScale
+// already lives.
+struct GalaxyPlacement
+{
+    // Held inverted, and per-call rather than in GalaxyDensityParams. The large tier
+    // rejects against ITS OWN CELL's peak density instead of a global reference --
+    // that is the point of its prepass, since the ratio then runs order-1 across the
+    // cell instead of order-1e-3 and most candidates land. A global field parameter
+    // could not express that; a per-call one does, and the mid and small tiers just
+    // pass the global value.
+    float InvDensityReference;
+    float Compression; // 0 = accepted count tracks density linearly
+    float SpawnExponent; // 1 = the raw response; <1 spawns more in faint regions
+    float ExtentMin;
+    float ExtentMax;
+    float ExtentExponent; // <1 biases small, >1 biases large
+};
+
+GalaxyPlacement MakeGalaxyPlacement(
+    float InDensityReference, // the density that reads as a certain spawn
+    float InCompression,
+    float InSpawnExponent,
+    float InExtentMin, // FINAL units: divide by UnitScale before calling
+    float InExtentMax,
+    float InExtentExponent)
+{
+    GalaxyPlacement Q;
+
+    // Division guard, not a range limit: a reference of zero is a divide by zero and
+    // the infinity accepts every candidate in the galaxy at once.
+    Q.InvDensityReference = 1.0f / max(InDensityReference, 1e-3f);
+    Q.Compression = saturate(InCompression);
+    Q.SpawnExponent = max(InSpawnExponent, 1e-3f);
+    Q.ExtentMin = InExtentMin;
+    Q.ExtentMax = InExtentMax;
+    Q.ExtentExponent = max(InExtentExponent, 1e-3f);
+
+    return Q;
+}
+
+struct GalaxyEntity
+{
+    float3 Pos; // caller's units, same frame as the cell centre passed in
+    float Extent;
+    float Density; // raw field value at Pos, before any spawn shaping
+    float3 Decor; // three decorrelated uniforms in [0,1) for colour, rotation, type
+    float bValid; // 0 = rejected; the caller skips it
+};
+
+
 struct GalaxyDensityParams
 {
     float BoundsFadeStart;
@@ -123,6 +189,11 @@ struct GalaxyDensityParams
     float HaloTwistInherit; // fraction of the spiral twist the halo frame takes
     int NoiseOctaveCount;
 
+    // SpawnExponent, extent range and extent shaping are PER TIER and live in
+    // GalaxyPlacement instead. They cannot sit here: the derivation runs sixteen arm
+    // hashes and a tan, so rebuilding this struct once per tier to change a scale
+    // range would repeat all of that to alter two numbers the field never reads.
+
     // ======================================================================
     // HELPERS
     // ======================================================================
@@ -149,6 +220,46 @@ struct GalaxyDensityParams
 
         // Scalar rather than uint4: this was the only integer vector in the file, and
         // keeping it out means the C++ shim needs no such type. Arithmetic identical.
+        uint a = n * 1664525u + 1013904223u;
+        uint b = a * 1664525u + 1013904223u;
+        uint c = b * 1664525u + 1013904223u;
+        uint d = c * 1664525u + 1013904223u;
+
+        a ^= a >> 16u;
+        b ^= b >> 16u;
+        c ^= c >> 16u;
+        d ^= d >> 16u;
+        a *= 1664525u;
+        b *= 1664525u;
+        c *= 1664525u;
+        d *= 1664525u;
+        a ^= a >> 16u;
+        b ^= b >> 16u;
+        c ^= c >> 16u;
+        d ^= d >> 16u;
+
+        const float Inv32 = 1.0f / 4294967296.0f;
+        return float4(float(a) * Inv32, float(b) * Inv32,
+                      float(c) * Inv32, float(d) * Inv32);
+    }
+
+    // Stateless four-value hash on four integers. Same wrapping uint arithmetic as
+    // ArmHash, widened so a cell and a slot index can both key it.
+    //
+    // This replaces the sequential FRandomStream the CPU sampler used, and the
+    // change is not merely a port. A stream makes candidate i depend on every draw
+    // before it, so one entity cannot be produced without producing all of its
+    // predecessors -- fine in a loop, impossible for one thread per slot. Keyed on
+    // (cell, slot) instead, any entity is recomputable on its own, identity stops
+    // being "position in the append order", and a region regenerates identically
+    // after the player leaves and comes back.
+    float4 Hash4(int InA, int InB, int InC, int InD)
+    {
+        uint n = (uint) InA * 73856093u;
+        n ^= (uint) InB * 19349663u;
+        n ^= (uint) InC * 83492791u;
+        n ^= (uint) InD * 2654435761u;
+
         uint a = n * 1664525u + 1013904223u;
         uint b = a * 1664525u + 1013904223u;
         uint c = b * 1664525u + 1013904223u;
@@ -547,6 +658,103 @@ struct GalaxyDensityParams
     }
 
     // ======================================================================
+    // ENTITY PLACEMENT
+    // ======================================================================
+
+    // Density -> acceptance probability.
+    //
+    // The field is an OPTICAL DEPTH, not a probability: it peaks in the hundreds
+    // while most of the volume sits below 0.01, so clamping it to [0,1] here would
+    // accept every candidate across the arms, the inner disc and the bulge at once,
+    // flattening the distribution exactly where the structure is.
+    //
+    // Linear keeps star number density proportional to gas density, since accepted
+    // count is candidates * p and only p ~ d makes a region twice as dense hold twice
+    // the stars. Beer-Lambert deliberately breaks that: it is the same form the
+    // renderer uses for alpha, so "looks opaque" and "certainly spawns" become the
+    // same statement, and dense cores fill evenly instead of becoming a wall of
+    // sprites while the faint halo spawns almost nothing.
+    //
+    // SpawnExponent replaces the UCurveFloat the CPU path evaluated. A curve asset
+    // has no shader equivalent, and an exponent covers what that curve was actually
+    // doing -- bending the response toward or away from the dense regions -- without
+    // a LUT or a second authored asset that only one side can read.
+    float SpawnProbability(float InDensity, GalaxyPlacement InPlace)
+    {
+        if (InDensity <= 0.0f)
+        {
+            return 0.0f;
+        }
+
+        float ratio = InDensity * InPlace.InvDensityReference;
+
+        // NOT named `linear`. That is an HLSL interpolation modifier -- the same
+        // family as centroid and nointerpolation -- so `float linear` is a reserved
+        // word and fails to parse, while C++ accepts it without comment. The name
+        // came across with this body when it moved out of FGalaxyDensityParams.
+        float proportional = min(ratio, 1.0f);
+        float compressed = 1.0f - exp(-ratio);
+
+        float p = lerp(proportional, compressed, saturate(InPlace.Compression));
+        return saturate(PowSafe(p, max(InPlace.SpawnExponent, 1e-3f)));
+    }
+
+    // One candidate, decided entirely by its own key.
+    //
+    // InCellCentre and InCellExtent describe the cell in the caller's units;
+    // InInvGalaxyExtent converts into the normalized [-1,1] frame the field is
+    // defined in. The caller already holds that reciprocal, and passing it beats
+    // storing a second extent here that could disagree with the one the proxy uses.
+    //
+    // Four hashed uniforms: three place the candidate, the fourth is the accept
+    // draw. Extent needs a fifth and MUST NOT reuse the fourth: acceptance keeps
+    // only candidates whose accept draw fell below p, so among survivors that value
+    // is biased low, and in a sparse region where p is small only the very lowest
+    // draws survive at all. Reusing it made extent correlate with local density --
+    // measured as a mean of 1.15 against the 2.25 a uniform 0.5-4.0 should give,
+    // with sparse regions holding systematically tiny stars. A scrambled
+    // recombination of the first three costs four ops instead of a second hash.
+    GalaxyEntity SampleEntity(GalaxyPlacement InPlace, float3 InCellCentre,
+                              float InCellExtent, float InInvGalaxyExtent,
+                              int InCellX, int InCellY, int InCellZ, int InSlot)
+    {
+        GalaxyEntity E;
+
+        float4 h = Hash4(InCellX, InCellY, InCellZ, InSlot);
+
+        E.Pos = float3(
+            InCellCentre.x + (h.x * 2.0f - 1.0f) * InCellExtent,
+            InCellCentre.y + (h.y * 2.0f - 1.0f) * InCellExtent,
+            InCellCentre.z + (h.z * 2.0f - 1.0f) * InCellExtent);
+
+        float3 norm = float3(E.Pos.x * InInvGalaxyExtent,
+                             E.Pos.y * InInvGalaxyExtent,
+                             E.Pos.z * InInvGalaxyExtent);
+
+        E.Density = SampleAnalytic(norm);
+        E.bValid = (h.w < SpawnProbability(E.Density, InPlace)) ? 1.0f : 0.0f;
+
+        // A second key for the decorative values. One extra hash against a full
+        // SampleAnalytic per candidate is not worth branching around, and deriving
+        // colour from the placement uniforms would tie appearance to position.
+        float4 g = Hash4(InCellX, InCellY, InCellZ, InSlot + 24337);
+        E.Decor = float3(g.x, g.y, g.z);
+
+        // Extent is drawn from the same uniform, shaped by an exponent rather than a
+        // curve asset for the same reason the spawn response is. Per-layer extent
+        // rules belong here later, once there is a physical distribution worth
+        // reproducing; a shaped uniform is honest placeholder until then.
+        float e = h.x * 7.31f + h.y * 3.17f + h.z * 11.71f;
+        e = e - floor(e);
+        E.Extent = InPlace.ExtentMin
+            + (InPlace.ExtentMax - InPlace.ExtentMin)
+              * PowSafe(e, max(InPlace.ExtentExponent, 1e-3f));
+
+        return E;
+    }
+
+
+    // ======================================================================
     // NOISE FRAME
     // Everything below shapes the domain the noise is sampled in. It reads no
     // texture, so it lives here rather than in GalaxyDensity.ush, but it is the
@@ -759,6 +967,7 @@ GalaxyDensityParams MakeGalaxyDensityParams(
             max(1.0f + InArmAsym.z * (2.0f * h.z - 1.0f), 0.0f),
             P.DiscRadius * (1.0f - InArmAsym.w * h.w) - armFadeW);
     }
+
 
     return P;
 }
