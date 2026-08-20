@@ -101,6 +101,24 @@ GalaxyPlacement MakeGalaxyPlacement(
     return Q;
 }
 
+// A candidate before the field has been consulted. Split out so the DENSITY SOURCE
+// is the caller's choice, exactly as it already is for the field itself: NoiseFrame
+// computes a coordinate in here, the wrapper fetches the texture, and the values come
+// back in. Placement now works the same way.
+//
+// Without this split SampleEntity would hardcode SampleAnalytic, and the textured
+// path -- warp and modulation -- would be permanently unreachable from placement. It
+// is the difference between the entity generator seeing the galaxy the material draws
+// and seeing a texture-free approximation of it.
+struct GalaxyCandidate
+{
+    float3 Pos; // caller's units
+    float3 Norm; // the same point in the field's [-1,1] frame
+    float AcceptDraw; // uniform in [0,1), compared against the spawn probability
+    float ExtentDraw; // uniform in [0,1), decorrelated from AcceptDraw
+    float3 Decor;
+};
+
 struct GalaxyEntity
 {
     float3 Pos; // caller's units, same frame as the cell centre passed in
@@ -714,43 +732,76 @@ struct GalaxyDensityParams
     // measured as a mean of 1.15 against the 2.25 a uniform 0.5-4.0 should give,
     // with sparse regions holding systematically tiny stars. A scrambled
     // recombination of the first three costs four ops instead of a second hash.
-    GalaxyEntity SampleEntity(GalaxyPlacement InPlace, float3 InCellCentre,
-                              float InCellExtent, float InInvGalaxyExtent,
-                              int InCellX, int InCellY, int InCellZ, int InSlot)
+    // Everything that does not need the field. Resource-free on both sides.
+    GalaxyCandidate MakeCandidate(float3 InCellCentre, float InCellExtent,
+                                  float InInvGalaxyExtent, int InCellX, int InCellY,
+                                  int InCellZ, int InSlot)
     {
-        GalaxyEntity E;
+        GalaxyCandidate C;
 
         float4 h = Hash4(InCellX, InCellY, InCellZ, InSlot);
 
-        E.Pos = float3(
+        C.Pos = float3(
             InCellCentre.x + (h.x * 2.0f - 1.0f) * InCellExtent,
             InCellCentre.y + (h.y * 2.0f - 1.0f) * InCellExtent,
             InCellCentre.z + (h.z * 2.0f - 1.0f) * InCellExtent);
 
-        float3 norm = float3(E.Pos.x * InInvGalaxyExtent,
-                             E.Pos.y * InInvGalaxyExtent,
-                             E.Pos.z * InInvGalaxyExtent);
+        C.Norm = float3(C.Pos.x * InInvGalaxyExtent,
+                        C.Pos.y * InInvGalaxyExtent,
+                        C.Pos.z * InInvGalaxyExtent);
 
-        E.Density = SampleAnalytic(norm);
-        E.bValid = (h.w < SpawnProbability(E.Density, InPlace)) ? 1.0f : 0.0f;
+        C.AcceptDraw = h.w;
 
-        // A second key for the decorative values. One extra hash against a full
-        // SampleAnalytic per candidate is not worth branching around, and deriving
-        // colour from the placement uniforms would tie appearance to position.
-        float4 g = Hash4(InCellX, InCellY, InCellZ, InSlot + 24337);
-        E.Decor = float3(g.x, g.y, g.z);
-
-        // Extent is drawn from the same uniform, shaped by an exponent rather than a
-        // curve asset for the same reason the spawn response is. Per-layer extent
-        // rules belong here later, once there is a physical distribution worth
-        // reproducing; a shaped uniform is honest placeholder until then.
+        // MUST NOT reuse AcceptDraw. Acceptance keeps only candidates whose draw fell
+        // below p, so among survivors that value is biased low, and in a sparse region
+        // where p is small only the very lowest draws survive at all. Reusing it made
+        // extent correlate with local density -- measured as a mean of 1.15 against
+        // the 2.25 a uniform 0.5-4.0 should give, with sparse regions holding
+        // systematically tiny stars.
         float e = h.x * 7.31f + h.y * 3.17f + h.z * 11.71f;
-        e = e - floor(e);
+        C.ExtentDraw = e - floor(e);
+
+        // A second key for the decorative values, so colour is stable for a given
+        // entity without being tied to where it landed.
+        float4 g = Hash4(InCellX, InCellY, InCellZ, InSlot + 24337);
+        C.Decor = float3(g.x, g.y, g.z);
+
+        return C;
+    }
+
+    // Everything that does need it. InDensity is the RAW field value at C.Norm,
+    // whichever way the caller obtained it: SampleAnalytic for the texture-free path,
+    // GalaxySample for the textured one.
+    GalaxyEntity FinishEntity(GalaxyPlacement InPlace, GalaxyCandidate InC,
+                              float InDensity)
+    {
+        GalaxyEntity E;
+
+        E.Pos = InC.Pos;
+        E.Density = InDensity;
+        E.Decor = InC.Decor;
+        E.bValid = (InC.AcceptDraw < SpawnProbability(InDensity, InPlace))
+            ? 1.0f : 0.0f;
+
         E.Extent = InPlace.ExtentMin
             + (InPlace.ExtentMax - InPlace.ExtentMin)
-              * PowSafe(e, max(InPlace.ExtentExponent, 1e-3f));
+              * PowSafe(InC.ExtentDraw, max(InPlace.ExtentExponent, 1e-3f));
 
         return E;
+    }
+
+    // Texture-free convenience: the two halves with SampleAnalytic between them.
+    // Correct wherever noise is off, and the only form the CPU could reach before
+    // placement moved to a compute dispatch.
+    GalaxyEntity SampleEntity(GalaxyPlacement InPlace, float3 InCellCentre,
+                              float InCellExtent, float InInvGalaxyExtent,
+                              int InCellX, int InCellY, int InCellZ, int InSlot)
+    {
+        GalaxyCandidate C = MakeCandidate(InCellCentre, InCellExtent,
+                                          InInvGalaxyExtent, InCellX, InCellY,
+                                          InCellZ, InSlot);
+
+        return FinishEntity(InPlace, C, SampleAnalytic(C.Norm));
     }
 
 

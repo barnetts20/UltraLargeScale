@@ -1,0 +1,167 @@
+// GalaxyEntityGen.usf
+// Entity placement on the GPU, so the generator sees the SAME field the material
+// draws -- warp and modulation included.
+//
+// This is the point of the migration, and it is not only about parity. While
+// placement could only run on the CPU the field had to stay resource-free, so every
+// feature had to be paid for analytically. Reaching the volume texture from here
+// means warp and detail can come from a fetch instead of from arithmetic, which
+// changes what it is reasonable to write in the field at all.
+//
+// One thread per candidate. Placement is keyed on (cell, slot) and nothing is
+// order-dependent, so a thread needs no neighbours and no group memory.
+
+#include "/Engine/Public/Platform.ush"
+#include "/UltraLargeScale/GalaxyDensity.ush"
+
+// ---------------------------------------------------------------------------
+// OUTPUT
+//
+// FIXED SLOTS, NOT AN APPEND BUFFER. Thread i writes entry i unconditionally and
+// marks it valid or not; the CPU compacts on readback.
+//
+// An append buffer would be denser, and it would throw away the property the whole
+// design rests on: identity is (cell, slot), not position in the output. Append
+// ordering is not guaranteed between dispatches, so the same region would come back
+// with entities shuffled between visits, and a saved reference to "entity 7" would
+// point somewhere else. The wasted entries cost bandwidth on a dispatch measured in
+// tens of thousands of threads, which is not the expensive part of this.
+// ---------------------------------------------------------------------------
+struct FGalaxyEntityOut
+{
+    float3 Pos;
+    float Extent;
+    float3 Decor;
+    float Density;
+    uint bValid;
+    uint3 Pad; // 48 bytes, so the C++ mirror needs no packing rules to match
+};
+
+RWStructuredBuffer<FGalaxyEntityOut> OutEntities;
+
+// ---------------------------------------------------------------------------
+// DISPATCH
+//
+// A batch of cells, each drawing CandidateBudget candidates. Cells are supplied as a
+// buffer rather than derived from the thread id because the large tier's active set
+// is sparse -- the prepass has already discarded cells with no structure in them, and
+// re-deriving that on the GPU would repeat the whole cull.
+// ---------------------------------------------------------------------------
+struct FGalaxyGenCell
+{
+    float3 Centre; // caller's units
+    float HalfExtent;
+    int3 Coord; // the placement key; NOT the dispatch index
+    float DensityReference; // per-cell envelope for the large tier, global otherwise
+};
+
+StructuredBuffer<FGalaxyGenCell> InCells;
+
+uint NumCells;
+uint CandidateBudget;
+uint SlotStride; // entries reserved per cell in OutEntities
+int KeySeed; // galaxy seed folded with the tier's seed offset
+float InvGalaxyExtent;
+
+// --- placement, per dispatch; the per-cell reference overrides Q.InvDensityReference
+float PlaceCompression;
+float PlaceSpawnExponent;
+float PlaceExtentMin;
+float PlaceExtentMax;
+float PlaceExtentExponent;
+
+Texture3D NoiseTex;
+SamplerState NoiseTexSampler;
+
+// --- field parameters, raw, in the order MakeGalaxyDensityParams takes them -------
+// Passed raw rather than as a pre-derived struct on purpose. A derived
+// GalaxyDensityParams uploaded as a constant buffer would have to match HLSL's
+// packing rules against the C++ layout member for member, and a single straddling
+// float3 would silently shift everything after it. Deriving here costs sixteen arm
+// hashes and a tan per thread against a full field evaluation, and it cannot drift.
+float4 InLateralScale;
+float4 InVerticalScale;
+float4 InLayerDensity;
+float4 InNoiseAmount;
+float4 InWarpAmount;
+float4 InArmAsym;
+float4 InSpiralTwist;
+float3 InCentralVoid;
+float4 InNoiseScale;
+float4 InWarpScale;
+float4 InNoiseChannelWeights;
+float3 InNoiseOffset;
+float InBoundsFadeStart;
+float InDiscScaleLengthRatio;
+float InDiscVerticalFalloff;
+float InDiscFlare;
+float InDiscWarpAmplitude;
+float InDiscWarpPhase;
+float InDiscWarpTwist;
+float InDiscLopsidedAmount;
+float InDiscLopsidedPhase;
+float InArmCount;
+float InArmAsymSeed;
+float InArmProfileExponent;
+float InArmRadialGrowth;
+float InArmHostFalloff;
+float InBulgeConcentration;
+float InBackgroundConcentration;
+float InNoiseOctaves;
+float InNoiseRidged;
+float InNoiseEnable;
+
+[numthreads(64, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    const uint Index = DispatchThreadId.x;
+    const uint CellIndex = Index / CandidateBudget;
+    const uint Slot = Index - CellIndex * CandidateBudget;
+
+    if (CellIndex >= NumCells || Slot >= SlotStride)
+    {
+        return;
+    }
+
+    const uint OutIndex = CellIndex * SlotStride + Slot;
+
+    FGalaxyGenCell Cell = InCells[CellIndex];
+
+    GalaxyDensityParams P = MakeGalaxyDensityParams(
+        InLateralScale, InVerticalScale, InLayerDensity, InNoiseAmount,
+        InWarpAmount, InArmAsym, InSpiralTwist, InCentralVoid,
+        InNoiseScale, InWarpScale, InNoiseChannelWeights, InNoiseOffset,
+        InBoundsFadeStart, InDiscScaleLengthRatio, InDiscVerticalFalloff,
+        InDiscFlare, InDiscWarpAmplitude, InDiscWarpPhase, InDiscWarpTwist,
+        InDiscLopsidedAmount, InDiscLopsidedPhase, InArmCount, InArmAsymSeed,
+        InArmProfileExponent, InArmRadialGrowth, InArmHostFalloff,
+        InBulgeConcentration, InBackgroundConcentration,
+        InNoiseOctaves, InNoiseRidged, InNoiseEnable);
+
+    GalaxyPlacement Q = MakeGalaxyPlacement(
+        Cell.DensityReference, PlaceCompression, PlaceSpawnExponent,
+        PlaceExtentMin, PlaceExtentMax, PlaceExtentExponent);
+
+    GalaxyCandidate C = P.MakeCandidate(
+        Cell.Centre, Cell.HalfExtent, InvGalaxyExtent,
+        Cell.Coord.x, Cell.Coord.y, Cell.Coord.z,
+        (int) Slot * 977 + KeySeed);
+
+    // THE WHOLE POINT. GalaxySample reads the volume texture for warp and modulation;
+    // SampleAnalytic does not. With InNoiseEnable at zero the two agree exactly, which
+    // is what makes the first migration step verifiable against the CPU path before
+    // the texture is switched on.
+    const float Density = GalaxySample(P, NoiseTex, NoiseTexSampler, C.Norm);
+
+    GalaxyEntity E = P.FinishEntity(Q, C, Density);
+
+    FGalaxyEntityOut Out;
+    Out.Pos = E.Pos;
+    Out.Extent = E.Extent;
+    Out.Decor = E.Decor;
+    Out.Density = E.Density;
+    Out.bValid = (E.bValid > 0.5f) ? 1u : 0u;
+    Out.Pad = uint3(0, 0, 0);
+
+    OutEntities[OutIndex] = Out;
+}
