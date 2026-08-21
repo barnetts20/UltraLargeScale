@@ -12,7 +12,7 @@
 #include "TextureResource.h"
 
 IMPLEMENT_GLOBAL_SHADER(FGalaxyEntityGenCS,
-	"/UltraLargeScale/GalaxyEntityGen.usf", "MainCS", SF_Compute);
+	"/UltraLargeScale/Private/GalaxyEntityGen.usf", "MainCS", SF_Compute);
 
 
 namespace GalaxyEntityGen

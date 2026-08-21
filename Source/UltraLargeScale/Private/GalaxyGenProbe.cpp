@@ -8,7 +8,7 @@
 #include "Async/TaskGraphInterfaces.h"
 
 IMPLEMENT_GLOBAL_SHADER(FGalaxyGenProbeCS,
-	"/UltraLargeScale/GalaxyGenProbe.usf", "MainCS", SF_Compute);
+	"/UltraLargeScale/Private/GalaxyGenProbe.usf", "MainCS", SF_Compute);
 
 namespace GalaxyGenProbe
 {
