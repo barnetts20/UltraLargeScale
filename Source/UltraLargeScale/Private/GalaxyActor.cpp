@@ -9,6 +9,8 @@
 #include <Kismet/GameplayStatics.h>
 #include <NiagaraFunctionLibrary.h>
 
+#include "UObject/ConstructorHelpers.h"
+
 #pragma endregion
 
 #pragma region Constructor/Destructor
@@ -18,6 +20,28 @@ AGalaxyActor::AGalaxyActor()
 	PrimaryActorTick.bCanEverTick = true;
 	SetActorTickEnabled(false);
 	Octree = MakeShared<FOctree>(Params.Extent);
+
+	// Default the placement noise texture to the same asset the material samples.
+	//
+	// Resolved here rather than as a UPROPERTY default because FGalaxyParams is a
+	// USTRUCT: ConstructorHelpers only runs during UObject construction, so a plain
+	// struct cannot reference an asset by path at all. Assigned only when unset, so
+	// anything authored on the instance wins.
+	//
+	// Set NEVER STREAM on this asset. GalaxyDensity.ush reads mip 0 on both paths, but
+	// the material handles streaming residency and a compute dispatch does not: if
+	// mip 0 is not resident when the dispatch runs it reads whatever is, and placement
+	// silently stops matching the render.
+	if (Params.NoiseTexture == nullptr)
+	{
+		static ConstructorHelpers::FObjectFinder<UVolumeTexture> DefaultNoise(
+			TEXT("/UltraLargeScale/VolumeTextures/VT_PerlinWorley_Balanced.VT_PerlinWorley_Balanced"));
+
+		if (DefaultNoise.Succeeded())
+		{
+			Params.NoiseTexture = DefaultNoise.Object;
+		}
+	}
 }
 
 AGalaxyActor::~AGalaxyActor()
@@ -404,6 +428,23 @@ void AGalaxyActor::BuildTierConfigs()
 	MidTierConfig.OctreeInsertBufferIndex = 0;
 	MidTierConfig.TierIndex = 1;
 	MidTierConfig.ShouldSkipCell = [this](const FIntVector& Coord) { return !CellOverlapsVolume(Coord, MidTierConfig.GridDepth); };
+	// GPU batch path, tried first. Returns false when it cannot run -- GPU generation
+	// disabled, no texture, readback timed out -- and the per-slot CPU callback below
+	// then fills the same slots exactly as before. The fallback is what keeps a GPU
+	// failure from silently producing an empty tier.
+	//
+	// Bound on Mid and Small only. The large tier rejects against its own per-cell
+	// density envelope, produced by a CPU cull prepass that has not been ported, and
+	// substituting the global reference there would collapse its acceptance rate by
+	// three orders of magnitude.
+	MidTierConfig.GenerateBatchCallback =
+		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts) -> bool
+		{
+			const double CellExt = GetGridCellExtent(MidTierConfig.GridDepth);
+			return GalaxyGenerator.GenerateTierBatchGPU(
+				Slots, MidTierState.Buffers[0], Params.MidTier, 7, CellExt, OutCounts);
+		};
+
 	MidTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
 		const FVector NodeCenter = GridCoordToCenter(Coord, MidTierConfig.GridDepth);
 		const double CellExt = GetGridCellExtent(MidTierConfig.GridDepth);
@@ -420,6 +461,23 @@ void AGalaxyActor::BuildTierConfigs()
 	SmallTierConfig.OctreeInsertBufferIndex = 0;
 	SmallTierConfig.TierIndex = 2;
 	SmallTierConfig.ShouldSkipCell = [this](const FIntVector& Coord) { return !CellOverlapsVolume(Coord, SmallTierConfig.GridDepth); };
+	// GPU batch path, tried first. Returns false when it cannot run -- GPU generation
+	// disabled, no texture, readback timed out -- and the per-slot CPU callback below
+	// then fills the same slots exactly as before. The fallback is what keeps a GPU
+	// failure from silently producing an empty tier.
+	//
+	// Bound on Mid and Small only. The large tier rejects against its own per-cell
+	// density envelope, produced by a CPU cull prepass that has not been ported, and
+	// substituting the global reference there would collapse its acceptance rate by
+	// three orders of magnitude.
+	SmallTierConfig.GenerateBatchCallback =
+		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts) -> bool
+		{
+			const double CellExt = GetGridCellExtent(SmallTierConfig.GridDepth);
+			return GalaxyGenerator.GenerateTierBatchGPU(
+				Slots, SmallTierState.Buffers[0], Params.SmallTier, 13, CellExt, OutCounts);
+		};
+
 	SmallTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
 		const FVector NodeCenter = GridCoordToCenter(Coord, SmallTierConfig.GridDepth);
 		const double CellExt = GetGridCellExtent(SmallTierConfig.GridDepth);

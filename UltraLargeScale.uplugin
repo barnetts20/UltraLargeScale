@@ -15,7 +15,11 @@
 	"IsExperimentalVersion": false,
 	"Installed": false,
 	"Modules": [
-		{"Name": "UltraLargeScale", "Type": "Runtime", "LoadingPhase": "Default"}
+		{
+			"Name": "UltraLargeScale",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit"
+		}
 	],
 	"AdditionalDependencies": [
 		"Core",

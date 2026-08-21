@@ -128,6 +128,33 @@ public:
 	GalaxyHLSL::GalaxyPlacement MakePlacement(const FTierParams& InTierParams,
 		float InDensityReference) const;
 
+public:
+	/** GPU generation for a whole batch of tier slots, in one dispatch.
+	 *
+	 *  This is the reason for the migration: the compute path can sample the volume
+	 *  texture, so entity placement sees the warp and modulation the material draws
+	 *  instead of a texture-free approximation of it. It also lifts the constraint
+	 *  that shaped the field in the first place -- features no longer have to be
+	 *  affordable analytically to be reachable from placement.
+	 *
+	 *  BACKGROUND THREAD ONLY; it blocks on a GPU readback. That is safe because tier
+	 *  generation already runs on AnyBackgroundHiPriTask, so the wait costs a worker
+	 *  rather than a frame.
+	 *
+	 *  Returns false if the dispatch could not run or the readback timed out, in
+	 *  which case NOTHING has been written and the caller should fall back to the
+	 *  per-slot CPU path. Keeping that fallback is the point: a GPU path that fails
+	 *  closed leaves an empty galaxy with no indication of why. */
+	bool GenerateTierBatchGPU(
+		const TArray<TPair<FIntVector, int32>>& InSlots,
+		FNiagaraParticleBuffer& InBuffer,
+		const FTierParams& InTierParams,
+		int32 InSeedOffset,
+		double InCellExtent,
+		TArray<int32>& OutSlotCounts) const;
+
+private:
+
 #pragma endregion
 
 #pragma region Large Tier Culling

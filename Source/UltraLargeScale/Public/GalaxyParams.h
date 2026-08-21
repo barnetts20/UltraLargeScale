@@ -1,5 +1,9 @@
 ﻿#pragma once
 
+
+
+#include "Engine/VolumeTexture.h"
+
 #include "CoreMinimal.h"
 #include "ProceduralSpaceActor.h"
 #include "FTierStreamingSystem.h"
@@ -23,7 +27,128 @@ USTRUCT(BlueprintType)
 struct ULTRALARGESCALE_API FGalaxyDensityParams
 {
 	GENERATED_BODY()
+	// ===========================================================================
+// Add to FGalaxyDensityParams in GalaxyParams.h, immediately below ToDerived().
+//
+// A TEMPLATE on purpose. The obvious signature takes
+// FGalaxyEntityGenCS::FParameters&, which would make GalaxyParams.h depend on
+// GalaxyEntityGen.h, which depends on GalaxyParams.h -- a cycle, and one that drags
+// RenderCore into every translation unit that only wanted the authored struct.
+// Templating on the destination keeps GalaxyParams.h free of render headers, and
+// costs nothing: the parameter struct is a POD with named members, so the compiler
+// resolves it at the one call site.
+//
+// The three places these values are marshalled are ToDerived (CPU), this (compute
+// dispatch) and the material's Custom node body. Adding a parameter to
+// MakeGalaxyDensityParams breaks the first two at compile time. THE CUSTOM NODE IS
+// THE ONE THAT WILL NOT -- a material Custom node fails at shader compile, not at
+// build, so a new parameter shows up as a red material rather than a build error.
+// Check it whenever the derivation signature changes.
+// ===========================================================================
 
+	/** Fills a compute shader parameter struct with the same raw values ToDerived
+	 *  passes to MakeGalaxyDensityParams, in the same order.
+	 *
+	 *  Raw rather than derived on purpose. Uploading a packed GalaxyDensityParams
+	 *  would require HLSL's constant buffer packing to agree with the C++ layout
+	 *  member for member, and a single float3 straddling a 16-byte boundary shifts
+	 *  every field after it with no diagnostic at all -- the galaxy would simply come
+	 *  out wrong. Passing raw inputs and deriving in the shader costs sixteen arm
+	 *  hashes and a tan per thread, against a full field evaluation per thread, and
+	 *  it cannot drift.
+	 *
+	 *  Does NOT override InNoiseEnable. For the first migration step, set it to zero
+	 *  at the call site: with noise off the compute path and the CPU path evaluate
+	 *  the identical function, which is what makes the plumbing verifiable before the
+	 *  texture is switched on. */
+	template <typename TShaderParams>
+	void FillShaderParameters(TShaderParams& Out) const
+	{
+		Out.InLateralScale = FVector4f(
+			ArmRadius, DiscRadius, BulgeRadius, BackgroundRadius);
+
+		Out.InVerticalScale = FVector4f(
+			ArmVerticalRatio, DiscVerticalRatio,
+			BulgeVerticalRatio, BackgroundVerticalRatio);
+
+		Out.InLayerDensity = FVector4f(
+			ArmDensity, DiscDensity, BulgeDensity, BackgroundDensity);
+
+		Out.InNoiseAmount = FVector4f(
+			ArmNoiseAmount, DiscNoiseAmount,
+			BulgeNoiseAmount, BackgroundNoiseAmount);
+
+		Out.InWarpAmount = FVector4f(
+			WarpAmountArms, WarpAmountDisc,
+			WarpAmountBulge, WarpAmountBackground);
+
+		Out.InArmAsym = FVector4f(
+			ArmAsymPitch, ArmAsymPhase, ArmAsymDensity, ArmAsymLength);
+
+		Out.InSpiralTwist = FVector4f(
+			ArmPitchAngle, ArmPitchTightening, ArmPhaseOffset, HaloTwistInherit);
+
+		Out.InCentralVoid = FVector3f(
+			CentralVoidRadius, CentralVoidAmount, CentralVoidExponent);
+
+		Out.InNoiseScale = FVector4f(
+			NoiseDiscLateralScale, NoiseDiscVerticalScale,
+			NoiseHaloLateralScale, NoiseHaloVerticalScale);
+
+		Out.InWarpScale = FVector4f(
+			WarpDiscLateralScale, WarpDiscVerticalScale,
+			WarpHaloLateralScale, WarpHaloVerticalScale);
+
+		// FLinearColor is RGBA in memory but the shader reads it as xyzw against
+		// NoiseChannelWeights, so the component order is spelled out rather than
+		// relying on a reinterpret that would silently reorder if the type changed.
+		Out.InNoiseChannelWeights = FVector4f(
+			NoiseChannelWeights.R, NoiseChannelWeights.G,
+			NoiseChannelWeights.B, NoiseChannelWeights.A);
+
+		Out.InNoiseOffset = FVector3f(
+			NoiseOffset.X, NoiseOffset.Y, NoiseOffset.Z);
+
+		Out.InBoundsFadeStart = BoundsFadeStart;
+		Out.InDiscScaleLengthRatio = DiscScaleRatio;
+		Out.InDiscVerticalFalloff = DiscVerticalFalloff;
+		Out.InDiscFlare = DiscFlare;
+		Out.InDiscWarpAmplitude = DiscWarpAmplitude;
+		Out.InDiscWarpPhase = DiscWarpPhase;
+		Out.InDiscWarpTwist = DiscWarpTwist;
+		Out.InDiscLopsidedAmount = DiscLopsidedAmount;
+		Out.InDiscLopsidedPhase = DiscLopsidedPhase;
+		Out.InArmCount = ArmCount;
+		Out.InArmAsymSeed = ArmAsymSeed;
+		Out.InArmProfileExponent = ArmProfileExponent;
+		Out.InArmRadialGrowth = ArmRadialGrowth;
+		Out.InArmHostFalloff = ArmHostFalloff;
+		Out.InBulgeConcentration = BulgeConcentration;
+		Out.InBackgroundConcentration = BackgroundConcentration;
+		Out.InNoiseOctaves = NoiseOctaves;
+		Out.InNoiseRidged = NoiseRidged;
+		Out.InNoiseEnable = bEnableNoise ? 1.0f : 0.0f;
+	}
+
+
+	// ===========================================================================
+	// AND in GalaxyEntityGen.cpp, the call site. Replace:
+	//
+	//     D.FillShaderParameters(*P);
+	//
+	// with this for step 2a, so the compute path and the CPU path evaluate the identical
+	// function and any difference in the output is plumbing rather than the field:
+	//
+	//     D.FillShaderParameters(*P);
+	//     P->InNoiseEnable = 0.0f;   // STEP 2a ONLY -- remove for 2b
+	//
+	// GalaxySample degenerates to SampleAnalytic when InNoiseEnable is zero, so with the
+	// same seed and the same cell keys the GPU should reproduce the CPU's accepted set
+	// exactly, up to float ordering in the ranking. Differences beyond a handful of
+	// entities near acceptance thresholds mean a marshalling error, not a field one --
+	// most likely a struct layout mismatch, which the static_asserts in GalaxyEntityGen.h
+	// are there to catch first.
+	// ===========================================================================
 #pragma region Lateral scales
 	/** Arm half-width as a FRACTION OF THE DISC SCALE HEIGHT. Arms are thinner than
 	 *  the stellar disc they sit in, so this is a ratio rather than an absolute. */
@@ -379,6 +504,57 @@ USTRUCT(BlueprintType)
 struct ULTRALARGESCALE_API FGalaxyParams : public FBaseParams
 {
 	GENERATED_BODY()
+
+#pragma region GPU Generation
+	/** Route entity placement through the compute shader instead of the CPU.
+	 *
+	 *  The compute path can sample the volume texture, so placement sees the warp and
+	 *  modulation the material draws rather than a texture-free approximation.
+	 *
+	 *  This and bGPUForceNoiseOff are MIGRATION SCAFFOLDING, not features. Two live
+	 *  paths mean two paths to maintain and only one that gets exercised; delete both
+	 *  flags and the CPU per-slot generators once the GPU path has proven itself. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Generation")
+	bool bUseGPUGeneration = true;
+
+	/** Zero InNoiseEnable in the dispatch only.
+	 *
+	 *  With noise off, GalaxySample degenerates to SampleAnalytic, so the GPU runs the
+	 *  identical function the CPU does and the two accepted sets should match. That is
+	 *  the migration's verification step -- a difference here is marshalling, not the
+	 *  field.
+	 *
+	 *  Defaults to false, so placement reads the texture. Set it true to reproduce the
+	 *  verification: mid and small tiers should then look exactly as they did on the
+	 *  CPU path, and any difference at THAT setting is marshalling rather than the
+	 *  field. Worth doing once if the noise-on result ever looks wrong, because it
+	 *  separates "the texture is reaching placement incorrectly" from "the texture is
+	 *  reaching placement and this is what it looks like". */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Generation")
+	bool bGPUForceNoiseOff = false;
+
+	/** The same volume texture the material samples.
+	 *
+	 *  Set NEVER STREAM on the asset. GalaxyDensity.ush reads mip 0 on both paths, but
+	 *  the material handles streaming residency and a compute dispatch does not: if
+	 *  mip 0 is not resident when the dispatch runs it reads whatever is, and placement
+	 *  silently stops matching the render.
+	 *
+	 *  The sampler here is Trilinear/Wrap. If the material's Texture Sample node uses
+	 *  anything else the two paths read different values at the same coordinate, which
+	 *  shows up as a small plausible-looking difference rather than an obvious break. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Generation")
+	TObjectPtr<UVolumeTexture> NoiseTexture = nullptr;
+
+	/** Give up on the readback after this long and fall back to the CPU path.
+	 *
+	 *  Not paranoia: if the render thread is blocked -- synchronous load, hitch, PIE
+	 *  teardown -- the fence never lands, and a background worker spinning forever is
+	 *  a hang with no stack pointing at the cause. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Generation")
+	double GPUReadbackTimeoutSeconds = 2.0;
+#pragma endregion
+
 	// TODO: SEE IF WE CAN BRIDGE THE GAP TO REAL WORLD SCALE HERE, I THINK WE HIT PRECISION ISSUES THOUGH... UNIT SCALE AND POTENTIALLY STAR SYSTEM SCALES/PARAMS MAY NEED TO SHIFT
 
 #pragma region Tier Scale Derivation

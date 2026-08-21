@@ -196,6 +196,19 @@ struct FParticleTierConfig
 	 *  NiagaraAsset, this tier's back buffer). */
 	TFunction<void(const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers)> GenerateCallback;
 
+	/** Optional whole-batch generator, tried before GenerateCallback.
+	 *
+	 *  Exists because a GPU dispatch wants the batch, not a slot: per-slot dispatches
+	 *  serialise on a GPU round-trip each and the latency compounds across a
+	 *  neighbourhood. When bound and it returns true it has filled every queued slot
+	 *  and written SlotCounts; when it returns false NOTHING has been written and the
+	 *  per-slot ParallelFor runs as before.
+	 *
+	 *  The fallback is not optional. A GPU path can fail for reasons that have nothing
+	 *  to do with this system -- a missing texture, a readback timeout during a hitch
+	 *  -- and failing closed would leave an empty tier with no indication of why. */
+	TFunction<bool(const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutSlotCounts)> GenerateBatchCallback;
+
 	/** Returns the fixed AABB set once at InitializeTier as the Niagara bounds
 	 *  for this tier's components. */
 	TFunction<FBox()> ComputeBounds;

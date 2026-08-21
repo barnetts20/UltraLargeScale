@@ -76,10 +76,22 @@ void FTierStreamingSystem::InitializeTier(const FTierStreamingContext& Ctx, FPar
 				PerSlotBufferPtrs[i][b] = &State.Buffers[b];
 		}
 
-		ParallelFor(ToGenerate.Num(), [&Config, &ToGenerate, &PerSlotBufferPtrs](int32 i) 
-			{
-				Config.GenerateCallback(ToGenerate[i].Key, ToGenerate[i].Value, PerSlotBufferPtrs[i]);
-			}, EParallelForFlags::BackgroundPriority);
+		// Whole batch first if a batch generator is bound. It returns false when it
+		// could not run at all, and then nothing has been written and the per-slot
+		// path below fills the same slots as it always did.
+		bool bBatchDone = false;
+		if (Config.GenerateBatchCallback)
+		{
+			bBatchDone = Config.GenerateBatchCallback(ToGenerate, State.SlotCounts);
+		}
+
+		if (!bBatchDone)
+		{
+			ParallelFor(ToGenerate.Num(), [&Config, &ToGenerate, &PerSlotBufferPtrs](int32 i)
+				{
+					Config.GenerateCallback(ToGenerate[i].Key, ToGenerate[i].Value, PerSlotBufferPtrs[i]);
+				}, EParallelForFlags::BackgroundPriority);
+		}
 
 		if (IsPooling()) return;
 
@@ -99,7 +111,7 @@ void FTierStreamingSystem::InitializeTier(const FTierStreamingContext& Ctx, FPar
 	USceneComponent* AttachRoot = Ctx.AttachRoot;
 	const bool bAbsolutePos = Ctx.bNiagaraAbsolutePosition;
 	const FVector VT = Ctx.VirtualTraversal;
-	
+
 	// Backdrop membership, sourced from the actor's REAL UnitScale via IsVirtualSpace()
 	const bool bVirtualSpace = Ctx.bVirtualSpace;
 
@@ -199,7 +211,7 @@ void FTierStreamingSystem::UpdateTier(const FTierStreamingContext& Ctx, FParticl
 	if (State.bUpdateInProgress.load()) return;
 
 	const FIntVector NewCoord = PositionToGridCoord(Ctx.VirtualTraversal, Config.GridDepth, Ctx.Extent, Ctx.GridExtentMultiplier);
-	
+
 	if (NewCoord == State.CenterCoord) return;
 
 	if (Config.ShouldSkipCell && Config.ShouldSkipCell(NewCoord)) return;
@@ -320,7 +332,7 @@ void FTierStreamingSystem::UpdateTier(const FTierStreamingContext& Ctx, FParticl
 							FMemory::Memcpy(&Buf.Positions[Start], CPos.GetData(), LiveCount * sizeof(FVector));
 							FMemory::Memcpy(&Buf.Extents[Start], CExt.GetData(), LiveCount * sizeof(float));
 							FMemory::Memcpy(&Buf.Colors[Start], CCol.GetData(), LiveCount * sizeof(FLinearColor));
-							
+
 							if (Buf.Rotations.Num() > 0 && CRot.Num() >= LiveCount)
 								FMemory::Memcpy(&Buf.Rotations[Start], CRot.GetData(), LiveCount * sizeof(FVector));
 						}
@@ -345,10 +357,23 @@ void FTierStreamingSystem::UpdateTier(const FTierStreamingContext& Ctx, FParticl
 					PerSlotBufferPtrs[i][b] = &State.Buffers[b];
 			}
 
-			ParallelFor(ToGenerate.Num(), [&Config, &ToGenerate, &PerSlotBufferPtrs](int32 i)
-				{
-				Config.GenerateCallback(ToGenerate[i].Key, ToGenerate[i].Value, PerSlotBufferPtrs[i]);
-				}, EParallelForFlags::BackgroundPriority);
+			// Same batch-first path as InitializeTier. Streaming updates are the
+			// common case by a wide margin -- the initial population happens once and
+			// every boundary cross after it comes through here -- so leaving this on
+			// the per-slot path would mean the GPU generator almost never ran.
+			bool bBatchDone = false;
+			if (Config.GenerateBatchCallback)
+			{
+				bBatchDone = Config.GenerateBatchCallback(ToGenerate, State.SlotCounts);
+			}
+
+			if (!bBatchDone)
+			{
+				ParallelFor(ToGenerate.Num(), [&Config, &ToGenerate, &PerSlotBufferPtrs](int32 i)
+					{
+						Config.GenerateCallback(ToGenerate[i].Key, ToGenerate[i].Value, PerSlotBufferPtrs[i]);
+					}, EParallelForFlags::BackgroundPriority);
+			}
 
 			// Cache newly generated cells.
 			for (const auto& Pair : ToGenerate)
@@ -552,7 +577,7 @@ void FTierStreamingSystem::CullTierCache(const FParticleTierConfig& Config, FPar
 	{
 		const FIntVector Delta = Pair.Key - NewCenter;
 		const int32 ChebyshevDist = FMath::Max3(FMath::Abs(Delta.X), FMath::Abs(Delta.Y), FMath::Abs(Delta.Z));
-		if (ChebyshevDist > CullRadius) 
+		if (ChebyshevDist > CullRadius)
 			ToEvict.Add(Pair.Key);
 	}
 

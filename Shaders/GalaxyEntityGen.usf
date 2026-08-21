@@ -17,15 +17,22 @@
 // ---------------------------------------------------------------------------
 // OUTPUT
 //
-// FIXED SLOTS, NOT AN APPEND BUFFER. Thread i writes entry i unconditionally and
-// marks it valid or not; the CPU compacts on readback.
+// COMPACTED PER CELL, and every entity CARRIES ITS SLOT.
 //
-// An append buffer would be denser, and it would throw away the property the whole
-// design rests on: identity is (cell, slot), not position in the output. Append
-// ordering is not guaranteed between dispatches, so the same region would come back
-// with entities shuffled between visits, and a saved reference to "entity 7" would
-// point somewhere else. The wasted entries cost bandwidth on a dispatch measured in
-// tens of thousands of threads, which is not the expensive part of this.
+// The first version reserved one entry per candidate and let the CPU filter. That is
+// correct and it does not scale: at nine thousand candidates a cell and acceptance
+// around a third of a percent, the readback copies six and a half megabytes to
+// extract a few hundred entities, with several batches in flight. The COPY, not the
+// dispatch, is what was timing out.
+//
+// Compacting with a per-cell atomic makes the buffer SlotCapacity wide instead of
+// CandidateBudget wide -- an order of magnitude less traffic.
+//
+// The reason an append buffer was rejected still stands: identity must be (cell,
+// slot), not position in the output, or a region regenerates with its entities
+// shuffled between visits. Writing Slot into each entity keeps that property while
+// allowing the compaction. The ORDER within a cell is now nondeterministic; the SET,
+// and every entity's identity within it, is not.
 // ---------------------------------------------------------------------------
 struct FGalaxyEntityOut
 {
@@ -33,11 +40,12 @@ struct FGalaxyEntityOut
     float Extent;
     float3 Decor;
     float Density;
-    uint bValid;
+    uint Slot; // the candidate index that produced this, NOT its position here
     uint3 Pad; // 48 bytes, so the C++ mirror needs no packing rules to match
 };
 
 RWStructuredBuffer<FGalaxyEntityOut> OutEntities;
+RWStructuredBuffer<uint> OutCounts; // accepted count per cell
 
 // ---------------------------------------------------------------------------
 // DISPATCH
@@ -118,7 +126,7 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     const uint CellIndex = Index / CandidateBudget;
     const uint Slot = Index - CellIndex * CandidateBudget;
 
-    if (CellIndex >= NumCells || Slot >= SlotStride)
+    if (CellIndex >= NumCells || Slot >= CandidateBudget)
     {
         return;
     }
@@ -155,13 +163,28 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
     GalaxyEntity E = P.FinishEntity(Q, C, Density);
 
+    if (E.bValid < 0.5f)
+    {
+        return;
+    }
+
+    // Claim a place in this cell's run. Bounded by SlotStride so an unusually rich
+    // cell overflows into nothing rather than into its neighbour's entries.
+    uint Local;
+    InterlockedAdd(OutCounts[CellIndex], 1u, Local);
+
+    if (Local >= SlotStride)
+    {
+        return;
+    }
+
     FGalaxyEntityOut Out;
     Out.Pos = E.Pos;
     Out.Extent = E.Extent;
     Out.Decor = E.Decor;
     Out.Density = E.Density;
-    Out.bValid = (E.bValid > 0.5f) ? 1u : 0u;
+    Out.Slot = Slot;
     Out.Pad = uint3(0, 0, 0);
 
-    OutEntities[OutIndex] = Out;
+    OutEntities[CellIndex * SlotStride + Local] = Out;
 }

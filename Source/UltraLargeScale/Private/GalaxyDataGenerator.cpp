@@ -7,6 +7,8 @@
 
 #include "GalaxyDataGenerator.h"
 
+#include "GalaxyEntityGen.h"
+
 // SHIM FIRST, then the shared field compiled INSIDE the shim's namespace.
 //
 // The namespace is never opened. MSVC's <cmath> declares float overloads of
@@ -259,6 +261,143 @@ TArray<uint8> GalaxyDataGenerator::SampleNoiseVolume(int InNoiseResolution) cons
 #pragma endregion
 
 #pragma region Tier Generation Callbacks
+
+bool GalaxyDataGenerator::GenerateTierBatchGPU(
+	const TArray<TPair<FIntVector, int32>>& InSlots,
+	FNiagaraParticleBuffer& InBuffer,
+	const FTierParams& InTierParams,
+	int32 InSeedOffset,
+	double InCellExtent,
+	TArray<int32>& OutSlotCounts) const
+{
+	if (InSlots.Num() == 0)
+	{
+		return true;
+	}
+
+	if (!Params.bUseGPUGeneration)
+	{
+		return false;
+	}
+
+	// SAY WHY, ONCE. Every bail here falls back to the CPU path and produces a
+	// perfectly ordinary-looking galaxy, so a misconfiguration is invisible: the only
+	// symptom of GPU generation never running is that placement quietly keeps
+	// ignoring the volume texture, which is the entire thing this was built to fix.
+	if (Params.NoiseTexture == nullptr)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("GalaxyEntityGen: bUseGPUGeneration is on but NoiseTexture is unset; ")
+			TEXT("falling back to CPU placement. Set it to the same volume texture the ")
+			TEXT("material samples."));
+		return false;
+	}
+
+	// One cell per queued slot. The KEY is the grid coord, never the dispatch index:
+	// identity is (coord, slot), which is what makes a region regenerate identically
+	// after the player leaves and returns.
+	TArray<FGalaxyGenCell> Cells;
+	Cells.Reserve(InSlots.Num());
+
+	for (const TPair<FIntVector, int32>& Slot : InSlots)
+	{
+		const FVector Centre = InBuffer.SlotCenters[Slot.Value];
+
+		FGalaxyGenCell Cell;
+		Cell.Centre = FVector3f(
+			static_cast<float>(Centre.X),
+			static_cast<float>(Centre.Y),
+			static_cast<float>(Centre.Z));
+		Cell.HalfExtent = static_cast<float>(InCellExtent);
+		Cell.Coord = FIntVector3(Slot.Key.X, Slot.Key.Y, Slot.Key.Z);
+
+		// Mid and small tiers reject against the global reference. The large tier's
+		// per-cell envelope needs its prepass and is not available here; that tier
+		// stays on the CPU path until its cull is ported.
+		Cell.DensityReference = Params.DensityParams.SpawnDensityReference;
+
+		Cells.Add(Cell);
+	}
+
+	// The run reserved per cell is the BUFFER's capacity, not the candidate budget.
+	// The dispatch compacts, so anything beyond what the slot can hold would be read
+	// back only to be discarded -- at nine thousand candidates a cell that was six and
+	// a half megabytes a batch to extract a few hundred entities, which is what the
+	// readbacks were timing out on.
+	const int32 SlotStride = FMath::Max(InBuffer.SlotCapacity, 1);
+
+	TArray<FGalaxyEntityOut> Entities;
+	TArray<uint32> Counts;
+
+	const bool bOk = GalaxyEntityGen::GenerateBatchBlocking(
+		Params, InTierParams, Cells, SlotStride,
+		Params.Seed + InSeedOffset,
+		Params.NoiseTexture,
+		Params.bGPUForceNoiseOff,
+		Params.GPUReadbackTimeoutSeconds,
+		Entities, Counts);
+
+	if (!bOk)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("GalaxyEntityGen: dispatch or readback failed for %d cells; ")
+			TEXT("falling back to CPU placement."), Cells.Num());
+		return false;
+	}
+
+	// Confirms the compute path actually ran, and whether the texture reached
+	// placement. Log once rather than per batch: this fires on every boundary cross.
+	static bool bAnnounced = false;
+	if (!bAnnounced)
+	{
+		bAnnounced = true;
+		UE_LOG(LogTemp, Display,
+			TEXT("GalaxyEntityGen: GPU placement active (%d cells, %d candidates each). ")
+			TEXT("Noise %s."),
+			Cells.Num(), SlotStride,
+			Params.bGPUForceNoiseOff
+			? TEXT("FORCED OFF -- verification mode, placement still ignores the texture")
+			: TEXT("ON -- placement is reading the volume texture"));
+	}
+
+	// Scatter. The dispatch wrote FIXED SLOTS -- one entry per candidate whether it
+	// was accepted or not -- so compaction happens here, in (cell, slot) order. An
+	// append buffer would have been denser and would have destroyed that ordering,
+	// and with it the stability of entity identity between visits.
+	OutSlotCounts.SetNumZeroed(InBuffer.SlotCoord.Num());
+
+	for (int32 c = 0; c < InSlots.Num(); ++c)
+	{
+		const int32 SlotIndex = InSlots[c].Value;
+		const int32 BufferStart = SlotIndex * InBuffer.SlotCapacity;
+		const int32 Base = c * SlotStride;
+
+		// Already compacted on the GPU, so this is a straight copy of the live run
+		// rather than a filter. Counts is clamped to the run width by the readback.
+		const int32 Accepted = FMath::Min(
+			static_cast<int32>(Counts[c]),
+			FMath::Min(SlotStride, InBuffer.SlotCapacity));
+
+		for (int32 i = 0; i < Accepted; ++i)
+		{
+			const FGalaxyEntityOut& E = Entities[Base + i];
+
+			const int32 Idx = BufferStart + i;
+
+			InBuffer.Positions[Idx] = FVector(E.Pos.X, E.Pos.Y, E.Pos.Z);
+
+			// AUTHORED SIZE IS TRUTH: Extent already carries the real-unit range
+			// divided by UnitScale exactly once, on the GPU via MakeGalaxyPlacement.
+			InBuffer.Extents[Idx] = E.Extent;
+			InBuffer.Colors[Idx] = FLinearColor(E.Decor.X, E.Decor.Y, E.Decor.Z);
+		}
+
+		InBuffer.PadSlotDead(SlotIndex, Accepted);
+		OutSlotCounts[SlotIndex] = Accepted;
+	}
+
+	return true;
+}
 
 void GalaxyDataGenerator::GenerateTierNode(
 	const FIntVector& InCoord,

@@ -12,6 +12,8 @@
 #include "RenderGraphResources.h"
 #include "RHIGPUReadback.h"
 
+#include <atomic>
+
 #include "GalaxyParams.h"
 #include "FTierStreamingSystem.h"
 
@@ -28,7 +30,10 @@ struct FGalaxyEntityOut
 	float Extent = 0.0f;
 	FVector3f Decor = FVector3f::ZeroVector;
 	float Density = 0.0f;
-	uint32 bValid = 0;
+	/** The candidate index that produced this entity, NOT its position in the buffer.
+	 *  The dispatch compacts per cell with an atomic, so the ORDER within a cell is
+	 *  nondeterministic while the set, and each entity's identity within it, is not. */
+	uint32 Slot = 0;
 	uint32 Pad[3] = { 0, 0, 0 };
 };
 static_assert(sizeof(FGalaxyEntityOut) == 48, "FGalaxyEntityOut must match the .usf layout");
@@ -51,6 +56,7 @@ public:
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FGalaxyEntityOut>, OutEntities)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutCounts)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGalaxyGenCell>, InCells)
 
 		SHADER_PARAMETER(uint32, NumCells)
@@ -129,7 +135,31 @@ public:
 	int32 SlotStride = 0;
 	int32 NumCells = 0;
 
-	bool IsReady() const { return Readback.IsValid() && Readback->IsReady(); }
+	/** True once there is something to consume, or once we know there never will be.
+	 *
+	 *  bSubmitted matters: the readbacks are allocated on the calling thread but the
+	 *  copies are enqueued later, on the render thread. Polling only IsReady() on a
+	 *  readback that has not been enqueued yet returns false forever -- which is what
+	 *  made the first version fall back to the CPU on nearly every batch. */
+	bool IsReady() const
+	{
+		if (bAborted)
+		{
+			return true;
+		}
+
+		return bSubmitted
+			&& Readback.IsValid() && CountReadback.IsValid()
+			&& Readback->IsReady() && CountReadback->IsReady();
+	}
+
+	bool Failed() const { return bAborted; }
+
+	/** Set on the render thread once the copies are enqueued, read on the waiting
+	 *  worker; and set on the game thread if the dispatch could not be issued at all.
+	 *  Atomic because those are three different threads. */
+	std::atomic<bool> bSubmitted{ false };
+	std::atomic<bool> bAborted{ false };
 
 	/** Compacts valid entries out of the fixed-slot buffer. Only call once IsReady().
 	 *  Returns entries in (cell, slot) order, which is stable across visits -- the
@@ -137,6 +167,12 @@ public:
 	void Consume(TArray<FGalaxyEntityOut>& OutValid);
 
 	TUniquePtr<FRHIGPUBufferReadback> Readback;
+
+	/** Accepted count per cell. Separate from the entity buffer because the CPU has
+	 *  to know how much of each cell's run is live, and reading a whole
+	 *  SlotCapacity-wide run to find out would put back the traffic the compaction
+	 *  removed. */
+	TUniquePtr<FRHIGPUBufferReadback> CountReadback;
 };
 
 namespace GalaxyEntityGen
@@ -149,6 +185,41 @@ namespace GalaxyEntityGen
 	 *  explicitly rather than derived from the thread id, which would repeat the cull
 	 *  on the GPU. It also carries the per-cell DensityReference, which is how the
 	 *  large tier's local envelope survives the move. */
+	 /** Dispatch, wait, and return the fixed-slot buffer.
+	  *
+	  *  CALL FROM A BACKGROUND THREAD ONLY. It blocks, which is safe here and nowhere
+	  *  else: tier generation already runs on AnyBackgroundHiPriTask inside a
+	  *  ParallelFor, so the wait stalls a worker rather than a frame, and the streaming
+	  *  system already tolerates generation taking arbitrary time -- that is what the
+	  *  cache-miss path exists for. Calling this from the game or render thread would
+	  *  deadlock against the very work it is waiting on.
+	  *
+	  *  ONE dispatch for the whole batch, not one per slot. Per-slot dispatches would
+	  *  serialise on a GPU round-trip each, and the latency compounds across a
+	  *  neighbourhood.
+	  *
+	  *  Returns false on timeout, leaving OutEntities untouched, so the caller can fall
+	  *  back to the CPU path. The timeout is not paranoia: if the render thread is
+	  *  blocked -- a synchronous load, a hitch, PIE teardown -- the fence never lands,
+	  *  and a background worker spinning forever is a hang with no stack pointing at
+	  *  the cause.
+	  *
+	  *  bForceNoiseOff zeroes InNoiseEnable so GalaxySample degenerates to
+	  *  SampleAnalytic and the GPU evaluates the identical function the CPU does. That
+	  *  is the migration's verification step: any difference is marshalling, not the
+	  *  field. */
+	bool GenerateBatchBlocking(
+		const FGalaxyParams& InParams,
+		const FTierParams& InTierParams,
+		const TArray<FGalaxyGenCell>& InCells,
+		int32 InSlotStride,
+		int32 InKeySeed,
+		UTexture* InNoiseTexture,
+		bool bForceNoiseOff,
+		double InTimeoutSeconds,
+		TArray<FGalaxyEntityOut>& OutEntities,
+		TArray<uint32>& OutCounts);
+
 	void Dispatch(
 		const FGalaxyParams& InParams,
 		const FTierParams& InTierParams,
@@ -156,5 +227,6 @@ namespace GalaxyEntityGen
 		int32 InSlotStride,
 		int32 InKeySeed,
 		UTexture* InNoiseTexture,
+		bool bForceNoiseOff,
 		TSharedRef<FGalaxyEntityGenRequest> OutRequest);
 }
