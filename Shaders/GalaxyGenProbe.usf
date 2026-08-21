@@ -1,0 +1,26 @@
+// GalaxyGenProbe.usf
+//
+// The smallest compute shader that can prove the plumbing works. No density field,
+// no cell buffer, no parameters that could be zero -- one thread writes one constant
+// to one buffer.
+//
+// This exists because six rounds of instrumenting the real shader have all returned
+// "nothing landed", and every explanation for that lives in the setup rather than in
+// the shader body: the module, the virtual shader path, the parameter struct, the
+// marshalling, the readback. Testing them through GalaxyEntityGen means testing them
+// through five hundred lines of field code at the same time.
+//
+// If this returns 1234, the plumbing is sound and the bug is in GalaxyEntityGen.
+// If it returns nothing, the bug is in the setup and no amount of work on the field
+// shader will find it.
+
+#include "/Engine/Public/Platform.ush"
+
+RWBuffer<uint> OutProbe;
+
+[numthreads(1, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    OutProbe[0] = 1234u;
+    OutProbe[1] = DispatchThreadId.x + 1u; // proves which thread arrived, not just that one did
+}

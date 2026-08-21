@@ -145,12 +145,53 @@ public:
 	 *  which case NOTHING has been written and the caller should fall back to the
 	 *  per-slot CPU path. Keeping that fallback is the point: a GPU path that fails
 	 *  closed leaves an empty galaxy with no indication of why. */
-	bool GenerateTierBatchGPU(
+	 /** One cell of a GPU generation batch.
+	  *
+	  *  The CENTRE IS SUPPLIED, not derived. Grid-coord-to-centre lives on the actor,
+	  *  which owns the grid; the generator inferring it from a buffer's slot centres
+	  *  put every candidate somewhere else entirely and every batch came back with
+	  *  nothing accepted. It also lets the large tier pass the centres its cull prepass
+	  *  already computed, so one path serves every tier. */
+	struct FTierBatchCell
+	{
+		FIntVector Coord = FIntVector::ZeroValue;
+		int32 SlotIndex = 0;
+		FVector Centre = FVector::ZeroVector;
+		double HalfExtent = 0.0;
+
+		/** Density this cell rejects against. Zero means use the global reference;
+		 *  the large tier passes its own per-cell peak, which is the whole reason its
+		 *  acceptance rate is workable. */
+		float DensityReference = 0.0f;
+
+		/** Candidates to draw for this cell. Zero means the tier's CandidateBudget.
+		 *
+		 *  The large tier SHARES one budget across its whole active set rather than
+		 *  giving every cell the full amount: its cell count is whatever survives the
+		 *  cull, not a fixed neighbourhood, so per-cell budgeting turns a few thousand
+		 *  cells into hundreds of millions of threads and a readback measured in
+		 *  hundreds of megabytes. */
+		int32 Candidates = 0;
+	};
+
+	/** Turns the large tier's active cell set into batch cells.
+	 *
+	 *  Its cells do not come from a grid neighbourhood: the cull prepass has already
+	 *  discarded everything with no structure in it, and each survivor carries its own
+	 *  peak density. That per-cell envelope is why the tier's acceptance rate is
+	 *  workable at all -- against the global reference the ratio would run three orders
+	 *  smaller and almost nothing would land.
+	 *
+	 *  All of that is DATA fed to the same dispatch, not a second code path. */
+	bool BuildLargeTierCells(
 		const TArray<TPair<FIntVector, int32>>& InSlots,
+		TArray<FTierBatchCell>& OutCells) const;
+
+	bool GenerateTierBatchGPU(
+		const TArray<FTierBatchCell>& InCells,
 		FNiagaraParticleBuffer& InBuffer,
 		const FTierParams& InTierParams,
 		int32 InSeedOffset,
-		double InCellExtent,
 		TArray<int32>& OutSlotCounts) const;
 
 private:

@@ -416,6 +416,26 @@ void AGalaxyActor::BuildTierConfigs()
 	LargeTierConfig.bWantRotations = { false };
 	LargeTierConfig.OctreeInsertBufferIndex = 0;
 	LargeTierConfig.TierIndex = 0;
+	// The large tier goes through the SAME GPU path as the others. It differs only in
+	// where its cells come from -- an active set from the cull prepass rather than a
+	// grid neighbourhood -- and in rejecting against each cell's own peak density
+	// instead of the global reference. Both are data, not a second code path, which is
+	// the point: one flow for every tier, and one thing to delete when the CPU path
+	// goes.
+	LargeTierConfig.GenerateBatchCallback =
+		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts) -> bool
+		{
+			TArray<GalaxyDataGenerator::FTierBatchCell> Cells;
+
+			if (!GalaxyGenerator.BuildLargeTierCells(Slots, Cells))
+			{
+				return false;
+			}
+
+			return GalaxyGenerator.GenerateTierBatchGPU(
+				Cells, LargeTierState.Buffers[0], Params.LargeTier, 0, OutCounts);
+		};
+
 	LargeTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) { GalaxyGenerator.GenerateLargeTierSlot(SlotIndex, *Buffers[0], LargeTierState.SlotCounts[SlotIndex]); };
 
 	// --- Mid tier: neighborhood streaming ---
@@ -433,16 +453,33 @@ void AGalaxyActor::BuildTierConfigs()
 	// then fills the same slots exactly as before. The fallback is what keeps a GPU
 	// failure from silently producing an empty tier.
 	//
-	// Bound on Mid and Small only. The large tier rejects against its own per-cell
-	// density envelope, produced by a CPU cull prepass that has not been ported, and
-	// substituting the global reference there would collapse its acceptance rate by
-	// three orders of magnitude.
+	// All three tiers run this same path. They differ only in where their cells come
+	// from and what each cell rejects against -- data, not a second code path.
 	MidTierConfig.GenerateBatchCallback =
 		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts) -> bool
 		{
+			// Centres come from the SAME helper the per-slot callback below uses.
+			// Deriving them anywhere else is how every candidate ended up in the wrong
+			// place and every batch came back with nothing accepted -- the grid belongs
+			// to the actor, so the actor states where each cell is.
 			const double CellExt = GetGridCellExtent(MidTierConfig.GridDepth);
+
+			TArray<GalaxyDataGenerator::FTierBatchCell> Cells;
+			Cells.Reserve(Slots.Num());
+
+			for (const TPair<FIntVector, int32>& Slot : Slots)
+			{
+				GalaxyDataGenerator::FTierBatchCell Cell;
+				Cell.Coord = Slot.Key;
+				Cell.SlotIndex = Slot.Value;
+				Cell.Centre = GridCoordToCenter(Slot.Key, MidTierConfig.GridDepth);
+				Cell.HalfExtent = CellExt;
+				Cell.DensityReference = 0.0f; // global reference
+				Cells.Add(Cell);
+			}
+
 			return GalaxyGenerator.GenerateTierBatchGPU(
-				Slots, MidTierState.Buffers[0], Params.MidTier, 7, CellExt, OutCounts);
+				Cells, MidTierState.Buffers[0], Params.MidTier, 7, OutCounts);
 		};
 
 	MidTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
@@ -466,16 +503,33 @@ void AGalaxyActor::BuildTierConfigs()
 	// then fills the same slots exactly as before. The fallback is what keeps a GPU
 	// failure from silently producing an empty tier.
 	//
-	// Bound on Mid and Small only. The large tier rejects against its own per-cell
-	// density envelope, produced by a CPU cull prepass that has not been ported, and
-	// substituting the global reference there would collapse its acceptance rate by
-	// three orders of magnitude.
+	// All three tiers run this same path. They differ only in where their cells come
+	// from and what each cell rejects against -- data, not a second code path.
 	SmallTierConfig.GenerateBatchCallback =
 		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts) -> bool
 		{
+			// Centres come from the SAME helper the per-slot callback below uses.
+			// Deriving them anywhere else is how every candidate ended up in the wrong
+			// place and every batch came back with nothing accepted -- the grid belongs
+			// to the actor, so the actor states where each cell is.
 			const double CellExt = GetGridCellExtent(SmallTierConfig.GridDepth);
+
+			TArray<GalaxyDataGenerator::FTierBatchCell> Cells;
+			Cells.Reserve(Slots.Num());
+
+			for (const TPair<FIntVector, int32>& Slot : Slots)
+			{
+				GalaxyDataGenerator::FTierBatchCell Cell;
+				Cell.Coord = Slot.Key;
+				Cell.SlotIndex = Slot.Value;
+				Cell.Centre = GridCoordToCenter(Slot.Key, SmallTierConfig.GridDepth);
+				Cell.HalfExtent = CellExt;
+				Cell.DensityReference = 0.0f; // global reference
+				Cells.Add(Cell);
+			}
+
 			return GalaxyGenerator.GenerateTierBatchGPU(
-				Slots, SmallTierState.Buffers[0], Params.SmallTier, 13, CellExt, OutCounts);
+				Cells, SmallTierState.Buffers[0], Params.SmallTier, 13, OutCounts);
 		};
 
 	SmallTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {

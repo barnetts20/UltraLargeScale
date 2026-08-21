@@ -14,47 +14,6 @@
 IMPLEMENT_GLOBAL_SHADER(FGalaxyEntityGenCS,
 	"/UltraLargeScale/GalaxyEntityGen.usf", "MainCS", SF_Compute);
 
-void FGalaxyEntityGenRequest::Consume(TArray<FGalaxyEntityOut>& OutValid)
-{
-	OutValid.Reset();
-
-	if (!IsReady())
-	{
-		return;
-	}
-
-	// The dispatch compacts per cell, so this concatenates the live runs rather than
-	// filtering. Reading the counts is what makes that possible: without them the only
-	// way to find the end of a run would be to scan the whole reserved width, which is
-	// exactly the traffic the compaction removed.
-	const uint32 CountBytes = static_cast<uint32>(NumCells) * sizeof(uint32);
-	const uint32* Counts = static_cast<const uint32*>(CountReadback->Lock(CountBytes));
-
-	const int32 Total = SlotStride * NumCells;
-	const uint32 Bytes = static_cast<uint32>(Total) * sizeof(FGalaxyEntityOut);
-	const FGalaxyEntityOut* Src = static_cast<const FGalaxyEntityOut*>(Readback->Lock(Bytes));
-
-	if (Counts && Src)
-	{
-		OutValid.Reserve(Total);
-
-		for (int32 c = 0; c < NumCells; ++c)
-		{
-			const int32 Live = FMath::Min(static_cast<int32>(Counts[c]), SlotStride);
-
-			for (int32 i = 0; i < Live; ++i)
-			{
-				OutValid.Add(Src[c * SlotStride + i]);
-			}
-		}
-	}
-
-	Readback->Unlock();
-	CountReadback->Unlock();
-
-	Readback.Reset();
-	CountReadback.Reset();
-}
 
 namespace GalaxyEntityGen
 {
@@ -66,6 +25,7 @@ namespace GalaxyEntityGen
 		int32 InSlotStride,
 		int32 InKeySeed,
 		UTexture* InNoiseTexture,
+		int32 InMaxCandidates,
 		bool bForceNoiseOff,
 		TSharedRef<FGalaxyEntityGenRequest> OutRequest)
 	{
@@ -94,7 +54,10 @@ namespace GalaxyEntityGen
 		const float PlaceExtentMax = static_cast<float>(InTierParams.MaxScale * InvUnit);
 		const float PlaceExtentExponent = InTierParams.ExtentExponent;
 
-		const int32 CandidateBudget = FMath::Max(InTierParams.CandidateBudget, 1);
+		// The dispatch stride is the LARGEST per-cell budget, not the tier's nominal
+		// one: cells may each want a different number, and threads past a cell's own
+		// budget return immediately.
+		const int32 CandidateBudget = FMath::Max(InMaxCandidates, 1);
 
 		// The UObject is captured, NOT dereferenced here.
 		//
@@ -135,10 +98,58 @@ namespace GalaxyEntityGen
 		// Safe against deadlock because the game thread does not block on generation:
 		// InitializeTier hands its rendezvous off through a TPromise and returns, so
 		// the game thread keeps pumping while the worker waits on the readback fence.
-		auto EnqueueOnRenderThread = [=, Cells = MoveTemp(InCells)]() mutable
+		// EVERYTHING THE RENDER COMMAND NEEDS, IN ONE SHARED PAYLOAD.
+		//
+		// This replaces a chain of [=] captures, and the chain was the bug. The outer
+		// lambda took Cells with MoveTemp(InCells); the inner lambda then said
+		// MoveTemp(InCells) AGAIN -- moving a second time from a parameter the outer
+		// capture had already emptied. The render command therefore ran with zero
+		// cells and a garbage budget, computed a group count of zero, and dispatched
+		// nothing. No error, no RDG complaint, buffers exactly as cleared: which is
+		// every symptom this took a long time to find.
+		//
+		// Nested [=] across two thread hops is what made it possible to write and
+		// impossible to see. A single shared payload captured explicitly by value in
+		// both lambdas cannot express the same mistake -- there is one copy of the
+		// data and both hops name it.
+		struct FDispatchPayload
+		{
+			TArray<FGalaxyGenCell> Cells;
+			FGalaxyDensityParams Density;
+			TWeakObjectPtr<UTexture> Noise;
+			int32 SlotStride = 0;
+			int32 KeySeed = 0;
+			int32 CandidateBudget = 0;
+			float InvGalaxyExtent = 0.0f;
+			float PlaceCompression = 0.0f;
+			float PlaceSpawnExponent = 0.0f;
+			float PlaceExtentMin = 0.0f;
+			float PlaceExtentMax = 0.0f;
+			float PlaceExtentExponent = 0.0f;
+			bool bForceNoiseOff = false;
+		};
+
+		TSharedRef<FDispatchPayload, ESPMode::ThreadSafe> Payload =
+			MakeShared<FDispatchPayload, ESPMode::ThreadSafe>();
+
+		Payload->Cells = MoveTemp(InCells);
+		Payload->Density = D;
+		Payload->Noise = WeakNoise;
+		Payload->SlotStride = InSlotStride;
+		Payload->KeySeed = InKeySeed;
+		Payload->CandidateBudget = FMath::Max(InMaxCandidates, 1);
+		Payload->InvGalaxyExtent = InvGalaxyExtent;
+		Payload->PlaceCompression = PlaceCompression;
+		Payload->PlaceSpawnExponent = PlaceSpawnExponent;
+		Payload->PlaceExtentMin = PlaceExtentMin;
+		Payload->PlaceExtentMax = PlaceExtentMax;
+		Payload->PlaceExtentExponent = PlaceExtentExponent;
+		Payload->bForceNoiseOff = bForceNoiseOff;
+
+		auto EnqueueOnRenderThread = [Payload, OutRequest, EntityReadback, CountReadbackPtr]() mutable
 			{
 				// On the game thread now: safe to touch the UObject.
-				UTexture* NoiseTexture = WeakNoise.Get();
+				UTexture* NoiseTexture = Payload->Noise.Get();
 				FTextureResource* NoiseResource = NoiseTexture ? NoiseTexture->GetResource() : nullptr;
 
 				if (!NoiseResource)
@@ -150,8 +161,14 @@ namespace GalaxyEntityGen
 				}
 
 				ENQUEUE_RENDER_COMMAND(GalaxyEntityGenDispatch)(
-					[=, Cells = MoveTemp(InCells)](FRHICommandListImmediate& RHICmdList) mutable
+					[Payload, OutRequest, EntityReadback, CountReadbackPtr, NoiseResource]
+					(FRHICommandListImmediate& RHICmdList) mutable
 					{
+						// Named explicitly rather than reached through a capture chain.
+						const TArray<FGalaxyGenCell>& Cells = Payload->Cells;
+						const int32 InSlotStride = Payload->SlotStride;
+						const int32 CandidateBudget = Payload->CandidateBudget;
+						const int32 InKeySeed = Payload->KeySeed;
 						if (!NoiseResource->TextureRHI)
 						{
 							OutRequest->bAborted = true;
@@ -161,29 +178,57 @@ namespace GalaxyEntityGen
 						FRDGBuilder GraphBuilder(RHICmdList);
 
 						// --- cells in ---
+						// Explicit sizes and CopyData, so RDG owns the bytes rather than reading
+						// the array at execute time. The array does outlive Execute() here, but
+						// "does" and "is guaranteed to" are different things and this costs one
+						// memcpy of a few kilobytes.
 						FRDGBufferRef CellBuffer = CreateStructuredBuffer(
-							GraphBuilder, TEXT("GalaxyGenCells"), Cells);
+							GraphBuilder, TEXT("GalaxyGenCells"),
+							sizeof(FGalaxyGenCell), Cells.Num(),
+							Cells.GetData(), Cells.Num() * sizeof(FGalaxyGenCell),
+							ERDGInitialDataFlags::None);
 
 						// --- entities out ---
 						const int32 Total = InSlotStride * Cells.Num();
 
+						// SourceCopy is REQUIRED and neither factory sets it.
+						//
+						// AddEnqueueCopyPass reads the buffer on the copy queue, and without
+						// this usage flag the copy does not land the way it claims to: Lock
+						// then returns a mapping shorter than the bytes asked for, and the
+						// memcpy that follows runs off the end of it. The failure is a crash
+						// inside Memcpy with correct-looking sizes on both sides, which sends
+						// you hunting for a struct layout mismatch that is not there.
+						// Typed float4 elements, three per entity: same bytes, a view the
+						// pipeline has already shown it can write through.
+						FRDGBufferDesc EntityDesc =
+							FRDGBufferDesc::CreateBufferDesc(sizeof(FVector4f), (Total + 1) * 3);
+						EntityDesc.Usage |= EBufferUsageFlags::SourceCopy;
+
 						FRDGBufferRef EntityBuffer = GraphBuilder.CreateBuffer(
-							FRDGBufferDesc::CreateStructuredDesc(sizeof(FGalaxyEntityOut), Total),
-							TEXT("GalaxyGenEntities"));
+							EntityDesc, TEXT("GalaxyGenEntities"));
 
 						// One counter per cell, zeroed before the dispatch. Not cleared and the
 					// atomics accumulate across frames, which reads as cells that fill once
 					// and are empty ever after.
+						FRDGBufferDesc CountDesc =
+							FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), Cells.Num() * 4);
+						CountDesc.Usage |= EBufferUsageFlags::SourceCopy;
+
 						FRDGBufferRef CountBuffer = GraphBuilder.CreateBuffer(
-							FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), Cells.Num()),
-							TEXT("GalaxyGenCounts"));
+							CountDesc, TEXT("GalaxyGenCounts"));
 
 						FGalaxyEntityGenCS::FParameters* P =
 							GraphBuilder.AllocParameters<FGalaxyEntityGenCS::FParameters>();
 
-						P->OutEntities = GraphBuilder.CreateUAV(EntityBuffer);
+						P->OutEntities = GraphBuilder.CreateUAV(EntityBuffer, PF_A32B32G32R32F);
 						P->InCells = GraphBuilder.CreateSRV(CellBuffer);
-						P->OutCounts = GraphBuilder.CreateUAV(CountBuffer);
+						// PF_R32_UINT so the UAV has a FORMAT. A structured UAV has none, and RDG's
+						// clear path needs one: AddClearUAVPass over a formatless UAV leaves the
+						// counters at whatever the allocator handed back, InterlockedAdd then returns
+						// a huge index, every entity fails the bounds test, and the cell writes
+						// nothing while looking entirely healthy.
+						P->OutCounts = GraphBuilder.CreateUAV(CountBuffer, PF_R32_UINT);
 
 						AddClearUAVPass(GraphBuilder, P->OutCounts, 0u);
 
@@ -191,13 +236,13 @@ namespace GalaxyEntityGen
 						P->CandidateBudget = static_cast<uint32>(CandidateBudget);
 						P->SlotStride = static_cast<uint32>(InSlotStride);
 						P->KeySeed = InKeySeed;
-						P->InvGalaxyExtent = InvGalaxyExtent;
+						P->InvGalaxyExtent = Payload->InvGalaxyExtent;
 
-						P->PlaceCompression = PlaceCompression;
-						P->PlaceSpawnExponent = PlaceSpawnExponent;
-						P->PlaceExtentMin = PlaceExtentMin;
-						P->PlaceExtentMax = PlaceExtentMax;
-						P->PlaceExtentExponent = PlaceExtentExponent;
+						P->PlaceCompression = Payload->PlaceCompression;
+						P->PlaceSpawnExponent = Payload->PlaceSpawnExponent;
+						P->PlaceExtentMin = Payload->PlaceExtentMin;
+						P->PlaceExtentMax = Payload->PlaceExtentMax;
+						P->PlaceExtentExponent = Payload->PlaceExtentExponent;
 
 						P->NoiseTex = NoiseResource->TextureRHI;
 						P->NoiseTexSampler = TStaticSamplerState<
@@ -207,14 +252,14 @@ namespace GalaxyEntityGen
 						// This block and the Custom node body are the two places the same values
 						// are marshalled; if a parameter is ever added to
 						// MakeGalaxyDensityParams, both fail to compile, which is the intent.
-						D.FillShaderParameters(*P);
+						Payload->Density.FillShaderParameters(*P);
 
 						// Step 2a: with noise off, GalaxySample degenerates to SampleAnalytic and
 						// the GPU runs the identical function the CPU does, so the accepted sets
 						// should match. Any difference at this setting is marshalling -- most
 						// likely struct layout, which the static_asserts catch first -- rather
 						// than the field.
-						if (bForceNoiseOff)
+						if (Payload->bForceNoiseOff)
 						{
 							P->InNoiseEnable = 0.0f;
 						}
@@ -228,6 +273,24 @@ namespace GalaxyEntityGen
 							FMath::DivideAndRoundUp(ThreadCount,
 								static_cast<int32>(FGalaxyEntityGenCS::ThreadGroupSize)), 1, 1);
 
+						// The last unlogged quantity in the chain, and the only one computed
+						// inside the render command where nothing else could see it.
+						//
+						// A zero group count dispatches nothing, silently: no error, no RDG
+						// complaint, and buffers that come back exactly as cleared. That is
+						// every symptom, and the standalone probe cannot exhibit it because its
+						// group count is the literal FIntVector(1,1,1).
+						static bool bDispatchAnnounced = false;
+						if (!bDispatchAnnounced)
+						{
+							bDispatchAnnounced = true;
+							UE_LOG(LogTemp, Display,
+								TEXT("GalaxyEntityGen DISPATCH: cells %d, budget %d, threads %d, ")
+								TEXT("groups %d, entity buffer %d records, valid shader %d"),
+								Cells.Num(), CandidateBudget, ThreadCount, Groups.X, Total + 1,
+								ComputeShader.IsValid() ? 1 : 0);
+						}
+
 						FComputeShaderUtils::AddPass(
 							GraphBuilder,
 							RDG_EVENT_NAME("GalaxyEntityGen"),
@@ -239,7 +302,12 @@ namespace GalaxyEntityGen
 						// the graphics pipe but asserts where the platform or the current
 						// configuration does not support it, and a crash inside a background
 						// worker is a poor first result. Switch it once this is measuring.
-							ERDGPassFlags::Compute,
+							// NeverCull, because a culled pass and a pass that ran and wrote nothing
+							// are indistinguishable from the readback -- both give empty buffers
+							// with no error anywhere. RDG should keep this alive on the strength of
+							// the copy passes reading its UAVs, but "should" is what has cost the
+							// last several rounds; stating it removes the question.
+							ERDGPassFlags::Compute | ERDGPassFlags::NeverCull,
 							ComputeShader,
 							P,
 							Groups);
@@ -249,10 +317,10 @@ namespace GalaxyEntityGen
 						// readback stalls the render thread for the full pipeline depth, and the
 						// caller polls IsReady() over the following frames instead.
 						AddEnqueueCopyPass(GraphBuilder, EntityReadback, EntityBuffer,
-							static_cast<uint32>(Total) * sizeof(FGalaxyEntityOut));
+							static_cast<uint32>(Total + 1) * sizeof(FGalaxyEntityOut));
 
 						AddEnqueueCopyPass(GraphBuilder, CountReadbackPtr, CountBuffer,
-							static_cast<uint32>(Cells.Num()) * sizeof(uint32));
+							static_cast<uint32>(Cells.Num()) * 4u * sizeof(uint32));
 
 						GraphBuilder.Execute();
 
@@ -261,7 +329,26 @@ namespace GalaxyEntityGen
 					});
 			};
 
-		if (IsInGameThread())
+		// WHICH ROUTE THIS TOOK MATTERS and is worth recording.
+		//
+		// InitializeTier issues its batch inline; UpdateTier runs on a background
+		// worker, so its batch is marshalled and the enqueue happens a hop later. If
+		// one tier produces entities and another does not, that hop is the difference
+		// between them, and inferring it from which tier failed is guesswork.
+		const bool bInline = IsInGameThread();
+
+		static bool bRouteAnnounced = false;
+		if (!bRouteAnnounced)
+		{
+			bRouteAnnounced = true;
+			UE_LOG(LogTemp, Display,
+				TEXT("GalaxyEntityGen: dispatch issued %s (%d cells)."),
+				bInline ? TEXT("INLINE on the game thread")
+				: TEXT("MARSHALLED from a background worker"),
+				NumCells);
+		}
+
+		if (bInline)
 		{
 			EnqueueOnRenderThread();
 		}
@@ -278,6 +365,7 @@ namespace GalaxyEntityGen
 		int32 InSlotStride,
 		int32 InKeySeed,
 		UTexture* InNoiseTexture,
+		int32 InMaxCandidates,
 		bool bForceNoiseOff,
 		double InTimeoutSeconds,
 		TArray<FGalaxyEntityOut>& OutEntities,
@@ -300,7 +388,7 @@ namespace GalaxyEntityGen
 		TSharedRef<FGalaxyEntityGenRequest> Request = MakeShared<FGalaxyEntityGenRequest>();
 
 		Dispatch(InParams, InTierParams, InCells, InSlotStride, InKeySeed,
-			InNoiseTexture, bForceNoiseOff, Request);
+			InNoiseTexture, InMaxCandidates, bForceNoiseOff, Request);
 
 		if (!Request->Readback.IsValid())
 		{
@@ -329,49 +417,91 @@ namespace GalaxyEntityGen
 			return false;
 		}
 
-		// The dispatch already compacted per cell, so this reads two buffers: the runs
-		// themselves, and how much of each run is live. Reading only the entity buffer
-		// would mean scanning a whole SlotCapacity-wide run per cell to find the end,
-		// which is the traffic the compaction exists to avoid.
+		// LOCK ON THE RENDER THREAD. Lock() maps the staging buffer through the RHI
+		// and crashes anywhere else, so the worker -- which may poll the fence safely
+		// -- hands the copy over and waits again rather than reading it directly.
+		//
+		// Marshalled through the game thread for the same reason the dispatch is:
+		// ENQUEUE_RENDER_COMMAND from a background task can run inline on that task,
+		// which puts RHI work back on the thread that must not do it.
 		const int32 Total = InSlotStride * InCells.Num();
-		const uint32 Bytes = static_cast<uint32>(Total) * sizeof(FGalaxyEntityOut);
+		const int32 NumCells = InCells.Num();
 
-		const FGalaxyEntityOut* Src =
-			static_cast<const FGalaxyEntityOut*>(Request->Readback->Lock(Bytes));
+		TSharedRef<FGalaxyEntityGenRequest> Req = Request;
 
-		if (!Src)
+		auto EnqueueCopy = [Req, Total, NumCells]() mutable
+			{
+				ENQUEUE_RENDER_COMMAND(GalaxyEntityGenCopy)(
+					[Req, Total, NumCells](FRHICommandListImmediate&) mutable
+					{
+						// Total + 1: the last record is the shader's sentinel, not an entity.
+						const uint32 Bytes = static_cast<uint32>(Total + 1) * sizeof(FGalaxyEntityOut);
+						const uint32 CountBytes = static_cast<uint32>(NumCells) * 4u * sizeof(uint32);
+
+						const FGalaxyEntityOut* Src =
+							static_cast<const FGalaxyEntityOut*>(Req->Readback->Lock(Bytes));
+
+						if (Src)
+						{
+							Req->Entities.SetNumUninitialized(Total + 1);
+							FMemory::Memcpy(Req->Entities.GetData(), Src, Bytes);
+						}
+						Req->Readback->Unlock();
+
+						const uint32* CountSrc =
+							static_cast<const uint32*>(Req->CountReadback->Lock(CountBytes));
+
+						if (CountSrc)
+						{
+							Req->Counts.SetNumUninitialized(NumCells * 4);
+							FMemory::Memcpy(Req->Counts.GetData(), CountSrc, CountBytes);
+						}
+						Req->CountReadback->Unlock();
+
+						Req->bCopied = true;
+					});
+			};
+
+		if (IsInGameThread())
 		{
-			Request->Readback->Unlock();
+			EnqueueCopy();
+		}
+		else
+		{
+			AsyncTask(ENamedThreads::GameThread, MoveTemp(EnqueueCopy));
+		}
+
+		const double CopyDeadline = FPlatformTime::Seconds() + InTimeoutSeconds;
+
+		while (!Request->bCopied)
+		{
+			if (FPlatformTime::Seconds() > CopyDeadline)
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("GalaxyEntityGen: staging copy timed out after %.2fs; falling back to CPU generation."),
+					InTimeoutSeconds);
+				return false;
+			}
+
+			FPlatformProcess::Sleep(0.0005f);
+		}
+
+		if (Request->Entities.Num() != Total + 1 || Request->Counts.Num() != NumCells * 4)
+		{
 			return false;
 		}
 
-		OutEntities.SetNumUninitialized(Total);
-		FMemory::Memcpy(OutEntities.GetData(), Src, Bytes);
+		OutEntities = MoveTemp(Request->Entities);
+		OutCounts = MoveTemp(Request->Counts);
 
-		Request->Readback->Unlock();
-
-		const uint32 CountBytes = static_cast<uint32>(InCells.Num()) * sizeof(uint32);
-		const uint32* CountSrc =
-			static_cast<const uint32*>(Request->CountReadback->Lock(CountBytes));
-
-		if (!CountSrc)
-		{
-			Request->CountReadback->Unlock();
-			return false;
-		}
-
-		OutCounts.SetNumUninitialized(InCells.Num());
-		FMemory::Memcpy(OutCounts.GetData(), CountSrc, CountBytes);
-
-		Request->CountReadback->Unlock();
-
+		// Only slot 0 of each triple is an accepted count; slots 1 and 2 are the thread
+		// tally and the max density, and clamping those would destroy the diagnostic.
+		//
 		// The shader's atomic counts EVERY acceptance, including the ones it then drops
-		// for exceeding the run. Clamping here rather than in the shader keeps the
-		// count meaningful as "how many were accepted", which is worth knowing when a
-		// cell is saturating its capacity.
-		for (uint32& Count : OutCounts)
+		// for exceeding the run, so slot 0 is clamped to keep the scatter in bounds.
+		for (int32 i = 0; i < InCells.Num(); ++i)
 		{
-			Count = FMath::Min(Count, static_cast<uint32>(InSlotStride));
+			OutCounts[i * 4] = FMath::Min(OutCounts[i * 4], static_cast<uint32>(InSlotStride));
 		}
 
 		Request->Readback.Reset();
