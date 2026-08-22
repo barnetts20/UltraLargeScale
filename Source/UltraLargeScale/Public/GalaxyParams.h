@@ -57,10 +57,8 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	 *  hashes and a tan per thread, against a full field evaluation per thread, and
 	 *  it cannot drift.
 	 *
-	 *  Does NOT override InNoiseEnable. For the first migration step, set it to zero
-	 *  at the call site: with noise off the compute path and the CPU path evaluate
-	 *  the identical function, which is what makes the plumbing verifiable before the
-	 *  texture is switched on. */
+	 *  bEnableNoise (the "renderer only" per-instance toggle below) IS honoured here --
+	 *  it drives InNoiseEnable directly, same as it drives the material. */
 	template <typename TShaderParams>
 	void FillShaderParameters(TShaderParams& Out) const
 	{
@@ -131,24 +129,6 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	}
 
 
-	// ===========================================================================
-	// AND in GalaxyEntityGen.cpp, the call site. Replace:
-	//
-	//     D.FillShaderParameters(*P);
-	//
-	// with this for step 2a, so the compute path and the CPU path evaluate the identical
-	// function and any difference in the output is plumbing rather than the field:
-	//
-	//     D.FillShaderParameters(*P);
-	//     P->InNoiseEnable = 0.0f;   // STEP 2a ONLY -- remove for 2b
-	//
-	// GalaxySample degenerates to SampleAnalytic when InNoiseEnable is zero, so with the
-	// same seed and the same cell keys the GPU should reproduce the CPU's accepted set
-	// exactly, up to float ordering in the ranking. Differences beyond a handful of
-	// entities near acceptance thresholds mean a marshalling error, not a field one --
-	// most likely a struct layout mismatch, which the static_asserts in GalaxyEntityGen.h
-	// are there to catch first.
-	// ===========================================================================
 #pragma region Lateral scales
 	/** Arm half-width as a FRACTION OF THE DISC SCALE HEIGHT. Arms are thinner than
 	 *  the stellar disc they sit in, so this is a ratio rather than an absolute. */
@@ -506,33 +486,6 @@ struct ULTRALARGESCALE_API FGalaxyParams : public FBaseParams
 	GENERATED_BODY()
 
 #pragma region GPU Generation
-	/** Route entity placement through the compute shader instead of the CPU.
-	 *
-	 *  The compute path can sample the volume texture, so placement sees the warp and
-	 *  modulation the material draws rather than a texture-free approximation.
-	 *
-	 *  This and bGPUForceNoiseOff are MIGRATION SCAFFOLDING, not features. Two live
-	 *  paths mean two paths to maintain and only one that gets exercised; delete both
-	 *  flags and the CPU per-slot generators once the GPU path has proven itself. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Generation")
-	bool bUseGPUGeneration = true;
-
-	/** Zero InNoiseEnable in the dispatch only.
-	 *
-	 *  With noise off, GalaxySample degenerates to SampleAnalytic, so the GPU runs the
-	 *  identical function the CPU does and the two accepted sets should match. That is
-	 *  the migration's verification step -- a difference here is marshalling, not the
-	 *  field.
-	 *
-	 *  Defaults to false, so placement reads the texture. Set it true to reproduce the
-	 *  verification: mid and small tiers should then look exactly as they did on the
-	 *  CPU path, and any difference at THAT setting is marshalling rather than the
-	 *  field. Worth doing once if the noise-on result ever looks wrong, because it
-	 *  separates "the texture is reaching placement incorrectly" from "the texture is
-	 *  reaching placement and this is what it looks like". */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Generation")
-	bool bGPUForceNoiseOff = false;
-
 	/** The same volume texture the material samples.
 	 *
 	 *  Set NEVER STREAM on the asset. GalaxyDensity.ush reads mip 0 on both paths, but
@@ -542,17 +495,26 @@ struct ULTRALARGESCALE_API FGalaxyParams : public FBaseParams
 	 *
 	 *  The sampler here is Trilinear/Wrap. If the material's Texture Sample node uses
 	 *  anything else the two paths read different values at the same coordinate, which
-	 *  shows up as a small plausible-looking difference rather than an obvious break. */
+	 *  shows up as a small plausible-looking difference rather than an obvious break.
+	 *
+	 *  REQUIRED. There is no CPU placement path to fall back to any more: if this is
+	 *  unset, GenerateTierBatchGPU logs an error and that tier's batch generates
+	 *  nothing rather than silently approximating the field without warp or
+	 *  modulation. AGalaxyActor's constructor assigns a plugin default
+	 *  (VT_PerlinWorley_Balanced) when this is null, so an unset value here normally
+	 *  only happens for a hand-built FGalaxyParams that bypasses the actor. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Generation")
 	TObjectPtr<UVolumeTexture> NoiseTexture = nullptr;
 
-	/** Give up on the readback after this long and fall back to the CPU path.
+	/** Give up on the readback after this long and treat the batch as failed (that
+	 *  batch's slots generate nothing).
 	 *
 	 *  Not paranoia: if the render thread is blocked -- synchronous load, hitch, PIE
 	 *  teardown -- the fence never lands, and a background worker spinning forever is
-	 *  a hang with no stack pointing at the cause. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Generation")
-	double GPUReadbackTimeoutSeconds = 2.0;
+	 *  a hang with no stack pointing at the cause. Not editable: it is a safety valve,
+	 *  not a tuning knob, and there is no longer a fallback path whose cost it trades
+	 *  against. */
+	static constexpr double GPUReadbackTimeoutSeconds = 2.0;
 #pragma endregion
 
 	// TODO: SEE IF WE CAN BRIDGE THE GAP TO REAL WORLD SCALE HERE, I THINK WE HIT PRECISION ISSUES THOUGH... UNIT SCALE AND POTENTIALLY STAR SYSTEM SCALES/PARAMS MAY NEED TO SHIFT

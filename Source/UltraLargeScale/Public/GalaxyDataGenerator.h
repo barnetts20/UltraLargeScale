@@ -65,15 +65,6 @@ public:
 	 *  Always route it through GalaxyDensityParams::SpawnProbability first. */
 	float SampleDensity(const FVector& InNormPos) const;
 
-	/** Batch form. Same contract: raw optical depth out.
-	 *
-	 *  No longer used by generation. A slot must be decidable in isolation, so
-	 *  SampleEntity evaluates the field itself per candidate; batching would force
-	 *  the caller to hold every candidate before deciding any of them. Retained for
-	 *  the volume texture bake. */
-	void SampleDensityBatch(float* OutDensity, int32 InCount,
-		const float* InX, const float* InY, const float* InZ) const;
-
 #pragma endregion
 
 #pragma region Initialization
@@ -98,35 +89,12 @@ public:
 #pragma endregion
 
 #pragma region Tier Generation Callbacks
-	/** Self-contained generation functions that write directly into particle buffers;
-	 *  the galaxy actor's tier system calls them via
-	 *  FParticleTierConfig::GenerateCallback lambdas.
-	 *
-	 *  A single function serves all tiers; Large/Mid/Small differ only in the
-	 *  candidate volume (full extent vs cell-local), the tier params (scale range,
-	 *  spawn and extent exponents), and the seed offset that separates tiers sharing
-	 *  a coordinate.
-	 *
-	 *  Placement itself lives in GalaxyDensityCore.ush, so where a star spawns and
-	 *  where gas is drawn are one function rather than two kept in agreement by
-	 *  hand, and the eventual compute dispatch needs no second implementation. */
-	void GenerateTierNode(const FIntVector& InCoord, int32 InSlotIndex,
-		FNiagaraParticleBuffer& InBuffer, const FVector& InNodeCenter,
-		double InCellExtent, const FTierParams& InTierParams,
-		int32 InSeedOffset, int32& OutSlotCount) const;
-
-	void GenerateLargeTierSlot(int32 InSlotIndex, FNiagaraParticleBuffer& InBuffer,
-		int32& OutSlotCount) const;
-
-	/** Per-tier placement rules: acceptance mapping and extent range.
-	 *
-	 *  Separate from GalaxyDensityParams because these change per tier while the
-	 *  field does not, and because the large tier substitutes its own per-cell peak
-	 *  density for InDensityReference -- which a field-level parameter could not
-	 *  express. Built per call rather than cached: six floats and a reciprocal,
-	 *  against a derivation that runs sixteen arm hashes and a tan. */
-	GalaxyHLSL::GalaxyPlacement MakePlacement(const FTierParams& InTierParams,
-		float InDensityReference) const;
+	// The CPU per-slot generators (GenerateTierNode, GenerateLargeTierSlot) and their
+	// MakePlacement helper are gone: every galaxy tier now generates exclusively
+	// through GenerateTierBatchGPU below, and a failed dispatch leaves that batch's
+	// slots empty rather than falling back to a CPU sampler. Placement itself still
+	// lives in GalaxyDensityCore.ush -- MakeGalaxyPlacement / MakeCandidate /
+	// FinishEntity -- and the GPU shader is now the only caller.
 
 public:
 	/** GPU generation for a whole batch of tier slots, in one dispatch.

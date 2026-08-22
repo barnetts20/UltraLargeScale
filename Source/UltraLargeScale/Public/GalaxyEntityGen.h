@@ -214,16 +214,16 @@ namespace GalaxyEntityGen
 	  *  serialise on a GPU round-trip each, and the latency compounds across a
 	  *  neighbourhood.
 	  *
-	  *  Returns false on timeout, leaving OutEntities untouched, so the caller can fall
-	  *  back to the CPU path. The timeout is not paranoia: if the render thread is
-	  *  blocked -- a synchronous load, a hitch, PIE teardown -- the fence never lands,
-	  *  and a background worker spinning forever is a hang with no stack pointing at
-	  *  the cause.
+	  *  Returns false on timeout, leaving OutEntities untouched; that batch's slots
+	  *  generate nothing. Not paranoia: if the render thread is blocked -- a
+	  *  synchronous load, a hitch, PIE teardown -- the fence never lands, and a
+	  *  background worker spinning forever is a hang with no stack pointing at the
+	  *  cause.
 	  *
 	  *  bForceNoiseOff zeroes InNoiseEnable so GalaxySample degenerates to
-	  *  SampleAnalytic and the GPU evaluates the identical function the CPU does. That
-	  *  is the migration's verification step: any difference is marshalling, not the
-	  *  field. */
+	  *  SampleAnalytic. Manual diagnostic only -- callers pass false in normal
+	  *  operation; flip it by hand if placement and render ever need to be checked
+	  *  against each other again. */
 	bool GenerateBatchBlocking(
 		const FGalaxyParams& InParams,
 		const FTierParams& InTierParams,

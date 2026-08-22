@@ -419,24 +419,25 @@ void AGalaxyActor::BuildTierConfigs()
 	// The large tier goes through the SAME GPU path as the others. It differs only in
 	// where its cells come from -- an active set from the cull prepass rather than a
 	// grid neighbourhood -- and in rejecting against each cell's own peak density
-	// instead of the global reference. Both are data, not a second code path, which is
-	// the point: one flow for every tier, and one thing to delete when the CPU path
-	// goes.
+	// instead of the global reference. Both are data, not a second code path.
+	//
+	// GPU generation OWNS this tier outright: there is no CPU fallback, so a failed
+	// dispatch (missing texture, readback timeout) simply leaves that batch's slots
+	// empty rather than silently regenerating them on the CPU. GenerateTierBatchGPU
+	// logs the failure.
 	LargeTierConfig.GenerateBatchCallback =
-		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts) -> bool
+		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts)
 		{
 			TArray<GalaxyDataGenerator::FTierBatchCell> Cells;
 
 			if (!GalaxyGenerator.BuildLargeTierCells(Slots, Cells))
 			{
-				return false;
+				return;
 			}
 
-			return GalaxyGenerator.GenerateTierBatchGPU(
+			GalaxyGenerator.GenerateTierBatchGPU(
 				Cells, LargeTierState.Buffers[0], Params.LargeTier, 0, OutCounts);
 		};
-
-	LargeTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) { GalaxyGenerator.GenerateLargeTierSlot(SlotIndex, *Buffers[0], LargeTierState.SlotCounts[SlotIndex]); };
 
 	// --- Mid tier: neighborhood streaming ---
 	MidTierConfig.TierName = TEXT("Mid");
@@ -448,17 +449,15 @@ void AGalaxyActor::BuildTierConfigs()
 	MidTierConfig.OctreeInsertBufferIndex = 0;
 	MidTierConfig.TierIndex = 1;
 	MidTierConfig.ShouldSkipCell = [this](const FIntVector& Coord) { return !CellOverlapsVolume(Coord, MidTierConfig.GridDepth); };
-	// GPU batch path, tried first. Returns false when it cannot run -- GPU generation
-	// disabled, no texture, readback timed out -- and the per-slot CPU callback below
-	// then fills the same slots exactly as before. The fallback is what keeps a GPU
-	// failure from silently producing an empty tier.
+	// GPU generation OWNS this tier outright -- see the note on the Large tier above.
+	// A failed dispatch leaves that batch's slots empty; GenerateTierBatchGPU logs it.
 	//
 	// All three tiers run this same path. They differ only in where their cells come
 	// from and what each cell rejects against -- data, not a second code path.
 	MidTierConfig.GenerateBatchCallback =
-		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts) -> bool
+		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts)
 		{
-			// Centres come from the SAME helper the per-slot callback below uses.
+			// Centres come from the SAME helper GridCoordToCenter uses everywhere else.
 			// Deriving them anywhere else is how every candidate ended up in the wrong
 			// place and every batch came back with nothing accepted -- the grid belongs
 			// to the actor, so the actor states where each cell is.
@@ -478,14 +477,8 @@ void AGalaxyActor::BuildTierConfigs()
 				Cells.Add(Cell);
 			}
 
-			return GalaxyGenerator.GenerateTierBatchGPU(
+			GalaxyGenerator.GenerateTierBatchGPU(
 				Cells, MidTierState.Buffers[0], Params.MidTier, 7, OutCounts);
-		};
-
-	MidTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
-		const FVector NodeCenter = GridCoordToCenter(Coord, MidTierConfig.GridDepth);
-		const double CellExt = GetGridCellExtent(MidTierConfig.GridDepth);
-		GalaxyGenerator.GenerateTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter, CellExt, Params.MidTier, 7, MidTierState.SlotCounts[SlotIndex]);
 		};
 
 	// --- Small tier: neighborhood streaming ---
@@ -498,17 +491,15 @@ void AGalaxyActor::BuildTierConfigs()
 	SmallTierConfig.OctreeInsertBufferIndex = 0;
 	SmallTierConfig.TierIndex = 2;
 	SmallTierConfig.ShouldSkipCell = [this](const FIntVector& Coord) { return !CellOverlapsVolume(Coord, SmallTierConfig.GridDepth); };
-	// GPU batch path, tried first. Returns false when it cannot run -- GPU generation
-	// disabled, no texture, readback timed out -- and the per-slot CPU callback below
-	// then fills the same slots exactly as before. The fallback is what keeps a GPU
-	// failure from silently producing an empty tier.
+	// GPU generation OWNS this tier outright -- see the note on the Large tier above.
+	// A failed dispatch leaves that batch's slots empty; GenerateTierBatchGPU logs it.
 	//
 	// All three tiers run this same path. They differ only in where their cells come
 	// from and what each cell rejects against -- data, not a second code path.
 	SmallTierConfig.GenerateBatchCallback =
-		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts) -> bool
+		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts)
 		{
-			// Centres come from the SAME helper the per-slot callback below uses.
+			// Centres come from the SAME helper GridCoordToCenter uses everywhere else.
 			// Deriving them anywhere else is how every candidate ended up in the wrong
 			// place and every batch came back with nothing accepted -- the grid belongs
 			// to the actor, so the actor states where each cell is.
@@ -528,15 +519,8 @@ void AGalaxyActor::BuildTierConfigs()
 				Cells.Add(Cell);
 			}
 
-			return GalaxyGenerator.GenerateTierBatchGPU(
+			GalaxyGenerator.GenerateTierBatchGPU(
 				Cells, SmallTierState.Buffers[0], Params.SmallTier, 13, OutCounts);
-		};
-
-	SmallTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
-		const FVector NodeCenter = GridCoordToCenter(Coord, SmallTierConfig.GridDepth);
-		const double CellExt = GetGridCellExtent(SmallTierConfig.GridDepth);
-		GalaxyGenerator.GenerateTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter,
-			CellExt, Params.SmallTier, 23, SmallTierState.SlotCounts[SlotIndex]);
 		};
 
 	// Shared bounds convention — see the derivation in AUniverseActor::BuildTierConfigs. Tight half-bound is (2R+2) * CellHalfExtent; we provision 2 * (2R+1) to match the universe tiers. The previous (2R+1) * CellHalfExtent under-bounded by up to one half-cell when VT sat near a cell boundary, risking edge-cell culling pops.

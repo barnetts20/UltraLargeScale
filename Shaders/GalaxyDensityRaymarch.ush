@@ -1,0 +1,98 @@
+#pragma once
+
+// GalaxyDensityRaymarch.ush
+// Debug density raymarcher material bridge
+#include "/UltraLargeScale/GalaxyDensity.ush"
+
+// TODO: We should keep a dividing line between the MATERIAL bridge and the ENTITY GENERATION bridge... keeping the analytic and noise portions seperate is fine (GalaxyDensityCore.ush, GalaxyDensity.ush)
+// TODO: The below raymarch should move to its own shader as it is a material only function
+// TODO: Final Proposed shader stack: GalaxyDensityCore.ush - Analytic Only, GalaxyDensity.ush - Analytic + Texture Sampling, GalaxyDensityRaymarch.ush - Analytic + TextureSampling + Raymarch, GalaxyEntityGen.usf - Analytic + TextureSampling + Compute Entity Generation
+// TODO: POTENTIAL RAYMARCH OPTIMIZATIONS - PERFORMANCE + QUALITY
+//
+// TODO: PERFORMANCE:
+// TODO: Screen Space Constant Step Sizing optimization
+// TODO: Determine minimum step size close to camera as step size
+// TODO: Scale step size to maintain a constant angular scale of the step based on distance from the camera
+// TODO: example: A step 2x as far from the camera can be 2x as large without losing perceived size
+//
+// TOOD: QUALITY:
+// TODO: Quantized step grid + partial steps - Avoid raymarch "sliding" artifacts by pegging the steps to a grid. 
+// TODO: Instead of the first step starting at the camera at full size, and all remaining steps inheriting that initial distance along the ray
+// TODO: The first step from the camera should be a partial step to intersect the quatization grid, then allow the full sized steps and adaptive step sizing to take over
+// TODO: The idea is, instead of the ray sample points sliding along with the camera as it moves, they stay static relative to the quantization grid and the first step(s) are there to basically align the ray
+
+// TODO: This has some tension with the adaptive step sizing, however the artifacts from that should be relatively far along the ray so it may be fine
+// --- RAYMARCH: ANALYTIC SPHERE-BOUNDED DENSITY ACCUMULATION ---
+// The proxy mesh decides which pixels run; the unit sphere decides where to march.
+// Step length adapts to chord length, so quality does not vary with view angle and no
+// trailing partial step is needed.
+//
+// Do not add a box bounds test on the marched position. InStartPos sits exactly on
+// the proxy surface, so a component is exactly 0 or 1 before any FP error, and such a
+// test breaks on iteration zero wherever rounding pushes it outside -- view-direction
+// dependent, so it shows as angle-dependent dropout at silhouettes.
+//
+// InViewVec is the LOCAL camera vector, surface toward camera, need not be
+// normalized. Returns emissive in RGB, transmittance in A.
+float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 InStartPos, float3 InViewVec, int InMaxSteps, float InDensityScale, float InJitter, float InNoisePower)
+{
+    // Unit box [0,1] -> normalized galaxy space [-1,1]. Uniform scale, so a direction is identical in both.
+    float3 o = 2.0 * (InStartPos - 0.5);
+    float3 dir = normalize(-InViewVec);
+
+    float b = dot(o, dir);
+    float c = dot(o, o) - 1.0;
+    float disc = b * b - c;
+    if (disc <= 0.0)
+    {
+        return float4(0.0, 0.0, 0.0, 1.0);
+    }
+
+    float sq = sqrt(disc);
+
+    // Origin inside the sphere: clamp the near end. Outside: take the whole chord WITHOUT clamping to zero, because with an inverted-normal proxy the shaded point is the far face and the chord lies at negative t.
+    float tEnter = (c < 0.0) ? 0.0 : (-b - sq);
+    float tExit = -b + sq;
+    if (tExit <= tEnter)
+    {
+        return float4(0.0, 0.0, 0.0, 1.0);
+    }
+
+    int steps = max(InMaxSteps, 1);
+    float normStep = (tExit - tEnter) / float(steps);
+
+    // Optical path is in LOCAL units and normalized space is 2x local.
+    float localStep = normStep * 0.5;
+
+    // Dither the entry point, not the step length, so every ray keeps an identical total path and density does not shimmer with the noise.
+    float t = tEnter + InJitter * normStep;
+
+    bool bShape = (InNoisePower != 1.0);
+
+    float transmittance = 1.0;
+    float emission = 0.0;
+
+    for (int i = 0; i < steps; i++)
+    {
+        float density = GalaxySample(P, InTex, InSampler, o + dir * t);
+        if (bShape)
+        {
+            density = P.PowSafe(density, InNoisePower);
+        }
+
+        float alpha = 1.0 - exp(-density * InDensityScale * localStep);
+
+        // Flat white emission: structure only.
+        emission += alpha * transmittance;
+        transmittance *= 1.0 - alpha;
+
+        if (transmittance < 0.001)
+        {
+            break;
+        }
+
+        t += normStep;
+    }
+
+    return float4(emission.xxx, transmittance);
+}

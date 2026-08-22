@@ -8,7 +8,10 @@
 #include "GalaxyDataGenerator.h"
 
 #include "GalaxyEntityGen.h"
-#include "GalaxyGenProbe.h"
+// GalaxyGenProbe.h is deliberately NOT included here any more: the probe was
+// wired into every batch to bisect the entity-gen dispatch bug, which is fixed.
+// It stays in the module as a standalone diagnostic -- call GalaxyGenProbe::Run()
+// from a background thread if the plumbing (not the field) is ever in doubt again.
 // SHIM FIRST, then the shared field compiled INSIDE the shim's namespace.
 //
 // The namespace is never opened. MSVC's <cmath> declares float overloads of
@@ -84,25 +87,6 @@ GalaxyHLSL::GalaxyDensityParams FGalaxyDensityParams::ToDerived() const
 		bEnableNoise ? 1.0f : 0.0f);
 }
 
-GalaxyHLSL::GalaxyPlacement GalaxyDataGenerator::MakePlacement(
-	const FTierParams& InTierParams,
-	float InDensityReference) const
-{
-	// Extent converts through UnitScale HERE, so the field stays unit-agnostic and
-	// the conversion happens once in the place UnitScale already lives. AUTHORED SIZE
-	// IS TRUTH still holds: the real-unit range passes through UnitScale exactly once
-	// and nothing downstream reconstructs size from a quantized octree depth.
-	const double InvUnit = 1.0 / FMath::Max(Params.UnitScale, UE_DOUBLE_SMALL_NUMBER);
-
-	return GalaxyHLSL::MakeGalaxyPlacement(
-		InDensityReference,
-		Params.DensityParams.SpawnCompression,
-		InTierParams.SpawnExponent,
-		static_cast<float>(InTierParams.MinScale * InvUnit),
-		static_cast<float>(InTierParams.MaxScale * InvUnit),
-		InTierParams.ExtentExponent);
-}
-
 #pragma endregion
 
 #pragma region Density Sampling
@@ -123,25 +107,7 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 		static_cast<float>(InNormPos.Z)));
 }
 
-void GalaxyDataGenerator::SampleDensityBatch(
-	float* OutDensity,
-	int32 InCount,
-	const float* InX,
-	const float* InY,
-	const float* InZ) const
-{
-	if (!Derived)
-	{
-		FMemory::Memzero(OutDensity, sizeof(float) * InCount);
-		return;
-	}
 
-	GalaxyDensityParams& P = *Derived;
-	for (int32 i = 0; i < InCount; ++i)
-	{
-		OutDensity[i] = P.SampleAnalytic(float3(InX[i], InY[i], InZ[i]));
-	}
-}
 
 #pragma endregion
 
@@ -330,27 +296,21 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	int32 InSeedOffset,
 	TArray<int32>& OutSlotCounts) const
 {
-	GalaxyGenProbe::Run();
 	if (InCells.Num() == 0)
 	{
 		return true;
 	}
 
-	if (!Params.bUseGPUGeneration)
-	{
-		return false;
-	}
-
-	// SAY WHY, ONCE. Every bail here falls back to the CPU path and produces a
-	// perfectly ordinary-looking galaxy, so a misconfiguration is invisible: the only
-	// symptom of GPU generation never running is that placement quietly keeps
-	// ignoring the volume texture, which is the entire thing this was built to fix.
+	// SAY WHY, ONCE. There is no CPU fallback any more, so a misconfiguration here is
+	// not just slower, it is invisible: the only symptom of a missing texture is
+	// placement quietly not matching the render, which is the entire thing the GPU
+	// path exists to fix.
 	if (Params.NoiseTexture == nullptr)
 	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("GalaxyEntityGen: bUseGPUGeneration is on but NoiseTexture is unset; ")
-			TEXT("falling back to CPU placement. Set it to the same volume texture the ")
-			TEXT("material samples."));
+		UE_LOG(LogTemp, Error,
+			TEXT("GalaxyEntityGen: NoiseTexture is unset; this tier's batch will ")
+			TEXT("generate nothing. Set it to the same volume texture the material ")
+			TEXT("samples."));
 		return false;
 	}
 
@@ -462,7 +422,7 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 		Params.Seed + InSeedOffset,
 		Params.NoiseTexture,
 		MaxCandidates,
-		Params.bGPUForceNoiseOff,
+		/*bForceNoiseOff=*/ false,
 		Params.GPUReadbackTimeoutSeconds,
 		Entities, Counts);
 
@@ -470,184 +430,27 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	{
 		UE_LOG(LogTemp, Warning,
 			TEXT("GalaxyEntityGen: dispatch or readback failed for %d cells; ")
-			TEXT("falling back to CPU placement."), Cells.Num());
+			TEXT("this batch generates nothing."), Cells.Num());
 		return false;
 	}
 
-	// Confirms the compute path actually ran, and whether the texture reached
-	// placement. Log once rather than per batch: this fires on every boundary cross.
-	// Confirms the compute path ran AND that it produced something. "The dispatch
-	// succeeded" is not enough on its own: an uncleared counter, an empty batch or a
-	// saturated bounds test all return success and place nothing, and the symptom --
-	// one tier populated and the others empty -- reads as a streaming problem rather
-	// than a generation one.
-	// Counts is a TRIPLE per cell: accepted, threads that reached the acceptance test,
-	// and the largest density any thread saw. The last two exist because zero accepted
-	// is otherwise ambiguous -- a dispatch that never ran, one that ran on an empty
-	// field, and one that ran on a healthy field and rejected everything all look the
-	// same from here.
+	// Confirms the compute path actually produced something. Logged once, and again
+	// whenever a batch comes back empty -- that combination (one tier populated,
+	// others not) otherwise reads as a streaming problem rather than a generation one.
 	uint32 TotalAccepted = 0;
-	uint32 TotalThreadsRun = 0;
-	float MaxGpuDensity = 0.0f;
-	uint32 MaxSeenCandidates = 0;
-
-	for (int32 i = 0; i < InCells.Num(); ++i)
+	for (uint32 Count : Counts)
 	{
-		TotalAccepted += Counts[i * 4];
-		TotalThreadsRun += Counts[i * 4 + 1];
-
-		const uint32 Bits = Counts[i * 4 + 2];
-		MaxGpuDensity = FMath::Max(MaxGpuDensity, *reinterpret_cast<const float*>(&Bits));
-
-		MaxSeenCandidates = FMath::Max(MaxSeenCandidates, Counts[i * 4 + 3]);
+		TotalAccepted += Count;
 	}
-
-	// The shader writes this through the STRUCTURED uav before any early-out. Its
-	// absence when threads also report zero means the dispatch never ran; its presence
-	// with zero counters means it ran and the TYPED counter uav is not landing.
-	// The shader writes this into a record PAST the last entity, through the same UAV
-	// the entities use. Present with zeroed entities would mean the writes land and
-	// the field is wrong; absent with correct counters means the entity UAV is not
-	// delivering at all, which is what sent this to a typed buffer.
-	// Entity 0 is the shader's parameter echo, not an entity: Pos.X is the marker,
-	// and Pos.Y / Pos.Z / Extent are NumCells, CandidateBudget and SlotStride as the
-	// SHADER saw them. If those are zero while the CPU passed real values, the loose
-	// parameters are not binding -- which would explain every zero we have seen.
-	const bool bSentinel = !Entities.IsEmpty()
-		&& FMath::IsNearlyEqual(Entities[0].Pos.X, 123456.0f, 1.0f);
-
-	const int32 GpuNumCells = Entities.IsEmpty() ? -1 : static_cast<int32>(Entities[0].Pos.Y);
-	const int32 GpuBudget = Entities.IsEmpty() ? -1 : static_cast<int32>(Entities[0].Pos.Z);
-	const int32 GpuStride = Entities.IsEmpty() ? -1 : static_cast<int32>(Entities[0].Extent);
 
 	static bool bAnnounced = false;
 	if (!bAnnounced || TotalAccepted == 0)
 	{
 		bAnnounced = true;
 
-		if (TotalAccepted > 0)
-		{
-			UE_LOG(LogTemp, Display,
-				TEXT("GalaxyEntityGen: %d cells x %d candidates -> %u accepted (run %d, %u threads ran, GPU max density %.5f). Noise %s."),
-				Cells.Num(), CandidateBudget, TotalAccepted, SlotStride,
-				TotalThreadsRun, MaxGpuDensity,
-				Params.bGPUForceNoiseOff
-				? TEXT("FORCED OFF -- placement still ignores the texture")
-				: TEXT("ON -- placement is reading the volume texture"));
-		}
-		else
-		{
-			// Zero acceptance has three causes and the count alone cannot tell them
-			// apart, so probe the SAME field on the CPU across the first cell. The CPU
-			// path cannot read the volume texture, so this is SampleAnalytic -- which
-			// is what makes it diagnostic rather than redundant:
-			//
-			//   all ~0        -> geometry. Centres, extents or Extent are putting
-			//                    candidates outside the field entirely.
-			//   healthy       -> geometry is right and the GPU disagrees, so it is the
-			//                    parameter marshalling or the texture. bGPUForceNoiseOff
-			//                    separates those: with noise off the GPU runs the exact
-			//                    function these lines just ran.
-			//
-			// A black or unbound texture is the specific trap worth naming: the noise
-			// path is density * max(1 + Amount * n, 0), a texture reading zero gives
-			// n = -1, and any NoiseAmount at or above 1 zeroes every candidate.
-			//
-			// The percentiles are the calibration. Acceptance has to satisfy
-			// budget ~ capacity / rate, so at a third of a percent a 3000-capacity slot
-			// would need most of a million candidates -- the budget is not the knob, the
-			// mapping is. SpawnDensityReference wants to sit near the density the field
-			// actually reaches here, not far above it.
-			const double InvExt = 1.0 / FMath::Max(static_cast<double>(Params.Extent), 1e-9);
-			const FVector Centre = InCells[0].Centre;
-			const double Half = InCells[0].HalfExtent;
-
-			TArray<float> Probe;
-			Probe.Reserve(512);
-
-			FRandomStream ProbeStream(1337);
-			for (int32 i = 0; i < 512; ++i)
-			{
-				const FVector P = Centre + FVector(
-					ProbeStream.FRandRange(-Half, Half),
-					ProbeStream.FRandRange(-Half, Half),
-					ProbeStream.FRandRange(-Half, Half));
-
-				Probe.Add(SampleDensity(P * InvExt));
-			}
-			Probe.Sort();
-
-			UE_LOG(LogTemp, Warning,
-				TEXT("GalaxyEntityGen: %d cells x %d candidates -> ZERO accepted (run %d).")
-				TEXT("  CPU density across cell 0: p50 %.5f  p90 %.5f  p99 %.5f  max %.5f")
-				TEXT("  GPU: %u threads ran, max density %.5f, cell.Candidates read as %u, marker %s")
-				TEXT("  GPU SAW params: NumCells %d, CandidateBudget %d, SlotStride %d")
-				TEXT("  | SpawnDensityReference %.3f, Compression %.2f, noise %s"),
-				Cells.Num(), CandidateBudget, SlotStride,
-				Probe[255], Probe[460], Probe[506], Probe.Last(),
-				TotalThreadsRun, MaxGpuDensity, MaxSeenCandidates,
-				bSentinel ? TEXT("PRESENT") : TEXT("MISSING"),
-				GpuNumCells, GpuBudget, GpuStride,
-				Params.DensityParams.SpawnDensityReference,
-				Params.DensityParams.SpawnCompression,
-				Params.bGPUForceNoiseOff ? TEXT("OFF") : TEXT("ON"));
-
-			// AUTO-BISECT. If the CPU field is healthy here and the GPU accepted
-			// nothing, the two are evaluating different things -- and there are exactly
-			// two ways that happens: the parameters did not marshal, or the texture is
-			// not delivering what the material gets.
-			//
-			// Re-running the same batch with noise forced off separates them without a
-			// flag flip and a restart, because with noise off GalaxySample degenerates
-			// to SampleAnalytic and the GPU runs the identical function the probe above
-			// just ran. Once, and only on failure, so it cannot become a per-batch cost.
-			const bool bFieldIsHealthy = Probe[460] > Params.DensityParams.SpawnDensityReference * 0.05f;
-
-			static bool bBisected = false;
-			if (!bBisected && bFieldIsHealthy && !Params.bGPUForceNoiseOff)
-			{
-				bBisected = true;
-
-				TArray<FGalaxyEntityOut> RetryEntities;
-				TArray<uint32> RetryCounts;
-
-				const bool bRetryOk = GalaxyEntityGen::GenerateBatchBlocking(
-					Params, InTierParams, Cells, SlotStride,
-					Params.Seed + InSeedOffset, Params.NoiseTexture, MaxCandidates,
-					true, // noise OFF
-					Params.GPUReadbackTimeoutSeconds, RetryEntities, RetryCounts);
-
-				uint32 RetryAccepted = 0;
-				for (uint32 Count : RetryCounts)
-				{
-					RetryAccepted += Count;
-				}
-
-				if (bRetryOk && RetryAccepted > 0)
-				{
-					UE_LOG(LogTemp, Error,
-						TEXT("GalaxyEntityGen BISECT: the same batch accepts %u with noise OFF. ")
-						TEXT("Parameter marshalling is correct and the field is right; the NOISE ")
-						TEXT("PATH is what zeroes it. Most likely the volume texture reads black -- ")
-						TEXT("modulation is density * max(1 + Amount * n, 0), and an unbound or ")
-						TEXT("non-resident texture gives n = -1, so any NoiseAmount at or above 1 ")
-						TEXT("kills every candidate. Check the texture is assigned, and set NEVER ")
-						TEXT("STREAM on it: the material handles mip residency, a compute dispatch ")
-						TEXT("does not."),
-						RetryAccepted);
-				}
-				else
-				{
-					UE_LOG(LogTemp, Error,
-						TEXT("GalaxyEntityGen BISECT: still zero with noise OFF, where the GPU runs ")
-						TEXT("the identical function the CPU probe just ran and got p90 %.5f. ")
-						TEXT("The field parameters are not reaching the shader -- compare ")
-						TEXT("FillShaderParameters against the MakeGalaxyDensityParams argument ")
-						TEXT("order, and check InvGalaxyExtent and the cell centres."),
-						Probe[460]);
-				}
-			}
-		}
+		UE_LOG(LogTemp, Display,
+			TEXT("GalaxyEntityGen: %d cells x %d candidates -> %u accepted (run %d)."),
+			Cells.Num(), CandidateBudget, TotalAccepted, SlotStride);
 	}
 
 	// Scatter, with a WRITE CURSOR PER SLOT.
@@ -684,7 +487,7 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 
 		// Already compacted on the GPU, so this is a straight copy of the live run
 		// rather than a filter. Counts is clamped to the run width by the readback.
-		const int32 Accepted = FMath::Min(static_cast<int32>(Counts[c * 4]), SlotStride);
+		const int32 Accepted = FMath::Min(static_cast<int32>(Counts[c]), SlotStride);
 
 		for (int32 i = 0; i < Accepted; ++i)
 		{
@@ -716,98 +519,6 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	}
 
 	return true;
-}
-
-void GalaxyDataGenerator::GenerateTierNode(
-	const FIntVector& InCoord,
-	int32 InSlotIndex,
-	FNiagaraParticleBuffer& InBuffer,
-	const FVector& InNodeCenter,
-	double InCellExtent,
-	const FTierParams& InTierParams,
-	int32 InSeedOffset,
-	int32& OutSlotCount) const
-{
-	// -----------------------------------------------------------------------
-	// One slot at a time, decided entirely by its own key.
-	//
-	// FRandomStream is gone, and that is not merely a port. A stream made candidate
-	// i depend on every draw before it, so no entity could be produced without
-	// producing all of its predecessors -- fine in a loop, impossible for one thread
-	// per slot. Keying on (coord, slot) instead makes any entity recomputable alone
-	// and stops identity being "position in the append order", so a region
-	// regenerates identically after the player leaves and comes back.
-	//
-	// The three-phase batch that used to live here is gone with it: a slot has to be
-	// decidable in isolation, and batching would force every candidate to be held
-	// before any of them could be judged.
-	// -----------------------------------------------------------------------
-
-	if (!Derived)
-	{
-		InBuffer.PadSlotDead(InSlotIndex, 0);
-		OutSlotCount = 0;
-		return;
-	}
-
-	const int32 BufferStart = InSlotIndex * InBuffer.SlotCapacity;
-
-	// Fixed budget, variable acceptance. The candidate count no longer tracks the
-	// buffer's remaining room, so a cell's yield depends on the field there and
-	// nothing else.
-	const int32 NumCandidates = FMath::Max(InTierParams.CandidateBudget, 1);
-	const int32 MaxAccepted = InBuffer.SlotCapacity;
-
-	const float InvExtent = static_cast<float>(1.0 / static_cast<double>(Params.Extent));
-
-	const GalaxyPlacement Place = MakePlacement(
-		InTierParams, Params.DensityParams.SpawnDensityReference);
-
-	// InSeedOffset separates tiers that share a coordinate; the galaxy seed separates
-	// galaxies. Both fold into the key rather than into a stream, so nothing here is
-	// order dependent.
-	const int32 KeySeed = Params.Seed + InSeedOffset;
-
-	const float3 Centre(
-		static_cast<float>(InNodeCenter.X),
-		static_cast<float>(InNodeCenter.Y),
-		static_cast<float>(InNodeCenter.Z));
-
-	int32 ActualCount = 0;
-
-	for (int32 i = 0; i < NumCandidates && ActualCount < MaxAccepted; ++i)
-	{
-		const GalaxyEntity E = Derived->SampleEntity(
-			Place, Centre,
-			static_cast<float>(InCellExtent), InvExtent,
-			InCoord.X, InCoord.Y, InCoord.Z,
-			i * 977 + KeySeed);
-
-		if (E.bValid < 0.5f)
-		{
-			continue;
-		}
-
-		const int32 Idx = BufferStart + ActualCount;
-
-		InBuffer.Positions[Idx] = FVector(E.Pos.x, E.Pos.y, E.Pos.z);
-
-		// AUTHORED SIZE IS TRUTH: Extent already carries the real-unit range divided
-		// by UnitScale exactly once, in MakePlacement. Octree insert depth is derived
-		// later at insert time; never reconstruct size from the quantized depth, which
-		// would inflate every particle to its node extent and make sprite sizes
-		// octave-step with UnitScale.
-		InBuffer.Extents[Idx] = E.Extent;
-
-		// Three decorrelated uniforms on a second key, so colour is stable for a given
-		// entity without being tied to where it landed.
-		InBuffer.Colors[Idx] = FLinearColor(E.Decor.x, E.Decor.y, E.Decor.z);
-
-		++ActualCount;
-	}
-
-	InBuffer.PadSlotDead(InSlotIndex, ActualCount);
-	OutSlotCount = ActualCount;
 }
 
 #pragma endregion
@@ -934,107 +645,6 @@ TArray<GalaxyDataGenerator::FActiveLargeTierCell> GalaxyDataGenerator::CollectAc
 		TotalCells > 0 ? 100.0f * static_cast<float>(ActiveCells.Num()) / static_cast<float>(TotalCells) : 0.0f);
 
 	return ActiveCells;
-}
-
-void GalaxyDataGenerator::GenerateLargeTierSlot(
-	int32 InSlotIndex,
-	FNiagaraParticleBuffer& InBuffer,
-	int32& OutSlotCount) const
-{
-	// -----------------------------------------------------------------------
-	// Collect active cells, then distribute the slot's candidate budget across them
-	// and rejection-sample inside each against ITS OWN peak density.
-	//
-	// The two halves have to be paired correctly or the distribution is wrong.
-	// Accepted count per cell is budget x mean(d)/envelope, and what we want is
-	// proportional to cell mass, i.e. to mean(d):
-	//
-	//   budget ~ max,  envelope = cellMax   -> accepted ~ mean          EXACT
-	//   budget ~ mean, envelope = globalRef -> accepted ~ mean^2        1.7x biased
-	//   budget ~ mean, envelope = cellMax   -> accepted ~ mean^2/max    3.9x biased
-	//
-	// So the budget weights on cell MAX, not cell mean. Weighting by mean while also
-	// rejecting by density counts the same factor twice and over-concentrates in the
-	// arms quadratically.
-	//
-	// The per-cell envelope is why the acceptance mapping lives in GalaxyPlacement
-	// rather than in the derived field: this tier substitutes its own reference,
-	// which a field-level parameter could not express. SpawnDensityReference stays
-	// the mapping for mid and small, which have no prepass to derive a local bound
-	// from; substituting it here would collapse acceptance by three orders.
-	// -----------------------------------------------------------------------
-
-	if (!Derived)
-	{
-		InBuffer.PadSlotDead(InSlotIndex, 0);
-		OutSlotCount = 0;
-		return;
-	}
-
-	const TArray<FActiveLargeTierCell> ActiveCells = CollectActiveLargeTierCells();
-	if (ActiveCells.Num() == 0)
-	{
-		InBuffer.PadSlotDead(InSlotIndex, 0);
-		OutSlotCount = 0;
-		return;
-	}
-
-	const int32 BufferStart = InSlotIndex * InBuffer.SlotCapacity;
-	const int32 MaxAccepted = InBuffer.SlotCapacity;
-	const float InvExtent = static_cast<float>(1.0 / static_cast<double>(Params.Extent));
-
-	// Never fewer candidates than cells: a cell that survived the prepass has
-	// structure in it and should get at least one draw.
-	const int32 Budget = FMath::Max(Params.LargeTier.CandidateBudget, ActiveCells.Num());
-
-	double TotalWeight = 0.0;
-	for (const FActiveLargeTierCell& Cell : ActiveCells)
-	{
-		TotalWeight += FMath::Max(static_cast<double>(Cell.MaxDensity), 1e-6);
-	}
-
-	int32 TotalAccepted = 0;
-
-	for (int32 ci = 0; ci < ActiveCells.Num() && TotalAccepted < MaxAccepted; ++ci)
-	{
-		const FActiveLargeTierCell& Cell = ActiveCells[ci];
-
-		const double Weight = FMath::Max(static_cast<double>(Cell.MaxDensity), 1e-6);
-		const int32 NumCandidates = FMath::Max(1,
-			FMath::RoundToInt(static_cast<double>(Budget) * Weight / TotalWeight));
-
-		const GalaxyPlacement Place = MakePlacement(Params.LargeTier, Cell.MaxDensity);
-
-		const float3 Centre(
-			static_cast<float>(Cell.Center.X),
-			static_cast<float>(Cell.Center.Y),
-			static_cast<float>(Cell.Center.Z));
-
-		for (int32 i = 0; i < NumCandidates && TotalAccepted < MaxAccepted; ++i)
-		{
-			const GalaxyEntity E = Derived->SampleEntity(
-				Place, Centre,
-				static_cast<float>(Cell.HalfExt), InvExtent,
-				Cell.GridCoord.X, Cell.GridCoord.Y, Cell.GridCoord.Z,
-				i * 977 + Params.Seed);
-
-			if (E.bValid < 0.5f)
-			{
-				continue;
-			}
-
-			const int32 Idx = BufferStart + TotalAccepted;
-
-			InBuffer.Positions[Idx] = FVector(E.Pos.x, E.Pos.y, E.Pos.z);
-			InBuffer.Extents[Idx] = E.Extent;
-			InBuffer.Colors[Idx] = FLinearColor(E.Decor.x, E.Decor.y, E.Decor.z);
-
-			++TotalAccepted;
-		}
-	}
-
-	InBuffer.PadSlotDead(InSlotIndex, TotalAccepted);
-	OutSlotCount = TotalAccepted;
 }
 
 #pragma endregion

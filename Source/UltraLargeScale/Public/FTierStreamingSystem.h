@@ -189,25 +189,29 @@ struct FParticleTierConfig
 	 *  skips octree insertion entirely for this tier. Large/Mid/Small = 0. */
 	int32 OctreeInsertBufferIndex = 0;
 
-	/** Particle generation callback, invoked once per entering cell during
-	 *  parallel generation (InitializeTier and UpdateTier). Writes directly into
-	 *  each buffer's slot region. Receives the cell's grid Coord, the flat
-	 *  SlotIndex within the tier's buffers, and Buffers (one raw pointer per
-	 *  NiagaraAsset, this tier's back buffer). */
+	/** Per-slot CPU generation callback, invoked once per entering cell during
+	 *  parallel generation (InitializeTier and UpdateTier) when no GenerateBatchCallback
+	 *  is bound. Writes directly into each buffer's slot region. Receives the cell's
+	 *  grid Coord, the flat SlotIndex within the tier's buffers, and Buffers (one raw
+	 *  pointer per NiagaraAsset, this tier's back buffer).
+	 *
+	 *  GALAXY LAYER: unused -- every galaxy tier binds GenerateBatchCallback, so this
+	 *  is never called for it. UNIVERSE AND STAR-SYSTEM LAYERS: this is their only
+	 *  generation path; they have not migrated to a GPU batch dispatch. Leave both
+	 *  bound only if you intend the tier to keep working before that migration lands. */
 	TFunction<void(const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers)> GenerateCallback;
 
-	/** Optional whole-batch generator, tried before GenerateCallback.
+	/** Optional whole-batch generator, tried instead of GenerateCallback when bound.
 	 *
 	 *  Exists because a GPU dispatch wants the batch, not a slot: per-slot dispatches
 	 *  serialise on a GPU round-trip each and the latency compounds across a
-	 *  neighbourhood. When bound and it returns true it has filled every queued slot
-	 *  and written SlotCounts; when it returns false NOTHING has been written and the
-	 *  per-slot ParallelFor runs as before.
-	 *
-	 *  The fallback is not optional. A GPU path can fail for reasons that have nothing
-	 *  to do with this system -- a missing texture, a readback timeout during a hitch
-	 *  -- and failing closed would leave an empty tier with no indication of why. */
-	TFunction<bool(const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutSlotCounts)> GenerateBatchCallback;
+	 *  neighbourhood. When bound, it OWNS every queued slot outright -- there is no
+	 *  per-slot fallback once a tier commits to it. A dispatch that fails for any
+	 *  reason (missing texture, a readback timeout during a hitch) is the callback's
+	 *  own problem to log and leave that batch's slots empty; the streaming system
+	 *  does not retry it through GenerateCallback, so a tier that only ever sets
+	 *  GenerateBatchCallback must not also need GenerateCallback to be bound. */
+	TFunction<void(const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutSlotCounts)> GenerateBatchCallback;
 
 	/** Returns the fixed AABB set once at InitializeTier as the Niagara bounds
 	 *  for this tier's components. */

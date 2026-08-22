@@ -76,16 +76,15 @@ void FTierStreamingSystem::InitializeTier(const FTierStreamingContext& Ctx, FPar
 				PerSlotBufferPtrs[i][b] = &State.Buffers[b];
 		}
 
-		// Whole batch first if a batch generator is bound. It returns false when it
-		// could not run at all, and then nothing has been written and the per-slot
-		// path below fills the same slots as it always did.
-		bool bBatchDone = false;
+		// A batch generator, when bound, owns every queued slot outright -- see the
+		// doc comment on FParticleTierConfig::GenerateBatchCallback. Tiers that have
+		// not migrated to a batch dispatch (Universe, StarSystem) leave it unbound and
+		// take the per-slot path instead.
 		if (Config.GenerateBatchCallback)
 		{
-			bBatchDone = Config.GenerateBatchCallback(ToGenerate, State.SlotCounts);
+			Config.GenerateBatchCallback(ToGenerate, State.SlotCounts);
 		}
-
-		if (!bBatchDone)
+		else
 		{
 			ParallelFor(ToGenerate.Num(), [&Config, &ToGenerate, &PerSlotBufferPtrs](int32 i)
 				{
@@ -357,17 +356,15 @@ void FTierStreamingSystem::UpdateTier(const FTierStreamingContext& Ctx, FParticl
 					PerSlotBufferPtrs[i][b] = &State.Buffers[b];
 			}
 
-			// Same batch-first path as InitializeTier. Streaming updates are the
-			// common case by a wide margin -- the initial population happens once and
-			// every boundary cross after it comes through here -- so leaving this on
-			// the per-slot path would mean the GPU generator almost never ran.
-			bool bBatchDone = false;
+			// Same batch-first path as InitializeTier -- see the doc comment on
+			// FParticleTierConfig::GenerateBatchCallback. Streaming updates are the
+			// common case by a wide margin, so this is where a bound batch generator
+			// actually earns its keep.
 			if (Config.GenerateBatchCallback)
 			{
-				bBatchDone = Config.GenerateBatchCallback(ToGenerate, State.SlotCounts);
+				Config.GenerateBatchCallback(ToGenerate, State.SlotCounts);
 			}
-
-			if (!bBatchDone)
+			else
 			{
 				ParallelFor(ToGenerate.Num(), [&Config, &ToGenerate, &PerSlotBufferPtrs](int32 i)
 					{
