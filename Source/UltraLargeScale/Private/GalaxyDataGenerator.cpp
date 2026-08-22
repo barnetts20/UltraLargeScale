@@ -328,19 +328,18 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 			return false;
 		};
 
-	if (!Params.bUseGPUGeneration)
-	{
-		return FailBatch();
-	}
-
-	// SAY WHY, ONCE. A misconfiguration would otherwise surface only as a tier that
-	// never populates, which reads as a streaming problem rather than a setup one.
+	// LOUD ONCE, then quiet. ensure fires on its first hit per call site per session,
+	// which is exactly right for a setup error: it stops the developer and lands in the
+	// log, and it does not then spam a warning on every boundary cross for the rest of
+	// the run. A misconfiguration would otherwise surface only as a tier that never
+	// populates, which reads as a streaming problem rather than a setup one.
 	if (Params.NoiseTexture == nullptr)
 	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("GalaxyEntityGen: bUseGPUGeneration is on but NoiseTexture is unset, ")
-			TEXT("so this tier will generate NOTHING -- there is no CPU path behind it. ")
-			TEXT("Set it to the same volume texture the material samples."));
+		ensureMsgf(false,
+			TEXT("GalaxyEntityGen: NoiseTexture is unset, so the galaxy will generate ")
+			TEXT("NOTHING -- placement is GPU-only and the dispatch samples it. Set it to ")
+			TEXT("the same volume texture the material samples, with NEVER STREAM on the ")
+			TEXT("asset."));
 		return FailBatch();
 	}
 
@@ -452,16 +451,15 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 		Params.Seed + InSeedOffset,
 		Params.NoiseTexture,
 		MaxCandidates,
-		Params.bGPUForceNoiseOff,
-		Params.GPUReadbackTimeoutSeconds,
 		Entities, Counts);
 
 	if (!bOk)
 	{
 		UE_LOG(LogTemp, Warning,
 			TEXT("GalaxyEntityGen: dispatch or readback failed for %d cells; those slots ")
-			TEXT("will be EMPTY. Check GPUReadbackTimeoutSeconds and the log above for ")
-			TEXT("an RHI or shader complaint."), Cells.Num());
+			TEXT("will be EMPTY. Check the log above for an RHI or shader complaint; if ")
+			TEXT("it was the timeout, GalaxyEntityGen::ReadbackTimeoutSeconds says how long ")
+			TEXT("it waited."), Cells.Num());
 		return FailBatch();
 	}
 

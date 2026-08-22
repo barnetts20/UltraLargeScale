@@ -23,6 +23,11 @@ AGalaxyActor::AGalaxyActor()
 
 	// Default the placement noise texture to the same asset the material samples.
 	//
+	// NOT a convenience. Placement is GPU-only and the dispatch samples this texture,
+	// so an unset NoiseTexture means the galaxy generates nothing at all. Defaulting
+	// here is what keeps that a deliberate act rather than an easy accident; clearing
+	// it on an instance still fails, loudly, at the first batch.
+	//
 	// Resolved here rather than as a UPROPERTY default because FGalaxyParams is a
 	// USTRUCT: ConstructorHelpers only runs during UObject construction, so a plain
 	// struct cannot reference an asset by path at all. Assigned only when unset, so

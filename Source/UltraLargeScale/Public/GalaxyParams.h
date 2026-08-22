@@ -506,34 +506,12 @@ struct ULTRALARGESCALE_API FGalaxyParams : public FBaseParams
 	GENERATED_BODY()
 
 #pragma region GPU Generation
-	/** Route entity placement through the compute shader instead of the CPU.
+	/** The same volume texture the material samples. REQUIRED.
 	 *
-	 *  The compute path can sample the volume texture, so placement sees the warp and
-	 *  modulation the material draws rather than a texture-free approximation.
-	 *
-	 *  This and bGPUForceNoiseOff are MIGRATION SCAFFOLDING, not features. Two live
-	 *  paths mean two paths to maintain and only one that gets exercised; delete both
-	 *  flags and the CPU per-slot generators once the GPU path has proven itself. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Generation")
-	bool bUseGPUGeneration = true;
-
-	/** Zero InNoiseEnable in the dispatch only.
-	 *
-	 *  With noise off, GalaxySample degenerates to SampleAnalytic, so the GPU runs the
-	 *  identical function the CPU does and the two accepted sets should match. That is
-	 *  the migration's verification step -- a difference here is marshalling, not the
-	 *  field.
-	 *
-	 *  Defaults to false, so placement reads the texture. Set it true to reproduce the
-	 *  verification: mid and small tiers should then look exactly as they did on the
-	 *  CPU path, and any difference at THAT setting is marshalling rather than the
-	 *  field. Worth doing once if the noise-on result ever looks wrong, because it
-	 *  separates "the texture is reaching placement incorrectly" from "the texture is
-	 *  reaching placement and this is what it looks like". */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Generation")
-	bool bGPUForceNoiseOff = false;
-
-	/** The same volume texture the material samples.
+	 *  Placement is GPU-only, and the dispatch samples this. Without it the galaxy
+	 *  generates NOTHING -- there is no analytic path behind it any more. The actor's
+	 *  constructor assigns a default when this is left unset, so it is a requirement
+	 *  rather than a chore; clearing it deliberately is the case that fails.
 	 *
 	 *  Set NEVER STREAM on the asset. GalaxyDensity.ush reads mip 0 on both paths, but
 	 *  the material handles streaming residency and a compute dispatch does not: if
@@ -545,14 +523,6 @@ struct ULTRALARGESCALE_API FGalaxyParams : public FBaseParams
 	 *  shows up as a small plausible-looking difference rather than an obvious break. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Generation")
 	TObjectPtr<UVolumeTexture> NoiseTexture = nullptr;
-
-	/** Give up on the readback after this long and fall back to the CPU path.
-	 *
-	 *  Not paranoia: if the render thread is blocked -- synchronous load, hitch, PIE
-	 *  teardown -- the fence never lands, and a background worker spinning forever is
-	 *  a hang with no stack pointing at the cause. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Generation")
-	double GPUReadbackTimeoutSeconds = 2.0;
 #pragma endregion
 
 	// TODO: SEE IF WE CAN BRIDGE THE GAP TO REAL WORLD SCALE HERE, I THINK WE HIT PRECISION ISSUES THOUGH... UNIT SCALE AND POTENTIALLY STAR SYSTEM SCALES/PARAMS MAY NEED TO SHIFT
@@ -655,7 +625,7 @@ struct ULTRALARGESCALE_API FGalaxyParams : public FBaseParams
 		LargeTier.NeighborhoodRadius = 0;
 		LargeTier.SlotCapacity = 10000;
 		LargeTier.CandidateBudget = 15000;
-		
+
 		MidTier.GridDepth = 3;
 		MidTier.NeighborhoodRadius = 1;
 		MidTier.SlotCapacity = 8000;

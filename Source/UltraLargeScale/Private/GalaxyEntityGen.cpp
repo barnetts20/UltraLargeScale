@@ -26,7 +26,6 @@ namespace GalaxyEntityGen
 		int32 InKeySeed,
 		UTexture* InNoiseTexture,
 		int32 InMaxCandidates,
-		bool bForceNoiseOff,
 		TSharedRef<FGalaxyEntityGenRequest> OutRequest)
 	{
 		const int32 NumCells = InCells.Num();
@@ -126,7 +125,6 @@ namespace GalaxyEntityGen
 			float PlaceExtentMin = 0.0f;
 			float PlaceExtentMax = 0.0f;
 			float PlaceExtentExponent = 0.0f;
-			bool bForceNoiseOff = false;
 		};
 
 		TSharedRef<FDispatchPayload, ESPMode::ThreadSafe> Payload =
@@ -144,7 +142,6 @@ namespace GalaxyEntityGen
 		Payload->PlaceExtentMin = PlaceExtentMin;
 		Payload->PlaceExtentMax = PlaceExtentMax;
 		Payload->PlaceExtentExponent = PlaceExtentExponent;
-		Payload->bForceNoiseOff = bForceNoiseOff;
 
 		auto EnqueueOnRenderThread = [Payload, OutRequest, EntityReadback, CountReadbackPtr]() mutable
 			{
@@ -254,16 +251,6 @@ namespace GalaxyEntityGen
 						// MakeGalaxyDensityParams, both fail to compile, which is the intent.
 						Payload->Density.FillShaderParameters(*P);
 
-						// Step 2a: with noise off, GalaxySample degenerates to SampleAnalytic and
-						// the GPU runs the identical function the CPU does, so the accepted sets
-						// should match. Any difference at this setting is marshalling -- most
-						// likely struct layout, which the static_asserts catch first -- rather
-						// than the field.
-						if (Payload->bForceNoiseOff)
-						{
-							P->InNoiseEnable = 0.0f;
-						}
-
 						FGalaxyEntityGenCS::FPermutationDomain PermutationVector;
 						TShaderMapRef<FGalaxyEntityGenCS> ComputeShader(
 							GetGlobalShaderMap(GMaxRHIFeatureLevel), PermutationVector);
@@ -333,8 +320,6 @@ namespace GalaxyEntityGen
 		int32 InKeySeed,
 		UTexture* InNoiseTexture,
 		int32 InMaxCandidates,
-		bool bForceNoiseOff,
-		double InTimeoutSeconds,
 		TArray<FGalaxyEntityOut>& OutEntities,
 		TArray<uint32>& OutCounts)
 	{
@@ -355,22 +340,22 @@ namespace GalaxyEntityGen
 		TSharedRef<FGalaxyEntityGenRequest> Request = MakeShared<FGalaxyEntityGenRequest>();
 
 		Dispatch(InParams, InTierParams, InCells, InSlotStride, InKeySeed,
-			InNoiseTexture, InMaxCandidates, bForceNoiseOff, Request);
+			InNoiseTexture, InMaxCandidates, Request);
 
 		if (!Request->Readback.IsValid())
 		{
 			return false;
 		}
 
-		const double Deadline = FPlatformTime::Seconds() + InTimeoutSeconds;
+		const double Deadline = FPlatformTime::Seconds() + ReadbackTimeoutSeconds;
 
 		while (!Request->IsReady())
 		{
 			if (FPlatformTime::Seconds() > Deadline)
 			{
 				UE_LOG(LogTemp, Warning,
-					TEXT("GalaxyEntityGen: readback timed out after %.2fs; falling back to CPU generation."),
-					InTimeoutSeconds);
+					TEXT("GalaxyEntityGen: readback timed out after %.2fs; these slots get nothing."),
+					ReadbackTimeoutSeconds);
 				return false;
 			}
 
@@ -437,15 +422,15 @@ namespace GalaxyEntityGen
 			AsyncTask(ENamedThreads::GameThread, MoveTemp(EnqueueCopy));
 		}
 
-		const double CopyDeadline = FPlatformTime::Seconds() + InTimeoutSeconds;
+		const double CopyDeadline = FPlatformTime::Seconds() + ReadbackTimeoutSeconds;
 
 		while (!Request->bCopied)
 		{
 			if (FPlatformTime::Seconds() > CopyDeadline)
 			{
 				UE_LOG(LogTemp, Warning,
-					TEXT("GalaxyEntityGen: staging copy timed out after %.2fs; falling back to CPU generation."),
-					InTimeoutSeconds);
+					TEXT("GalaxyEntityGen: staging copy timed out after %.2fs; these slots get nothing."),
+					ReadbackTimeoutSeconds);
 				return false;
 			}
 

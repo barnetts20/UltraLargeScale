@@ -193,6 +193,19 @@ public:
 
 namespace GalaxyEntityGen
 {
+	/** Give up on the readback after this long.
+	 *
+	 *  A SAFETY VALVE, not a tuning knob, which is why it is a constant rather than a
+	 *  UPROPERTY: if the render thread is blocked -- synchronous load, hitch, PIE
+	 *  teardown -- the fence never lands, and a background worker spinning forever is a
+	 *  hang with no stack pointing at the cause. Nothing about a particular galaxy
+	 *  makes the right answer different, and exposing it invites tuning a deadlock
+	 *  detector instead of fixing the deadlock.
+	 *
+	 *  Two seconds is generous for a dispatch measured in microseconds. If this is ever
+	 *  hit on healthy hardware the timeout is not the problem. */
+	inline constexpr double ReadbackTimeoutSeconds = 2.0;
+
 	/** Enqueues the dispatch and a readback copy. Safe to call from the game thread;
 	 *  the work is deferred to the render thread.
 	 *
@@ -214,16 +227,9 @@ namespace GalaxyEntityGen
 	  *  serialise on a GPU round-trip each, and the latency compounds across a
 	  *  neighbourhood.
 	  *
-	  *  Returns false on timeout, leaving OutEntities untouched, so the caller can fall
-	  *  back to the CPU path. The timeout is not paranoia: if the render thread is
-	  *  blocked -- a synchronous load, a hitch, PIE teardown -- the fence never lands,
-	  *  and a background worker spinning forever is a hang with no stack pointing at
-	  *  the cause.
-	  *
-	  *  bForceNoiseOff zeroes InNoiseEnable so GalaxySample degenerates to
-	  *  SampleAnalytic and the GPU evaluates the identical function the CPU does. That
-	  *  is the migration's verification step: any difference is marshalling, not the
-	  *  field. */
+	  *  Returns false on timeout, leaving OutEntities untouched. There is no CPU path
+	  *  behind this any more, so the caller blanks the affected slots rather than
+	  *  filling them another way -- see GalaxyDataGenerator::GenerateTierBatchGPU. */
 	bool GenerateBatchBlocking(
 		const FGalaxyParams& InParams,
 		const FTierParams& InTierParams,
@@ -232,8 +238,6 @@ namespace GalaxyEntityGen
 		int32 InKeySeed,
 		UTexture* InNoiseTexture,
 		int32 InMaxCandidates,
-		bool bForceNoiseOff,
-		double InTimeoutSeconds,
 		TArray<FGalaxyEntityOut>& OutEntities,
 		TArray<uint32>& OutCounts);
 
@@ -245,6 +249,5 @@ namespace GalaxyEntityGen
 		int32 InKeySeed,
 		UTexture* InNoiseTexture,
 		int32 InMaxCandidates,
-		bool bForceNoiseOff,
 		TSharedRef<FGalaxyEntityGenRequest> OutRequest);
 }
