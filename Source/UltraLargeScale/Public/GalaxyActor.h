@@ -1,4 +1,6 @@
-﻿// GalaxyActor.h
+﻿//TODO: NEEDS TO SET PERLIN WORLEY BY DEFAULT AS VOLUME NOISE TEX
+
+// GalaxyActor.h
 // Full tier streaming system mirroring UniverseActor.
 // Large tier: exhaustive single-pass (NeighborhoodRadius=0), always loaded.
 // Mid/Small tiers: neighborhood streaming with cell cache.
