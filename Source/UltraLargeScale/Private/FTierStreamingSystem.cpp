@@ -77,15 +77,20 @@ void FTierStreamingSystem::InitializeTier(const FTierStreamingContext& Ctx, FPar
 		}
 
 		// Whole batch first if a batch generator is bound. It returns false when it
-		// could not run at all, and then nothing has been written and the per-slot
-		// path below fills the same slots as it always did.
+		// could not run at all; the per-slot path below then fills the same slots.
+		//
+		// A tier may bind EITHER, and a tier that binds only the batch generator has no
+		// per-slot path to fall back to -- the galaxy layer is now one of those. Calling
+		// an unbound TFunction asserts, so the fallback is guarded on the binding rather
+		// than on bBatchDone alone. A batch generator that fails is responsible for
+		// leaving its own slots in a sane state and for saying so.
 		bool bBatchDone = false;
 		if (Config.GenerateBatchCallback)
 		{
 			bBatchDone = Config.GenerateBatchCallback(ToGenerate, State.SlotCounts);
 		}
 
-		if (!bBatchDone)
+		if (!bBatchDone && Config.GenerateCallback)
 		{
 			ParallelFor(ToGenerate.Num(), [&Config, &ToGenerate, &PerSlotBufferPtrs](int32 i)
 				{
@@ -357,17 +362,18 @@ void FTierStreamingSystem::UpdateTier(const FTierStreamingContext& Ctx, FParticl
 					PerSlotBufferPtrs[i][b] = &State.Buffers[b];
 			}
 
-			// Same batch-first path as InitializeTier. Streaming updates are the
-			// common case by a wide margin -- the initial population happens once and
-			// every boundary cross after it comes through here -- so leaving this on
-			// the per-slot path would mean the GPU generator almost never ran.
+			// Same batch-first path as InitializeTier, and the same guard on the
+			// per-slot binding. Streaming updates are the common case by a wide margin
+			// -- the initial population happens once and every boundary cross after it
+			// comes through here -- so this is where a tier that binds only the batch
+			// generator spends nearly all of its life.
 			bool bBatchDone = false;
 			if (Config.GenerateBatchCallback)
 			{
 				bBatchDone = Config.GenerateBatchCallback(ToGenerate, State.SlotCounts);
 			}
 
-			if (!bBatchDone)
+			if (!bBatchDone && Config.GenerateCallback)
 			{
 				ParallelFor(ToGenerate.Num(), [&Config, &ToGenerate, &PerSlotBufferPtrs](int32 i)
 					{

@@ -24,8 +24,6 @@
 namespace GalaxyHLSL
 {
 	struct GalaxyDensityParams;
-	struct GalaxyPlacement;
-	struct GalaxyEntity;
 }
 
 /** Owns density evaluation and tier generation for the galaxy layer; mirrors
@@ -65,15 +63,6 @@ public:
 	 *  Always route it through GalaxyDensityParams::SpawnProbability first. */
 	float SampleDensity(const FVector& InNormPos) const;
 
-	/** Batch form. Same contract: raw optical depth out.
-	 *
-	 *  No longer used by generation. A slot must be decidable in isolation, so
-	 *  SampleEntity evaluates the field itself per candidate; batching would force
-	 *  the caller to hold every candidate before deciding any of them. Retained for
-	 *  the volume texture bake. */
-	void SampleDensityBatch(float* OutDensity, int32 InCount,
-		const float* InX, const float* InY, const float* InZ) const;
-
 #pragma endregion
 
 #pragma region Initialization
@@ -97,36 +86,17 @@ public:
 
 #pragma endregion
 
-#pragma region Tier Generation Callbacks
-	/** Self-contained generation functions that write directly into particle buffers;
-	 *  the galaxy actor's tier system calls them via
-	 *  FParticleTierConfig::GenerateCallback lambdas.
+#pragma region Tier Generation
+	/** Generation is GPU-ONLY for this layer. The per-slot CPU functions that used to
+	 *  sit here -- GenerateTierNode, GenerateLargeTierSlot and the MakePlacement helper
+	 *  they shared -- are gone, along with the FParticleTierConfig::GenerateCallback
+	 *  bindings that reached them.
 	 *
-	 *  A single function serves all tiers; Large/Mid/Small differ only in the
-	 *  candidate volume (full extent vs cell-local), the tier params (scale range,
-	 *  spawn and extent exponents), and the seed offset that separates tiers sharing
-	 *  a coordinate.
+	 *  They existed because the field had to stay resource-free to be reachable from
+	 *  the CPU, which is exactly the constraint the compute path was built to lift. A
+	 *  second implementation kept in agreement by hand would put it straight back.
 	 *
-	 *  Placement itself lives in GalaxyDensityCore.ush, so where a star spawns and
-	 *  where gas is drawn are one function rather than two kept in agreement by
-	 *  hand, and the eventual compute dispatch needs no second implementation. */
-	void GenerateTierNode(const FIntVector& InCoord, int32 InSlotIndex,
-		FNiagaraParticleBuffer& InBuffer, const FVector& InNodeCenter,
-		double InCellExtent, const FTierParams& InTierParams,
-		int32 InSeedOffset, int32& OutSlotCount) const;
-
-	void GenerateLargeTierSlot(int32 InSlotIndex, FNiagaraParticleBuffer& InBuffer,
-		int32& OutSlotCount) const;
-
-	/** Per-tier placement rules: acceptance mapping and extent range.
-	 *
-	 *  Separate from GalaxyDensityParams because these change per tier while the
-	 *  field does not, and because the large tier substitutes its own per-cell peak
-	 *  density for InDensityReference -- which a field-level parameter could not
-	 *  express. Built per call rather than cached: six floats and a reciprocal,
-	 *  against a derivation that runs sixteen arm hashes and a tan. */
-	GalaxyHLSL::GalaxyPlacement MakePlacement(const FTierParams& InTierParams,
-		float InDensityReference) const;
+	 *  The other two layers still bind GenerateCallback, so it stays on the config. */
 
 public:
 	/** GPU generation for a whole batch of tier slots, in one dispatch.
@@ -141,10 +111,11 @@ public:
 	 *  generation already runs on AnyBackgroundHiPriTask, so the wait costs a worker
 	 *  rather than a frame.
 	 *
-	 *  Returns false if the dispatch could not run or the readback timed out, in
-	 *  which case NOTHING has been written and the caller should fall back to the
-	 *  per-slot CPU path. Keeping that fallback is the point: a GPU path that fails
-	 *  closed leaves an empty galaxy with no indication of why. */
+	 *  Returns false if the dispatch could not run or the readback timed out. There is
+	 *  no CPU path behind it any more, so it FAILS CLOSED: the affected slots are
+	 *  blanked and their counts zeroed before returning, because a slot is reused as
+	 *  the player crosses boundaries and leaving it untouched would show the previous
+	 *  occupant's entities at a coord they no longer belong to. Every such path logs. */
 	 /** One cell of a GPU generation batch.
 	  *
 	  *  The CENTRE IS SUPPLIED, not derived. Grid-coord-to-centre lives on the actor,

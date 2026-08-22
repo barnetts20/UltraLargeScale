@@ -193,20 +193,26 @@ struct FParticleTierConfig
 	 *  parallel generation (InitializeTier and UpdateTier). Writes directly into
 	 *  each buffer's slot region. Receives the cell's grid Coord, the flat
 	 *  SlotIndex within the tier's buffers, and Buffers (one raw pointer per
-	 *  NiagaraAsset, this tier's back buffer). */
+	 *  NiagaraAsset, this tier's back buffer).
+	 *
+	 *  OPTIONAL. A tier may bind this, GenerateBatchCallback, or both; the star-system
+	 *  and universe layers bind only this one, the galaxy layer only the batch form.
+	 *  Both call sites check it is bound before invoking it. */
 	TFunction<void(const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers)> GenerateCallback;
 
 	/** Optional whole-batch generator, tried before GenerateCallback.
 	 *
 	 *  Exists because a GPU dispatch wants the batch, not a slot: per-slot dispatches
 	 *  serialise on a GPU round-trip each and the latency compounds across a
-	 *  neighbourhood. When bound and it returns true it has filled every queued slot
-	 *  and written SlotCounts; when it returns false NOTHING has been written and the
-	 *  per-slot ParallelFor runs as before.
+	 *  neighbourhood. Returning true means it has filled every queued slot and written
+	 *  SlotCounts; returning false means it could not run.
 	 *
-	 *  The fallback is not optional. A GPU path can fail for reasons that have nothing
-	 *  to do with this system -- a missing texture, a readback timeout during a hitch
-	 *  -- and failing closed would leave an empty tier with no indication of why. */
+	 *  The bool selects between the two paths for a tier that binds both. For a tier
+	 *  that binds only this one there is nothing to select, so false means those slots
+	 *  get nothing -- and the batch generator is then responsible for leaving them in a
+	 *  defined state (blanked, counts zeroed) and for logging why. Silently returning
+	 *  false from a batch-only tier produces an empty region with no explanation, which
+	 *  is the failure this system keeps being debugged for. */
 	TFunction<bool(const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutSlotCounts)> GenerateBatchCallback;
 
 	/** Returns the fixed AABB set once at InitializeTier as the Niagara bounds

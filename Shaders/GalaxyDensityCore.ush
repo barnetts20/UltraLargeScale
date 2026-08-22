@@ -104,12 +104,13 @@ GalaxyPlacement MakeGalaxyPlacement(
 // A candidate before the field has been consulted. Split out so the DENSITY SOURCE
 // is the caller's choice, exactly as it already is for the field itself: NoiseFrame
 // computes a coordinate in here, the wrapper fetches the texture, and the values come
-// back in. Placement now works the same way.
+// back in. Placement works the same way.
 //
-// Without this split SampleEntity would hardcode SampleAnalytic, and the textured
-// path -- warp and modulation -- would be permanently unreachable from placement. It
-// is the difference between the entity generator seeing the galaxy the material draws
-// and seeing a texture-free approximation of it.
+// MakeCandidate / FinishEntity IS THE CONTRACT the other layers copy. A single
+// SampleEntity that did both would have to name its own density source, and naming it
+// means hardcoding SampleAnalytic -- which puts the textured path, warp and modulation
+// included, permanently out of reach of placement. That convenience wrapper existed
+// while the CPU was the only caller; it is gone, and this split is what replaced it.
 struct GalaxyCandidate
 {
     float3 Pos; // caller's units
@@ -788,20 +789,6 @@ struct GalaxyDensityParams
               * PowSafe(InC.ExtentDraw, max(InPlace.ExtentExponent, 1e-3f));
 
         return E;
-    }
-
-    // Texture-free convenience: the two halves with SampleAnalytic between them.
-    // Correct wherever noise is off, and the only form the CPU could reach before
-    // placement moved to a compute dispatch.
-    GalaxyEntity SampleEntity(GalaxyPlacement InPlace, float3 InCellCentre,
-                              float InCellExtent, float InInvGalaxyExtent,
-                              int InCellX, int InCellY, int InCellZ, int InSlot)
-    {
-        GalaxyCandidate C = MakeCandidate(InCellCentre, InCellExtent,
-                                          InInvGalaxyExtent, InCellX, InCellY,
-                                          InCellZ, InSlot);
-
-        return FinishEntity(InPlace, C, SampleAnalytic(C.Norm));
     }
 
 

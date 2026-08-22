@@ -27,8 +27,6 @@ using GalaxyHLSL::float3;
 using GalaxyHLSL::float4;
 using GalaxyHLSL::GalaxyDensityParams;
 using GalaxyHLSL::MakeGalaxyDensityParams;
-using GalaxyHLSL::GalaxyEntity;
-using GalaxyHLSL::GalaxyPlacement;
 
 #pragma region Lifetime
 
@@ -84,25 +82,6 @@ GalaxyHLSL::GalaxyDensityParams FGalaxyDensityParams::ToDerived() const
 		bEnableNoise ? 1.0f : 0.0f);
 }
 
-GalaxyHLSL::GalaxyPlacement GalaxyDataGenerator::MakePlacement(
-	const FTierParams& InTierParams,
-	float InDensityReference) const
-{
-	// Extent converts through UnitScale HERE, so the field stays unit-agnostic and
-	// the conversion happens once in the place UnitScale already lives. AUTHORED SIZE
-	// IS TRUTH still holds: the real-unit range passes through UnitScale exactly once
-	// and nothing downstream reconstructs size from a quantized octree depth.
-	const double InvUnit = 1.0 / FMath::Max(Params.UnitScale, UE_DOUBLE_SMALL_NUMBER);
-
-	return GalaxyHLSL::MakeGalaxyPlacement(
-		InDensityReference,
-		Params.DensityParams.SpawnCompression,
-		InTierParams.SpawnExponent,
-		static_cast<float>(InTierParams.MinScale * InvUnit),
-		static_cast<float>(InTierParams.MaxScale * InvUnit),
-		InTierParams.ExtentExponent);
-}
-
 #pragma endregion
 
 #pragma region Density Sampling
@@ -121,26 +100,6 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 		static_cast<float>(InNormPos.X),
 		static_cast<float>(InNormPos.Y),
 		static_cast<float>(InNormPos.Z)));
-}
-
-void GalaxyDataGenerator::SampleDensityBatch(
-	float* OutDensity,
-	int32 InCount,
-	const float* InX,
-	const float* InY,
-	const float* InZ) const
-{
-	if (!Derived)
-	{
-		FMemory::Memzero(OutDensity, sizeof(float) * InCount);
-		return;
-	}
-
-	GalaxyDensityParams& P = *Derived;
-	for (int32 i = 0; i < InCount; ++i)
-	{
-		OutDensity[i] = P.SampleAnalytic(float3(InX[i], InY[i], InZ[i]));
-	}
 }
 
 #pragma endregion
@@ -346,22 +305,43 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 		return true;
 	}
 
+	// FAIL CLOSED, VISIBLY. There is no CPU path behind this any more, so a failure
+	// here means these slots get nothing -- and a slot is REUSED as the player crosses
+	// boundaries, so "nothing written" is not an empty slot, it is the previous
+	// occupant's entities still sitting there at a coord they no longer belong to.
+	// That reads as a placement bug rather than a generation failure.
+	//
+	// Blanking costs an empty region, which is honest, and the caller logs.
+	auto FailBatch = [&InCells, &InBuffer, &OutSlotCounts]() -> bool
+		{
+			OutSlotCounts.SetNumZeroed(InBuffer.SlotCoord.Num());
+
+			for (const FTierBatchCell& Cell : InCells)
+			{
+				if (OutSlotCounts.IsValidIndex(Cell.SlotIndex))
+				{
+					InBuffer.PadSlotDead(Cell.SlotIndex, 0);
+					OutSlotCounts[Cell.SlotIndex] = 0;
+				}
+			}
+
+			return false;
+		};
+
 	if (!Params.bUseGPUGeneration)
 	{
-		return false;
+		return FailBatch();
 	}
 
-	// SAY WHY, ONCE. Every bail here falls back to the CPU path and produces a
-	// perfectly ordinary-looking galaxy, so a misconfiguration is invisible: the only
-	// symptom of GPU generation never running is that placement quietly keeps
-	// ignoring the volume texture, which is the entire thing this was built to fix.
+	// SAY WHY, ONCE. A misconfiguration would otherwise surface only as a tier that
+	// never populates, which reads as a streaming problem rather than a setup one.
 	if (Params.NoiseTexture == nullptr)
 	{
 		UE_LOG(LogTemp, Warning,
-			TEXT("GalaxyEntityGen: bUseGPUGeneration is on but NoiseTexture is unset; ")
-			TEXT("falling back to CPU placement. Set it to the same volume texture the ")
-			TEXT("material samples."));
-		return false;
+			TEXT("GalaxyEntityGen: bUseGPUGeneration is on but NoiseTexture is unset, ")
+			TEXT("so this tier will generate NOTHING -- there is no CPU path behind it. ")
+			TEXT("Set it to the same volume texture the material samples."));
+		return FailBatch();
 	}
 
 	// One cell per queued slot. The KEY is the grid coord, never the dispatch index:
@@ -461,7 +441,7 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 			TEXT("%lld entries (%lld MB). Reduce CandidateBudget or split the batch."),
 			InCells.Num(), MaxCandidates, TotalThreads, TotalEntries,
 			(TotalEntries * static_cast<int64>(sizeof(FGalaxyEntityOut))) >> 20);
-		return false;
+		return FailBatch();
 	}
 
 	TArray<FGalaxyEntityOut> Entities;
@@ -479,9 +459,10 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	if (!bOk)
 	{
 		UE_LOG(LogTemp, Warning,
-			TEXT("GalaxyEntityGen: dispatch or readback failed for %d cells; ")
-			TEXT("falling back to CPU placement."), Cells.Num());
-		return false;
+			TEXT("GalaxyEntityGen: dispatch or readback failed for %d cells; those slots ")
+			TEXT("will be EMPTY. Check GPUReadbackTimeoutSeconds and the log above for ")
+			TEXT("an RHI or shader complaint."), Cells.Num());
+		return FailBatch();
 	}
 
 	// Confirms the compute path ran AND that it produced something. "The dispatch
@@ -610,98 +591,6 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	return true;
 }
 
-void GalaxyDataGenerator::GenerateTierNode(
-	const FIntVector& InCoord,
-	int32 InSlotIndex,
-	FNiagaraParticleBuffer& InBuffer,
-	const FVector& InNodeCenter,
-	double InCellExtent,
-	const FTierParams& InTierParams,
-	int32 InSeedOffset,
-	int32& OutSlotCount) const
-{
-	// -----------------------------------------------------------------------
-	// One slot at a time, decided entirely by its own key.
-	//
-	// FRandomStream is gone, and that is not merely a port. A stream made candidate
-	// i depend on every draw before it, so no entity could be produced without
-	// producing all of its predecessors -- fine in a loop, impossible for one thread
-	// per slot. Keying on (coord, slot) instead makes any entity recomputable alone
-	// and stops identity being "position in the append order", so a region
-	// regenerates identically after the player leaves and comes back.
-	//
-	// The three-phase batch that used to live here is gone with it: a slot has to be
-	// decidable in isolation, and batching would force every candidate to be held
-	// before any of them could be judged.
-	// -----------------------------------------------------------------------
-
-	if (!Derived)
-	{
-		InBuffer.PadSlotDead(InSlotIndex, 0);
-		OutSlotCount = 0;
-		return;
-	}
-
-	const int32 BufferStart = InSlotIndex * InBuffer.SlotCapacity;
-
-	// Fixed budget, variable acceptance. The candidate count no longer tracks the
-	// buffer's remaining room, so a cell's yield depends on the field there and
-	// nothing else.
-	const int32 NumCandidates = FMath::Max(InTierParams.CandidateBudget, 1);
-	const int32 MaxAccepted = InBuffer.SlotCapacity;
-
-	const float InvExtent = static_cast<float>(1.0 / static_cast<double>(Params.Extent));
-
-	const GalaxyPlacement Place = MakePlacement(
-		InTierParams, Params.DensityParams.SpawnDensityReference);
-
-	// InSeedOffset separates tiers that share a coordinate; the galaxy seed separates
-	// galaxies. Both fold into the key rather than into a stream, so nothing here is
-	// order dependent.
-	const int32 KeySeed = Params.Seed + InSeedOffset;
-
-	const float3 Centre(
-		static_cast<float>(InNodeCenter.X),
-		static_cast<float>(InNodeCenter.Y),
-		static_cast<float>(InNodeCenter.Z));
-
-	int32 ActualCount = 0;
-
-	for (int32 i = 0; i < NumCandidates && ActualCount < MaxAccepted; ++i)
-	{
-		const GalaxyEntity E = Derived->SampleEntity(
-			Place, Centre,
-			static_cast<float>(InCellExtent), InvExtent,
-			InCoord.X, InCoord.Y, InCoord.Z,
-			i * 977 + KeySeed);
-
-		if (E.bValid < 0.5f)
-		{
-			continue;
-		}
-
-		const int32 Idx = BufferStart + ActualCount;
-
-		InBuffer.Positions[Idx] = FVector(E.Pos.x, E.Pos.y, E.Pos.z);
-
-		// AUTHORED SIZE IS TRUTH: Extent already carries the real-unit range divided
-		// by UnitScale exactly once, in MakePlacement. Octree insert depth is derived
-		// later at insert time; never reconstruct size from the quantized depth, which
-		// would inflate every particle to its node extent and make sprite sizes
-		// octave-step with UnitScale.
-		InBuffer.Extents[Idx] = E.Extent;
-
-		// Three decorrelated uniforms on a second key, so colour is stable for a given
-		// entity without being tied to where it landed.
-		InBuffer.Colors[Idx] = FLinearColor(E.Decor.x, E.Decor.y, E.Decor.z);
-
-		++ActualCount;
-	}
-
-	InBuffer.PadSlotDead(InSlotIndex, ActualCount);
-	OutSlotCount = ActualCount;
-}
-
 #pragma endregion
 
 #pragma region Large Tier Culling
@@ -826,107 +715,6 @@ TArray<GalaxyDataGenerator::FActiveLargeTierCell> GalaxyDataGenerator::CollectAc
 		TotalCells > 0 ? 100.0f * static_cast<float>(ActiveCells.Num()) / static_cast<float>(TotalCells) : 0.0f);
 
 	return ActiveCells;
-}
-
-void GalaxyDataGenerator::GenerateLargeTierSlot(
-	int32 InSlotIndex,
-	FNiagaraParticleBuffer& InBuffer,
-	int32& OutSlotCount) const
-{
-	// -----------------------------------------------------------------------
-	// Collect active cells, then distribute the slot's candidate budget across them
-	// and rejection-sample inside each against ITS OWN peak density.
-	//
-	// The two halves have to be paired correctly or the distribution is wrong.
-	// Accepted count per cell is budget x mean(d)/envelope, and what we want is
-	// proportional to cell mass, i.e. to mean(d):
-	//
-	//   budget ~ max,  envelope = cellMax   -> accepted ~ mean          EXACT
-	//   budget ~ mean, envelope = globalRef -> accepted ~ mean^2        1.7x biased
-	//   budget ~ mean, envelope = cellMax   -> accepted ~ mean^2/max    3.9x biased
-	//
-	// So the budget weights on cell MAX, not cell mean. Weighting by mean while also
-	// rejecting by density counts the same factor twice and over-concentrates in the
-	// arms quadratically.
-	//
-	// The per-cell envelope is why the acceptance mapping lives in GalaxyPlacement
-	// rather than in the derived field: this tier substitutes its own reference,
-	// which a field-level parameter could not express. SpawnDensityReference stays
-	// the mapping for mid and small, which have no prepass to derive a local bound
-	// from; substituting it here would collapse acceptance by three orders.
-	// -----------------------------------------------------------------------
-
-	if (!Derived)
-	{
-		InBuffer.PadSlotDead(InSlotIndex, 0);
-		OutSlotCount = 0;
-		return;
-	}
-
-	const TArray<FActiveLargeTierCell> ActiveCells = CollectActiveLargeTierCells();
-	if (ActiveCells.Num() == 0)
-	{
-		InBuffer.PadSlotDead(InSlotIndex, 0);
-		OutSlotCount = 0;
-		return;
-	}
-
-	const int32 BufferStart = InSlotIndex * InBuffer.SlotCapacity;
-	const int32 MaxAccepted = InBuffer.SlotCapacity;
-	const float InvExtent = static_cast<float>(1.0 / static_cast<double>(Params.Extent));
-
-	// Never fewer candidates than cells: a cell that survived the prepass has
-	// structure in it and should get at least one draw.
-	const int32 Budget = FMath::Max(Params.LargeTier.CandidateBudget, ActiveCells.Num());
-
-	double TotalWeight = 0.0;
-	for (const FActiveLargeTierCell& Cell : ActiveCells)
-	{
-		TotalWeight += FMath::Max(static_cast<double>(Cell.MaxDensity), 1e-6);
-	}
-
-	int32 TotalAccepted = 0;
-
-	for (int32 ci = 0; ci < ActiveCells.Num() && TotalAccepted < MaxAccepted; ++ci)
-	{
-		const FActiveLargeTierCell& Cell = ActiveCells[ci];
-
-		const double Weight = FMath::Max(static_cast<double>(Cell.MaxDensity), 1e-6);
-		const int32 NumCandidates = FMath::Max(1,
-			FMath::RoundToInt(static_cast<double>(Budget) * Weight / TotalWeight));
-
-		const GalaxyPlacement Place = MakePlacement(Params.LargeTier, Cell.MaxDensity);
-
-		const float3 Centre(
-			static_cast<float>(Cell.Center.X),
-			static_cast<float>(Cell.Center.Y),
-			static_cast<float>(Cell.Center.Z));
-
-		for (int32 i = 0; i < NumCandidates && TotalAccepted < MaxAccepted; ++i)
-		{
-			const GalaxyEntity E = Derived->SampleEntity(
-				Place, Centre,
-				static_cast<float>(Cell.HalfExt), InvExtent,
-				Cell.GridCoord.X, Cell.GridCoord.Y, Cell.GridCoord.Z,
-				i * 977 + Params.Seed);
-
-			if (E.bValid < 0.5f)
-			{
-				continue;
-			}
-
-			const int32 Idx = BufferStart + TotalAccepted;
-
-			InBuffer.Positions[Idx] = FVector(E.Pos.x, E.Pos.y, E.Pos.z);
-			InBuffer.Extents[Idx] = E.Extent;
-			InBuffer.Colors[Idx] = FLinearColor(E.Decor.x, E.Decor.y, E.Decor.z);
-
-			++TotalAccepted;
-		}
-	}
-
-	InBuffer.PadSlotDead(InSlotIndex, TotalAccepted);
-	OutSlotCount = TotalAccepted;
 }
 
 #pragma endregion

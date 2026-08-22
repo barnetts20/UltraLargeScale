@@ -419,9 +419,11 @@ void AGalaxyActor::BuildTierConfigs()
 	// The large tier goes through the SAME GPU path as the others. It differs only in
 	// where its cells come from -- an active set from the cull prepass rather than a
 	// grid neighbourhood -- and in rejecting against each cell's own peak density
-	// instead of the global reference. Both are data, not a second code path, which is
-	// the point: one flow for every tier, and one thing to delete when the CPU path
-	// goes.
+	// instead of the global reference. Both are data, not a second code path.
+	//
+	// NO GenerateCallback. This layer is GPU-only: the batch callback is the whole
+	// generation path, and a false return means these slots are deliberately blanked
+	// rather than filled by something that cannot read the volume texture.
 	LargeTierConfig.GenerateBatchCallback =
 		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts) -> bool
 		{
@@ -436,8 +438,6 @@ void AGalaxyActor::BuildTierConfigs()
 				Cells, LargeTierState.Buffers[0], Params.LargeTier, 0, OutCounts);
 		};
 
-	LargeTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) { GalaxyGenerator.GenerateLargeTierSlot(SlotIndex, *Buffers[0], LargeTierState.SlotCounts[SlotIndex]); };
-
 	// --- Mid tier: neighborhood streaming ---
 	MidTierConfig.TierName = TEXT("Mid");
 	MidTierConfig.GridDepth = Params.MidTier.GridDepth;
@@ -448,10 +448,9 @@ void AGalaxyActor::BuildTierConfigs()
 	MidTierConfig.OctreeInsertBufferIndex = 0;
 	MidTierConfig.TierIndex = 1;
 	MidTierConfig.ShouldSkipCell = [this](const FIntVector& Coord) { return !CellOverlapsVolume(Coord, MidTierConfig.GridDepth); };
-	// GPU batch path, tried first. Returns false when it cannot run -- GPU generation
-	// disabled, no texture, readback timed out -- and the per-slot CPU callback below
-	// then fills the same slots exactly as before. The fallback is what keeps a GPU
-	// failure from silently producing an empty tier.
+	// The only generation path. Returns false when it cannot run -- GPU generation
+	// disabled, no texture, readback timed out -- and blanks the affected slots on the
+	// way out rather than leaving the previous occupant's entities in them.
 	//
 	// All three tiers run this same path. They differ only in where their cells come
 	// from and what each cell rejects against -- data, not a second code path.
@@ -482,12 +481,6 @@ void AGalaxyActor::BuildTierConfigs()
 				Cells, MidTierState.Buffers[0], Params.MidTier, 7, OutCounts);
 		};
 
-	MidTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
-		const FVector NodeCenter = GridCoordToCenter(Coord, MidTierConfig.GridDepth);
-		const double CellExt = GetGridCellExtent(MidTierConfig.GridDepth);
-		GalaxyGenerator.GenerateTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter, CellExt, Params.MidTier, 7, MidTierState.SlotCounts[SlotIndex]);
-		};
-
 	// --- Small tier: neighborhood streaming ---
 	SmallTierConfig.TierName = TEXT("Small");
 	SmallTierConfig.GridDepth = Params.SmallTier.GridDepth;
@@ -498,10 +491,9 @@ void AGalaxyActor::BuildTierConfigs()
 	SmallTierConfig.OctreeInsertBufferIndex = 0;
 	SmallTierConfig.TierIndex = 2;
 	SmallTierConfig.ShouldSkipCell = [this](const FIntVector& Coord) { return !CellOverlapsVolume(Coord, SmallTierConfig.GridDepth); };
-	// GPU batch path, tried first. Returns false when it cannot run -- GPU generation
-	// disabled, no texture, readback timed out -- and the per-slot CPU callback below
-	// then fills the same slots exactly as before. The fallback is what keeps a GPU
-	// failure from silently producing an empty tier.
+	// The only generation path. Returns false when it cannot run -- GPU generation
+	// disabled, no texture, readback timed out -- and blanks the affected slots on the
+	// way out rather than leaving the previous occupant's entities in them.
 	//
 	// All three tiers run this same path. They differ only in where their cells come
 	// from and what each cell rejects against -- data, not a second code path.
@@ -530,13 +522,6 @@ void AGalaxyActor::BuildTierConfigs()
 
 			return GalaxyGenerator.GenerateTierBatchGPU(
 				Cells, SmallTierState.Buffers[0], Params.SmallTier, 13, OutCounts);
-		};
-
-	SmallTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
-		const FVector NodeCenter = GridCoordToCenter(Coord, SmallTierConfig.GridDepth);
-		const double CellExt = GetGridCellExtent(SmallTierConfig.GridDepth);
-		GalaxyGenerator.GenerateTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter,
-			CellExt, Params.SmallTier, 23, SmallTierState.SlotCounts[SlotIndex]);
 		};
 
 	// Shared bounds convention — see the derivation in AUniverseActor::BuildTierConfigs. Tight half-bound is (2R+2) * CellHalfExtent; we provision 2 * (2R+1) to match the universe tiers. The previous (2R+1) * CellHalfExtent under-bounded by up to one half-cell when VT sat near a cell boundary, risking edge-cell culling pops.
