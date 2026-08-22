@@ -62,7 +62,7 @@ void Run()
 				FComputeShaderUtils::AddPass(
 					GraphBuilder,
 					RDG_EVENT_NAME("GalaxyGenProbe"),
-					ERDGPassFlags::Compute | ERDGPassFlags::NeverCull,
+					ERDGPassFlags::AsyncCompute,
 					ComputeShader,
 					P,
 					FIntVector(1, 1, 1));

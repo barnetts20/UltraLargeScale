@@ -270,13 +270,7 @@ namespace GalaxyEntityGen
 							// the current configuration does not support it, and a crash inside a
 							// background worker was a poor first result to debug. Switch it once
 							// this is measuring.
-							//
-							// NeverCull, because a culled pass and a pass that ran and wrote nothing
-							// are indistinguishable from the readback -- both give empty buffers
-							// with no error anywhere. RDG should keep this alive on the strength of
-							// the copy passes reading its UAVs; now that real data flows, try
-							// dropping it.
-							ERDGPassFlags::Compute | ERDGPassFlags::NeverCull,
+							ERDGPassFlags::AsyncCompute,
 							ComputeShader,
 							P,
 							Groups);
