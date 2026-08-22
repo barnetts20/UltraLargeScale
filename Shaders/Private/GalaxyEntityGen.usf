@@ -14,28 +14,6 @@
 #include "/Engine/Public/Platform.ush"
 #include "/UltraLargeScale/GalaxyDensity.ush"
 
-// BISECT SWITCH. The standalone probe proved the module, shader path, parameter
-// struct, UAV binding, dispatch and readback all work -- so the fault is in this
-// shader, and it is either the BINDINGS (this struct has two UAVs, an SRV, a texture
-// and forty loose parameters where the probe had one UAV) or the BODY.
-//
-// Set to 1 and MainCS does nothing but the marker write, with every parameter and
-// buffer still declared and still bound:
-//
-//   marker PRESENT -> bindings are fine, something in the body stops execution.
-//                     Re-enable and bisect the body: the density include, the cell
-//                     fetch, MakeGalaxyDensityParams.
-//   marker MISSING -> the bindings differ from the probe's in some way that matters.
-//                     Remove parameters from the struct and the .usf together until
-//                     it writes; the last one removed is the culprit.
-//
-// ANSWERED: with it at 1 the marker appeared and the parameters read back correctly
-// (NumCells 1448, CandidateBudget 38, SlotStride 8), which cleared the bindings and
-// left the dispatch itself -- a zero group count from a double-moved cell array.
-// Kept because it costs nothing at 0 and is the fastest way to re-split "bindings"
-// from "body" if this shader ever goes quiet again.
-#define GALAXY_ENTITYGEN_PROBE_ONLY 0
-
 // ---------------------------------------------------------------------------
 // OUTPUT
 //
@@ -59,10 +37,10 @@
 // A TYPED buffer of float4 triples, not a structured buffer of entities.
 //
 // The counters go through a typed RWBuffer and land; the entities went through a
-// structured one and came back zeroed -- positions, extents and the sentinel all
-// absent while the counters from the same dispatch were correct. Rather than keep
-// guessing at why the structured path fails here, this uses the mechanism already
-// proven to work in this pipeline.
+// structured one and came back zeroed -- positions and extents absent while the
+// counters from the same dispatch were correct. Rather than keep guessing at why the
+// structured path fails here, this uses the mechanism already proven to work in this
+// pipeline.
 //
 // The layout is unchanged: three float4s are the same forty-eight bytes in the same
 // order as the C++ mirror, so the readback still memcpys straight into it.
@@ -81,9 +59,13 @@ RWBuffer<float4> OutEntities;
 //   [2] the largest density any thread saw, as asuint
 //   [3] the Candidates value the shader READ from the cell buffer
 //
-// Zero accepted is ambiguous on its own -- a dispatch that never ran, one that ran
-// and saw an empty field, and one that ran on a healthy field and rejected everything
-// all read the same from the CPU. These three separate them in a single readback.
+// Only [0] is load-bearing. [1..3] are CALIBRATION, and the calibration is not
+// finished: [2] against SpawnDensityReference is what says whether the reference sits
+// anywhere near the density the field actually reaches, and [0] against SlotStride is
+// what says whether dense cells are saturating the run. Collapse this to a single
+// slot -- and the stride in GalaxyEntityGen.cpp and the scatter in
+// GalaxyDataGenerator.cpp with it -- once those two numbers have settled.
+//
 // asuint is monotonic for non-negative floats, so InterlockedMax over the bit pattern
 // orders exactly as the float does.
 RWBuffer<uint> OutCounts;
@@ -167,32 +149,6 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
     const uint Index = DispatchThreadId.x;
 
-    // ECHO THE PARAMETERS, at a FIXED index, before any arithmetic or guard.
-    //
-    // Everything downstream depends on these: CellIndex is Index / CandidateBudget,
-    // so a CandidateBudget of zero makes that division undefined, the resulting
-    // CellIndex fails the NumCells guard, and every thread returns -- zero threads,
-    // no marker, Candidates reading zero. That is every symptom we have, and it is
-    // indistinguishable from the dispatch never running.
-    //
-    // The previous marker could not test it, because its own index was computed from
-    // the parameters it was meant to be checking. Index 0 is valid in any buffer we
-    // allocate, so this one lands whatever the parameters say.
-    //
-    // Costs entity 0, which becomes a diagnostic record rather than a real entity.
-    // Temporary, and worth one entity to end six rounds of inference.
-    if (Index == 0u)
-    {
-        OutEntities[0] = float4(123456.0f, float(NumCells),
-                                float(CandidateBudget), float(SlotStride));
-    }
-
-#if GALAXY_ENTITYGEN_PROBE_ONLY
-    // Everything below is skipped, but every parameter above is still declared and
-    // bound exactly as it would be in the real dispatch.
-    return;
-#endif
-
     const uint CellIndex = Index / max(CandidateBudget, 1u);
     const uint Slot = Index - CellIndex * max(CandidateBudget, 1u);
 
@@ -201,17 +157,10 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
-    // SENTINEL, written through the STRUCTURED uav before anything can reject.
-    //
-    // Zero counters have two causes that look identical from the CPU: the dispatch
-    // never ran, or it ran and the writes are not landing. The counters go through a
-    // typed RWBuffer and the entities through a structured one, so writing a marker
-    // to the entity buffer separates them -- if the marker arrives, the shader
-    // executed and the typed UAV is the problem.
-    // Tallied here, BEFORE the per-cell budget test rather than after acceptance.
-    // A cell buffer that failed to bind reads as zeros, so Cell.Candidates would be
-    // zero, every thread would return, and a shader that ran perfectly well would
-    // report no threads at all.
+    // Tallied BEFORE the per-cell budget test rather than after acceptance. A cell
+    // buffer that failed to bind reads as zeros, so Cell.Candidates would be zero,
+    // every thread would return, and a shader that ran perfectly well would report
+    // no threads at all.
     uint ThreadTally;
     InterlockedAdd(OutCounts[CellIndex * 4u + 1u], 1u, ThreadTally);
 
@@ -226,7 +175,7 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     // their surplus threads land here. The large tier shares one budget across its
     // whole active set rather than giving every cell the full amount: its cell count
     // is whatever survives the cull, not a fixed neighbourhood, so per-cell budgeting
-    // turns a few thousand cells into hundreds of millions of threads.
+    // would turn a few thousand cells into hundreds of millions of threads.
     if (Slot >= Cell.Candidates)
     {
         return;

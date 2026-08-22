@@ -202,7 +202,7 @@ namespace GalaxyEntityGen
 						// Typed float4 elements, three per entity: same bytes, a view the
 						// pipeline has already shown it can write through.
 						FRDGBufferDesc EntityDesc =
-							FRDGBufferDesc::CreateBufferDesc(sizeof(FVector4f), (Total + 1) * 3);
+							FRDGBufferDesc::CreateBufferDesc(sizeof(FVector4f), Total * 3);
 						EntityDesc.Usage |= EBufferUsageFlags::SourceCopy;
 
 						FRDGBufferRef EntityBuffer = GraphBuilder.CreateBuffer(
@@ -273,40 +273,22 @@ namespace GalaxyEntityGen
 							FMath::DivideAndRoundUp(ThreadCount,
 								static_cast<int32>(FGalaxyEntityGenCS::ThreadGroupSize)), 1, 1);
 
-						// The last unlogged quantity in the chain, and the only one computed
-						// inside the render command where nothing else could see it.
-						//
-						// A zero group count dispatches nothing, silently: no error, no RDG
-						// complaint, and buffers that come back exactly as cleared. That is
-						// every symptom, and the standalone probe cannot exhibit it because its
-						// group count is the literal FIntVector(1,1,1).
-						static bool bDispatchAnnounced = false;
-						if (!bDispatchAnnounced)
-						{
-							bDispatchAnnounced = true;
-							UE_LOG(LogTemp, Display,
-								TEXT("GalaxyEntityGen DISPATCH: cells %d, budget %d, threads %d, ")
-								TEXT("groups %d, entity buffer %d records, valid shader %d"),
-								Cells.Num(), CandidateBudget, ThreadCount, Groups.X, Total + 1,
-								ComputeShader.IsValid() ? 1 : 0);
-						}
-
 						FComputeShaderUtils::AddPass(
 							GraphBuilder,
 							RDG_EVENT_NAME("GalaxyEntityGen"),
-							// Async so the dispatch overlaps the graphics pipe instead of
-							// serialising against it. It is a pure producer -- it writes a buffer
-							// nothing else in the frame reads -- so there is no barrier for RDG
-							// to insert on the critical path.
-							// Compute, not AsyncCompute, until the path is proven. Async overlaps
-						// the graphics pipe but asserts where the platform or the current
-						// configuration does not support it, and a crash inside a background
-						// worker is a poor first result. Switch it once this is measuring.
+							// Compute, not AsyncCompute, until the path is proven. This is a pure
+							// producer -- it writes a buffer nothing else in the frame reads -- so
+							// there is no barrier for RDG to insert on the critical path and it
+							// should overlap the graphics pipe. Async asserts where the platform or
+							// the current configuration does not support it, and a crash inside a
+							// background worker was a poor first result to debug. Switch it once
+							// this is measuring.
+							//
 							// NeverCull, because a culled pass and a pass that ran and wrote nothing
 							// are indistinguishable from the readback -- both give empty buffers
 							// with no error anywhere. RDG should keep this alive on the strength of
-							// the copy passes reading its UAVs, but "should" is what has cost the
-							// last several rounds; stating it removes the question.
+							// the copy passes reading its UAVs; now that real data flows, try
+							// dropping it.
 							ERDGPassFlags::Compute | ERDGPassFlags::NeverCull,
 							ComputeShader,
 							P,
@@ -317,7 +299,7 @@ namespace GalaxyEntityGen
 						// readback stalls the render thread for the full pipeline depth, and the
 						// caller polls IsReady() over the following frames instead.
 						AddEnqueueCopyPass(GraphBuilder, EntityReadback, EntityBuffer,
-							static_cast<uint32>(Total + 1) * sizeof(FGalaxyEntityOut));
+							static_cast<uint32>(Total) * sizeof(FGalaxyEntityOut));
 
 						AddEnqueueCopyPass(GraphBuilder, CountReadbackPtr, CountBuffer,
 							static_cast<uint32>(Cells.Num()) * 4u * sizeof(uint32));
@@ -329,24 +311,9 @@ namespace GalaxyEntityGen
 					});
 			};
 
-		// WHICH ROUTE THIS TOOK MATTERS and is worth recording.
-		//
 		// InitializeTier issues its batch inline; UpdateTier runs on a background
-		// worker, so its batch is marshalled and the enqueue happens a hop later. If
-		// one tier produces entities and another does not, that hop is the difference
-		// between them, and inferring it from which tier failed is guesswork.
+		// worker, so its batch is marshalled and the enqueue happens a hop later.
 		const bool bInline = IsInGameThread();
-
-		static bool bRouteAnnounced = false;
-		if (!bRouteAnnounced)
-		{
-			bRouteAnnounced = true;
-			UE_LOG(LogTemp, Display,
-				TEXT("GalaxyEntityGen: dispatch issued %s (%d cells)."),
-				bInline ? TEXT("INLINE on the game thread")
-				: TEXT("MARSHALLED from a background worker"),
-				NumCells);
-		}
 
 		if (bInline)
 		{
@@ -434,8 +401,7 @@ namespace GalaxyEntityGen
 				ENQUEUE_RENDER_COMMAND(GalaxyEntityGenCopy)(
 					[Req, Total, NumCells](FRHICommandListImmediate&) mutable
 					{
-						// Total + 1: the last record is the shader's sentinel, not an entity.
-						const uint32 Bytes = static_cast<uint32>(Total + 1) * sizeof(FGalaxyEntityOut);
+						const uint32 Bytes = static_cast<uint32>(Total) * sizeof(FGalaxyEntityOut);
 						const uint32 CountBytes = static_cast<uint32>(NumCells) * 4u * sizeof(uint32);
 
 						const FGalaxyEntityOut* Src =
@@ -443,7 +409,7 @@ namespace GalaxyEntityGen
 
 						if (Src)
 						{
-							Req->Entities.SetNumUninitialized(Total + 1);
+							Req->Entities.SetNumUninitialized(Total);
 							FMemory::Memcpy(Req->Entities.GetData(), Src, Bytes);
 						}
 						Req->Readback->Unlock();
@@ -486,7 +452,7 @@ namespace GalaxyEntityGen
 			FPlatformProcess::Sleep(0.0005f);
 		}
 
-		if (Request->Entities.Num() != Total + 1 || Request->Counts.Num() != NumCells * 4)
+		if (Request->Entities.Num() != Total || Request->Counts.Num() != NumCells * 4)
 		{
 			return false;
 		}
@@ -494,8 +460,9 @@ namespace GalaxyEntityGen
 		OutEntities = MoveTemp(Request->Entities);
 		OutCounts = MoveTemp(Request->Counts);
 
-		// Only slot 0 of each triple is an accepted count; slots 1 and 2 are the thread
-		// tally and the max density, and clamping those would destroy the diagnostic.
+		// Only slot 0 of each group is an accepted count; slots 1, 2 and 3 are the
+		// thread tally, the max density and the Candidates value the shader read, and
+		// clamping those would destroy the calibration.
 		//
 		// The shader's atomic counts EVERY acceptance, including the ones it then drops
 		// for exceeding the run, so slot 0 is clamped to keep the scatter in bounds.
