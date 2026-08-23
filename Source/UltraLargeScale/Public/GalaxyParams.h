@@ -389,16 +389,29 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Render", meta = (ClampMin = "0.0"))
 	float MasterDensityPower = 1.0f;
 
-	/** THE DENSITY AT WHICH A CANDIDATE ALWAYS SPAWNS.
+	/** THE DENSITY AT WHICH A CELL DRAWS ITS TIER'S FULL CANDIDATE BUDGET.
 	 *
-	 *  The field is an optical depth and is deliberately unbounded -- it peaks near
-	 *  260 at the default tuning while 83% of the volume sits under 0.01. Feeding it
-	 *  to the rejection test directly would accept every candidate above 1.0, which
-	 *  is the arms, the inner disc and the whole bulge, erasing exactly the structure
-	 *  the field describes.
+	 *  ITS ROLE CHANGED. This was the rejection envelope: every candidate everywhere
+	 *  was measured against it. Every tier now rejects against ITS OWN CELL'S peak
+	 *  instead (see GalaxyDataGenerator::ApplyCellEnvelopes), because the field is an
+	 *  unbounded optical depth spanning four decades -- it peaks near 260 at the
+	 *  default tuning while 83% of the volume sits under 0.01 -- and one global number
+	 *  cannot serve both ends. Against a global reference, dense cells sat at
+	 *  probability 1 throughout and rendered as structureless mush while sparse cells
+	 *  spawned almost nothing.
 	 *
-	 *  Dividing by this reference restores a probability. Star count scales roughly
-	 *  as 1/reference, so retune tier capacities alongside it. */
+	 *  What it anchors now is the BUDGET. A cell whose peak reaches this draws the full
+	 *  tier budget; fainter cells draw proportionally fewer candidates and so accept
+	 *  proportionally fewer entities, which is what carries structure between cells now
+	 *  that each cell is normalised to itself.
+	 *
+	 *  SET IT NEAR THE FIELD'S PEAK, not below it. Too low and most cells clamp at the
+	 *  tier budget, flattening inter-cell contrast at the top end -- ApplyCellEnvelopes
+	 *  warns when that is happening. Unlike the old role, raising it no longer costs
+	 *  acceptance rate; it only re-anchors the budget.
+	 *
+	 *  Star count still scales roughly as 1/reference, so retune tier capacities
+	 *  alongside it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Spawn", meta = (ClampMin = "0.001"))
 	float SpawnDensityReference = 10.0f;
 

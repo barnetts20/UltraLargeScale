@@ -453,12 +453,13 @@ void AGalaxyActor::BuildTierConfigs()
 	MidTierConfig.OctreeInsertBufferIndex = 0;
 	MidTierConfig.TierIndex = 1;
 	MidTierConfig.ShouldSkipCell = [this](const FIntVector& Coord) { return !CellOverlapsVolume(Coord, MidTierConfig.GridDepth); };
-	// The only generation path. Returns false when it cannot run -- GPU generation
-	// disabled, no texture, readback timed out -- and blanks the affected slots on the
-	// way out rather than leaving the previous occupant's entities in them.
+	// The only generation path. Returns false when it cannot run -- no texture, readback
+	// timed out -- and blanks the affected slots on the way out rather than leaving the
+	// previous occupant's entities in them.
 	//
 	// All three tiers run this same path. They differ only in where their cells come
-	// from and what each cell rejects against -- data, not a second code path.
+	// from -- a streamed neighbourhood here, a culled active set for the large tier --
+	// which is data, not a second code path.
 	MidTierConfig.GenerateBatchCallback =
 		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts) -> bool
 		{
@@ -478,9 +479,19 @@ void AGalaxyActor::BuildTierConfigs()
 				Cell.SlotIndex = Slot.Value;
 				Cell.Centre = GridCoordToCenter(Slot.Key, MidTierConfig.GridDepth);
 				Cell.HalfExtent = CellExt;
-				Cell.DensityReference = 0.0f; // global reference
 				Cells.Add(Cell);
 			}
+
+			// Per-cell rejection envelope, and a candidate budget weighted by it.
+			//
+			// These two tiers used to pass DensityReference = 0, meaning the global
+			// reference. Against a field that runs four decades that made acceptance
+			// bimodal rather than low: dense cells sat at probability 1 everywhere,
+			// accepted nearly every candidate, overflowed their run and rendered as
+			// structureless mush, while sparse cells starved. The large tier has
+			// rejected against its own cell peaks since its cull prepass existed; this
+			// is the same treatment, from the same helper.
+			GalaxyGenerator.ApplyCellEnvelopes(Cells, Params.MidTier);
 
 			return GalaxyGenerator.GenerateTierBatchGPU(
 				Cells, MidTierState.Buffers[0], Params.MidTier, 7, OutCounts);
@@ -496,12 +507,13 @@ void AGalaxyActor::BuildTierConfigs()
 	SmallTierConfig.OctreeInsertBufferIndex = 0;
 	SmallTierConfig.TierIndex = 2;
 	SmallTierConfig.ShouldSkipCell = [this](const FIntVector& Coord) { return !CellOverlapsVolume(Coord, SmallTierConfig.GridDepth); };
-	// The only generation path. Returns false when it cannot run -- GPU generation
-	// disabled, no texture, readback timed out -- and blanks the affected slots on the
-	// way out rather than leaving the previous occupant's entities in them.
+	// The only generation path. Returns false when it cannot run -- no texture, readback
+	// timed out -- and blanks the affected slots on the way out rather than leaving the
+	// previous occupant's entities in them.
 	//
 	// All three tiers run this same path. They differ only in where their cells come
-	// from and what each cell rejects against -- data, not a second code path.
+	// from -- a streamed neighbourhood here, a culled active set for the large tier --
+	// which is data, not a second code path.
 	SmallTierConfig.GenerateBatchCallback =
 		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts) -> bool
 		{
@@ -521,9 +533,19 @@ void AGalaxyActor::BuildTierConfigs()
 				Cell.SlotIndex = Slot.Value;
 				Cell.Centre = GridCoordToCenter(Slot.Key, SmallTierConfig.GridDepth);
 				Cell.HalfExtent = CellExt;
-				Cell.DensityReference = 0.0f; // global reference
 				Cells.Add(Cell);
 			}
+
+			// Per-cell rejection envelope, and a candidate budget weighted by it.
+			//
+			// These two tiers used to pass DensityReference = 0, meaning the global
+			// reference. Against a field that runs four decades that made acceptance
+			// bimodal rather than low: dense cells sat at probability 1 everywhere,
+			// accepted nearly every candidate, overflowed their run and rendered as
+			// structureless mush, while sparse cells starved. The large tier has
+			// rejected against its own cell peaks since its cull prepass existed; this
+			// is the same treatment, from the same helper.
+			GalaxyGenerator.ApplyCellEnvelopes(Cells, Params.SmallTier);
 
 			return GalaxyGenerator.GenerateTierBatchGPU(
 				Cells, SmallTierState.Buffers[0], Params.SmallTier, 13, OutCounts);

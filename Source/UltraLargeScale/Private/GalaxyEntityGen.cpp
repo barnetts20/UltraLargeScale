@@ -263,8 +263,7 @@ namespace GalaxyEntityGen
 						FComputeShaderUtils::AddPass(
 							GraphBuilder,
 							RDG_EVENT_NAME("GalaxyEntityGen"),
-							// Compute, not AsyncCompute, until the path is proven. This is a pure
-							// producer -- it writes a buffer nothing else in the frame reads -- so
+							// This is a pure producer -- it writes a buffer nothing else in the frame reads -- so
 							// there is no barrier for RDG to insert on the critical path and it
 							// should overlap the graphics pipe. Async asserts where the platform or
 							// the current configuration does not support it, and a crash inside a

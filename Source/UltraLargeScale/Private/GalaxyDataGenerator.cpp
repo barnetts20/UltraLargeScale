@@ -102,6 +102,110 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 		static_cast<float>(InNormPos.Z)));
 }
 
+float GalaxyDataGenerator::EnvelopePadding() const
+{
+	// TWO errors to cover, and only one of them is a fixed factor.
+	//
+	// The first is sampling: the estimate is a max over 32 points, so it under-shoots
+	// the true peak inside the cell by an amount that depends on how sharp the field is
+	// there. That is the fixed part.
+	//
+	// The second is SYSTEMATIC and was being ignored. The probes run SampleAnalytic on
+	// the CPU while the dispatch rejects against GalaxySample, which multiplies by
+	// max(1 + Amount * n, 0) with n roughly in [-1,1]. The textured field can therefore
+	// reach (1 + Amount) times the analytic value at the same point, and the LARGEST
+	// per-layer amount bounds it because a candidate can land in any layer.
+	//
+	// A fixed 1.5 covered this only while every amount stayed under 0.5.
+	// BackgroundNoiseAmount defaults to 1.0 and BulgeNoiseAmount to 0.5, so the
+	// envelope was already being exceeded at default tuning -- and an exceeded envelope
+	// clips the ratio at 1, flattening exactly the peaks the prepass went looking for.
+	//
+	// Erring high costs acceptance rate; erring low costs fidelity, and only one of
+	// those is recoverable.
+	constexpr float SampleMiss = 1.15f;
+
+	const FGalaxyDensityParams& D = Params.DensityParams;
+
+	if (!D.bEnableNoise)
+	{
+		return SampleMiss;
+	}
+
+	const float MaxAmount = FMath::Max(
+		FMath::Max(D.ArmNoiseAmount, D.DiscNoiseAmount),
+		FMath::Max(D.BulgeNoiseAmount, D.BackgroundNoiseAmount));
+
+	return SampleMiss * (1.0f + FMath::Max(MaxAmount, 0.0f));
+}
+
+float GalaxyDataGenerator::EstimateCellEnvelope(
+	const FIntVector& InCoord,
+	const FVector& InCentre,
+	double InHalfExtent) const
+{
+	// 8 corner offsets in cell-local space (+/-HalfExtent on each axis).
+	static const FVector CornerOffsets[8] =
+	{
+		FVector(-1, -1, -1), FVector(1, -1, -1),
+		FVector(-1,  1, -1), FVector(1,  1, -1),
+		FVector(-1, -1,  1), FVector(1, -1,  1),
+		FVector(-1,  1,  1), FVector(1,  1,  1),
+	};
+
+	constexpr int32 InteriorProbes = 24;
+
+	const double InvExtent = 1.0 / FMath::Max(static_cast<double>(Params.Extent), 1e-9);
+
+	// The candidate span MakeCandidate uses is +/-HalfExtent about the centre, so the
+	// probes cover exactly the region the envelope has to bound. Sampling a smaller
+	// region would leave candidates outside it rejecting against a peak that does not
+	// apply to them.
+	float CellMax = 0.0f;
+
+	auto Probe = [this, InvExtent, &CellMax](const FVector& InPoint)
+		{
+			const FVector Norm = InPoint * InvExtent;
+
+			// SampleDensity already returns zero outside the field, but an explicit
+			// check skips the full evaluation for points clearly beyond the extents.
+			if (FMath::Abs(Norm.X) > 1.0 ||
+				FMath::Abs(Norm.Y) > 1.0 ||
+				FMath::Abs(Norm.Z) > 1.0)
+			{
+				return;
+			}
+
+			CellMax = FMath::Max(CellMax, SampleDensity(Norm));
+		};
+
+	for (int32 c = 0; c < 8; ++c)
+	{
+		Probe(InCentre + CornerOffsets[c] * InHalfExtent);
+	}
+
+	// Seeded from the CELL COORD, not from anything about the batch. The same cell must
+	// yield the same envelope whichever neighbourhood it arrives in, or its candidate
+	// budget shifts between visits and the region regenerates differently.
+	const int32 CellHash = HashCombine(
+		HashCombine(GetTypeHash(InCoord.X), GetTypeHash(InCoord.Y)),
+		GetTypeHash(InCoord.Z));
+
+	FRandomStream ProbeStream(HashCombine(Params.Seed, CellHash));
+
+	for (int32 p = 0; p < InteriorProbes; ++p)
+	{
+		Probe(InCentre + FVector(
+			ProbeStream.FRandRange(-InHalfExtent, InHalfExtent),
+			ProbeStream.FRandRange(-InHalfExtent, InHalfExtent),
+			ProbeStream.FRandRange(-InHalfExtent, InHalfExtent)));
+	}
+
+	// Zero means empty, and stays exactly zero so the caller can test it. Padding is
+	// applied only to a real peak.
+	return (CellMax > 0.0f) ? CellMax * EnvelopePadding() : 0.0f;
+}
+
 #pragma endregion
 
 #pragma region Initialization
@@ -280,6 +384,81 @@ bool GalaxyDataGenerator::BuildLargeTierCells(
 	}
 
 	return true;
+}
+
+void GalaxyDataGenerator::ApplyCellEnvelopes(
+	TArray<FTierBatchCell>& InOutCells,
+	const FTierParams& InTierParams) const
+{
+	// The budget anchor. A cell whose peak reaches this draws the full tier budget;
+	// everything fainter draws proportionally fewer candidates and therefore accepts
+	// proportionally fewer entities, which is what carries the structure BETWEEN cells
+	// now that each cell rejects against its own peak.
+	const float GlobalReference =
+		FMath::Max(Params.DensityParams.SpawnDensityReference, 1e-3f);
+
+	const int32 Budget = FMath::Max(InTierParams.CandidateBudget, 1);
+
+	int32 ClampedCells = 0;
+	int32 EmptyCells = 0;
+
+	for (FTierBatchCell& Cell : InOutCells)
+	{
+		const float Envelope = EstimateCellEnvelope(Cell.Coord, Cell.Centre, Cell.HalfExtent);
+
+		if (Envelope <= 0.0f)
+		{
+			// Nothing here. The cell still has to appear in the batch so its slot gets
+			// padded dead, but it should not spend threads.
+			//
+			// One candidate rather than zero because zero is already spoken for:
+			// FTierBatchCell::Candidates uses it to mean "take the tier's budget", so a
+			// literal zero would hand this cell the full budget instead of none.
+			Cell.DensityReference = GlobalReference;
+			Cell.Candidates = 1;
+			++EmptyCells;
+			continue;
+		}
+
+		Cell.DensityReference = Envelope;
+
+		// Clamped at the tier budget so the dispatch stride -- which is the LARGEST
+		// per-cell budget -- cannot be inflated by one unusually dense cell.
+		const int32 Weighted = FMath::RoundToInt(
+			static_cast<double>(Budget) * static_cast<double>(Envelope)
+			/ static_cast<double>(GlobalReference));
+
+		Cell.Candidates = FMath::Clamp(Weighted, 1, Budget);
+
+		if (Weighted > Budget)
+		{
+			++ClampedCells;
+		}
+	}
+
+	// Clamping means the cell wanted more candidates than the anchor allows, so its
+	// accepted count no longer tracks its mass and inter-cell contrast flattens at the
+	// top end. A few clamped cells are fine; a lot means SpawnDensityReference is sitting
+	// well below what the field actually reaches and should be raised toward its peak.
+	//
+	// Note this is the OPPOSITE reason to the one the reference used to be raised for.
+	// It is no longer the rejection envelope for these tiers -- the per-cell peak is --
+	// so raising it no longer costs acceptance. It only re-anchors the budget.
+	if (ClampedCells * 4 > InOutCells.Num())
+	{
+		static bool bWarnedClamp = false;
+		if (!bWarnedClamp)
+		{
+			bWarnedClamp = true;
+			UE_LOG(LogTemp, Warning,
+				TEXT("GalaxyEntityGen: %d of %d cells clamped at the tier budget (%d empty). ")
+				TEXT("SpawnDensityReference %.3f is below the field's working range, so ")
+				TEXT("candidate budgets are pinned and inter-cell contrast is flattening. ")
+				TEXT("Raise it toward the peak density the field actually reaches."),
+				ClampedCells, InOutCells.Num(), EmptyCells,
+				Params.DensityParams.SpawnDensityReference);
+		}
+	}
 }
 
 bool GalaxyDataGenerator::GenerateTierBatchGPU(
@@ -609,9 +788,9 @@ TArray<GalaxyDataGenerator::FActiveLargeTierCell> GalaxyDataGenerator::CollectAc
 	// A jittered interior set costs a few more evaluations in a prepass that runs
 	// once per galaxy.
 	//
-	// The peak is padded because it remains an estimate from a finite sample. Erring
-	// high costs acceptance rate; erring low costs fidelity, and only one of those is
-	// recoverable.
+	// The sampling and the padding both live in EstimateCellEnvelope, which the mid and
+	// small tiers now share -- this prepass differs from them only in walking the whole
+	// grid rather than a streamed neighbourhood.
 	// -----------------------------------------------------------------------
 
 	const int32 CullDepth = FMath::Max(Params.LargeTierCullDepth, 1);
@@ -619,21 +798,6 @@ TArray<GalaxyDataGenerator::FActiveLargeTierCell> GalaxyDataGenerator::CollectAc
 	const double FullExtent = static_cast<double>(Params.Extent);
 	const double CellFull = (2.0 * FullExtent) / static_cast<double>(GridSide);
 	const double HalfCell = CellFull * 0.5;
-	const double InvExtent = 1.0 / FullExtent;
-
-	// 8 corner offsets in cell-local space (+/-HalfCell on each axis)
-	static const FVector CornerOffsets[8] =
-	{
-		FVector(-1, -1, -1), FVector(1, -1, -1),
-		FVector(-1,  1, -1), FVector(1,  1, -1),
-		FVector(-1, -1,  1), FVector(1, -1,  1),
-		FVector(-1,  1,  1), FVector(1,  1,  1),
-	};
-
-	// Interior probes per cell, on top of the 8 corners. Deterministic so the cell set
-	// is reproducible for a given seed.
-	const int32 InteriorProbes = 24;
-	const float EnvelopePad = 1.5f;
 
 	const int32 TotalCells = GridSide * GridSide * GridSide;
 	TArray<FActiveLargeTierCell> ActiveCells;
@@ -652,55 +816,17 @@ TArray<GalaxyDataGenerator::FActiveLargeTierCell> GalaxyDataGenerator::CollectAc
 					-FullExtent + HalfCell + static_cast<double>(iz) * CellFull);
 
 				// No early-out: we need the PEAK, not merely "is anything here".
-				float CellMax = 0.0f;
+				// Already padded, and zero exactly when the cell is empty.
+				const FIntVector Coord(ix, iy, iz);
+				const float Envelope = EstimateCellEnvelope(Coord, Center, HalfCell);
 
-				for (int32 c = 0; c < 8; ++c)
-				{
-					const FVector CornerNorm = (Center + CornerOffsets[c] * HalfCell) * InvExtent;
-
-					// Hard bounds check: SampleDensity already returns 0 beyond the
-					// unit sphere, but an explicit check skips the full evaluation
-					// for corners clearly outside the extents.
-					if (FMath::Abs(CornerNorm.X) > 1.0 ||
-						FMath::Abs(CornerNorm.Y) > 1.0 ||
-						FMath::Abs(CornerNorm.Z) > 1.0)
-					{
-						continue;
-					}
-
-					CellMax = FMath::Max(CellMax, SampleDensity(CornerNorm));
-				}
-
-				// Interior probes. Seeded from the grid coordinate so the same cell
-				// yields the same probes on every regeneration.
-				const int32 CellHash = HashCombine(
-					HashCombine(GetTypeHash(ix), GetTypeHash(iy)), GetTypeHash(iz));
-				FRandomStream ProbeStream(HashCombine(Params.Seed, CellHash));
-
-				for (int32 p = 0; p < InteriorProbes; ++p)
-				{
-					const FVector ProbeNorm = (Center + FVector(
-						ProbeStream.FRandRange(-HalfCell, HalfCell),
-						ProbeStream.FRandRange(-HalfCell, HalfCell),
-						ProbeStream.FRandRange(-HalfCell, HalfCell))) * InvExtent;
-
-					if (FMath::Abs(ProbeNorm.X) > 1.0 ||
-						FMath::Abs(ProbeNorm.Y) > 1.0 ||
-						FMath::Abs(ProbeNorm.Z) > 1.0)
-					{
-						continue;
-					}
-
-					CellMax = FMath::Max(CellMax, SampleDensity(ProbeNorm));
-				}
-
-				if (CellMax > 0.0f)
+				if (Envelope > 0.0f)
 				{
 					FActiveLargeTierCell Cell;
 					Cell.Center = Center;
 					Cell.HalfExt = HalfCell;
-					Cell.GridCoord = FIntVector(ix, iy, iz);
-					Cell.MaxDensity = CellMax * EnvelopePad;
+					Cell.GridCoord = Coord;
+					Cell.MaxDensity = Envelope;
 					ActiveCells.Add(Cell);
 				}
 			}

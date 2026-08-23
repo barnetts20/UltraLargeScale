@@ -63,6 +63,26 @@ public:
 	 *  Always route it through GalaxyDensityParams::SpawnProbability first. */
 	float SampleDensity(const FVector& InNormPos) const;
 
+	/** Peak density inside a cell, padded into a REJECTION ENVELOPE.
+	 *
+	 *  8 corners plus 24 jittered interior probes, seeded from the cell coord so the
+	 *  same cell yields the same estimate on every regeneration. Corners alone miss an
+	 *  arm passing through the middle of a cell without reaching any vertex, which both
+	 *  discards live cells and under-estimates the envelope of the ones it keeps.
+	 *
+	 *  Returns 0 for a cell with no density anywhere, which the caller may cull.
+	 *
+	 *  This is the number that makes acceptance workable. Rejecting against a global
+	 *  reference gives a ratio that runs order-1e-3 in a sparse cell and clips at 1
+	 *  across a dense one; rejecting against the cell's own peak gives order-1 in both.
+	 *  See ApplyCellEnvelopes for why the per-cell BUDGET has to move with it. */
+	float EstimateCellEnvelope(const FIntVector& InCoord, const FVector& InCentre,
+		double InHalfExtent) const;
+
+	/** Multiplier turning a sampled cell peak into an envelope the field will not
+	 *  exceed. Derived from the noise amounts rather than fixed -- see the .cpp. */
+	float EnvelopePadding() const;
+
 #pragma endregion
 
 #pragma region Initialization
@@ -157,6 +177,29 @@ public:
 	bool BuildLargeTierCells(
 		const TArray<TPair<FIntVector, int32>>& InSlots,
 		TArray<FTierBatchCell>& OutCells) const;
+
+	/** Give each cell its own rejection envelope and a candidate budget weighted by it.
+	 *
+	 *  TWO CONCERNS, SEPARATED. A global reference conflates them:
+	 *
+	 *    WHERE entities land inside a cell  -> Cell.DensityReference, the cell's peak.
+	 *    HOW MANY a cell gets               -> Cell.Candidates, weighted by that peak.
+	 *
+	 *  Accepted count is Candidates x mean(d)/envelope. Normalising against the cell
+	 *  peak alone would give every cell a similar count and erase the structure BETWEEN
+	 *  cells; weighting the budget by the same peak puts it back, because
+	 *  peak x mean/peak is mean, which is proportional to cell mass. Weighting by mean
+	 *  instead counts the factor twice and over-concentrates in the arms quadratically.
+	 *
+	 *  This is what BuildLargeTierCells has always done. It is stated here so the mid
+	 *  and small tiers -- and the other two layers -- get it from one place.
+	 *
+	 *  Budgets are anchored on SpawnDensityReference, NOT on the batch's own maximum.
+	 *  A per-batch normalisation would make a cell's candidate count depend on which
+	 *  other cells the player happened to stream in with it, and the same region would
+	 *  regenerate differently between visits. */
+	void ApplyCellEnvelopes(TArray<FTierBatchCell>& InOutCells,
+		const FTierParams& InTierParams) const;
 
 	bool GenerateTierBatchGPU(
 		const TArray<FTierBatchCell>& InCells,
