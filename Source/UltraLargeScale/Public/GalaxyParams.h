@@ -57,10 +57,9 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	 *  hashes and a tan per thread, against a full field evaluation per thread, and
 	 *  it cannot drift.
 	 *
-	 *  Does NOT override InNoiseEnable. For the first migration step, set it to zero
-	 *  at the call site: with noise off the compute path and the CPU path evaluate
-	 *  the identical function, which is what makes the plumbing verifiable before the
-	 *  texture is switched on. */
+	 *  InNoiseEnable is hard-wired to 1. Placement is always textured; the material's
+	 *  EnableNoise static switch controls the RENDER only, and is a visualisation aid
+	 *  rather than a field parameter. */
 	template <typename TShaderParams>
 	void FillShaderParameters(TShaderParams& Out) const
 	{
@@ -127,28 +126,13 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 		Out.InBackgroundConcentration = BackgroundConcentration;
 		Out.InNoiseOctaves = NoiseOctaves;
 		Out.InNoiseRidged = NoiseRidged;
-		Out.InNoiseEnable = bEnableNoise ? 1.0f : 0.0f;
+		// ALWAYS TEXTURED. Placement samples the volume texture unconditionally --
+		// that is the whole point of the GPU path, and a switch that turned it off
+		// here would make the placed field differ from the drawn one with nothing
+		// to say so.
+		Out.InNoiseEnable = 1.0f;
 	}
 
-
-	// ===========================================================================
-	// AND in GalaxyEntityGen.cpp, the call site. Replace:
-	//
-	//     D.FillShaderParameters(*P);
-	//
-	// with this for step 2a, so the compute path and the CPU path evaluate the identical
-	// function and any difference in the output is plumbing rather than the field:
-	//
-	//     D.FillShaderParameters(*P);
-	//     P->InNoiseEnable = 0.0f;   // STEP 2a ONLY -- remove for 2b
-	//
-	// GalaxySample degenerates to SampleAnalytic when InNoiseEnable is zero, so with the
-	// same seed and the same cell keys the GPU should reproduce the CPU's accepted set
-	// exactly, up to float ordering in the ranking. Differences beyond a handful of
-	// entities near acceptance thresholds mean a marshalling error, not a field one --
-	// most likely a struct layout mismatch, which the static_asserts in GalaxyEntityGen.h
-	// are there to catch first.
-	// ===========================================================================
 #pragma region Lateral scales
 	/** Arm half-width as a FRACTION OF THE DISC SCALE HEIGHT. Arms are thinner than
 	 *  the stellar disc they sit in, so this is a ratio rather than an absolute. */
@@ -203,8 +187,10 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 #pragma endregion
 
 #pragma region Noise response
-	/** Multiplicative depth: density *= 1 + Amount * n. GPU only -- the CPU path
-	 *  evaluates the analytic field, so these do not affect star placement. */
+	/** Multiplicative depth: density *= 1 + Amount * n. Above 1 the modulator goes
+	 *  negative in places, clamps to zero, and breaks the layer apart.
+	 *
+	 *  Affects the RENDER AND PLACEMENT ALIKE: both sample the same textured field. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
 	float ArmNoiseAmount = 0.333f;
 
@@ -218,7 +204,7 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	float BackgroundNoiseAmount = 1.0f;
 
 	/** Positional warp per layer. Signed: negative flips the displacement direction.
-	 *  GPU only, for the same reason as the amounts above. */
+	 *  Affects render and placement alike, as the amounts above do. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
 	float WarpAmountArms = 0.05f;
 
@@ -373,11 +359,6 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float NoiseRidged = 0.0f;
 
-	/** Renderer only. The CPU path always evaluates the analytic field, so leaving
-	 *  this on does not make star placement disagree with itself -- it makes the
-	 *  RENDER disagree with the placement by the amount the noise displaces things. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
-	bool bEnableNoise = true;
 #pragma endregion
 
 #pragma region Render and spawn mapping
@@ -413,14 +394,6 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	 *  alongside it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Spawn", meta = (ClampMin = "0.001"))
 	float SpawnDensityReference = 10.0f;
-
-	/** Compresses the spawn probability rather than scaling it linearly:
-	 *      0 = linear,  d / reference        star density tracks gas density
-	 *      1 = Beer,    1 - exp(-d / ref)    tracks apparent brightness
-	 *  Linear is the physically faithful choice; compression fills dense cores more
-	 *  evenly and stops the faint halo from spawning almost nothing. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Spawn", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float SpawnCompression = 0.0f;
 
 	/** Normaliser applied before quantising to the volume texture, which is a byte
 	 *  channel and would otherwise saturate to white everywhere the field exceeds 1.

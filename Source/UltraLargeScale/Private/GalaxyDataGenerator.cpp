@@ -81,7 +81,10 @@ GalaxyHLSL::GalaxyDensityParams FGalaxyDensityParams::ToDerived() const
 		BackgroundConcentration,
 		NoiseOctaves,
 		NoiseRidged,
-		bEnableNoise ? 1.0f : 0.0f);
+		// The shim's Texture3D returns the neutral 0.5, so every noise term is zero
+		// and this field reduces to the analytic one whatever is passed here. Kept at
+		// 1 to match the compute path rather than describing a mode nothing uses.
+		1.0f);
 }
 
 #pragma endregion
@@ -587,32 +590,6 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 			TEXT("the same volume texture the material samples, with NEVER STREAM on the ")
 			TEXT("asset."));
 		return FailBatch();
-	}
-
-	// COMPRESSION BREAKS THE CANCELLATION AND NOTHING RESTORES IT.
-	//
-	// Per-cell normalisation is artifact-free because the envelope cancels: budget
-	// scales as E^g, acceptance as (d/E)^g, and the realised density comes out as a
-	// function of d alone. That only works because a power law composes with itself.
-	// lerp(min(r,1), 1-exp(-r), C) is not a power law, so no choice of budget removes
-	// the cell from the result, and every cell boundary becomes a discontinuity.
-	//
-	// It also has no job left. Compression existed to soften the hard clip at r = 1
-	// against a GLOBAL reference. Against a per-cell envelope r never exceeds 1, so
-	// there is nothing to soften.
-	if (Params.DensityParams.SpawnCompression > 0.0f)
-	{
-		static bool bWarnedCompression = false;
-		if (!bWarnedCompression)
-		{
-			bWarnedCompression = true;
-			UE_LOG(LogTemp, Warning,
-				TEXT("GalaxyEntityGen: SpawnCompression is %.3f. Placement rejects against ")
-				TEXT("a PER-CELL envelope, and compression makes the acceptance mapping ")
-				TEXT("non-power-law, so the cell no longer cancels out of the result and ")
-				TEXT("cell boundaries show as grid artifacts. Set it to 0."),
-				Params.DensityParams.SpawnCompression);
-		}
 	}
 
 	// One cell per queued slot. The KEY is the grid coord, never the dispatch index:

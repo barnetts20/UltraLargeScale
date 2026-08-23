@@ -48,7 +48,6 @@ namespace GalaxyEntityGen
 		const float InvGalaxyExtent =
 			static_cast<float>(1.0 / FMath::Max(static_cast<double>(InParams.Extent), 1e-9));
 
-		const float PlaceCompression = D.SpawnCompression;
 		const float PlaceSpawnExponent = InTierParams.SpawnExponent;
 		const float PlaceExtentMin = static_cast<float>(InTierParams.MinScale * InvUnit);
 		const float PlaceExtentMax = static_cast<float>(InTierParams.MaxScale * InvUnit);
@@ -134,7 +133,6 @@ namespace GalaxyEntityGen
 			float BudgetAnchor = 1.0f;
 			float EnvelopePad = 1.0f;
 			float InvGalaxyExtent = 0.0f;
-			float PlaceCompression = 0.0f;
 			float PlaceSpawnExponent = 0.0f;
 			float PlaceExtentMin = 0.0f;
 			float PlaceExtentMax = 0.0f;
@@ -158,7 +156,6 @@ namespace GalaxyEntityGen
 		Payload->BudgetAnchor = BudgetAnchor;
 		Payload->EnvelopePad = EnvelopePad;
 		Payload->InvGalaxyExtent = InvGalaxyExtent;
-		Payload->PlaceCompression = PlaceCompression;
 		Payload->PlaceSpawnExponent = PlaceSpawnExponent;
 		Payload->PlaceExtentMin = PlaceExtentMin;
 		Payload->PlaceExtentMax = PlaceExtentMax;
@@ -284,7 +281,6 @@ namespace GalaxyEntityGen
 						Common.KeySeed = InKeySeed;
 						Common.InvGalaxyExtent = Payload->InvGalaxyExtent;
 
-						Common.PlaceCompression = Payload->PlaceCompression;
 						Common.PlaceSpawnExponent = Payload->PlaceSpawnExponent;
 						Common.PlaceExtentMin = Payload->PlaceExtentMin;
 						Common.PlaceExtentMax = Payload->PlaceExtentMax;

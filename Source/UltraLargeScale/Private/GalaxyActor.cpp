@@ -366,8 +366,11 @@ void AGalaxyActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
 
 	// NOT PUSHED: EnableNoise. It is a StaticSwitchParameter, resolved at material
 	// compile time -- a MID cannot change one, and setting it silently does nothing.
-	// It stays a material-asset setting. Making it per-galaxy would mean converting it
-	// back to a scalar, which costs the dead-stripping of the texture reads.
+	//
+	// It is a VISUALISATION AID on the material asset, not a field parameter. Placement
+	// always samples the texture, so turning it off shows the analytic layers alone
+	// while the stars stay where the textured field put them. There is deliberately no
+	// per-galaxy property behind it.
 }
 
 void AGalaxyActor::InitializeNiagara()

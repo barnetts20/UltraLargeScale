@@ -201,7 +201,6 @@ float BudgetAnchor;
 float EnvelopePad;
 
 // --- placement, per dispatch; the per-cell envelope overrides Q.InvDensityReference
-float PlaceCompression;
 float PlaceSpawnExponent;
 float PlaceExtentMin;
 float PlaceExtentMax;
@@ -248,8 +247,10 @@ float InNoiseOctaves;
 float InNoiseRidged;
 float InNoiseEnable;
 
+// Lanes per group, and therefore probes per round. The two were separate constants
+// with the same value: GroupMass was sized on one and summed to the other, so changing
+// either alone read off the end of groupshared memory.
 #define GALAXY_ENTITYGEN_GROUP 64u
-#define GALAXY_ENTITYGEN_PROBES 64u
 
 // The probed peak, reduced across the group. asuint is monotonic for non-negative
 // floats, so InterlockedMax over the bit pattern orders exactly as the float does --
@@ -408,7 +409,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     if (GroupIndex == 0u)
     {
         float Sum = 0.0f;
-        for (uint l = 0u; l < GALAXY_ENTITYGEN_PROBES; ++l)
+        for (uint l = 0u; l < GALAXY_ENTITYGEN_GROUP; ++l)
         {
             Sum += GroupMass[l];
         }
@@ -471,7 +472,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     const uint Candidates = (uint) clamp(RawCandidates, 1.0f, 4194304.0f);
 
     GalaxyPlacement Q = MakeGalaxyPlacement(
-        Envelope, PlaceCompression, PlaceSpawnExponent,
+        Envelope, PlaceSpawnExponent,
         PlaceExtentMin, PlaceExtentMax, PlaceExtentExponent);
 
     // Strided so consecutive lanes take consecutive slots, keeping hash inputs adjacent

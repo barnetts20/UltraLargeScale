@@ -86,7 +86,6 @@ struct GalaxyPlacement
     // could not express that; a per-call one does, and the mid and small tiers just
     // pass the global value.
     float InvDensityReference;
-    float Compression; // 0 = accepted count tracks density linearly
     float SpawnExponent; // 1 = the raw response; <1 spawns more in faint regions
     float ExtentMin;
     float ExtentMax;
@@ -108,7 +107,6 @@ struct GalaxyPlacement
 
 GalaxyPlacement MakeGalaxyPlacement(
     float InDensityReference, // the density that reads as a certain spawn
-    float InCompression,
     float InSpawnExponent,
     float InExtentMin, // FINAL units: divide by UnitScale before calling
     float InExtentMax,
@@ -119,7 +117,6 @@ GalaxyPlacement MakeGalaxyPlacement(
     // Division guard, not a range limit: a reference of zero is a divide by zero and
     // the infinity accepts every candidate in the galaxy at once.
     Q.InvDensityReference = 1.0f / max(InDensityReference, 1e-3f);
-    Q.Compression = saturate(InCompression);
     Q.SpawnExponent = max(InSpawnExponent, 1e-3f);
     Q.ExtentMin = InExtentMin;
     Q.ExtentMax = InExtentMax;
@@ -714,17 +711,15 @@ struct GalaxyDensityParams
     // accept every candidate across the arms, the inner disc and the bulge at once,
     // flattening the distribution exactly where the structure is.
     //
-    // Linear keeps star number density proportional to gas density, since accepted
-    // count is candidates * p and only p ~ d makes a region twice as dense hold twice
-    // the stars. Beer-Lambert deliberately breaks that: it is the same form the
-    // renderer uses for alpha, so "looks opaque" and "certainly spawns" become the
-    // same statement, and dense cores fill evenly instead of becoming a wall of
-    // sprites while the faint halo spawns almost nothing.
+    // The mapping is a POWER LAW and must stay one. Per-cell normalisation is
+    // artifact-free only because the envelope cancels: a cell's budget scales as E^g
+    // and its acceptance as (d/E)^g, so the realised density is a function of d alone.
+    // Anything that is not a power law -- a Beer-Lambert 1-exp(-r), a soft knee -- puts
+    // the cell back into the result and turns every cell boundary into a visible step.
     //
-    // SpawnExponent replaces the UCurveFloat the CPU path evaluated. A curve asset
-    // has no shader equivalent, and an exponent covers what that curve was actually
-    // doing -- bending the response toward or away from the dense regions -- without
-    // a LUT or a second authored asset that only one side can read.
+    // Linear (g = 1) keeps star number density proportional to gas density: accepted
+    // count is candidates * p, and only p ~ d makes a region twice as dense hold twice
+    // the stars. SpawnExponent bends that toward or away from the dense end.
     float SpawnProbability(float InDensity, GalaxyPlacement InPlace)
     {
         if (InDensity <= 0.0f)
@@ -732,17 +727,11 @@ struct GalaxyDensityParams
             return 0.0f;
         }
 
-        float ratio = InDensity * InPlace.InvDensityReference;
+        // Do NOT name the intermediate `linear`. That is an HLSL interpolation
+        // modifier and a reserved word, which C++ accepts without comment.
+        float ratio = min(InDensity * InPlace.InvDensityReference, 1.0f);
 
-        // NOT named `linear`. That is an HLSL interpolation modifier -- the same
-        // family as centroid and nointerpolation -- so `float linear` is a reserved
-        // word and fails to parse, while C++ accepts it without comment. The name
-        // came across with this body when it moved out of FGalaxyDensityParams.
-        float proportional = min(ratio, 1.0f);
-        float compressed = 1.0f - exp(-ratio);
-
-        float p = lerp(proportional, compressed, saturate(InPlace.Compression));
-        return saturate(PowSafe(p, max(InPlace.SpawnExponent, 1e-3f)));
+        return saturate(PowSafe(ratio, max(InPlace.SpawnExponent, 1e-3f)));
     }
 
     // One candidate, decided entirely by its own key.

@@ -85,7 +85,6 @@ public:
 		SHADER_PARAMETER(float, BudgetAnchor)
 		SHADER_PARAMETER(float, EnvelopePad)
 
-		SHADER_PARAMETER(float, PlaceCompression)
 		SHADER_PARAMETER(float, PlaceSpawnExponent)
 		SHADER_PARAMETER(float, PlaceExtentMin)
 		SHADER_PARAMETER(float, PlaceExtentMax)
