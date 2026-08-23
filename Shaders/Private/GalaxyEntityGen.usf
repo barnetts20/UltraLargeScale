@@ -432,27 +432,8 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     // -----------------------------------------------------------------------
     // PASS 2 -- GENERATE.
     //
-    // The budget is now DERIVED, not authored. K = target/sum(mass) is the one number
-    // the whole dispatch shares, and this cell draws K x (envelope/anchor)^g candidates.
-    //
-    // Why that expression: acceptance is (d/envelope)^g, so accepted works out to
-    //   K x (E/a)^g x mean(d^g)/E^g  =  K x mean((d/a)^g)  =  K x mass_i
-    // The envelope cancels, which is what makes per-cell normalisation free of grid
-    // artifacts, and the anchor cancels through K, which is why it is not a tuning knob.
-    // Summed over cells the total is exactly the target.
-    //
-    // Nothing clamps. A ceiling here is a cell-constant multiplier, and a cell-constant
-    // multiplier is a visible cube -- which is what the authored budget kept producing.
-    // -----------------------------------------------------------------------
-    const float Envelope = asfloat(OutCounts[CellIndex * 5u + 2u]);
-
-    if (!(Envelope > 0.0f))
-    {
-        return;
-    }
-
-    // The budget is DERIVED, and from a per-tier constant rather than anything about
-    // this batch. This cell draws BudgetScale x (envelope/anchor)^g candidates.
+    // The budget is DERIVED, and from a per-tier constant rather than from anything
+    // about this batch: the cell draws BudgetScale x (envelope/anchor)^g candidates.
     //
     // Why that expression: acceptance is (d/envelope)^g, so accepted works out to
     //   BudgetScale x (E/a)^g x mean(d^g)/E^g  =  BudgetScale x mean((d/a)^g)
@@ -461,15 +442,33 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     // artifacts, and the anchor cancels through the calibration, which is why it is not
     // a tuning knob. A cell's count therefore depends on that cell alone.
     //
-    // Nothing clamps to a ceiling. A ceiling is a cell-constant multiplier, and a
-    // cell-constant multiplier is a visible cube -- which is what the authored budget
-    // kept producing.
+    // NO FLOOR AND NO CEILING. Both are cell-constant multipliers, and a cell-constant
+    // multiplier is a visible cube. The real-valued budget reaches a whole number
+    // through StochasticCount, which preserves the expectation exactly.
+    // -----------------------------------------------------------------------
+    const float Envelope = asfloat(OutCounts[CellIndex * 5u + 2u]);
+
+    if (!(Envelope > 0.0f))
+    {
+        return;
+    }
+
     const float RawCandidates = BudgetScale * pow(Envelope * InvAnchor, Exponent);
 
-    // A runaway stop, not a tuning cap: reachable only if calibration returned a mass
-    // near zero, which means the probes found nothing anywhere and the inputs are wrong.
-    // The CPU says so from the counters.
-    const uint Candidates = (uint) clamp(RawCandidates, 1.0f, 4194304.0f);
+    // The ceiling is a RUNAWAY STOP, not a tuning cap: reachable only if calibration
+    // returned a mass near zero, which means the probes found nothing anywhere and the
+    // inputs are wrong. The CPU says so from the counters.
+    const uint Candidates = P.StochasticCount(
+        RawCandidates, Cell.Coord.x, Cell.Coord.y, Cell.Coord.z, KeySeed, 4194304.0f);
+
+    // Zero is ordinary, not an error: most of a galaxy is faint enough that a cell's
+    // budget is a fraction of one candidate and the draw comes up short. The strided
+    // loop below is already a no-op at zero; returning early only skips the placement
+    // setup.
+    if (Candidates == 0u)
+    {
+        return;
+    }
 
     GalaxyPlacement Q = MakeGalaxyPlacement(
         Envelope, PlaceSpawnExponent,

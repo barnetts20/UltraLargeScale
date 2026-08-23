@@ -105,6 +105,14 @@ struct GalaxyPlacement
 #define GALAXY_SLOT_STRIDE 977
 #define GALAXY_DECOR_OFFSET 24337
 
+// A third key family, one draw per cell, for StochasticCount below.
+//
+// Offsets must not share a residue modulo the stride, or two families land on the same
+// lattice point. Residues: candidates 0, decor 889, rounding 945. Tier seed offsets
+// enter through KeySeed and are small, so the check is that no residue difference --
+// 945, 56, 889 -- falls within the tier offset spread.
+#define GALAXY_ROUND_OFFSET 51749
+
 GalaxyPlacement MakeGalaxyPlacement(
     float InDensityReference, // the density that reads as a certain spawn
     float InSpawnExponent,
@@ -772,6 +780,38 @@ struct GalaxyDensityParams
             InCellCentre.x + (h.x * 2.0f - 1.0f) * InCellExtent,
             InCellCentre.y + (h.y * 2.0f - 1.0f) * InCellExtent,
             InCellCentre.z + (h.z * 2.0f - 1.0f) * InCellExtent);
+    }
+
+    // How many candidates a cell draws, from a real-valued budget.
+    //
+    // STOCHASTIC, NOT ROUNDED OR FLOORED. A cell's budget is BudgetScale x mass_i and
+    // most of a galaxy is faint, so in the outer halo that number is a small fraction.
+    // Any deterministic rounding destroys the distribution at the bottom end: a floor
+    // of 1 makes every faint cell draw the same count whatever it holds, so the halo's
+    // entity count tracks CELL COUNT rather than density, and plain rounding empties
+    // everything below half a candidate instead.
+    //
+    // Rounding down and adding one with probability frac() has expectation exactly
+    // InRaw, so the population is right in aggregate at every density while each cell
+    // holds a whole number.
+    //
+    // WAVE-UNIFORM BY CONSTRUCTION: the draw is keyed on the cell alone, so every lane
+    // in the group computes the same count and the strided candidate loop cannot
+    // diverge. Do not key it on the slot or the lane.
+    uint StochasticCount(float InRaw, int InCellX, int InCellY, int InCellZ,
+                         int InKeySeed, float InCeiling)
+    {
+        float r = min(max(InRaw, 0.0f), InCeiling);
+
+        // NOT named `frac`. That is an HLSL intrinsic, and shadowing one with a local
+        // is accepted by some compilers and rejected by others -- the same family of
+        // trap as naming a float `linear`.
+        float whole = floor(r);
+        float fracPart = r - whole;
+
+        float4 h = Hash4(InCellX, InCellY, InCellZ, InKeySeed + GALAXY_ROUND_OFFSET);
+
+        return (uint) whole + ((h.x < fracPart) ? 1u : 0u);
     }
 
     // InCellCentre and InCellExtent describe the cell in the caller's units;
