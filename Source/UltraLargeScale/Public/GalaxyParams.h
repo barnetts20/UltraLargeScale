@@ -592,18 +592,18 @@ struct ULTRALARGESCALE_API FGalaxyParams : public FBaseParams
 		// NeighborhoodRadius = 0 -> 1x1x1 = 1 slot, exhaustive single-pass.
 		LargeTier.GridDepth = 1;
 		LargeTier.NeighborhoodRadius = 0;
-		LargeTier.GenerationSubdivision = 4;
+		LargeTier.GenerationSubdivision = 3;
 		LargeTier.SlotCapacity = 10000;
 
 		MidTier.GridDepth = 3;
 		MidTier.NeighborhoodRadius = 1;
 		MidTier.GenerationSubdivision = 2;
-		MidTier.SlotCapacity = 8000;
+		MidTier.SlotCapacity = 20000;
 
 		SmallTier.GridDepth = 5;
 		SmallTier.NeighborhoodRadius = 1;
 		SmallTier.GenerationSubdivision = 2;
-		SmallTier.SlotCapacity = 6000;
+		SmallTier.SlotCapacity = 10000;
 
 		DeriveScaleRanges();
 	}
