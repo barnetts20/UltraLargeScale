@@ -332,8 +332,7 @@ namespace GalaxyEntityGen
 						// NeverCull, because a culled pass and a pass that ran and wrote
 						// nothing are indistinguishable from the readback -- both give empty
 						// buffers with no error anywhere.
-						constexpr ERDGPassFlags PassFlags =
-							ERDGPassFlags::Compute | ERDGPassFlags::NeverCull;
+						constexpr ERDGPassFlags PassFlags = ERDGPassFlags::AsyncCompute;
 
 						auto AddGenPass = [&GraphBuilder, &Common, PassFlags](
 							int32 InPass, const TCHAR* InName, const FIntVector& InGroups)
