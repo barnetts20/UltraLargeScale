@@ -121,6 +121,18 @@ public:
 	{
 		FIntVector Coord = FIntVector::ZeroValue;
 		int32 SlotIndex = 0;
+
+		/** Index into the array this cell was subdivided FROM, or its own index when
+		 *  nothing was subdivided.
+		 *
+		 *  Calibration needs it and generation does not. A tier with one cell per slot
+		 *  is calibrated against the largest STREAMED cell, which after subdivision is
+		 *  the largest sum over one parent's children -- so the children have to say
+		 *  which parent they belong to. SlotIndex cannot answer that: a batch of
+		 *  neighbouring cells shares no slot, and the whole-grid calibration pass has no
+		 *  slots at all. */
+		int32 ParentIndex = 0;
+
 		FVector Centre = FVector::ZeroVector;
 		double HalfExtent = 0.0;
 	};
@@ -148,12 +160,14 @@ public:
 	 *  entities at a coord they no longer belong to. Every such path logs. */
 	 /** The tier's placement constant: accepted count per cell is this times cell mass.
 	  *
-	  *  Measured ONCE per tier, lazily, by probing its whole grid on the GPU and reducing.
-	  *  Cached against the tier's seed offset, which is what distinguishes the three.
+	  *  Measured ONCE per tier, lazily, by probing its whole grid -- SUBDIVIDED EXACTLY AS
+	  *  GENERATION WILL SUBDIVIDE IT -- and reducing on the CPU. Cached against the tier's
+	  *  seed offset, which is what distinguishes the three.
 	  *
-	  *  Which reduction it divides capacity by depends on how the tier maps cells to
-	  *  slots -- see the .cpp. Getting that wrong is what made a void neighbourhood come
-	  *  back as densely populated as an arm.
+	  *  Which reduction divides the capacity depends on how the tier maps cells to slots:
+	  *  the total when they share one, the largest per-parent sum when each streamed cell
+	  *  owns its own. Getting that wrong is what made a void neighbourhood come back as
+	  *  densely populated as an arm.
 	  *
 	  *  Returns 0 if calibration could not run, which the caller treats as a failed
 	  *  batch rather than generating with a meaningless constant. */

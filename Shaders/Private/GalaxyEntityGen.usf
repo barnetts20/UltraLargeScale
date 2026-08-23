@@ -159,6 +159,14 @@ StructuredBuffer<FGalaxyGenCell> InCells;
 uint NumCells;
 uint EntityCapacity; // records in OutEntities
 
+// Width of the WRAPPED group grid, in groups.
+//
+// One group per cell, and a tier's subdivided grid runs to hundreds of thousands of
+// them -- past the 65535-per-dimension dispatch limit, which RDG catches as an ensure
+// and then dispatches nothing at all. So the groups are laid out two-dimensionally and
+// unwrapped here. The tail of the last row is out of range and returns below.
+uint DispatchGroupsX;
+
 // The per-tier constant. accepted_i = BudgetScale x mass_i, so this is the whole of the
 // tier's placement tuning, calibrated once from the reductions above. Unused by the
 // probe and reduce passes.
@@ -267,7 +275,7 @@ groupshared float GroupMassMax[GALAXY_ENTITYGEN_GROUP];
 [numthreads(GALAXY_ENTITYGEN_GROUP, 1, 1)]
 void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 {
-    const uint CellIndex = GroupId.x;
+    const uint CellIndex = GroupId.y * DispatchGroupsX + GroupId.x;
 
 #if GALAXY_ENTITYGEN_PASS == 1
     // -----------------------------------------------------------------------

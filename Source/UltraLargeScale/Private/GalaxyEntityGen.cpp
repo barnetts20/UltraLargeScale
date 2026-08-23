@@ -301,13 +301,39 @@ namespace GalaxyEntityGen
 						// be culled and enveloped by a reduction across its probes before any
 						// of its candidates exist.
 						//
-						// This also retires the failure that cost the most. The old sizing was
-						// cells x budget / 64, so a cell array that arrived empty through a
-						// capture chain gave a group count of ZERO -- which dispatches nothing
-						// silently, with no error and buffers reading exactly as cleared. Here
-						// the group count IS the cell count, and the guard at the top of
-						// Dispatch already returned on an empty batch.
-						const FIntVector CellGroups(Cells.Num(), 1, 1);
+						// WRAPPED ACROSS TWO DIMENSIONS. A dispatch is limited to 65535 groups
+						// per dimension, and a tier's subdivided calibration grid runs well
+						// past that -- the small tier alone is a hundred and fifty thousand
+						// cells. Exceeding it is an ensure inside RDG followed by no dispatch
+						// at all, so the readback simply times out and the tier reports a
+						// calibration failure with nothing to say the cause was the shape of
+						// the dispatch rather than the field.
+						//
+						// The shader unwraps with GroupId.y * DispatchGroupsX + GroupId.x and
+						// the existing NumCells bound discards the tail of the last row.
+						const int32 MaxGroupsPerDim = FMath::Max(
+							GRHIGlobals.MaxDispatchThreadGroupsPerDimension.X, 1);
+
+						const int32 GroupsX = FMath::Min(Cells.Num(), MaxGroupsPerDim);
+						const int32 GroupsY = FMath::DivideAndRoundUp(Cells.Num(), GroupsX);
+
+						const FIntVector CellGroups(GroupsX, GroupsY, 1);
+
+						Common.DispatchGroupsX = static_cast<uint32>(GroupsX);
+
+						// Two dimensions carry 65535^2 cells, which is four billion. If this
+						// ever fires the cell count is the problem, not the layout.
+						if (GroupsY > MaxGroupsPerDim)
+						{
+							UE_LOG(LogTemp, Warning,
+								TEXT("GalaxyEntityGen: %d cells needs %d x %d groups, past the ")
+								TEXT("dispatch limit of %d per dimension. Reduce the tier's ")
+								TEXT("GenerationSubdivision or its GridDepth."),
+								Cells.Num(), GroupsX, GroupsY, MaxGroupsPerDim);
+
+							OutRequest->bAborted = true;
+							return;
+						}
 
 						// THREE PASSES, ONE GRAPH, NO READBACK BETWEEN THEM.
 						//
@@ -522,11 +548,9 @@ namespace GalaxyEntityGen
 		const TArray<FGalaxyGenCell>& InCells,
 		int32 InKeySeed,
 		UTexture* InNoiseTexture,
-		float& OutTotalMass,
-		float& OutMaxCellMass)
+		TArray<float>& OutCellMass)
 	{
-		OutTotalMass = 0.0f;
-		OutMaxCellMass = 0.0f;
+		OutCellMass.Reset();
 
 		if (IsInGameThread() || IsInRenderingThread())
 		{
@@ -561,11 +585,25 @@ namespace GalaxyEntityGen
 			return false;
 		}
 
-		const uint32 TotalBits = Counts[GlobalTotalMassIndex(InCells.Num())];
-		const uint32 MaxBits = Counts[GlobalMaxMassIndex(InCells.Num())];
+		// THE PER-CELL MASSES WERE ALWAYS IN THE READBACK. The probe pass writes one
+		// per cell at [i*5+4] and the copy already brings the whole counter buffer
+		// across, so the reduction needs no GPU pass -- and reducing on the CPU is what
+		// lets the caller take a max of PER-PARENT SUMS, which no single thread group
+		// can see.
+		//
+		// Written as asuint by the shader; read back as the float bit pattern.
+		OutCellMass.SetNumUninitialized(InCells.Num());
 
-		OutTotalMass = *reinterpret_cast<const float*>(&TotalBits);
-		OutMaxCellMass = *reinterpret_cast<const float*>(&MaxBits);
+		for (int32 i = 0; i < InCells.Num(); ++i)
+		{
+			const uint32 Bits = Counts[i * CountersPerCell + 4];
+			const float Mass = *reinterpret_cast<const float*>(&Bits);
+
+			// A cell that probed nothing is zero, which is ordinary. Anything that is
+			// not a finite non-negative number is not, and letting one into the sum
+			// would poison every cell's budget at once.
+			OutCellMass[i] = FMath::IsFinite(Mass) ? FMath::Max(Mass, 0.0f) : 0.0f;
+		}
 
 		return true;
 	}

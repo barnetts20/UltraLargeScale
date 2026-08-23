@@ -237,6 +237,14 @@ void GalaxyDataGenerator::SubdivideCells(
 	if (InLevels <= 0)
 	{
 		OutCells = InCells;
+
+		// Every cell is its own parent, so a caller that groups by ParentIndex gets the
+		// same answer whether or not the tier subdivides.
+		for (int32 i = 0; i < OutCells.Num(); ++i)
+		{
+			OutCells[i].ParentIndex = i;
+		}
+
 		return;
 	}
 
@@ -246,8 +254,10 @@ void GalaxyDataGenerator::SubdivideCells(
 
 	OutCells.Reserve(InCells.Num() * PerCell / 2);
 
-	for (const FTierBatchCell& Parent : InCells)
+	for (int32 ParentIndex = 0; ParentIndex < InCells.Num(); ++ParentIndex)
 	{
+		const FTierBatchCell& Parent = InCells[ParentIndex];
+
 		const double SubHalf = Parent.HalfExtent / static_cast<double>(Side);
 		const double SubFull = SubHalf * 2.0;
 
@@ -287,6 +297,7 @@ void GalaxyDataGenerator::SubdivideCells(
 					// The SLOT is the parent's. Children are a generation detail; the
 					// buffer still holds one region per streamed cell.
 					Child.SlotIndex = Parent.SlotIndex;
+					Child.ParentIndex = ParentIndex;
 
 					Child.Coord = FIntVector(
 						Parent.Coord.X * Side + ix - Side / 2,
@@ -327,22 +338,13 @@ float GalaxyDataGenerator::GetTierBudgetScale(
 	// ONCE PER TIER, OVER ITS WHOLE GRID. Never per batch.
 	//
 	// Accepted count per cell is BudgetScale x mass_i, so BudgetScale is the entirety of
-	// a tier's placement tuning. Solving it from the cells in a BATCH made a cell's yield
-	// depend on which neighbours streamed in beside it: a neighbourhood of empty sky was
-	// forced to the same total as one full of arms, so voids came back populated and cost
-	// several times the candidates to produce. It also meant the same region generated
-	// differently depending on the direction of approach.
+	// a tier's placement tuning. Solving it from the cells in a BATCH makes a cell's
+	// yield depend on which neighbours streamed in beside it: a neighbourhood of empty
+	// sky is then forced to the same total as one full of arms, so voids come back
+	// populated, and the same region generates differently depending on the direction of
+	// approach.
 	//
-	// WHICH REDUCTION divides the capacity depends on how the tier maps cells to slots:
-	//
-	//   cells SHARE a slot  -> capacity / TOTAL mass.
-	//     The large tier feeds its entire grid into one slot, so the slot holds the sum
-	//     and the sum is what has to fit.
-	//
-	//   one cell PER slot   -> capacity / LARGEST cell mass.
-	//     The densest cell in the galaxy fills its slot exactly; every other cell is
-	//     proportionally less and no slot can overflow. Dividing a total here would give
-	//     every slot the same count regardless of what is in it.
+	// Which reduction divides the capacity is decided below, once the masses are in.
 	// -----------------------------------------------------------------------
 	FScopeLock Lock(TierBudgetScaleLock.Get());
 
@@ -353,26 +355,21 @@ float GalaxyDataGenerator::GetTierBudgetScale(
 
 	const int32 Subdivision = FMath::Clamp(InTierParams.GenerationSubdivision, 0, 6);
 
-	TArray<FTierBatchCell> AllCells;
-	BuildFullTierGrid(InTierParams.GridDepth, AllCells);
+	// MEASURE THE CELLS GENERATION WILL ACTUALLY USE.
+	//
+	// Both tier kinds descend to the generation grid, because a cell's mass is an
+	// estimate of the mean over its own volume and that estimate depends on the volume.
+	// Probing an undivided parent whose structure occupies a few percent of it reports a
+	// mean that is too low -- as BIAS, in one direction, growing with the subdivision
+	// depth -- so the constant came out too high and generation over-delivered.
+	//
+	// The reduction is then whichever one matches how the tier maps cells to slots, and
+	// both are taken on the CPU from the per-cell masses. See below.
+	TArray<FTierBatchCell> Parents;
+	BuildFullTierGrid(InTierParams.GridDepth, Parents);
 
-	// SUBDIVIDED ONLY WHEN THE ANSWER IS A SUM.
-	//
-	// A tier whose cells share a slot needs the TOTAL mass of its grid, and a total is
-	// only as good as the resolution it was summed at -- one cell spanning the galaxy
-	// cannot be characterised by five hundred samples of a mostly empty cube.
-	//
-	// A tier with one cell per slot needs the LARGEST PARENT's total instead, and that
-	// cannot be read off the subdivided grid at all: the reduce pass produces a global
-	// max, not a max of per-parent sums. It measures parents and scales, which is exact
-	// because children tile their parent -- a parent's mass is the mean of theirs, so
-	// their sum is 8^Levels times it.
-	if (bInCellsShareSlot && Subdivision > 0)
-	{
-		TArray<FTierBatchCell> Parents = MoveTemp(AllCells);
-		SubdivideCells(Parents, Subdivision,
-			static_cast<double>(Params.Extent), AllCells);
-	}
+	TArray<FTierBatchCell> AllCells;
+	SubdivideCells(Parents, Subdivision, static_cast<double>(Params.Extent), AllCells);
 
 	float Scale = 0.0f;
 
@@ -393,23 +390,63 @@ float GalaxyDataGenerator::GetTierBudgetScale(
 			Cells.Add(Cell);
 		}
 
-		float TotalMass = 0.0f;
-		float MaxCellMass = 0.0f;
+		TArray<float> CellMass;
+
+		const double CalibrationStart = FPlatformTime::Seconds();
 
 		if (GalaxyEntityGen::CalibrateBlocking(
 			Params, InTierParams, Cells,
-			Params.Seed + InSeedOffset, Params.NoiseTexture,
-			TotalMass, MaxCellMass))
+			Params.Seed + InSeedOffset, Params.NoiseTexture, CellMass)
+			&& CellMass.Num() == AllCells.Num())
 		{
-			// Share-slot measured the subdivided grid, so its total is already the sum
-			// the slot receives. One-cell-per-slot measured parents, so the largest is
-			// scaled by the number of children each has.
-			const double SubCellsPerCell = FMath::Pow(8.0, static_cast<double>(Subdivision));
+			// REDUCED HERE, NOT ON THE GPU, and in double.
+			//
+			// A slot receives the sum of what its cells produce, so the divisor is
+			// whichever sum the slot actually sees:
+			//
+			//   cells SHARE a slot  -> the TOTAL over the grid. The large tier feeds its
+			//     entire subdivided grid into one slot, so the sum is what must fit.
+			//
+			//   one cell PER slot   -> the LARGEST PER-PARENT SUM. A streamed cell owns a
+			//     slot and its children all write there, so the densest streamed cell
+			//     fills its slot exactly and every other is proportionally less. A global
+			//     max over subcells would answer a different question entirely, and a
+			//     total would force every neighbourhood to the same count -- which is how
+			//     a void came back as full as an arm.
+			//
+			// Summed in a fixed array order, so the answer is reproducible run to run --
+			// which matters because it divides every cell's budget. Double, because a
+			// subdivided grid is hundreds of thousands of terms and a float accumulator
+			// loses the small ones against the large.
+			double Total = 0.0;
+			for (const float Mass : CellMass)
+			{
+				Total += static_cast<double>(Mass);
+			}
 
-			const double Divisor = bInCellsShareSlot
-				? static_cast<double>(TotalMass)
-				: static_cast<double>(MaxCellMass) * SubCellsPerCell;
+			// Taken even when the tier does not divide by it, because the two numbers
+			// side by side in the log are what say whether a tier is calibrated against
+			// the right one: a share-slot tier's total should dwarf its largest parent,
+			// and a per-slot tier's should not be far off a multiple of it.
+			TArray<double> ParentSums;
+			ParentSums.SetNumZeroed(Parents.Num());
 
+			for (int32 i = 0; i < AllCells.Num(); ++i)
+			{
+				const int32 ParentIndex = AllCells[i].ParentIndex;
+				if (ParentSums.IsValidIndex(ParentIndex))
+				{
+					ParentSums[ParentIndex] += static_cast<double>(CellMass[i]);
+				}
+			}
+
+			double LargestParent = 0.0;
+			for (const double Sum : ParentSums)
+			{
+				LargestParent = FMath::Max(LargestParent, Sum);
+			}
+
+			const double Divisor = bInCellsShareSlot ? Total : LargestParent;
 			const int32 Capacity = FMath::Max(InTierParams.SlotCapacity, 1);
 
 			if (Divisor > 0.0)
@@ -418,19 +455,22 @@ float GalaxyDataGenerator::GetTierBudgetScale(
 			}
 
 			UE_LOG(LogTemp, Display,
-				TEXT("GalaxyEntityGen: calibrated tier +%d over %d cells -- total mass ")
-				TEXT("%.6f, largest cell %.6f, capacity %d, %s, subdivision %d ")
-				TEXT("(%.0f subcells per cell) -> scale %.1f."),
-				InSeedOffset, AllCells.Num(), TotalMass, MaxCellMass, Capacity,
+				TEXT("GalaxyEntityGen: calibrated tier +%d over %d parents -> %d cells ")
+				TEXT("(subdivision %d) in %.0f ms -- total mass %.6f, largest parent ")
+				TEXT("%.6f, capacity %d, %s -> scale %.1f."),
+				InSeedOffset, Parents.Num(), AllCells.Num(), Subdivision,
+				(FPlatformTime::Seconds() - CalibrationStart) * 1000.0,
+				Total, LargestParent, Capacity,
 				bInCellsShareSlot ? TEXT("cells share a slot") : TEXT("one cell per slot"),
-				Subdivision, SubCellsPerCell, Scale);
+				Scale);
 		}
 		else
 		{
 			UE_LOG(LogTemp, Warning,
-				TEXT("GalaxyEntityGen: calibration failed for tier +%d over %d cells. ")
-				TEXT("This tier will generate NOTHING until it succeeds -- generating with ")
-				TEXT("an uncalibrated constant would place entities at an arbitrary density."),
+				TEXT("GalaxyEntityGen: calibration failed for tier +%d over %d cells, or ")
+				TEXT("returned a mass array of the wrong length. This tier will generate ")
+				TEXT("NOTHING until it succeeds -- generating with an uncalibrated ")
+				TEXT("constant would place entities at an arbitrary density."),
 				InSeedOffset, AllCells.Num());
 		}
 	}
@@ -498,6 +538,7 @@ void GalaxyDataGenerator::BuildFullTierGrid(
 				FTierBatchCell Out;
 				Out.Coord = FIntVector(ix, iy, iz);
 				Out.SlotIndex = 0;
+				Out.ParentIndex = OutCells.Num();
 				Out.Centre = Centre;
 				Out.HalfExtent = HalfCell;
 

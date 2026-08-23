@@ -78,6 +78,7 @@ public:
 
 		SHADER_PARAMETER(uint32, NumCells)
 		SHADER_PARAMETER(uint32, EntityCapacity)
+		SHADER_PARAMETER(uint32, DispatchGroupsX)
 		SHADER_PARAMETER(float, BudgetScale)
 		SHADER_PARAMETER(uint32, ProbeRounds)
 		SHADER_PARAMETER(int32, KeySeed)
@@ -255,15 +256,16 @@ namespace GalaxyEntityGen
 
 	/** Rounds of sixty-four probes per cell during CALIBRATION.
 	 *
-	 *  Generation always uses one, because it probes a subcell. Calibration probes the
-	 *  whole streamed cell that subcell came from, and sixty-four samples of a cell whose
-	 *  structure occupies a few percent of its volume under-reports the mean badly.
+	 *  ONE, because calibration and generation now probe THE SAME CELLS. Calibration
+	 *  descends a tier's grid with the same GenerationSubdivision generation uses, so a
+	 *  cell's measured mass is the estimate its own thread group would produce.
 	 *
-	 *  The error is BIAS, not noise, and always in the same direction: mass too low ->
-	 *  scale too high -> generation over-delivers, by more the deeper the subdivision.
-	 *  Eight rounds is five hundred and twelve samples per cell, and calibration runs
-	 *  once per tier per galaxy, so the cost does not appear in any frame. */
-	inline constexpr int32 CalibrationProbeRounds = 8;
+	 *  It used to probe the undivided parent, and sixty-four samples of a cell whose
+	 *  structure occupies a few percent of its volume under-reports the mean -- as bias,
+	 *  not noise, always in the same direction. Extra rounds shrank that and could not
+	 *  remove it. Raise this only if the realised count scatters around target; if it
+	 *  sits consistently off in one direction the cause is not the sample count. */
+	inline constexpr int32 CalibrationProbeRounds = 1;
 
 	/** Enqueues the dispatch and a readback copy. Safe to call from the game thread;
 	 *  the work is deferred to the render thread.
@@ -289,12 +291,12 @@ namespace GalaxyEntityGen
 	  *  Returns false on timeout, leaving OutEntities untouched. There is no CPU path
 	  *  behind this any more, so the caller blanks the affected slots rather than
 	  *  filling them another way -- see GalaxyDataGenerator::GenerateTierBatchGPU. */
-	  /** Measure a tier's whole grid so its placement constant can be solved.
+	  /** Weigh every cell of a tier's grid, so its placement constant can be solved.
 	   *
-	   *  Runs the probe pass over every cell and reduces, returning the TOTAL mass and the
-	   *  LARGEST single cell mass. Which one the caller divides capacity by depends on how
-	   *  the tier maps cells to slots -- total when they share one, largest when each cell
-	   *  owns its own. Generation itself never reduces anything.
+	   *  Runs the probe pass and returns the PER-CELL masses, one per entry of InCells and
+	   *  in the same order. It does not reduce them: which reduction the capacity divides
+	   *  by depends on how the tier maps cells to slots, that is the caller's business, and
+	   *  a max of per-parent sums is not something a single thread group can see.
 	   *
 	   *  ONCE PER TIER, not per batch. Dividing a target across whatever cells were in a
 	   *  batch made a cell's yield depend on which neighbours streamed in with it: a void
@@ -308,8 +310,7 @@ namespace GalaxyEntityGen
 		const TArray<FGalaxyGenCell>& InCells,
 		int32 InKeySeed,
 		UTexture* InNoiseTexture,
-		float& OutTotalMass,
-		float& OutMaxCellMass);
+		TArray<float>& OutCellMass);
 
 	bool GenerateBatchBlocking(
 		const FGalaxyParams& InParams,
