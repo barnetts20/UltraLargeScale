@@ -128,7 +128,6 @@ namespace GalaxyEntityGen
 			int32 EntityCapacity = 0;
 			int32 KeySeed = 0;
 			float BudgetScale = 0.0f;
-			int32 ProbeRounds = 1;
 			bool bCalibrateOnly = false;
 			float BudgetAnchor = 1.0f;
 			float EnvelopePad = 1.0f;
@@ -149,10 +148,6 @@ namespace GalaxyEntityGen
 		Payload->KeySeed = InKeySeed;
 		Payload->BudgetScale = BudgetScale;
 		Payload->bCalibrateOnly = bInCalibrateOnly;
-
-		// One round when generating a subcell; many when measuring the parent it came
-		// from. The two are not sampling the same volume at the same scale.
-		Payload->ProbeRounds = bInCalibrateOnly ? CalibrationProbeRounds : 1;
 		Payload->BudgetAnchor = BudgetAnchor;
 		Payload->EnvelopePad = EnvelopePad;
 		Payload->InvGalaxyExtent = InvGalaxyExtent;
@@ -221,12 +216,12 @@ namespace GalaxyEntityGen
 						FRDGBufferRef EntityBuffer = GraphBuilder.CreateBuffer(
 							EntityDesc, TEXT("GalaxyGenEntities"));
 
-						// FIVE counters per cell PLUS THREE globals -- the append cursor and the
-						// two mass reductions. The element count is derived from the same
-						// expression the copy and the readback use, because writing it out
-						// three times is what let it drift: this desc kept four per cell while
-						// the copy moved to five plus three, so the copy ran off the end of the
-						// buffer and the shader's global writes landed outside the view.
+						// FIVE counters per cell PLUS ONE global, the entity append cursor. The
+						// element count is derived from the same expression the copy and the
+						// readback use, because writing it out three times is what let it
+						// drift: this desc kept four per cell while the copy moved on, so the
+						// copy ran off the end of the buffer and the shader's global write
+						// landed outside the view.
 						//
 						// It survived for a long time because RDG POOLS BUFFERS BY SIZE. A
 						// pooled allocation left over from a larger dispatch absorbed both,
@@ -273,8 +268,6 @@ namespace GalaxyEntityGen
 
 						Common.NumCells = static_cast<uint32>(Cells.Num());
 						Common.BudgetScale = Payload->BudgetScale;
-						Common.ProbeRounds =
-							static_cast<uint32>(FMath::Max(Payload->ProbeRounds, 1));
 						Common.BudgetAnchor = Payload->BudgetAnchor;
 						Common.EnvelopePad = Payload->EnvelopePad;
 						Common.EntityCapacity = static_cast<uint32>(Total);
@@ -335,25 +328,14 @@ namespace GalaxyEntityGen
 							return;
 						}
 
-						// THREE PASSES, ONE GRAPH, NO READBACK BETWEEN THEM.
+						// TWO PASSES, ONE GRAPH, NO READBACK BETWEEN THEM.
 						//
-						// They share a UAV and RDG orders them on that dependency, so the
-						// budget crosses from probe to generate entirely on the GPU. The
-						// reduce pass is what makes the candidate count derivable at all:
-						// K = target / sum(mass) needs a total no single group can see.
+						// They share a UAV and RDG orders them on that dependency, so each
+						// cell's envelope crosses from probe to generate entirely on the GPU.
 						//
-						// Flags, once, for all three:
-						//
-						// Compute rather than AsyncCompute until the path is proven. These are
-						// pure producers -- they write buffers nothing else in the frame reads
-						// -- so there is no barrier on the critical path and they should
-						// overlap the graphics pipe. Async asserts where the platform or
-						// configuration does not support it, and a crash inside a background
-						// worker was a poor first result to debug.
-						//
-						// NeverCull, because a culled pass and a pass that ran and wrote
-						// nothing are indistinguishable from the readback -- both give empty
-						// buffers with no error anywhere.
+						// AsyncCompute for both: these are pure producers, writing buffers
+						// nothing else in the frame reads, so there is no barrier on the
+						// critical path and they overlap the graphics pipe.
 						constexpr ERDGPassFlags PassFlags = ERDGPassFlags::AsyncCompute;
 
 						auto AddGenPass = [&GraphBuilder, &Common, PassFlags](
@@ -378,25 +360,16 @@ namespace GalaxyEntityGen
 									PassFlags, Shader, P, InGroups);
 							};
 
-						// Probe always: it produces the per-cell envelope and mass that both
-						// of the other two consume.
+						// Probe always: it produces the per-cell envelope generation rejects
+						// against, and the per-cell mass calibration is solved from.
 						AddGenPass(FGalaxyEntityGenCS::PassProbe,
 							TEXT("GalaxyEntityGen.Probe"), CellGroups);
 
-						if (Payload->bCalibrateOnly)
+						// Calibration stops here. It wants the masses and nothing else, and
+						// the reduction over them happens on the CPU -- the readback already
+						// carries every one of them across.
+						if (!Payload->bCalibrateOnly)
 						{
-							// ONE group, and it must be one: the reduce walks every cell in a
-							// fixed strided order and combines in ascending lane order, so the
-							// results are bit-identical run to run. More groups would need an
-							// atomic, and a float atomic lets scheduling decide the low bits of
-							// the number every cell's budget is divided by.
-							AddGenPass(FGalaxyEntityGenCS::PassReduce,
-								TEXT("GalaxyEntityGen.Reduce"), FIntVector(1, 1, 1));
-						}
-						else
-						{
-							// No reduce. Generation needs one constant and it was calibrated
-							// once, over the tier's whole grid, before any of this ran.
 							AddGenPass(FGalaxyEntityGenCS::PassGenerate,
 								TEXT("GalaxyEntityGen.Generate"), CellGroups);
 						}

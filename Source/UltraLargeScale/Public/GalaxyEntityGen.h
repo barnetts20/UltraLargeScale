@@ -80,7 +80,6 @@ public:
 		SHADER_PARAMETER(uint32, EntityCapacity)
 		SHADER_PARAMETER(uint32, DispatchGroupsX)
 		SHADER_PARAMETER(float, BudgetScale)
-		SHADER_PARAMETER(uint32, ProbeRounds)
 		SHADER_PARAMETER(int32, KeySeed)
 		SHADER_PARAMETER(float, InvGalaxyExtent)
 		SHADER_PARAMETER(float, BudgetAnchor)
@@ -135,12 +134,11 @@ public:
 		/** Which pass this permutation compiles.
 		 *
 		 *    0 PROBE    -- one group per cell: cull, envelope, and weigh it
-		 *    1 REDUCE   -- one group total: total and largest of the weights
-		 *    2 GENERATE -- one group per cell: draw and place candidates
+		 *    1 GENERATE -- one group per cell: draw and place candidates
 		 *
-		 *  TWO OF THE THREE RUN PER BATCH. Generation is probe then generate; reduce runs
-		 *  only during CALIBRATION, which happens once per tier over its whole grid and
-		 *  produces the single constant generation needs.
+		 *  Generation runs both. CALIBRATION runs the probe pass alone and reduces the
+		 *  per-cell masses on the CPU, which is what lets it take a max of per-parent
+		 *  sums -- a quantity no single thread group can see.
 		 *
 		 *  Calibrating per tier rather than per batch is the point. Accepted count per cell
 		 *  is BudgetScale x mass_i, so dividing a target across whatever cells happened to be
@@ -150,7 +148,7 @@ public:
 		 *  A permutation rather than separate shader classes: one parameter struct, one
 		 *  IMPLEMENT_GLOBAL_SHADER, one entry point, and no chance of them drifting apart in
 		 *  what they bind. */
-		class FPassDim : SHADER_PERMUTATION_INT("GALAXY_ENTITYGEN_PASS", 3);
+		class FPassDim : SHADER_PERMUTATION_INT("GALAXY_ENTITYGEN_PASS", 2);
 
 	using FPermutationDomain = TShaderPermutationDomain<FPassDim>;
 
@@ -163,8 +161,11 @@ public:
 
 	/** Pass indices, named so the dispatch site does not read as magic numbers. */
 	static constexpr int32 PassProbe = 0;
-	static constexpr int32 PassReduce = 1;
-	static constexpr int32 PassGenerate = 2;
+	static constexpr int32 PassGenerate = 1;
+
+	/** Probes per cell: one per lane, one round. Also the divisor the CPU uses to turn
+	 *  the evaluated-candidate counter into the candidates-per-probe ratio. */
+	static constexpr int32 ProbesPerCell = 64;
 };
 
 /** One in-flight dispatch. Owns its readback fence and its result.
@@ -181,8 +182,7 @@ public:
 	/** Records in the shared entity buffer, and the number of cells requested.
 	 *
 	 *  EntityCapacity is a budget for the whole dispatch, not a per-cell run. Counts is
-	 *  NumCells * 5 + 3 elements; the extras are the global append cursor and the two
-	 *  mass reductions the budget is calibrated from. */
+	 *  NumCells * 5 + 1 elements; the extra is the global entity append cursor. */
 	int32 EntityCapacity = 0;
 	int32 NumCells = 0;
 
@@ -254,19 +254,6 @@ namespace GalaxyEntityGen
 	 *  hit on healthy hardware the timeout is not the problem. */
 	inline constexpr double ReadbackTimeoutSeconds = 2.0;
 
-	/** Rounds of sixty-four probes per cell during CALIBRATION.
-	 *
-	 *  ONE, because calibration and generation now probe THE SAME CELLS. Calibration
-	 *  descends a tier's grid with the same GenerationSubdivision generation uses, so a
-	 *  cell's measured mass is the estimate its own thread group would produce.
-	 *
-	 *  It used to probe the undivided parent, and sixty-four samples of a cell whose
-	 *  structure occupies a few percent of its volume under-reports the mean -- as bias,
-	 *  not noise, always in the same direction. Extra rounds shrank that and could not
-	 *  remove it. Raise this only if the realised count scatters around target; if it
-	 *  sits consistently off in one direction the cause is not the sample count. */
-	inline constexpr int32 CalibrationProbeRounds = 1;
-
 	/** Enqueues the dispatch and a readback copy. Safe to call from the game thread;
 	 *  the work is deferred to the render thread.
 	 *
@@ -326,8 +313,7 @@ namespace GalaxyEntityGen
 	/** COUNTER BUFFER LAYOUT, in one place.
 	 *
 	 *  Five slots per cell -- accepted, candidates evaluated, envelope, largest candidate
-	 *  density, cell mass -- then three globals past the end: the entity append cursor
-	 *  and the two mass reductions calibration divides by.
+	 *  density, cell mass -- then one global past the end: the entity append cursor.
 	 *
 	 *  Named rather than spelled out because it was spelled out in four places and one of
 	 *  them did not move when the layout widened. The buffer stayed at four per cell
@@ -339,7 +325,7 @@ namespace GalaxyEntityGen
 	 *  GalaxyEntityGen.usf indexes the same layout with literals and cannot share these.
 	 *  Change one and change the other. */
 	inline constexpr int32 CountersPerCell = 5;
-	inline constexpr int32 CountGlobals = 3;
+	inline constexpr int32 CountGlobals = 1;
 
 	inline constexpr int32 CountElementsFor(int32 InNumCells)
 	{
@@ -352,22 +338,11 @@ namespace GalaxyEntityGen
 		return InNumCells * CountersPerCell;
 	}
 
-	inline constexpr int32 GlobalTotalMassIndex(int32 InNumCells)
-	{
-		return InNumCells * CountersPerCell + 1;
-	}
-
-	inline constexpr int32 GlobalMaxMassIndex(int32 InNumCells)
-	{
-		return InNumCells * CountersPerCell + 2;
-	}
-
 	/** Enqueue the passes and a readback copy.
 	 *
-	 *  bInCalibrateOnly runs probe and reduce and skips generation -- the mass reductions
-	 *  without any entities, which is what CalibrateBlocking wants. Otherwise it runs
-	 *  probe and generate and skips the reduce, because generation carries its constant
-	 *  as a uniform rather than solving for it. */
+	 *  bInCalibrateOnly runs the probe pass alone -- the per-cell masses without any
+	 *  entities, which is what CalibrateBlocking wants. Otherwise it runs probe then
+	 *  generate, carrying the calibrated constant in as a uniform. */
 	void Dispatch(
 		const FGalaxyParams& InParams,
 		const FTierParams& InTierParams,

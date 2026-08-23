@@ -83,7 +83,7 @@ RWBuffer<float4> OutEntities;
 // whatever the allocator handed back. Uncleared, InterlockedAdd returns a huge index,
 // every entity fails the bounds test below, and the cell writes nothing at all while
 // looking entirely healthy.
-// FIVE slots per cell, plus two globals past the end:
+// FIVE slots per cell, plus ONE global past the end:
 //   [0] accepted
 //   [1] candidates evaluated
 //   [2] the cell's ENVELOPE, as asuint
@@ -91,41 +91,26 @@ RWBuffer<float4> OutEntities;
 //   [4] the cell's MASS -- mean of (density/anchor)^exponent over its probes, as asuint
 //
 //   [NumCells*5 + 0] the global entity append cursor
-//   [NumCells*5 + 1] the summed mass over every cell, as asuint
-//   [NumCells*5 + 2] the LARGEST single cell mass, as asuint
 //
-// [4] and the two mass reductions are not diagnostics. They are how the candidate budget
-// stops being an authored number: accepted_i works out to BudgetScale x mass_i exactly,
-// so a single per-tier constant sets every cell's count.
+// [4] is not a diagnostic. It is how the candidate budget stops being an authored
+// number: accepted_i works out to BudgetScale x mass_i exactly, so one per-tier constant
+// sets every cell's count. The CPU reduces these masses -- summed for a tier whose cells
+// share a slot, max of per-parent sums for one where each streamed cell owns its own --
+// and hands the answer back as BudgetScale. Nothing here reduces anything.
 //
-// WHICH reduction that constant comes from depends on how the tier maps cells to slots,
-// and getting it wrong is what produced batches of empty sky as expensive as batches of
-// arms:
+// The other three answer questions with no other observer:
 //
-//   cells SHARE a slot (the large tier feeds its whole grid into one)
-//     -> capacity / TOTAL mass. The slot holds the sum, so the sum is what must fit.
-//
-//   one cell PER slot (the streamed tiers)
-//     -> capacity / MAX cell mass. The densest cell in the galaxy fills its slot and
-//        every other is proportionally less. Dividing a batch total instead would force
-//        every neighbourhood to the same count, so a void would come back as full as an
-//        arm -- which it did.
-//
-// Both are computed ONCE per tier over its whole grid, never per batch. A cell's yield
-// must not depend on which neighbours happened to stream in beside it.
-//
-// Everything else here answers a question with no other observer:
-//
-//   [1] against the budget the CPU re-derives -- did the loop run, did the cells bind?
+//   [1] candidates evaluated. Against the probe count -- cells x 64 -- it gives the
+//       ratio that says whether GenerationSubdivision is on the right side of its
+//       crossover, since probes and candidates are both field evaluations.
 //   [2] against the anchor -- is the normaliser in a sane numeric range?
 //   [3] against [2] -- THE ENVELOPE CHECK. A candidate density above the envelope means
 //       the probes under-estimated this cell, the ratio clipped at 1, and the peak was
 //       flattened. Cell-quantised, so it shows as grid artifacts.
 //
 // asuint is monotonic for non-negative floats, so InterlockedMax over the bit pattern
-// orders exactly as the float does. The mass values are read back as floats, never
-// atomically combined -- the reduce pass sums them in a FIXED order so the total is
-// reproducible, which a float atomic could not promise.
+// orders exactly as the float does. The masses are read back as floats and never
+// atomically combined, so no ordering question arises.
 RWBuffer<uint> OutCounts;
 
 // ---------------------------------------------------------------------------
@@ -172,19 +157,6 @@ uint DispatchGroupsX;
 // probe and reduce passes.
 float BudgetScale;
 
-// Rounds of sixty-four probes per cell. One during generation; more during CALIBRATION.
-//
-// They are not measuring the same thing at the same scale. Generation probes a SUBCELL,
-// and a streamed cell subdivided three levels gets five hundred and twelve of them --
-// thirty-two thousand samples across the parent. Calibration probes the PARENT once, and
-// sixty-four samples of a cell whose structure occupies a few percent of its volume
-// under-reports the mean badly.
-//
-// The consequence is not noise, it is BIAS in one direction: calibration reports a mass
-// that is too low, the scale it produces is too high, and generation over-delivers by
-// more the deeper the subdivision. Measured at 18% over for an unsubdivided tier and
-// 320% for one at 512 subcells per cell.
-uint ProbeRounds;
 int KeySeed; // galaxy seed folded with the tier's seed offset
 float InvGalaxyExtent;
 
@@ -265,70 +237,16 @@ float InNoiseEnable;
 // groupshared memory has no float atomics.
 groupshared uint GroupEnvelopeBits;
 
-// The shaped densities, reduced by ONE LANE IN A FIXED ORDER rather than by atomics.
-// This value feeds the global budget, so every cell's contribution has to be
+// The shaped densities, summed by ONE LANE IN A FIXED ORDER rather than by atomics.
+// This value divides the tier's whole budget, so every cell's contribution has to be
 // reproducible; float addition is not associative, and an atomic would let scheduling
 // decide the low bits. Sixty-four adds on one lane costs nothing.
 groupshared float GroupMass[GALAXY_ENTITYGEN_GROUP];
-groupshared float GroupMassMax[GALAXY_ENTITYGEN_GROUP];
 
 [numthreads(GALAXY_ENTITYGEN_GROUP, 1, 1)]
 void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 {
     const uint CellIndex = GroupId.y * DispatchGroupsX + GroupId.x;
-
-#if GALAXY_ENTITYGEN_PASS == 1
-    // -----------------------------------------------------------------------
-    // PASS 1 -- REDUCE. One group, no cell of its own. CALIBRATION ONLY.
-    //
-    // The candidate budget is not authored, it is solved. Accepted count per cell is
-    // BudgetScale x mass_i with the envelope cancelling, so one constant per tier sets
-    // every cell's count -- and this pass produces the two numbers it is solved from.
-    //
-    // TOTAL for a tier whose cells share a slot, LARGEST for one where each cell owns
-    // its own. Neither is visible to a group in pass 0, which is the entire reason this
-    // pass exists. It is also the cheapest dispatch in the graph: sixty-four lanes, a
-    // strided walk, one combine.
-    //
-    // It does NOT run during generation. It ran once, over the tier's whole grid, and
-    // generation carries the answer as a uniform.
-    // -----------------------------------------------------------------------
-    float Partial = 0.0f;
-    float PartialMax = 0.0f;
-
-    for (uint i = GroupIndex; i < NumCells; i += GALAXY_ENTITYGEN_GROUP)
-    {
-        const float CellMass = asfloat(OutCounts[i * 5u + 4u]);
-        Partial += CellMass;
-        PartialMax = max(PartialMax, CellMass);
-    }
-
-    GroupMass[GroupIndex] = Partial;
-    GroupMassMax[GroupIndex] = PartialMax;
-
-    GroupMemoryBarrierWithGroupSync();
-
-    if (GroupIndex == 0u)
-    {
-        // Ascending lane order, always. The strided walk above gives each lane a fixed
-        // set of cells, so the total is bit-identical run to run -- which matters
-        // because it divides every cell's budget, and a float atomic would let
-        // scheduling decide its low bits.
-        float Total = 0.0f;
-        float Largest = 0.0f;
-
-        for (uint l = 0u; l < GALAXY_ENTITYGEN_GROUP; ++l)
-        {
-            Total += GroupMass[l];
-            Largest = max(Largest, GroupMassMax[l]);
-        }
-
-        OutCounts[NumCells * 5u + 1u] = asuint(max(Total, 0.0f));
-        OutCounts[NumCells * 5u + 2u] = asuint(max(Largest, 0.0f));
-    }
-
-    return;
-#else
 
     if (CellIndex >= NumCells)
     {
@@ -350,14 +268,14 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
     const float InvAnchor = 1.0f / max(BudgetAnchor, 1e-6f);
     const float Exponent = max(PlaceSpawnExponent, 1e-3f);
-#endif
 
 #if GALAXY_ENTITYGEN_PASS == 0
     // -----------------------------------------------------------------------
     // PASS 0 -- PROBE. Cull the cell, envelope it, and weigh it.
     //
-    // ONE PROBE PER LANE PER ROUND. Generation runs one round; calibration runs several,
-    // because it is measuring a whole streamed cell rather than one subcell of it.
+    // ONE PROBE PER LANE, so sixty-four per cell, and the same for calibration and for
+    // generation -- both descend to the same grid, so a cell's measured mass is the
+    // estimate its own thread group would produce.
     //
     // Probe count matters more than it looks. The envelope is a MAX, and structure much
     // thinner than a cell is only found if a probe lands on it, so a sparse set makes the
@@ -377,9 +295,8 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     float LocalPeak = 0.0f;
     float LocalMass = 0.0f;
 
-    for (uint Round = 0u; Round < max(ProbeRounds, 1u); ++Round)
     {
-        const uint ProbeIndex = Round * GALAXY_ENTITYGEN_GROUP + GroupIndex;
+        const uint ProbeIndex = GroupIndex;
 
         const float3 ProbePos = P.MakeProbe(
             Cell.Centre, Cell.HalfExtent,
@@ -429,16 +346,16 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
         // common -- most of a galaxy's bounding grid is void -- while a slot still at the
         // cleared value means the group never reached here.
         OutCounts[CellIndex * 5u + 2u] = asuint(max(Envelope, 0.0f));
-        // Every probe except the eight corners, across every round.
-        const float MassSamples =
-            float(max(ProbeRounds, 1u) * GALAXY_ENTITYGEN_GROUP - 8u);
 
-        OutCounts[CellIndex * 5u + 4u] = asuint(Sum / max(MassSamples, 1.0f));
+        // Every probe except the eight corners.
+        const float MassSamples = float(GALAXY_ENTITYGEN_GROUP - 8u);
+
+        OutCounts[CellIndex * 5u + 4u] = asuint(Sum / MassSamples);
     }
 
-#elif GALAXY_ENTITYGEN_PASS == 2
+#else
     // -----------------------------------------------------------------------
-    // PASS 2 -- GENERATE.
+    // PASS 1 -- GENERATE.
     //
     // The budget is DERIVED, and from a per-tier constant rather than from anything
     // about this batch: the cell draws BudgetScale x (envelope/anchor)^g candidates.

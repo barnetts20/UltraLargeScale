@@ -759,7 +759,7 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	// one tier populated and the others empty -- reads as a streaming problem rather
 	// than a generation one.
 	//
-	// Counts is FOUR per cell:
+	// Counts is FIVE per cell, then the global append cursor:
 	//   [0] accepted
 	//   [1] candidates evaluated
 	//   [2] the cell's envelope, as asuint
@@ -818,12 +818,24 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	{
 		bAnnounced = true;
 
+		// PROBES AND CANDIDATES ARE BOTH FIELD EVALUATIONS, so their ratio is what says
+		// whether the tier's GenerationSubdivision sits on the right side of its
+		// crossover. Deeper subdivision multiplies probes by the cell growth factor and
+		// divides candidates by the acceptance gain; below about 1 the probes have
+		// overtaken placement and the tier wants one level fewer, above about 9 it wants
+		// one more.
+		const int64 TotalProbes =
+			static_cast<int64>(InCells.Num()) * FGalaxyEntityGenCS::ProbesPerCell;
+
 		UE_LOG(LogTemp, Display,
 			TEXT("GalaxyEntityGen: tier +%d, %d queued -> %d cells (%d live) -> ")
-			TEXT("%lld candidates -> %u accepted (%d landed, %d capacity, ")
-			TEXT("%d envelope exceeded, scale %.1f, max envelope %.5f)."),
+			TEXT("%lld probes + %lld candidates (C/P %.2f) -> %u accepted ")
+			TEXT("(%d landed, %d capacity, %d envelope exceeded, scale %.1f, ")
+			TEXT("max envelope %.5f)."),
 			InSeedOffset, InQueuedCells.Num(), InCells.Num(), LiveCells,
-			TotalEvaluated, GlobalAccepted, Landed, EntityCapacity,
+			TotalProbes, TotalEvaluated,
+			TotalProbes > 0 ? static_cast<double>(TotalEvaluated) / static_cast<double>(TotalProbes) : 0.0,
+			GlobalAccepted, Landed, EntityCapacity,
 			ExceededCells, BudgetScale, MaxEnvelope);
 	}
 
