@@ -9,6 +9,8 @@
 
 #include "GalaxyEntityGen.h"
 #include "GalaxyGenProbe.h"
+#include "ProceduralSpaceActor.h"
+#include "Misc/ScopeLock.h"
 // SHIM FIRST, then the shared field compiled INSIDE the shim's namespace.
 //
 // The namespace is never opened. MSVC's <cmath> declares float overloads of
@@ -100,110 +102,6 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 		static_cast<float>(InNormPos.X),
 		static_cast<float>(InNormPos.Y),
 		static_cast<float>(InNormPos.Z)));
-}
-
-float GalaxyDataGenerator::EnvelopePadding() const
-{
-	// TWO errors to cover, and only one of them is a fixed factor.
-	//
-	// The first is sampling: the estimate is a max over 32 points, so it under-shoots
-	// the true peak inside the cell by an amount that depends on how sharp the field is
-	// there. That is the fixed part.
-	//
-	// The second is SYSTEMATIC and was being ignored. The probes run SampleAnalytic on
-	// the CPU while the dispatch rejects against GalaxySample, which multiplies by
-	// max(1 + Amount * n, 0) with n roughly in [-1,1]. The textured field can therefore
-	// reach (1 + Amount) times the analytic value at the same point, and the LARGEST
-	// per-layer amount bounds it because a candidate can land in any layer.
-	//
-	// A fixed 1.5 covered this only while every amount stayed under 0.5.
-	// BackgroundNoiseAmount defaults to 1.0 and BulgeNoiseAmount to 0.5, so the
-	// envelope was already being exceeded at default tuning -- and an exceeded envelope
-	// clips the ratio at 1, flattening exactly the peaks the prepass went looking for.
-	//
-	// Erring high costs acceptance rate; erring low costs fidelity, and only one of
-	// those is recoverable.
-	constexpr float SampleMiss = 1.15f;
-
-	const FGalaxyDensityParams& D = Params.DensityParams;
-
-	if (!D.bEnableNoise)
-	{
-		return SampleMiss;
-	}
-
-	const float MaxAmount = FMath::Max(
-		FMath::Max(D.ArmNoiseAmount, D.DiscNoiseAmount),
-		FMath::Max(D.BulgeNoiseAmount, D.BackgroundNoiseAmount));
-
-	return SampleMiss * (1.0f + FMath::Max(MaxAmount, 0.0f));
-}
-
-float GalaxyDataGenerator::EstimateCellEnvelope(
-	const FIntVector& InCoord,
-	const FVector& InCentre,
-	double InHalfExtent) const
-{
-	// 8 corner offsets in cell-local space (+/-HalfExtent on each axis).
-	static const FVector CornerOffsets[8] =
-	{
-		FVector(-1, -1, -1), FVector(1, -1, -1),
-		FVector(-1,  1, -1), FVector(1,  1, -1),
-		FVector(-1, -1,  1), FVector(1, -1,  1),
-		FVector(-1,  1,  1), FVector(1,  1,  1),
-	};
-
-	constexpr int32 InteriorProbes = 24;
-
-	const double InvExtent = 1.0 / FMath::Max(static_cast<double>(Params.Extent), 1e-9);
-
-	// The candidate span MakeCandidate uses is +/-HalfExtent about the centre, so the
-	// probes cover exactly the region the envelope has to bound. Sampling a smaller
-	// region would leave candidates outside it rejecting against a peak that does not
-	// apply to them.
-	float CellMax = 0.0f;
-
-	auto Probe = [this, InvExtent, &CellMax](const FVector& InPoint)
-		{
-			const FVector Norm = InPoint * InvExtent;
-
-			// SampleDensity already returns zero outside the field, but an explicit
-			// check skips the full evaluation for points clearly beyond the extents.
-			if (FMath::Abs(Norm.X) > 1.0 ||
-				FMath::Abs(Norm.Y) > 1.0 ||
-				FMath::Abs(Norm.Z) > 1.0)
-			{
-				return;
-			}
-
-			CellMax = FMath::Max(CellMax, SampleDensity(Norm));
-		};
-
-	for (int32 c = 0; c < 8; ++c)
-	{
-		Probe(InCentre + CornerOffsets[c] * InHalfExtent);
-	}
-
-	// Seeded from the CELL COORD, not from anything about the batch. The same cell must
-	// yield the same envelope whichever neighbourhood it arrives in, or its candidate
-	// budget shifts between visits and the region regenerates differently.
-	const int32 CellHash = HashCombine(
-		HashCombine(GetTypeHash(InCoord.X), GetTypeHash(InCoord.Y)),
-		GetTypeHash(InCoord.Z));
-
-	FRandomStream ProbeStream(HashCombine(Params.Seed, CellHash));
-
-	for (int32 p = 0; p < InteriorProbes; ++p)
-	{
-		Probe(InCentre + FVector(
-			ProbeStream.FRandRange(-InHalfExtent, InHalfExtent),
-			ProbeStream.FRandRange(-InHalfExtent, InHalfExtent),
-			ProbeStream.FRandRange(-InHalfExtent, InHalfExtent)));
-	}
-
-	// Zero means empty, and stays exactly zero so the caller can test it. Padding is
-	// applied only to a real peak.
-	return (CellMax > 0.0f) ? CellMax * EnvelopePadding() : 0.0f;
 }
 
 #pragma endregion
@@ -336,138 +234,376 @@ bool GalaxyDataGenerator::BuildLargeTierCells(
 		return true;
 	}
 
-	const TArray<FActiveLargeTierCell> ActiveCells = CollectActiveLargeTierCells();
-	if (ActiveCells.Num() == 0)
-	{
-		return false;
-	}
+	// -----------------------------------------------------------------------
+	// GEOMETRY ONLY. This used to be a density prepass: it walked the grid sampling
+	// the analytic field, kept the cells with something in them, and handed each one a
+	// peak to reject against and a share of a pooled budget.
+	//
+	// All of that is in the shader now, where it can sample the TEXTURED field instead
+	// of an analytic stand-in for it. What is left here is the one question the GPU
+	// cannot answer more cheaply than the CPU: which cells exist at all.
+	//
+	// The bounds test is worth keeping because it costs nothing and halves the work.
+	// The field is zero outside the unit sphere, so a cell whose nearest corner is
+	// already beyond it can hold nothing -- and a sphere fills only pi/6 of its
+	// bounding cube, so roughly half the grid goes without a single field evaluation.
+	// Every surviving cell still gets probed by its own group.
+	// -----------------------------------------------------------------------
 
-	// The large tier has ONE slot, and its active cells all feed it. Every cell is
-	// tagged with that slot so the scatter writes them into the same run, and the
-	// dispatch's per-cell counters still keep the runs apart.
+	const int32 CullDepth = FMath::Max(Params.LargeTierCullDepth, 1);
+	const int32 GridSide = 1 << CullDepth;
+	const double FullExtent = static_cast<double>(Params.Extent);
+	const double CellFull = (2.0 * FullExtent) / static_cast<double>(GridSide);
+	const double HalfCell = CellFull * 0.5;
+	const double InvExtent = 1.0 / FMath::Max(FullExtent, 1e-9);
+
+	// The large tier has ONE slot, and every cell feeds it. Each cell is tagged with
+	// that slot so the scatter writes them into the same run, and the dispatch's
+	// per-cell counters still keep the runs apart.
 	//
 	// Not the grid coord of the slot: the KEY has to be the cell's own coord or two
 	// cells sharing a slot would draw identical candidates.
 	const int32 SlotIndex = InSlots[0].Value;
 
-	// Budget SHARED across the active set, weighted by each cell's peak density --
-	// the same distribution the per-slot CPU path used, and for the same reason.
-	//
-	// Accepted count per cell is budget x mean(d)/envelope, so weighting the budget by
-	// MAX and rejecting against that cell's own max gives accepted ~ mean, which is
-	// proportional to cell mass. Weighting by mean instead would count the same factor
-	// twice and over-concentrate in the arms quadratically.
-	const int32 Budget = FMath::Max(Params.LargeTier.CandidateBudget, ActiveCells.Num());
+	const int32 TotalCells = GridSide * GridSide * GridSide;
+	OutCells.Reserve(TotalCells / 2);
 
-	double TotalWeight = 0.0;
-	for (const FActiveLargeTierCell& Cell : ActiveCells)
+	for (int32 iz = 0; iz < GridSide; ++iz)
 	{
-		TotalWeight += FMath::Max(static_cast<double>(Cell.MaxDensity), 1e-6);
+		for (int32 iy = 0; iy < GridSide; ++iy)
+		{
+			for (int32 ix = 0; ix < GridSide; ++ix)
+			{
+				const FVector Centre(
+					-FullExtent + HalfCell + static_cast<double>(ix) * CellFull,
+					-FullExtent + HalfCell + static_cast<double>(iy) * CellFull,
+					-FullExtent + HalfCell + static_cast<double>(iz) * CellFull);
+
+				// Nearest point of the cell to the origin, normalised. If even that is
+				// outside the unit sphere the whole cell is, and no probe would find
+				// anything.
+				const FVector Nearest(
+					FMath::Max(FMath::Abs(Centre.X) - HalfCell, 0.0) * InvExtent,
+					FMath::Max(FMath::Abs(Centre.Y) - HalfCell, 0.0) * InvExtent,
+					FMath::Max(FMath::Abs(Centre.Z) - HalfCell, 0.0) * InvExtent);
+
+				if (Nearest.SizeSquared() > 1.0)
+				{
+					continue;
+				}
+
+				FTierBatchCell Out;
+				Out.Coord = FIntVector(ix, iy, iz);
+				Out.SlotIndex = SlotIndex;
+				Out.Centre = Centre;
+				Out.HalfExtent = HalfCell;
+
+				OutCells.Add(Out);
+			}
+		}
 	}
 
-	OutCells.Reserve(ActiveCells.Num());
+	UE_LOG(LogTemp, Verbose,
+		TEXT("GalaxyDataGenerator::BuildLargeTierCells - depth=%d grid=%d^3 total=%d ")
+		TEXT("in bounds=%d (%.1f%%); density culling happens in the dispatch."),
+		CullDepth, GridSide, TotalCells, OutCells.Num(),
+		TotalCells > 0 ? 100.0f * static_cast<float>(OutCells.Num()) / static_cast<float>(TotalCells) : 0.0f);
 
-	for (const FActiveLargeTierCell& Cell : ActiveCells)
-	{
-		const double Weight = FMath::Max(static_cast<double>(Cell.MaxDensity), 1e-6);
-
-		FTierBatchCell Out;
-		Out.Coord = Cell.GridCoord;
-		Out.SlotIndex = SlotIndex;
-		Out.Centre = Cell.Center;
-		Out.HalfExtent = Cell.HalfExt;
-		Out.DensityReference = Cell.MaxDensity;
-		Out.Candidates = FMath::Max(1,
-			FMath::RoundToInt(static_cast<double>(Budget) * Weight / TotalWeight));
-
-		OutCells.Add(Out);
-	}
-
-	return true;
+	return OutCells.Num() > 0;
 }
 
-void GalaxyDataGenerator::ApplyCellEnvelopes(
-	TArray<FTierBatchCell>& InOutCells,
-	const FTierParams& InTierParams) const
+void GalaxyDataGenerator::SubdivideCells(
+	const TArray<FTierBatchCell>& InCells,
+	int32 InLevels,
+	TArray<FTierBatchCell>& OutCells)
 {
-	// The budget anchor. A cell whose peak reaches this draws the full tier budget;
-	// everything fainter draws proportionally fewer candidates and therefore accepts
-	// proportionally fewer entities, which is what carries the structure BETWEEN cells
-	// now that each cell rejects against its own peak.
-	const float GlobalReference =
-		FMath::Max(Params.DensityParams.SpawnDensityReference, 1e-3f);
+	OutCells.Reset();
 
-	const int32 Budget = FMath::Max(InTierParams.CandidateBudget, 1);
-
-	int32 ClampedCells = 0;
-	int32 EmptyCells = 0;
-
-	for (FTierBatchCell& Cell : InOutCells)
+	if (InLevels <= 0)
 	{
-		const float Envelope = EstimateCellEnvelope(Cell.Coord, Cell.Centre, Cell.HalfExtent);
+		OutCells = InCells;
+		return;
+	}
 
-		if (Envelope <= 0.0f)
+	const int32 Side = 1 << InLevels;
+	const int32 PerCell = Side * Side * Side;
+
+	OutCells.Reserve(InCells.Num() * PerCell);
+
+	for (const FTierBatchCell& Parent : InCells)
+	{
+		const double SubHalf = Parent.HalfExtent / static_cast<double>(Side);
+		const double SubFull = SubHalf * 2.0;
+
+		// Centres run from one corner of the parent, offset so the set is symmetric
+		// about it. The children tile the parent exactly, which is what keeps the sum of
+		// their masses equal to 8^Levels times the parent's -- the relation the tier's
+		// calibrated constant is scaled by.
+		const double Origin = -(static_cast<double>(Side) - 1.0) * 0.5;
+
+		for (int32 iz = 0; iz < Side; ++iz)
 		{
-			// Nothing here. The cell still has to appear in the batch so its slot gets
-			// padded dead, but it should not spend threads.
-			//
-			// One candidate rather than zero because zero is already spoken for:
-			// FTierBatchCell::Candidates uses it to mean "take the tier's budget", so a
-			// literal zero would hand this cell the full budget instead of none.
-			Cell.DensityReference = GlobalReference;
-			Cell.Candidates = 1;
-			++EmptyCells;
-			continue;
+			for (int32 iy = 0; iy < Side; ++iy)
+			{
+				for (int32 ix = 0; ix < Side; ++ix)
+				{
+					FTierBatchCell Child;
+
+					// The SLOT is the parent's. Children are a generation detail; the
+					// buffer still holds one region per streamed cell.
+					Child.SlotIndex = Parent.SlotIndex;
+
+					Child.Coord = FIntVector(
+						Parent.Coord.X * Side + ix - Side / 2,
+						Parent.Coord.Y * Side + iy - Side / 2,
+						Parent.Coord.Z * Side + iz - Side / 2);
+
+					Child.Centre = Parent.Centre + FVector(
+						(Origin + static_cast<double>(ix)) * SubFull,
+						(Origin + static_cast<double>(iy)) * SubFull,
+						(Origin + static_cast<double>(iz)) * SubFull);
+
+					Child.HalfExtent = SubHalf;
+
+					OutCells.Add(Child);
+				}
+			}
 		}
+	}
+}
 
-		Cell.DensityReference = Envelope;
+float GalaxyDataGenerator::GetTierBudgetScale(
+	const FTierParams& InTierParams,
+	int32 InSeedOffset,
+	bool bInCellsShareSlot) const
+{
+	// Null only on a moved-from generator. Same contract as SampleDensity against a null
+	// Derived: report nothing rather than dereference.
+	if (!TierBudgetScaleLock.IsValid())
+	{
+		return 0.0f;
+	}
 
-		// Clamped at the tier budget so the dispatch stride -- which is the LARGEST
-		// per-cell budget -- cannot be inflated by one unusually dense cell.
-		const int32 Weighted = FMath::RoundToInt(
-			static_cast<double>(Budget) * static_cast<double>(Envelope)
-			/ static_cast<double>(GlobalReference));
-
-		Cell.Candidates = FMath::Clamp(Weighted, 1, Budget);
-
-		if (Weighted > Budget)
+	{
+		FScopeLock Lock(TierBudgetScaleLock.Get());
+		if (const float* Cached = TierBudgetScales.Find(InSeedOffset))
 		{
-			++ClampedCells;
+			return *Cached;
 		}
 	}
 
-	// Clamping means the cell wanted more candidates than the anchor allows, so its
-	// accepted count no longer tracks its mass and inter-cell contrast flattens at the
-	// top end. A few clamped cells are fine; a lot means SpawnDensityReference is sitting
-	// well below what the field actually reaches and should be raised toward its peak.
+	// -----------------------------------------------------------------------
+	// ONCE PER TIER, OVER ITS WHOLE GRID. Never per batch.
 	//
-	// Note this is the OPPOSITE reason to the one the reference used to be raised for.
-	// It is no longer the rejection envelope for these tiers -- the per-cell peak is --
-	// so raising it no longer costs acceptance. It only re-anchors the budget.
-	if (ClampedCells * 4 > InOutCells.Num())
+	// Accepted count per cell is BudgetScale x mass_i, so BudgetScale is the entirety of
+	// a tier's placement tuning. Solving it from the cells in a BATCH made a cell's yield
+	// depend on which neighbours streamed in beside it: a neighbourhood of empty sky was
+	// forced to the same total as one full of arms, so voids came back populated and cost
+	// several times the candidates to produce. It also meant the same region generated
+	// differently depending on the direction of approach.
+	//
+	// WHICH REDUCTION divides the capacity depends on how the tier maps cells to slots:
+	//
+	//   cells SHARE a slot  -> capacity / TOTAL mass.
+	//     The large tier feeds its entire grid into one slot, so the slot holds the sum
+	//     and the sum is what has to fit.
+	//
+	//   one cell PER slot   -> capacity / LARGEST cell mass.
+	//     The densest cell in the galaxy fills its slot exactly; every other cell is
+	//     proportionally less and no slot can overflow. Dividing a total here would give
+	//     every slot the same count regardless of what is in it.
+	// -----------------------------------------------------------------------
+	FScopeLock Lock(TierBudgetScaleLock.Get());
+
+	if (const float* Cached = TierBudgetScales.Find(InSeedOffset))
 	{
-		static bool bWarnedClamp = false;
-		if (!bWarnedClamp)
+		return *Cached;
+	}
+
+	TArray<FTierBatchCell> AllCells;
+
+	if (bInCellsShareSlot)
+	{
+		// The large tier already hands its whole grid over on every batch, so the cell
+		// set it calibrates against is the one it generates with.
+		const TArray<TPair<FIntVector, int32>> OneSlot = { TPair<FIntVector, int32>(FIntVector::ZeroValue, 0) };
+		BuildLargeTierCells(OneSlot, AllCells);
+	}
+	else
+	{
+		BuildFullTierGrid(InTierParams.GridDepth, AllCells);
+	}
+
+	float Scale = 0.0f;
+
+	if (AllCells.Num() > 0 && Params.NoiseTexture != nullptr)
+	{
+		TArray<FGalaxyGenCell> Cells;
+		Cells.Reserve(AllCells.Num());
+
+		for (const FTierBatchCell& In : AllCells)
 		{
-			bWarnedClamp = true;
+			FGalaxyGenCell Cell;
+			Cell.Centre = FVector3f(
+				static_cast<float>(In.Centre.X),
+				static_cast<float>(In.Centre.Y),
+				static_cast<float>(In.Centre.Z));
+			Cell.HalfExtent = static_cast<float>(In.HalfExtent);
+			Cell.Coord = FIntVector3(In.Coord.X, In.Coord.Y, In.Coord.Z);
+			Cells.Add(Cell);
+		}
+
+		float TotalMass = 0.0f;
+		float MaxCellMass = 0.0f;
+
+		if (GalaxyEntityGen::CalibrateBlocking(
+			Params, InTierParams, Cells,
+			Params.Seed + InSeedOffset, Params.NoiseTexture,
+			TotalMass, MaxCellMass))
+		{
+			// CALIBRATED AT THE STREAMING DEPTH, then scaled for subdivision.
+			//
+			// Generation may descend inside each streamed cell, and a slot then receives
+			// the sum of that cell's children rather than the cell itself. Children tile
+			// their parent, so a parent's mass is the MEAN of theirs and the sum is
+			// exactly 8^Levels times it -- which is why the tree does not have to be
+			// walked here to account for it.
+			//
+			// Measuring at the deeper level instead would answer a different question:
+			// the largest SUBCELL mass, when what a slot has to fit is the largest
+			// PARENT's total.
+			const int32 Subdivision = FMath::Clamp(InTierParams.GenerationSubdivision, 0, 4);
+			const double SubCellsPerCell = FMath::Pow(8.0, static_cast<double>(Subdivision));
+
+			const double Divisor = bInCellsShareSlot
+				? static_cast<double>(TotalMass)
+				: static_cast<double>(MaxCellMass) * SubCellsPerCell;
+
+			const int32 Capacity = FMath::Max(InTierParams.SlotCapacity, 1);
+
+			if (Divisor > 0.0)
+			{
+				Scale = static_cast<float>(static_cast<double>(Capacity) / Divisor);
+			}
+
+			UE_LOG(LogTemp, Display,
+				TEXT("GalaxyEntityGen: calibrated tier +%d over %d cells -- total mass ")
+				TEXT("%.6f, largest cell %.6f, capacity %d, %s, subdivision %d ")
+				TEXT("(%.0f subcells per cell) -> scale %.1f."),
+				InSeedOffset, AllCells.Num(), TotalMass, MaxCellMass, Capacity,
+				bInCellsShareSlot ? TEXT("cells share a slot") : TEXT("one cell per slot"),
+				Subdivision, SubCellsPerCell, Scale);
+		}
+		else
+		{
 			UE_LOG(LogTemp, Warning,
-				TEXT("GalaxyEntityGen: %d of %d cells clamped at the tier budget (%d empty). ")
-				TEXT("SpawnDensityReference %.3f is below the field's working range, so ")
-				TEXT("candidate budgets are pinned and inter-cell contrast is flattening. ")
-				TEXT("Raise it toward the peak density the field actually reaches."),
-				ClampedCells, InOutCells.Num(), EmptyCells,
-				Params.DensityParams.SpawnDensityReference);
+				TEXT("GalaxyEntityGen: calibration failed for tier +%d over %d cells. ")
+				TEXT("This tier will generate NOTHING until it succeeds -- generating with ")
+				TEXT("an uncalibrated constant would place entities at an arbitrary density."),
+				InSeedOffset, AllCells.Num());
+		}
+	}
+
+	// Cached even at zero. A retry every batch would re-probe an entire grid on the
+	// streaming path, and the cause of a failure here -- no texture, no device -- does
+	// not resolve itself between boundary crosses.
+	TierBudgetScales.Add(InSeedOffset, Scale);
+
+	return Scale;
+}
+
+void GalaxyDataGenerator::BuildFullTierGrid(
+	int32 InGridDepth,
+	TArray<FTierBatchCell>& OutCells) const
+{
+	OutCells.Reset();
+
+	// The streaming system's grid, enumerated exhaustively rather than around a viewer.
+	// Same formula, because calibration has to measure the cells the tier will actually
+	// generate with -- a different coord labelling would reseed the probe jitter and give
+	// a slightly different answer.
+	const double CellSize = (static_cast<double>(Params.Extent)
+		* AProceduralSpaceActor::GridExtentMultiplier) / static_cast<double>(1 << InGridDepth);
+
+	const double HalfCell = CellSize * 0.5;
+
+	if (!(CellSize > 0.0))
+	{
+		return;
+	}
+
+	// Coords run outward from the origin, far enough that the last ring still touches the
+	// field. The +1 covers the half cell of overhang.
+	const int32 Ring = FMath::CeilToInt32(
+		static_cast<double>(Params.Extent) / CellSize) + 1;
+
+	const double InvExtent = 1.0 / FMath::Max(static_cast<double>(Params.Extent), 1e-9);
+
+	OutCells.Reserve((2 * Ring + 1) * (2 * Ring + 1) * (2 * Ring + 1) / 2);
+
+	for (int32 iz = -Ring; iz <= Ring; ++iz)
+	{
+		for (int32 iy = -Ring; iy <= Ring; ++iy)
+		{
+			for (int32 ix = -Ring; ix <= Ring; ++ix)
+			{
+				const FVector Centre(
+					static_cast<double>(ix) * CellSize,
+					static_cast<double>(iy) * CellSize,
+					static_cast<double>(iz) * CellSize);
+
+				// Nearest point of the cell to the origin. Beyond the unit sphere the
+				// field is zero everywhere in it, so no probe would find anything.
+				const FVector Nearest(
+					FMath::Max(FMath::Abs(Centre.X) - HalfCell, 0.0) * InvExtent,
+					FMath::Max(FMath::Abs(Centre.Y) - HalfCell, 0.0) * InvExtent,
+					FMath::Max(FMath::Abs(Centre.Z) - HalfCell, 0.0) * InvExtent);
+
+				if (Nearest.SizeSquared() > 1.0)
+				{
+					continue;
+				}
+
+				FTierBatchCell Out;
+				Out.Coord = FIntVector(ix, iy, iz);
+				Out.SlotIndex = 0;
+				Out.Centre = Centre;
+				Out.HalfExtent = HalfCell;
+
+				OutCells.Add(Out);
+			}
 		}
 	}
 }
 
 bool GalaxyDataGenerator::GenerateTierBatchGPU(
-	const TArray<FTierBatchCell>& InCells,
+	const TArray<FTierBatchCell>& InQueuedCells,
 	FNiagaraParticleBuffer& InBuffer,
 	const FTierParams& InTierParams,
 	int32 InSeedOffset,
+	bool bInCellsShareSlot,
 	TArray<int32>& OutSlotCounts) const
 {
+	// GENERATION GRANULARITY, SEPARATED FROM SLOT GRANULARITY.
+	//
+	// A streamed cell is sized so a neighbourhood of them stays resident; the field's
+	// structure has no reason to match. With a disc a few percent of a cell thick, the
+	// cell's mean density is a small fraction of its peak -- and rejection against a
+	// per-cell envelope accepts at exactly that ratio, which is why acceptance sat
+	// around one percent while voids and arms both ran the full candidate count.
+	//
+	// Descending inside each cell cuts both ends: children clear of the structure are
+	// culled by the probe pass for sixty-four evaluations and draw nothing at all, and
+	// the ones that survive have a peak much closer to their own mean.
+	//
+	// Every child keeps its PARENT'S SLOT. The buffer still holds one region per
+	// streamed cell; only the generation grid got finer.
+	TArray<FTierBatchCell> Subdivided;
+	SubdivideCells(InQueuedCells,
+		FMath::Clamp(InTierParams.GenerationSubdivision, 0, 4), Subdivided);
+
+	const TArray<FTierBatchCell>& InCells = Subdivided;
+
 	// Once per run, not per batch. This confirms the compute plumbing -- module, shader
 	// path, parameter struct, UAV binding, dispatch, readback -- without touching a real
 	// shader, which is what separated setup from shader in the first place. It costs
@@ -491,11 +627,13 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	// That reads as a placement bug rather than a generation failure.
 	//
 	// Blanking costs an empty region, which is honest, and the caller logs.
-	auto FailBatch = [&InCells, &InBuffer, &OutSlotCounts]() -> bool
+	auto FailBatch = [&InQueuedCells, &InBuffer, &OutSlotCounts]() -> bool
 		{
 			OutSlotCounts.SetNumZeroed(InBuffer.SlotCoord.Num());
 
-			for (const FTierBatchCell& Cell : InCells)
+			// The QUEUED cells, not the subdivided ones: blanking is per slot, and the
+			// children of a cell all share its slot.
+			for (const FTierBatchCell& Cell : InQueuedCells)
 			{
 				if (OutSlotCounts.IsValidIndex(Cell.SlotIndex))
 				{
@@ -522,50 +660,102 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 		return FailBatch();
 	}
 
+	// COMPRESSION BREAKS THE CANCELLATION AND NOTHING RESTORES IT.
+	//
+	// Per-cell normalisation is artifact-free because the envelope cancels: budget
+	// scales as E^g, acceptance as (d/E)^g, and the realised density comes out as a
+	// function of d alone. That only works because a power law composes with itself.
+	// lerp(min(r,1), 1-exp(-r), C) is not a power law, so no choice of budget removes
+	// the cell from the result, and every cell boundary becomes a discontinuity.
+	//
+	// It also has no job left. Compression existed to soften the hard clip at r = 1
+	// against a GLOBAL reference. Against a per-cell envelope r never exceeds 1, so
+	// there is nothing to soften.
+	if (Params.DensityParams.SpawnCompression > 0.0f)
+	{
+		static bool bWarnedCompression = false;
+		if (!bWarnedCompression)
+		{
+			bWarnedCompression = true;
+			UE_LOG(LogTemp, Warning,
+				TEXT("GalaxyEntityGen: SpawnCompression is %.3f. Placement rejects against ")
+				TEXT("a PER-CELL envelope, and compression makes the acceptance mapping ")
+				TEXT("non-power-law, so the cell no longer cancels out of the result and ")
+				TEXT("cell boundaries show as grid artifacts. Set it to 0."),
+				Params.DensityParams.SpawnCompression);
+		}
+	}
+
 	// One cell per queued slot. The KEY is the grid coord, never the dispatch index:
 	// identity is (coord, slot), which is what makes a region regenerate identically
 	// after the player leaves and returns.
 	TArray<FGalaxyGenCell> Cells;
 	Cells.Reserve(InCells.Num());
 
-	// The dispatch is sized on the LARGEST per-cell budget; cells wanting fewer simply
-	// have their surplus threads return early. Sizing on the sum instead would need a
-	// prefix sum to map a thread back to its cell, for no gain when the budgets are
-	// near-uniform.
-	// The run reserved per cell is the slot's capacity divided by HOW MANY CELLS SHARE
-	// THAT SLOT, not the capacity itself.
+	// ONE SHARED BUFFER, sized on what the SLOTS can hold -- not on cells.
 	//
-	// Mid and small have one cell per slot, so they get the whole capacity. The large
-	// tier feeds its entire active set -- fourteen hundred cells -- into a single slot
-	// whose capacity is three thousand, so a full run each reserved four million
-	// entries to hold at most three thousand entities. Sizing by share keeps the
-	// readback proportional to what can actually be kept.
+	// It used to be a uniform run per cell, and a uniform run has to be as wide as the
+	// densest cell needs while every cell pays for it. Measured on a real galaxy: 2728
+	// cells with the densest wanting a few thousand entities is over half a gigabyte of
+	// readback, so the run gets set to what fits instead -- 32 -- and a third of the live
+	// cells pin against it exactly. A pinned cell emits the same count whatever it holds,
+	// which is a cubic lattice in the sky, and the arms clip hardest because they are
+	// what exceeds the run.
 	//
-	// Four times the fair share, because acceptance is uneven: a dense cell should be
-	// able to exceed its average without being clipped, and the total is still capped
-	// by the slot capacity during the scatter.
-	int32 MaxCellsPerSlot = 1;
+	// No cell has a ceiling now, so the only question is how many entities can possibly
+	// be KEPT. That is the slots' business, and it is known here.
+	//
+	// Twice capacity as headroom. Acceptance is stochastic and the anchor is authored,
+	// so the total lands near capacity rather than on it. Overshoot within the headroom
+	// is thinned deterministically below; overshoot BEYOND it is truncated by the GPU's
+	// arrival order, which is both nondeterministic and spatially biased -- the failure
+	// this change exists to remove, so the headroom is what protects it.
+	TSet<int32> DistinctSlots;
+	for (const FTierBatchCell& In : InCells)
 	{
-		TMap<int32, int32> CellsPerSlot;
-		for (const FTierBatchCell& In : InCells)
-		{
-			MaxCellsPerSlot = FMath::Max(MaxCellsPerSlot, ++CellsPerSlot.FindOrAdd(In.SlotIndex));
-		}
+		DistinctSlots.Add(In.SlotIndex);
 	}
 
-	const int32 FairShare = FMath::DivideAndRoundUp(
-		FMath::Max(InBuffer.SlotCapacity, 1), MaxCellsPerSlot);
+	// The tier's calibrated constant. Measured once over its whole grid, never from this
+	// batch -- otherwise a cell's yield would depend on which neighbours streamed in with
+	// it, and the same region would generate differently depending on approach.
+	//
+	// Whether cells share slots is STATED by the caller, not counted here. Subdivision
+	// also makes cells outnumber slots and it means the opposite thing: those cells all
+	// belong to one parent rather than to the whole tier, so the constant still comes
+	// from the largest single streamed cell.
+	const float BudgetScale =
+		GetTierBudgetScale(InTierParams, InSeedOffset, bInCellsShareSlot);
 
-	const int32 SlotStride = FMath::Clamp(FairShare * 4, 8,
-		FMath::Max(InBuffer.SlotCapacity, 1));
+	if (!(BudgetScale > 0.0f))
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("GalaxyEntityGen: tier +%d has no calibrated budget scale, so these slots ")
+			TEXT("get nothing. See the calibration failure above."), InSeedOffset);
+		return FailBatch();
+	}
 
-	// The tier's nominal budget, used by any cell that does not state its own.
-	const int32 CandidateBudget = FMath::Max(InTierParams.CandidateBudget, 1);
-
-	int32 MaxCandidates = 0;
+	// Headroom over what the slots can hold. A quarter.
+	//
+	// It was doubled while the budget was authored and could miss by any factor, then cut
+	// to a tenth once calibration made overshoot stochastic. A tenth turned out to be too
+	// tight: calibration measures a whole streamed cell while generation measures its
+	// subcells, and the coarser estimate is BIASED low rather than merely noisy, so the
+	// realised count lands consistently above target rather than scattering around it.
+	// More probe rounds during calibration shrink that bias but do not erase it.
+	//
+	// Headroom exists at all because the alternative when it runs out is the GPU
+	// truncating by arrival order, which is nondeterministic and spatially biased -- so
+	// it is sized against the residual bias, not against the square-root noise, which at
+	// a slot of ten thousand is only a hundred either way.
+	const int32 EntityCapacity = FMath::Max(
+		FMath::DivideAndRoundUp(
+			DistinctSlots.Num() * FMath::Max(InBuffer.SlotCapacity, 1) * 5, 4), 64);
 
 	for (const FTierBatchCell& In : InCells)
 	{
+		// GEOMETRY ONLY. Whether this cell has anything in it, what it rejects against
+		// and how many candidates it draws are all decided by its group in the dispatch.
 		FGalaxyGenCell Cell;
 		Cell.Centre = FVector3f(
 			static_cast<float>(In.Centre.X),
@@ -578,47 +768,21 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 		// the player leaves and returns.
 		Cell.Coord = FIntVector3(In.Coord.X, In.Coord.Y, In.Coord.Z);
 
-		// Zero means "use the global reference". The large tier supplies its own
-		// per-cell peak instead, so the ratio runs order-1 across the cell rather
-		// than order-1e-3 and most candidates land -- that is the entire point of
-		// its cull prepass, and it is expressible here because the reference lives
-		// in GalaxyPlacement rather than in the field parameters.
-		Cell.DensityReference = (In.DensityReference > 0.0f)
-			? In.DensityReference
-			: Params.DensityParams.SpawnDensityReference;
-
-		const int32 CellCandidates = (In.Candidates > 0) ? In.Candidates : CandidateBudget;
-		Cell.Candidates = static_cast<uint32>(CellCandidates);
-		MaxCandidates = FMath::Max(MaxCandidates, CellCandidates);
-
 		Cells.Add(Cell);
 	}
 
-	// The run reserved per cell is the BUFFER's capacity, not the candidate budget.
-	// The dispatch compacts, so anything beyond what the slot can hold would be read
-	// back only to be discarded -- at nine thousand candidates a cell that was six and
-	// a half megabytes a batch to extract a few hundred entities, which is what the
-	// readbacks were timing out on.
-
-	// SIZE GUARD. Total is the readback, and the dispatch is Cells x CandidateBudget
-	// threads; both scale with the cell count, and the large tier's active set is not
-	// a fixed nine or twenty-seven cells the way a grid neighbourhood is. Left
-	// unchecked, a large active set asks for a buffer of hundreds of megabytes and a
-	// dispatch of hundreds of millions of threads, and the failure surfaces as a
-	// crash inside memcpy with no indication that the SIZE was the problem.
-	const int64 TotalEntries = static_cast<int64>(SlotStride) * InCells.Num();
-	const int64 TotalThreads = static_cast<int64>(MaxCandidates) * InCells.Num();
-
+	// SIZE GUARD. Both axes are bounded by construction now -- the dispatch is one group
+	// per cell, the readback is slots x capacity -- so this fires only on an absurd
+	// authored capacity, never on the cell count, which is what it used to catch.
 	constexpr int64 kMaxEntries = 4 * 1024 * 1024;   // 192 MB at 48 bytes each
-	constexpr int64 kMaxThreads = 64 * 1024 * 1024;
 
-	if (TotalEntries > kMaxEntries || TotalThreads > kMaxThreads)
+	if (static_cast<int64>(EntityCapacity) > kMaxEntries)
 	{
 		UE_LOG(LogTemp, Warning,
-			TEXT("GalaxyEntityGen: batch too large -- %d cells x %d candidates = %lld threads, ")
-			TEXT("%lld entries (%lld MB). Reduce CandidateBudget or split the batch."),
-			InCells.Num(), MaxCandidates, TotalThreads, TotalEntries,
-			(TotalEntries * static_cast<int64>(sizeof(FGalaxyEntityOut))) >> 20);
+			TEXT("GalaxyEntityGen: batch too large -- %d slots x %d capacity x2 = %d ")
+			TEXT("entries (%lld MB) to read back. Reduce the tier's SlotCapacity."),
+			DistinctSlots.Num(), InBuffer.SlotCapacity, EntityCapacity,
+			(static_cast<int64>(EntityCapacity) * static_cast<int64>(sizeof(FGalaxyEntityOut))) >> 20);
 		return FailBatch();
 	}
 
@@ -626,10 +790,10 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	TArray<uint32> Counts;
 
 	const bool bOk = GalaxyEntityGen::GenerateBatchBlocking(
-		Params, InTierParams, Cells, SlotStride,
+		Params, InTierParams, Cells, EntityCapacity,
 		Params.Seed + InSeedOffset,
 		Params.NoiseTexture,
-		MaxCandidates,
+		BudgetScale,
 		Entities, Counts);
 
 	if (!bOk)
@@ -648,67 +812,106 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	// one tier populated and the others empty -- reads as a streaming problem rather
 	// than a generation one.
 	//
-	// Counts is FOUR per cell. Only [0] is load-bearing; [1..3] are CALIBRATION and go
-	// once the numbers below have settled:
-	//   [0] accepted            -- against SlotStride, says whether cells are saturating
-	//   [1] threads that ran    -- against Cells x CandidateBudget, says the dispatch sized
-	//   [2] max density seen    -- against SpawnDensityReference, says the reference is sane
-	//   [3] Candidates as read  -- says the cell buffer bound
+	// Counts is FOUR per cell:
+	//   [0] accepted
+	//   [1] candidates evaluated
+	//   [2] the cell's envelope, as asuint
+	//   [3] the largest density any candidate saw, as asuint
+	//   [4] the cell's mass, as asuint -- what calibration solved the tier constant from
+
 	uint32 TotalAccepted = 0;
-	uint32 TotalThreadsRun = 0;
-	float MaxGpuDensity = 0.0f;
-	uint32 MaxSeenCandidates = 0;
-	int32 SaturatedCells = 0;
+	int64 TotalEvaluated = 0;
+	float MaxEnvelope = 0.0f;
+	int32 LiveCells = 0;
+	int32 ExceededCells = 0;
+
+	auto AsFloat = [](uint32 InBits) { return *reinterpret_cast<const float*>(&InBits); };
 
 	for (int32 i = 0; i < InCells.Num(); ++i)
 	{
-		const uint32 Accepted = Counts[i * 4];
+		const int32 Base = i * GalaxyEntityGen::CountersPerCell;
+
+		const uint32 Accepted = Counts[Base];
+		const float Envelope = AsFloat(Counts[Base + 2]);
+		const float PeakSeen = AsFloat(Counts[Base + 3]);
 
 		TotalAccepted += Accepted;
-		TotalThreadsRun += Counts[i * 4 + 1];
+		TotalEvaluated += Counts[Base + 1];
+		MaxEnvelope = FMath::Max(MaxEnvelope, Envelope);
 
-		const uint32 Bits = Counts[i * 4 + 2];
-		MaxGpuDensity = FMath::Max(MaxGpuDensity, *reinterpret_cast<const float*>(&Bits));
-
-		MaxSeenCandidates = FMath::Max(MaxSeenCandidates, Counts[i * 4 + 3]);
-
-		// Pinned exactly at the run width means the cell had more to give and was
-		// clipped, not that the field is thin there. That is the signal to raise
-		// SpawnDensityReference and bring CandidateBudget down, rather than the other
-		// way round.
-		if (Accepted >= static_cast<uint32>(SlotStride))
+		if (Envelope <= 0.0f)
 		{
-			++SaturatedCells;
+			// Culled by the shader's own probes. Expected and common -- most of a
+			// galaxy's bounding grid is void.
+			continue;
+		}
+
+		++LiveCells;
+
+		// THE ENVELOPE CHECK. A candidate found more density than thirty-two probes
+		// did, so the ratio clipped at 1 and this cell's peak was flattened. Not fatal,
+		// but it is what EnvelopePad exists to prevent, and it has no other observer.
+		if (PeakSeen > Envelope)
+		{
+			++ExceededCells;
 		}
 	}
 
-	// Once per run while things are healthy, and every time they are not. Saturation
-	// counts as "not healthy" for the moment: it is the calibration signal, and it
-	// should stop appearing once the reference is set correctly.
+	// Once per run while things are healthy, and every time they are not.
+	// The GLOBAL cursor, one past the per-cell region. Deliberately un-clamped by the
+	// shader, so it reports the true total accepted even when the buffer overflowed --
+	// which is exactly the case where the CPU needs to know by how much.
+	const uint32 GlobalAccepted =
+		Counts[GalaxyEntityGen::GlobalCursorIndex(InCells.Num())];
+	const int32 Landed = FMath::Min(static_cast<int32>(GlobalAccepted), EntityCapacity);
+	const bool bOverflowed = static_cast<int32>(GlobalAccepted) > EntityCapacity;
+
 	static bool bAnnounced = false;
-	if (!bAnnounced || TotalAccepted == 0 || SaturatedCells > 0)
+	if (!bAnnounced || TotalAccepted == 0 || bOverflowed || ExceededCells > 0)
 	{
 		bAnnounced = true;
 
 		UE_LOG(LogTemp, Display,
-			TEXT("GalaxyEntityGen: %d cells x %d candidates -> %u accepted ")
-			TEXT("(run %d, %u threads ran, %d cells saturated, ")
-			TEXT("GPU max density %.5f against reference %.3f, cell.Candidates read as %u)."),
-			Cells.Num(), CandidateBudget, TotalAccepted, SlotStride,
-			TotalThreadsRun, SaturatedCells,
-			MaxGpuDensity, Params.DensityParams.SpawnDensityReference,
-			MaxSeenCandidates);
+			TEXT("GalaxyEntityGen: tier +%d, %d queued -> %d cells (%d live) -> ")
+			TEXT("%lld candidates -> %u accepted (%d landed, %d capacity, ")
+			TEXT("%d envelope exceeded, scale %.1f, max envelope %.5f)."),
+			InSeedOffset, InQueuedCells.Num(), InCells.Num(), LiveCells,
+			TotalEvaluated, GlobalAccepted, Landed, EntityCapacity,
+			ExceededCells, BudgetScale, MaxEnvelope);
+	}
+
+	// The one remaining path where entities are dropped by ARRIVAL ORDER rather than
+	// deterministically. Everything within the headroom is thinned uniformly below; this
+	// is the overshoot beyond it, biased toward whichever groups the scheduler ran first.
+	//
+	// It should not be reachable. The buffer holds twice the target and the shader solves
+	// the budget so the total lands ON the target, so overflowing it means the solve was
+	// off by more than 2x -- which is the biased-probe case above, not a tuning miss.
+	if (bOverflowed)
+	{
+		static bool bWarnedOverflow = false;
+		if (!bWarnedOverflow)
+		{
+			bWarnedOverflow = true;
+			UE_LOG(LogTemp, Warning,
+				TEXT("GalaxyEntityGen: %u accepted against a %d-record buffer -- the excess ")
+				TEXT("was dropped by GPU arrival order, which is nondeterministic and ")
+				TEXT("spatially biased. Calibration should make this unreachable, so it ")
+				TEXT("means the probes under-weighed this region: %d cells reported a ")
+				TEXT("candidate density above their own envelope."),
+				GlobalAccepted, EntityCapacity, ExceededCells);
+		}
 	}
 
 	// Scatter, with a WRITE CURSOR PER SLOT.
 	//
-	// Cells do not map one-to-one onto slots. The large tier feeds its whole active
-	// set into a single slot, so without a cursor each cell would start writing at
-	// offset zero and overwrite the one before it -- leaving only the last cell's
-	// entities and looking like a generation failure rather than a scatter bug.
+	// Entities arrive in one shared, globally-appended buffer rather than in per-cell
+	// runs, so an entity's POSITION says nothing about where it belongs. Each record
+	// carries the index of the cell that produced it, and the cell carries the slot.
 	//
-	// The mid and small tiers have one cell per slot, where the cursor is simply
-	// always zero, so there is one path rather than a special case.
+	// Nothing downstream may key off buffer order. Identity is still (cell, slot), and
+	// Slot travels in the record for exactly that reason -- the thinning below uses it,
+	// never the loop index.
 	const int32 NumSlots = InBuffer.SlotCoord.Num();
 
 	OutSlotCounts.SetNumZeroed(NumSlots);
@@ -716,45 +919,142 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	TArray<int32> Cursor;
 	Cursor.SetNumZeroed(NumSlots);
 
+	// Every queued slot is touched whether or not anything landed in it. A slot that
+	// generated nothing still has to be padded dead, or it keeps the entities of
+	// whichever coord occupied it last.
 	TArray<int32> TouchedSlots;
 	TouchedSlots.Reserve(InCells.Num());
 
-	for (int32 c = 0; c < InCells.Num(); ++c)
+	for (const FTierBatchCell& In : InCells)
 	{
-		const int32 SlotIndex = InCells[c].SlotIndex;
-		if (!InBuffer.Positions.IsValidIndex(SlotIndex * InBuffer.SlotCapacity))
+		if (InBuffer.Positions.IsValidIndex(In.SlotIndex * InBuffer.SlotCapacity))
+		{
+			TouchedSlots.AddUnique(In.SlotIndex);
+		}
+	}
+
+	// POOLED BUDGET, APPLIED AT SCATTER TIME.
+	//
+	// A slot can still receive more than it holds, and WHICH entities survive is the
+	// whole question. Filling in arrival order answers it by scheduling; filling in cell
+	// order answers it by grid position, and the cut then lies along grid planes.
+	//
+	// Thinning keeps a uniform fraction of every cell's entities instead, so the shape
+	// survives and only the count comes down. This is what the CPU prepass used to do by
+	// dividing a pooled budget before generating; doing it here costs candidates that get
+	// discarded, and buys not needing a second dispatch and a global reduction to know the
+	// total in advance.
+	TArray<int32> SlotTotals;
+	SlotTotals.SetNumZeroed(NumSlots);
+
+	for (int32 i = 0; i < Landed; ++i)
+	{
+		const int32 CellIndex = static_cast<int32>(Entities[i].CellIndex);
+		if (!InCells.IsValidIndex(CellIndex))
 		{
 			continue;
 		}
 
-		TouchedSlots.AddUnique(SlotIndex);
-
-		const int32 BufferStart = SlotIndex * InBuffer.SlotCapacity;
-		const int32 Base = c * SlotStride;
-
-		// Already compacted on the GPU, so this is a straight copy of the live run
-		// rather than a filter. Counts is clamped to the run width by the readback.
-		const int32 Accepted = FMath::Min(static_cast<int32>(Counts[c * 4]), SlotStride);
-
-		for (int32 i = 0; i < Accepted; ++i)
+		const int32 SlotIndex = InCells[CellIndex].SlotIndex;
+		if (SlotTotals.IsValidIndex(SlotIndex))
 		{
-			if (Cursor[SlotIndex] >= InBuffer.SlotCapacity)
-			{
-				break;
-			}
-
-			const FGalaxyEntityOut& E = Entities[Base + i];
-			const int32 Idx = BufferStart + Cursor[SlotIndex];
-
-			InBuffer.Positions[Idx] = FVector(E.Pos.X, E.Pos.Y, E.Pos.Z);
-
-			// AUTHORED SIZE IS TRUTH: Extent already carries the real-unit range
-			// divided by UnitScale exactly once, on the GPU via MakeGalaxyPlacement.
-			InBuffer.Extents[Idx] = E.Extent;
-			InBuffer.Colors[Idx] = FLinearColor(E.Decor.X, E.Decor.Y, E.Decor.Z);
-
-			++Cursor[SlotIndex];
+			++SlotTotals[SlotIndex];
 		}
+	}
+
+	// Five percent of headroom, because the keep test is per entity and independent so
+	// the realised count varies around the target by roughly its square root.
+	TArray<float> KeepFraction;
+	KeepFraction.Init(1.0f, NumSlots);
+
+	int32 ThinnedSlots = 0;
+	float MinKeep = 1.0f;
+
+	for (int32 SlotIndex = 0; SlotIndex < NumSlots; ++SlotIndex)
+	{
+		if (SlotTotals[SlotIndex] > InBuffer.SlotCapacity && SlotTotals[SlotIndex] > 0)
+		{
+			KeepFraction[SlotIndex] = 0.95f * static_cast<float>(InBuffer.SlotCapacity)
+				/ static_cast<float>(SlotTotals[SlotIndex]);
+			MinKeep = FMath::Min(MinKeep, KeepFraction[SlotIndex]);
+			++ThinnedSlots;
+		}
+	}
+
+	if (ThinnedSlots > 0)
+	{
+		static bool bWarnedThin = false;
+		if (!bWarnedThin || MinKeep < 0.25f)
+		{
+			bWarnedThin = true;
+			UE_LOG(LogTemp, Warning,
+				TEXT("GalaxyEntityGen: %d slot(s) over capacity and thinned, keeping as ")
+				TEXT("little as %.1f%%. The shape is preserved but the candidates behind ")
+				TEXT("the discard was wasted. Calibration sizes the densest cell in the ")
+				TEXT("galaxy to fill its slot exactly, so this should not happen -- it means ")
+				TEXT("the probes under-weighed this cell during calibration, the same cause ")
+				TEXT("as an exceeded envelope."),
+				ThinnedSlots, MinKeep * 100.0f);
+		}
+	}
+
+	for (int32 i = 0; i < Landed; ++i)
+	{
+		const FGalaxyEntityOut& E = Entities[i];
+
+		const int32 CellIndex = static_cast<int32>(E.CellIndex);
+		if (!InCells.IsValidIndex(CellIndex))
+		{
+			continue;
+		}
+
+		const int32 SlotIndex = InCells[CellIndex].SlotIndex;
+		if (!Cursor.IsValidIndex(SlotIndex)
+			|| !InBuffer.Positions.IsValidIndex(SlotIndex * InBuffer.SlotCapacity))
+		{
+			continue;
+		}
+
+		// A BACKSTOP, not the mechanism. If this trips with thinning active the headroom
+		// was too small, and the discard goes back to being order-dependent.
+		if (Cursor[SlotIndex] >= InBuffer.SlotCapacity)
+		{
+			continue;
+		}
+
+		const float Keep = KeepFraction[SlotIndex];
+
+		if (Keep < 1.0f)
+		{
+			// Keyed on (coord, slot), never on i. Append order is scheduling-dependent,
+			// so thinning on the buffer index would keep a different subset every visit
+			// -- the stars would flicker rather than the region merely being sparser.
+			const FIntVector& Coord = InCells[CellIndex].Coord;
+
+			const uint32 Key = HashCombine(
+				HashCombine(GetTypeHash(Coord.X), GetTypeHash(Coord.Y)),
+				HashCombine(GetTypeHash(Coord.Z),
+					GetTypeHash(static_cast<int32>(E.Slot))));
+
+			const uint32 Scrambled = Key * 2654435761u;
+			const float U = static_cast<float>(Scrambled >> 8) * (1.0f / 16777216.0f);
+
+			if (U >= Keep)
+			{
+				continue;
+			}
+		}
+
+		const int32 Idx = SlotIndex * InBuffer.SlotCapacity + Cursor[SlotIndex];
+
+		InBuffer.Positions[Idx] = FVector(E.Pos.X, E.Pos.Y, E.Pos.Z);
+
+		// AUTHORED SIZE IS TRUTH: Extent already carries the real-unit range divided by
+		// UnitScale exactly once, on the GPU via MakeGalaxyPlacement.
+		InBuffer.Extents[Idx] = E.Extent;
+		InBuffer.Colors[Idx] = FLinearColor(E.Decor.X, E.Decor.Y, E.Decor.Z);
+
+		++Cursor[SlotIndex];
 	}
 
 	// Padded once per slot, AFTER every cell that feeds it has been written. Doing it
@@ -766,79 +1066,6 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	}
 
 	return true;
-}
-
-#pragma endregion
-
-#pragma region Large Tier Culling
-//TODO: Check if this block should be shared
-TArray<GalaxyDataGenerator::FActiveLargeTierCell> GalaxyDataGenerator::CollectActiveLargeTierCells() const
-{
-	// -----------------------------------------------------------------------
-	// Subdivide [-Extent, +Extent]^3 into a uniform grid at LargeTierCullDepth and,
-	// for each cell, find the PEAK density inside it. A cell whose peak is zero lies
-	// entirely outside every layer's support and is skipped; the rest carry their
-	// peak forward as a local rejection envelope.
-	//
-	// Sampling corners alone is not enough for either job. An arm is narrower than a
-	// cell through most of the disc, so one can pass through a cell's interior
-	// without reaching any vertex -- which discards a live cell outright, and
-	// under-estimates the envelope of the cells it does keep. An under-estimated
-	// envelope clips the peak, flattening exactly the structure the field describes.
-	// A jittered interior set costs a few more evaluations in a prepass that runs
-	// once per galaxy.
-	//
-	// The sampling and the padding both live in EstimateCellEnvelope, which the mid and
-	// small tiers now share -- this prepass differs from them only in walking the whole
-	// grid rather than a streamed neighbourhood.
-	// -----------------------------------------------------------------------
-
-	const int32 CullDepth = FMath::Max(Params.LargeTierCullDepth, 1);
-	const int32 GridSide = 1 << CullDepth;          // cells per axis
-	const double FullExtent = static_cast<double>(Params.Extent);
-	const double CellFull = (2.0 * FullExtent) / static_cast<double>(GridSide);
-	const double HalfCell = CellFull * 0.5;
-
-	const int32 TotalCells = GridSide * GridSide * GridSide;
-	TArray<FActiveLargeTierCell> ActiveCells;
-	ActiveCells.Reserve(TotalCells / 4); // rough estimate; arms ~ 25% fill
-
-	for (int32 iz = 0; iz < GridSide; ++iz)
-	{
-		for (int32 iy = 0; iy < GridSide; ++iy)
-		{
-			for (int32 ix = 0; ix < GridSide; ++ix)
-			{
-				// Cell center in galaxy-local space
-				const FVector Center(
-					-FullExtent + HalfCell + static_cast<double>(ix) * CellFull,
-					-FullExtent + HalfCell + static_cast<double>(iy) * CellFull,
-					-FullExtent + HalfCell + static_cast<double>(iz) * CellFull);
-
-				// No early-out: we need the PEAK, not merely "is anything here".
-				// Already padded, and zero exactly when the cell is empty.
-				const FIntVector Coord(ix, iy, iz);
-				const float Envelope = EstimateCellEnvelope(Coord, Center, HalfCell);
-
-				if (Envelope > 0.0f)
-				{
-					FActiveLargeTierCell Cell;
-					Cell.Center = Center;
-					Cell.HalfExt = HalfCell;
-					Cell.GridCoord = Coord;
-					Cell.MaxDensity = Envelope;
-					ActiveCells.Add(Cell);
-				}
-			}
-		}
-	}
-
-	UE_LOG(LogTemp, Verbose,
-		TEXT("GalaxyDataGenerator::CollectActiveLargeTierCells - depth=%d grid=%d^3 total=%d active=%d (%.1f%%)"),
-		CullDepth, GridSide, TotalCells, ActiveCells.Num(),
-		TotalCells > 0 ? 100.0f * static_cast<float>(ActiveCells.Num()) / static_cast<float>(TotalCells) : 0.0f);
-
-	return ActiveCells;
 }
 
 #pragma endregion

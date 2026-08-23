@@ -1,14 +1,28 @@
 #pragma once
 
 // GalaxyDensityCore.ush
-// Analytic galaxy density field. NO RESOURCES: this file contains no Texture3D,
-// SamplerState or texture fetch, so it can be compiled by C++ behind a small shim
-// (float3, lerp, saturate, rsqrt, sincos) as well as by the shader compiler. That is
-// what makes CPU star placement and GPU rendering the same code rather than two
-// implementations held in agreement by hand.
+// The galaxy density field, entire: analytic layers, texture sampling, placement and
+// candidate generation.
 //
-// Texture sampling, FBm and the ray march live in GalaxyDensity.ush, which includes
-// this file and supplies the noise results as plain values.
+// NEVER BINDS A RESOURCE, ONLY RECEIVES ONE. Every function that samples takes the
+// texture and sampler its caller already holds; nothing here declares one, and nothing
+// here touches Parameters or View. That is the rule, and it is what lets a material
+// Custom node, a compute dispatch and C++ behind a small shim all call the same code
+// rather than keeping three implementations in agreement by hand.
+//
+// It used to say NO RESOURCES, with texture sampling exiled to GalaxyDensity.ush purely
+// because it could not cross into C++. The shim stubs Texture3D and SamplerState now --
+// returning the neutral 0.5, so the C++ field reduces exactly to the analytic one -- and
+// that file merged back in. Resource-FREE was never the property that mattered; not
+// binding is.
+//
+// The C++ side exists for parameter derivation, authoring and diagnostics. IT MUST NEVER
+// PLACE ENTITIES: it cannot see the texture, and a texture-free approximation of a
+// textured field produces a perfectly ordinary-looking galaxy that quietly ignores what
+// the material draws. That was the defect this whole migration removed.
+//
+// The ray march lives in GalaxyDensityRaymarch.ush, which includes this file. Entity
+// generation lives in GalaxyEntityGen.usf, which also includes it.
 //
 // PARITY RULES -- both compilers see this file, so:
 //   - Guard every pow() base away from zero. HLSL evaluates pow(x,y) as
@@ -78,6 +92,19 @@ struct GalaxyPlacement
     float ExtentMax;
     float ExtentExponent; // <1 biases small, >1 biases large
 };
+
+// The spacing of the per-candidate key lattice. Every key a cell derives is
+// KeySeed + GALAXY_SLOT_STRIDE * n for some integer n: candidates take n >= 0 and
+// envelope probes take n < 0, so the two families can never collide however large the
+// candidate budget grows.
+//
+// THE INVARIANT IS NOT WHAT IT LOOKS LIKE. Two keys collide only when
+// GALAXY_SLOT_STRIDE * (nA - nB) equals the difference between two tier offsets, and
+// every tier offset is far smaller than the stride -- so growing the budget moves the
+// whole lattice and introduces nothing. What breaks it is a tier offset reaching the
+// stride, or GALAXY_DECOR_OFFSET landing on an offset difference modulo it.
+#define GALAXY_SLOT_STRIDE 977
+#define GALAXY_DECOR_OFFSET 24337
 
 GalaxyPlacement MakeGalaxyPlacement(
     float InDensityReference, // the density that reads as a certain spawn
@@ -196,7 +223,7 @@ struct GalaxyDensityParams
     float WarpAmountBackground;
 
     // --- NOISE FIELD SHAPE ---
-    // Consumed by GalaxyDensity.ush, carried here so the whole parameter set travels
+    // Consumed by the texture-sampling field below, carried here so the whole set travels
     // as one value.
     float3 NoiseOffset; // per-galaxy variation; a texture has no seed
     float4 NoiseScale; // modulation frequency, frame convention
@@ -577,7 +604,7 @@ struct GalaxyDensityParams
     // CPU rejection sampler maps it to a probability with its own response curve.
     float Compose(float4 L, float rBoundsSq)
     {
-        float Density = L.x + L.y + L.z + L.w;
+        float Density = max(max(max(L.x, L.y), L.z), L.w);
 
         Density *= VoidFactor(rBoundsSq);
         Density *= BoundsFade(rBoundsSq);
@@ -720,6 +747,44 @@ struct GalaxyDensityParams
 
     // One candidate, decided entirely by its own key.
     //
+    // A sample point inside a cell, for estimating that cell's density ENVELOPE
+    // before any candidate is drawn. Resource-free like everything else here: the
+    // caller evaluates the field at the returned point with whatever source it has,
+    // which is the same split MakeCandidate/FinishEntity uses.
+    //
+    // Eight corners, then jitter. Corners alone miss an arm passing through the middle
+    // of a cell without reaching any vertex, which both discards live cells and
+    // under-estimates the envelope of the ones it keeps. Jitter alone misses a peak
+    // sitting exactly at a vertex. Both happen, so the probe set does both.
+    //
+    // The jitter key runs DOWNWARD from the cell's seed while candidates run upward,
+    // so a probe can never draw the same key as a candidate in the same cell.
+    float3 MakeProbe(float3 InCellCentre, float InCellExtent,
+                     int InCellX, int InCellY, int InCellZ,
+                     int InKeySeed, uint InProbeIndex)
+    {
+        if (InProbeIndex < 8u)
+        {
+            return float3(
+                InCellCentre.x + ((InProbeIndex & 1u) != 0u ? InCellExtent : -InCellExtent),
+                InCellCentre.y + ((InProbeIndex & 2u) != 0u ? InCellExtent : -InCellExtent),
+                InCellCentre.z + ((InProbeIndex & 4u) != 0u ? InCellExtent : -InCellExtent));
+        }
+
+        float4 h = Hash4(InCellX, InCellY, InCellZ,
+                         InKeySeed - (int) (InProbeIndex + 1u) * GALAXY_SLOT_STRIDE);
+
+        // Componentwise, and no swizzle. The shim gives float3/float4 members and
+        // compound assignment only -- no .xyz, no free operator+ -- so the whole core
+        // is written this way and this function is not the place to start relying on
+        // more. Matches MakeCandidate exactly, which is the point: a probe and a
+        // candidate place a point in the cell by the same arithmetic.
+        return float3(
+            InCellCentre.x + (h.x * 2.0f - 1.0f) * InCellExtent,
+            InCellCentre.y + (h.y * 2.0f - 1.0f) * InCellExtent,
+            InCellCentre.z + (h.z * 2.0f - 1.0f) * InCellExtent);
+    }
+
     // InCellCentre and InCellExtent describe the cell in the caller's units;
     // InInvGalaxyExtent converts into the normalized [-1,1] frame the field is
     // defined in. The caller already holds that reciprocal, and passing it beats
@@ -764,7 +829,7 @@ struct GalaxyDensityParams
 
         // A second key for the decorative values, so colour is stable for a given
         // entity without being tied to where it landed.
-        float4 g = Hash4(InCellX, InCellY, InCellZ, InSlot + 24337);
+        float4 g = Hash4(InCellX, InCellY, InCellZ, InSlot + GALAXY_DECOR_OFFSET);
         C.Decor = float3(g.x, g.y, g.z);
 
         return C;
@@ -795,7 +860,7 @@ struct GalaxyDensityParams
     // ======================================================================
     // NOISE FRAME
     // Everything below shapes the domain the noise is sampled in. It reads no
-    // texture, so it lives here rather than in GalaxyDensity.ush, but it is the
+    // texture, so it lives with the analytic half rather than the sampling half, but it is the
     // section to alter when changing how noise relates to the geometry.
     // ======================================================================
 
@@ -1008,4 +1073,179 @@ GalaxyDensityParams MakeGalaxyDensityParams(
 
 
     return P;
+}
+
+
+// ===========================================================================
+// TEXTURE-SAMPLING FIELD
+//
+// Merged in from GalaxyDensity.ush, which existed only because texture sampling
+// could not cross into C++. It can now: the shim stubs Texture3D and SamplerState
+// so this compiles either side, and on the C++ side every noise term comes out zero
+// and GalaxySample reduces to SampleAnalytic term for term.
+//
+// THE RULE THAT REPLACED "RESOURCE-FREE" IS: NEVER BIND, ONLY RECEIVE. Nothing here
+// owns a texture -- each function takes the one its caller already has -- which is
+// what lets a material Custom node, a compute dispatch and the C++ shim all use the
+// same code. Anything that binds a resource, or touches Parameters or View, belongs
+// in the material or the compute shader instead.
+//
+// Written componentwise, like the rest of this file. The shim provides no swizzles
+// and only the operators the core actually uses, so idiomatic HLSL vector arithmetic
+// breaks the C++ build -- which is the intended failure, a compile error rather than
+// a silent divergence.
+// ===========================================================================
+
+// --- VOLUME TEXTURE LOOKUP, SIGNED ---
+// SampleLevel, not Sample: inside a dynamic loop the derivatives driving mip
+// selection are undefined. Called as a method rather than through the
+// Texture3DSampleLevel macro so this file does not depend on Common.ush having been
+// included ahead of it.
+//
+// Channels are centred to [-1,1] BEFORE weighting, which is what lets a weight act
+// as a mixer: positive takes the channel, negative inverts it, |w| > 1 is gain,
+// all-zero returns 0. Weighting first would need a signed-sum divide that blows up
+// for (1,-1,0,0).
+//
+// Output is deliberately NOT bounded to [-1,1] -- sum|w| > 1 exceeds it. The
+// downstream modulator is 1 + Amount * n, so large |n| spikes density as well as
+// clamping it to zero. Keep sum|w| near 1 unless gain is wanted.
+//
+// Ridging happens HERE, per channel, not on the weighted sum: the 1-2|c| fold only
+// maps back into [-1,1] when its input is already bounded there, which each centred
+// channel is and the weighted sum is not.
+float GalaxySampleNoiseTex(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 Pos)
+{
+    float4 t = InTex.SampleLevel(InSampler, Pos, 0);
+
+    float cx = t.x * 2.0f - 1.0f;
+    float cy = t.y * 2.0f - 1.0f;
+    float cz = t.z * 2.0f - 1.0f;
+    float cw = t.w * 2.0f - 1.0f;
+
+    cx = lerp(cx, 1.0f - 2.0f * abs(cx), P.NoiseRidged);
+    cy = lerp(cy, 1.0f - 2.0f * abs(cy), P.NoiseRidged);
+    cz = lerp(cz, 1.0f - 2.0f * abs(cz), P.NoiseRidged);
+    cw = lerp(cw, 1.0f - 2.0f * abs(cw), P.NoiseRidged);
+
+    return dot(P.NoiseChannelWeights, float4(cx, cy, cz, cw));
+}
+
+float GalaxyFBm(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 Pos)
+{
+    float sum = 0.0f;
+    float amp = 1.0f;
+
+    for (int o = 0; o < GALAXY_MAX_OCTAVES; o++)
+    {
+        if (o >= P.NoiseOctaveCount)
+        {
+            break;
+        }
+
+        // A texture has no seed, so octaves decorrelate by offset.
+        float3 Offset = float3(
+            Pos.x + 17.3f * float(o),
+            Pos.y + 11.7f * float(o),
+            Pos.z + 23.1f * float(o));
+
+        sum += GalaxySampleNoiseTex(P, InTex, InSampler, Offset) * amp;
+
+        Pos *= GALAXY_NOISE_LACUNARITY;
+        amp *= GALAXY_NOISE_GAIN;
+    }
+
+    return sum * P.InvNoiseNorm;
+}
+
+// Full field: analytic layers, positionally warped, then modulated.
+// The ORDER matters for cost. Warp has to be sampled before the layers because it
+// displaces the position they are evaluated at, but modulation is sampled AFTER,
+// gated on the layers being non-zero -- most of the volume is empty, so that gate
+// skips the octave loop for the majority of march steps.
+float GalaxySample(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 NormPos)
+{
+    // Squared, so out-of-bounds samples never pay for the sqrt.
+    float rBoundsSq = dot(NormPos, NormPos);
+    if (rBoundsSq >= 1.0f)
+    {
+        return 0.0f;
+    }
+
+    bool bNoise = P.NoiseEnable > 0.5f;
+
+    // Split so neither twist is built when nothing consumes it.
+    bool bGasNoise = bNoise && (P.WarpAmountArms != 0.0f || P.WarpAmountDisc != 0.0f
+                              || P.NoiseAmountArm != 0.0f || P.NoiseAmountDisc != 0.0f);
+    bool bHaloNoise = bNoise && (P.WarpAmountBulge != 0.0f || P.WarpAmountBackground != 0.0f
+                              || P.NoiseAmountBulge != 0.0f || P.NoiseAmountBackground != 0.0f);
+
+    float gasTwist = 0.0f;
+    float haloTwist = 0.0f;
+
+    if (bGasNoise || bHaloNoise)
+    {
+        // One log for both twists: they share this radius.
+        float rXY0 = sqrt(NormPos.x * NormPos.x + NormPos.y * NormPos.y);
+        float rn0 = saturate(rXY0 * P.InvDiscRadius);
+        float u0 = min(-log(max(rn0, 1e-5f)), 6.0f);
+
+        gasTwist = bGasNoise ? P.SpiralTwistAt(u0, rn0, 1.0f) : 0.0f;
+        haloTwist = bHaloNoise ? P.SpiralTwistAt(u0, rn0, P.HaloTwistInherit) : 0.0f;
+    }
+
+    // One fetch per family, not an FBm call: warp wants a single low frequency, and
+    // RGB supplies a three-component vector directly. The two layers in a family
+    // share the fetch and scale it independently, so they can warp in opposite
+    // directions for the price of one lookup.
+    float3 gasWarp = float3(0.0f, 0.0f, 0.0f);
+    float3 haloWarp = float3(0.0f, 0.0f, 0.0f);
+
+    if (bGasNoise && (P.WarpAmountArms != 0.0f || P.WarpAmountDisc != 0.0f))
+    {
+        float3 wf = P.NoiseFrame(NormPos, gasTwist, float2(P.WarpScale.x, P.WarpScale.y), P.NoiseOffset);
+        float4 ws = InTex.SampleLevel(InSampler, wf, 0);
+        gasWarp = float3(ws.x - 0.5f, ws.y - 0.5f, ws.z - 0.5f);
+    }
+
+    // From the ORIGINAL position, not a gas-warped one, so the two displacements stay
+    // independent rather than compounding.
+    if (bHaloNoise && (P.WarpAmountBulge != 0.0f || P.WarpAmountBackground != 0.0f))
+    {
+        float3 hf = P.NoiseFrame(NormPos, haloTwist, float2(P.WarpScale.z, P.WarpScale.w),
+                                 P.NoiseOffset + GALAXY_HALO_DOMAIN);
+        float4 hs = InTex.SampleLevel(InSampler, hf, 0);
+        haloWarp = float3(hs.x - 0.5f, hs.y - 0.5f, hs.z - 0.5f);
+    }
+
+    float4 L = P.SampleLayersWarped(NormPos, gasWarp, haloWarp);
+
+    // Sampled at the UNWARPED position: one fetch feeds two layers that are warped
+    // differently, so either warped position would be an arbitrary choice and
+    // sampling both would double the cost for no visible gain.
+    //
+    // != 0.0 rather than > 0.0, so a negative amount -- a valid inversion of the
+    // modulation -- is not silently dropped. Zero means "gate rejected", and
+    // ApplyModulation leaves those layers untouched.
+    float gasNoise = 0.0f;
+    float haloNoise = 0.0f;
+
+    if (bGasNoise && (P.NoiseAmountArm != 0.0f || P.NoiseAmountDisc != 0.0f)
+        && (L.x + L.y) > 1e-4f)
+    {
+        float3 nf = P.NoiseFrame(NormPos, gasTwist, float2(P.NoiseScale.x, P.NoiseScale.y), P.NoiseOffset);
+        gasNoise = GalaxyFBm(P, InTex, InSampler, nf);
+    }
+
+    if (bHaloNoise && (P.NoiseAmountBulge != 0.0f || P.NoiseAmountBackground != 0.0f)
+        && (L.z + L.w) > 1e-4f)
+    {
+        float3 hf = P.NoiseFrame(NormPos, haloTwist, float2(P.NoiseScale.z, P.NoiseScale.w),
+                                 P.NoiseOffset + GALAXY_HALO_DOMAIN);
+        haloNoise = GalaxyFBm(P, InTex, InSampler, hf);
+    }
+
+    L = P.ApplyModulation(L, gasNoise, haloNoise);
+
+    return P.Compose(L, rBoundsSq);
 }

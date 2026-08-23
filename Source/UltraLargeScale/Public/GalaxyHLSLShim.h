@@ -82,6 +82,37 @@ namespace GalaxyHLSL
     inline float4 operator*(float S, const float4& A) { return float4(A.x * S, A.y * S, A.z * S, A.w * S); }
 
     // ---------------------------------------------------------------------------
+    // RESOURCE STUBS
+    //
+    // The core samples a volume texture, and C++ has none. These make it COMPILE, not
+    // work: SampleLevel returns the neutral value, 0.5 in every channel, which is the
+    // exact midpoint the core centres to zero. Every noise term derived from it --
+    // channel mix, FBm, warp displacement -- comes out zero, and GalaxySample reduces
+    // to SampleAnalytic term for term.
+    //
+    // THAT IS THE ONLY THING THE C++ SIDE MAY BE USED FOR: parameter derivation,
+    // authoring and diagnostics against the analytic field. It MUST NEVER PLACE
+    // ENTITIES. Placement against a texture-free approximation of a textured field was
+    // the defect this entire migration existed to remove, and the failure mode is
+    // silent -- a perfectly ordinary-looking galaxy that simply ignores the volume
+    // texture the material draws.
+    //
+    // Returning 0.5 rather than 0 matters. Zero would centre to -1, drive modulation to
+    // max(1 - Amount, 0) and warp by half a domain, so the C++ field would differ from
+    // the analytic one instead of equalling it.
+    // ---------------------------------------------------------------------------
+
+    struct SamplerState {};
+
+    struct Texture3D
+    {
+        float4 SampleLevel(const SamplerState&, const float3&, float) const
+        {
+            return float4(0.5f, 0.5f, 0.5f, 0.5f);
+        }
+    };
+
+    // ---------------------------------------------------------------------------
     // INTRINSICS
     // Concrete float overloads, never templates: an exact match must win against the
     // int and double candidates the standard library contributes.

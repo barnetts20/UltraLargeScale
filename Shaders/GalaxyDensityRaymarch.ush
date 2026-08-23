@@ -1,12 +1,25 @@
 #pragma once
 
 // GalaxyDensityRaymarch.ush
-// Debug density raymarcher material bridge
-#include "/UltraLargeScale/GalaxyDensity.ush"
-
-// TODO: We should keep a dividing line between the MATERIAL bridge and the ENTITY GENERATION bridge... keeping the analytic and noise portions seperate is fine (GalaxyDensityCore.ush, GalaxyDensity.ush)
-// TODO: The below raymarch should move to its own shader as it is a material only function
-// TODO: Final Proposed shader stack: GalaxyDensityCore.ush - Analytic Only, GalaxyDensity.ush - Analytic + Texture Sampling, GalaxyDensityRaymarch.ush - Analytic + TextureSampling + Raymarch, GalaxyEntityGen.usf - Analytic + TextureSampling + Compute Entity Generation
+// MATERIAL-ONLY: the ray march, and nothing that another consumer of the field needs.
+//
+// THE SHADER STACK, and the rule that separates the three:
+//
+//   GalaxyDensityCore.ush  -- the field. Analytic layers, texture sampling, placement,
+//                             candidates. NEVER BINDS A RESOURCE, only receives one, so
+//                             a material Custom node, a compute dispatch and the C++
+//                             shim can all call the same code.
+//   GalaxyDensityRaymarch.ush -- this file. Marching, stepping, shading. Free to reach
+//                             for material-only state.
+//   GalaxyEntityGen.usf    -- entity generation, and any further per-layer compute.
+//                             Owns a parameter struct and binds its own resources.
+//
+// GalaxyDensity.ush used to sit between the core and here, holding everything that
+// touched a texture, purely because texture sampling could not cross into C++. The shim
+// stubs Texture3D and SamplerState now, so that reason is gone and its contents moved
+// into the core. "Resource-free" was never the real boundary; "never binds, only
+// receives" is, and that is what the core enforces.
+#include "/UltraLargeScale/GalaxyDensityCore.ush"
 // TODO: POTENTIAL RAYMARCH OPTIMIZATIONS - PERFORMANCE + QUALITY
 //
 // TODO: PERFORMANCE:

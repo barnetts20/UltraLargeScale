@@ -392,9 +392,9 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	/** THE DENSITY AT WHICH A CELL DRAWS ITS TIER'S FULL CANDIDATE BUDGET.
 	 *
 	 *  ITS ROLE CHANGED. This was the rejection envelope: every candidate everywhere
-	 *  was measured against it. Every tier now rejects against ITS OWN CELL'S peak
-	 *  instead (see GalaxyDataGenerator::ApplyCellEnvelopes), because the field is an
-	 *  unbounded optical depth spanning four decades -- it peaks near 260 at the
+	 *  was measured against it. Every cell now rejects against ITS OWN probed peak,
+	 *  computed by that cell's thread group in GalaxyEntityGen.usf, because the field is
+	 *  an unbounded optical depth spanning four decades -- it peaks near 260 at the
 	 *  default tuning while 83% of the volume sits under 0.01 -- and one global number
 	 *  cannot serve both ends. Against a global reference, dense cells sat at
 	 *  probability 1 throughout and rendered as structureless mush while sparse cells
@@ -406,9 +406,8 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	 *  that each cell is normalised to itself.
 	 *
 	 *  SET IT NEAR THE FIELD'S PEAK, not below it. Too low and most cells clamp at the
-	 *  tier budget, flattening inter-cell contrast at the top end -- ApplyCellEnvelopes
-	 *  warns when that is happening. Unlike the old role, raising it no longer costs
-	 *  acceptance rate; it only re-anchors the budget.
+	 *  tier budget, flattening inter-cell contrast at the top end. Unlike the old role,
+	 *  raising it no longer costs acceptance rate; it only re-anchors the budget.
 	 *
 	 *  Star count still scales roughly as 1/reference, so retune tier capacities
 	 *  alongside it. */
@@ -526,7 +525,7 @@ struct ULTRALARGESCALE_API FGalaxyParams : public FBaseParams
 	 *  constructor assigns a default when this is left unset, so it is a requirement
 	 *  rather than a chore; clearing it deliberately is the case that fails.
 	 *
-	 *  Set NEVER STREAM on the asset. GalaxyDensity.ush reads mip 0 on both paths, but
+	 *  Set NEVER STREAM on the asset. GalaxyDensityCore.ush reads mip 0 on both paths, but
 	 *  the material handles streaming residency and a compute dispatch does not: if
 	 *  mip 0 is not resident when the dispatch runs it reads whatever is, and placement
 	 *  silently stops matching the render.
@@ -637,17 +636,16 @@ struct ULTRALARGESCALE_API FGalaxyParams : public FBaseParams
 		LargeTier.GridDepth = 1;
 		LargeTier.NeighborhoodRadius = 0;
 		LargeTier.SlotCapacity = 10000;
-		LargeTier.CandidateBudget = 15000;
 
 		MidTier.GridDepth = 3;
 		MidTier.NeighborhoodRadius = 1;
+		MidTier.GenerationSubdivision = 2;
 		MidTier.SlotCapacity = 8000;
-		MidTier.CandidateBudget = 12000;
 
 		SmallTier.GridDepth = 5;
 		SmallTier.NeighborhoodRadius = 1;
+		SmallTier.GenerationSubdivision = 2;
 		SmallTier.SlotCapacity = 6000;
-		SmallTier.CandidateBudget = 9000;
 
 		DeriveScaleRanges();
 	}

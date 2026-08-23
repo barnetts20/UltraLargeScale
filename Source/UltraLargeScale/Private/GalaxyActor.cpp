@@ -33,7 +33,7 @@ AGalaxyActor::AGalaxyActor()
 	// struct cannot reference an asset by path at all. Assigned only when unset, so
 	// anything authored on the instance wins.
 	//
-	// Set NEVER STREAM on this asset. GalaxyDensity.ush reads mip 0 on both paths, but
+	// Set NEVER STREAM on this asset. GalaxyDensityCore.ush reads mip 0 on both paths, but
 	// the material handles streaming residency and a compute dispatch does not: if
 	// mip 0 is not resident when the dispatch runs it reads whatever is, and placement
 	// silently stops matching the render.
@@ -439,8 +439,11 @@ void AGalaxyActor::BuildTierConfigs()
 				return false;
 			}
 
+			// SHARE A SLOT: the whole cull grid feeds this tier's single slot, so its
+			// placement constant is calibrated against the grid's total mass rather than
+			// its largest single cell.
 			return GalaxyGenerator.GenerateTierBatchGPU(
-				Cells, LargeTierState.Buffers[0], Params.LargeTier, 0, OutCounts);
+				Cells, LargeTierState.Buffers[0], Params.LargeTier, 0, true, OutCounts);
 		};
 
 	// --- Mid tier: neighborhood streaming ---
@@ -457,9 +460,13 @@ void AGalaxyActor::BuildTierConfigs()
 	// timed out -- and blanks the affected slots on the way out rather than leaving the
 	// previous occupant's entities in them.
 	//
-	// All three tiers run this same path. They differ only in where their cells come
-	// from -- a streamed neighbourhood here, a culled active set for the large tier --
-	// which is data, not a second code path.
+	// Cells carry GEOMETRY ONLY. Whether a cell holds anything, what it rejects against
+	// and how many candidates it draws are all decided by that cell's thread group in
+	// the dispatch, from probes that sample the same textured field acceptance does.
+	//
+	// All three tiers run this same path, differing only in where their cells come from
+	// -- a streamed neighbourhood here, the whole bounding grid for the large tier.
+	// That is data, not a second code path.
 	MidTierConfig.GenerateBatchCallback =
 		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts) -> bool
 		{
@@ -482,19 +489,10 @@ void AGalaxyActor::BuildTierConfigs()
 				Cells.Add(Cell);
 			}
 
-			// Per-cell rejection envelope, and a candidate budget weighted by it.
-			//
-			// These two tiers used to pass DensityReference = 0, meaning the global
-			// reference. Against a field that runs four decades that made acceptance
-			// bimodal rather than low: dense cells sat at probability 1 everywhere,
-			// accepted nearly every candidate, overflowed their run and rendered as
-			// structureless mush, while sparse cells starved. The large tier has
-			// rejected against its own cell peaks since its cull prepass existed; this
-			// is the same treatment, from the same helper.
-			GalaxyGenerator.ApplyCellEnvelopes(Cells, Params.MidTier);
-
+			// ONE CELL PER SLOT. Subdivision happens inside the generator and does
+						// not change that: the children of a streamed cell all write to its slot.
 			return GalaxyGenerator.GenerateTierBatchGPU(
-				Cells, MidTierState.Buffers[0], Params.MidTier, 7, OutCounts);
+				Cells, MidTierState.Buffers[0], Params.MidTier, 7, false, OutCounts);
 		};
 
 	// --- Small tier: neighborhood streaming ---
@@ -511,9 +509,13 @@ void AGalaxyActor::BuildTierConfigs()
 	// timed out -- and blanks the affected slots on the way out rather than leaving the
 	// previous occupant's entities in them.
 	//
-	// All three tiers run this same path. They differ only in where their cells come
-	// from -- a streamed neighbourhood here, a culled active set for the large tier --
-	// which is data, not a second code path.
+	// Cells carry GEOMETRY ONLY. Whether a cell holds anything, what it rejects against
+	// and how many candidates it draws are all decided by that cell's thread group in
+	// the dispatch, from probes that sample the same textured field acceptance does.
+	//
+	// All three tiers run this same path, differing only in where their cells come from
+	// -- a streamed neighbourhood here, the whole bounding grid for the large tier.
+	// That is data, not a second code path.
 	SmallTierConfig.GenerateBatchCallback =
 		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts) -> bool
 		{
@@ -536,19 +538,10 @@ void AGalaxyActor::BuildTierConfigs()
 				Cells.Add(Cell);
 			}
 
-			// Per-cell rejection envelope, and a candidate budget weighted by it.
-			//
-			// These two tiers used to pass DensityReference = 0, meaning the global
-			// reference. Against a field that runs four decades that made acceptance
-			// bimodal rather than low: dense cells sat at probability 1 everywhere,
-			// accepted nearly every candidate, overflowed their run and rendered as
-			// structureless mush, while sparse cells starved. The large tier has
-			// rejected against its own cell peaks since its cull prepass existed; this
-			// is the same treatment, from the same helper.
-			GalaxyGenerator.ApplyCellEnvelopes(Cells, Params.SmallTier);
-
+			// ONE CELL PER SLOT. Subdivision happens inside the generator and does
+			// not change that: the children of a streamed cell all write to its slot.
 			return GalaxyGenerator.GenerateTierBatchGPU(
-				Cells, SmallTierState.Buffers[0], Params.SmallTier, 13, OutCounts);
+				Cells, SmallTierState.Buffers[0], Params.SmallTier, 13, false, OutCounts);
 		};
 
 	// Shared bounds convention — see the derivation in AUniverseActor::BuildTierConfigs. Tight half-bound is (2R+2) * CellHalfExtent; we provision 2 * (2R+1) to match the universe tiers. The previous (2R+1) * CellHalfExtent under-bounded by up to one half-cell when VT sat near a cell boundary, risking edge-cell culling pops.

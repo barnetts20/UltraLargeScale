@@ -10,6 +10,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "HAL/CriticalSection.h"
 #include "DataTypes.h"
 #include "FastNoise/FastNoise.h"
 #include "ProceduralSpaceActor.h"
@@ -63,26 +64,6 @@ public:
 	 *  Always route it through GalaxyDensityParams::SpawnProbability first. */
 	float SampleDensity(const FVector& InNormPos) const;
 
-	/** Peak density inside a cell, padded into a REJECTION ENVELOPE.
-	 *
-	 *  8 corners plus 24 jittered interior probes, seeded from the cell coord so the
-	 *  same cell yields the same estimate on every regeneration. Corners alone miss an
-	 *  arm passing through the middle of a cell without reaching any vertex, which both
-	 *  discards live cells and under-estimates the envelope of the ones it keeps.
-	 *
-	 *  Returns 0 for a cell with no density anywhere, which the caller may cull.
-	 *
-	 *  This is the number that makes acceptance workable. Rejecting against a global
-	 *  reference gives a ratio that runs order-1e-3 in a sparse cell and clips at 1
-	 *  across a dense one; rejecting against the cell's own peak gives order-1 in both.
-	 *  See ApplyCellEnvelopes for why the per-cell BUDGET has to move with it. */
-	float EstimateCellEnvelope(const FIntVector& InCoord, const FVector& InCentre,
-		double InHalfExtent) const;
-
-	/** Multiplier turning a sampled cell peak into an envelope the field will not
-	 *  exceed. Derived from the noise amounts rather than fixed -- see the .cpp. */
-	float EnvelopePadding() const;
-
 #pragma endregion
 
 #pragma region Initialization
@@ -107,138 +88,147 @@ public:
 #pragma endregion
 
 #pragma region Tier Generation
-	/** Generation is GPU-ONLY for this layer. The per-slot CPU functions that used to
-	 *  sit here -- GenerateTierNode, GenerateLargeTierSlot and the MakePlacement helper
-	 *  they shared -- are gone, along with the FParticleTierConfig::GenerateCallback
-	 *  bindings that reached them.
+
+	/** Generation is GPU-ONLY for this layer, and now GPU-only end to end.
 	 *
-	 *  They existed because the field had to stay resource-free to be reachable from
-	 *  the CPU, which is exactly the constraint the compute path was built to lift. A
-	 *  second implementation kept in agreement by hand would put it straight back.
+	 *  The per-slot CPU generators went first -- GenerateTierNode, GenerateLargeTierSlot
+	 *  and the MakePlacement helper they shared -- along with the
+	 *  FParticleTierConfig::GenerateCallback bindings that reached them. The density
+	 *  PREPASS went second: cell culling, envelope estimation and per-cell budgeting all
+	 *  moved into the dispatch, where they can sample the textured field instead of an
+	 *  analytic stand-in for it.
+	 *
+	 *  What that leaves on this side is geometry and marshalling. Nothing here evaluates
+	 *  the field, so GalaxyDensityCore.ush no longer has to compile as C++ to serve the
+	 *  runtime -- the shim stays for the bake and the parity probe, which are
+	 *  verification tools rather than a second implementation of the path.
 	 *
 	 *  The other two layers still bind GenerateCallback, so it stays on the config. */
 
 public:
-	/** GPU generation for a whole batch of tier slots, in one dispatch.
+	/** A cell handed to the dispatch. GEOMETRY ONLY.
 	 *
-	 *  This is the reason for the migration: the compute path can sample the volume
-	 *  texture, so entity placement sees the warp and modulation the material draws
-	 *  instead of a texture-free approximation of it. It also lifts the constraint
-	 *  that shaped the field in the first place -- features no longer have to be
-	 *  affordable analytically to be reachable from placement.
+	 *  It carried a DensityReference and a Candidates count until the prepass moved to
+	 *  the GPU. Both are now derived by the cell's own thread group, from probes that
+	 *  sample the TEXTURED field rather than an analytic stand-in for it.
 	 *
-	 *  BACKGROUND THREAD ONLY; it blocks on a GPU readback. That is safe because tier
-	 *  generation already runs on AnyBackgroundHiPriTask, so the wait costs a worker
-	 *  rather than a frame.
-	 *
-	 *  Returns false if the dispatch could not run or the readback timed out. There is
-	 *  no CPU path behind it any more, so it FAILS CLOSED: the affected slots are
-	 *  blanked and their counts zeroed before returning, because a slot is reused as
-	 *  the player crosses boundaries and leaving it untouched would show the previous
-	 *  occupant's entities at a coord they no longer belong to. Every such path logs. */
-	 /** One cell of a GPU generation batch.
-	  *
-	  *  The CENTRE IS SUPPLIED, not derived. Grid-coord-to-centre lives on the actor,
-	  *  which owns the grid; the generator inferring it from a buffer's slot centres
-	  *  put every candidate somewhere else entirely and every batch came back with
-	  *  nothing accepted. It also lets the large tier pass the centres its cull prepass
-	  *  already computed, so one path serves every tier. */
+	 *  THE CENTRE IS SUPPLIED, not derived. Grid-coord-to-centre lives on the actor,
+	 *  which owns the grid; the generator inferring it from a buffer's slot centres put
+	 *  every candidate somewhere else entirely and every batch came back with nothing
+	 *  accepted. It is also what lets a streamed neighbourhood and a whole bounding grid
+	 *  be the same dispatch with different contents. */
 	struct FTierBatchCell
 	{
 		FIntVector Coord = FIntVector::ZeroValue;
 		int32 SlotIndex = 0;
 		FVector Centre = FVector::ZeroVector;
 		double HalfExtent = 0.0;
-
-		/** Density this cell rejects against. Zero means use the global reference;
-		 *  the large tier passes its own per-cell peak, which is the whole reason its
-		 *  acceptance rate is workable. */
-		float DensityReference = 0.0f;
-
-		/** Candidates to draw for this cell. Zero means the tier's CandidateBudget.
-		 *
-		 *  The large tier SHARES one budget across its whole active set rather than
-		 *  giving every cell the full amount: its cell count is whatever survives the
-		 *  cull, not a fixed neighbourhood, so per-cell budgeting turns a few thousand
-		 *  cells into hundreds of millions of threads and a readback measured in
-		 *  hundreds of megabytes. */
-		int32 Candidates = 0;
 	};
 
-	/** Turns the large tier's active cell set into batch cells.
+	/** Every cell of the large tier's bounding grid that could hold anything.
 	 *
-	 *  Its cells do not come from a grid neighbourhood: the cull prepass has already
-	 *  discarded everything with no structure in it, and each survivor carries its own
-	 *  peak density. That per-cell envelope is why the tier's acceptance rate is
-	 *  workable at all -- against the global reference the ratio would run three orders
-	 *  smaller and almost nothing would land.
+	 *  A BOUNDS test, not a density test. The field is zero outside the unit sphere, so
+	 *  a cell whose nearest corner already lies beyond it can hold nothing -- and since
+	 *  a sphere fills only pi/6 of its bounding cube, that discards roughly half the
+	 *  grid for one dot product each.
 	 *
-	 *  All of that is DATA fed to the same dispatch, not a second code path. */
+	 *  Density culling happens in the dispatch, where a dead cell costs its group
+	 *  thirty-two probes and an exit. This used to walk the same grid sampling the
+	 *  analytic field on the game thread, and hand each survivor a peak to reject
+	 *  against and a share of a pooled budget. */
 	bool BuildLargeTierCells(
 		const TArray<TPair<FIntVector, int32>>& InSlots,
 		TArray<FTierBatchCell>& OutCells) const;
 
-	/** Give each cell its own rejection envelope and a candidate budget weighted by it.
+	/** GPU generation for a whole batch of tier slots, in one dispatch.
 	 *
-	 *  TWO CONCERNS, SEPARATED. A global reference conflates them:
+	 *  ONE GROUP PER CELL. The group probes its cell to get a rejection envelope,
+	 *  derives its own candidate budget from that envelope, and then spends itself on
+	 *  that cell's candidates. Nothing on this side evaluates the field.
 	 *
-	 *    WHERE entities land inside a cell  -> Cell.DensityReference, the cell's peak.
-	 *    HOW MANY a cell gets               -> Cell.Candidates, weighted by that peak.
+	 *  This is the reason for the migration: the compute path can sample the volume
+	 *  texture, so entity placement sees the warp and modulation the material draws
+	 *  instead of a texture-free approximation of it. It also lifts the constraint that
+	 *  shaped the field in the first place -- features no longer have to be affordable
+	 *  analytically to be reachable from placement.
 	 *
-	 *  Accepted count is Candidates x mean(d)/envelope. Normalising against the cell
-	 *  peak alone would give every cell a similar count and erase the structure BETWEEN
-	 *  cells; weighting the budget by the same peak puts it back, because
-	 *  peak x mean/peak is mean, which is proportional to cell mass. Weighting by mean
-	 *  instead counts the factor twice and over-concentrates in the arms quadratically.
+	 *  BACKGROUND THREAD ONLY; it blocks on a GPU readback. That is safe because tier
+	 *  generation already runs on AnyBackgroundHiPriTask, so the wait costs a worker
+	 *  rather than a frame.
 	 *
-	 *  This is what BuildLargeTierCells has always done. It is stated here so the mid
-	 *  and small tiers -- and the other two layers -- get it from one place.
+	 *  Returns false if the dispatch could not run or the readback timed out. There is
+	 *  no CPU path behind it, so it FAILS CLOSED: the affected slots are blanked and
+	 *  their counts zeroed before returning, because a slot is reused as the player
+	 *  crosses boundaries and leaving it untouched would show the previous occupant's
+	 *  entities at a coord they no longer belong to. Every such path logs. */
+	 /** The tier's placement constant: accepted count per cell is this times cell mass.
+	  *
+	  *  Measured ONCE per tier, lazily, by probing its whole grid on the GPU and reducing.
+	  *  Cached against the tier's seed offset, which is what distinguishes the three.
+	  *
+	  *  Which reduction it divides capacity by depends on how the tier maps cells to
+	  *  slots -- see the .cpp. Getting that wrong is what made a void neighbourhood come
+	  *  back as densely populated as an arm.
+	  *
+	  *  Returns 0 if calibration could not run, which the caller treats as a failed
+	  *  batch rather than generating with a meaningless constant. */
+	float GetTierBudgetScale(const FTierParams& InTierParams, int32 InSeedOffset,
+		bool bInCellsShareSlot) const;
+
+	/** Split each cell into 8^Levels children, in place of it.
 	 *
-	 *  Budgets are anchored on SpawnDensityReference, NOT on the batch's own maximum.
-	 *  A per-batch normalisation would make a cell's candidate count depend on which
-	 *  other cells the player happened to stream in with it, and the same region would
-	 *  regenerate differently between visits. */
-	void ApplyCellEnvelopes(TArray<FTierBatchCell>& InOutCells,
-		const FTierParams& InTierParams) const;
+	 *  Deriving geometry FROM a supplied cell, not inferring it: the actor still says
+	 *  where its cells are and this only descends inside them, which is what keeps the
+	 *  grid the actor's business.
+	 *
+	 *  Child coords are ParentCoord * 2^Levels + an offset, so they are unique across
+	 *  parents and depend on nothing but the parent -- the placement key and the probe
+	 *  jitter both read them, and a child whose coord shifted with the batch would
+	 *  regenerate differently. They do NOT correspond to positions on the streaming grid
+	 *  at the deeper level, and nothing requires them to. */
+	static void SubdivideCells(const TArray<FTierBatchCell>& InCells, int32 InLevels,
+		TArray<FTierBatchCell>& OutCells);
+
+	/** Every cell of a streamed tier's grid, enumerated exhaustively.
+	 *
+	 *  The streaming system's own coordinate formula, so calibration measures the cells
+	 *  the tier will actually generate with -- a different coord labelling would reseed
+	 *  the probe jitter and answer a slightly different question. Bounds-culled only. */
+	void BuildFullTierGrid(int32 InGridDepth, TArray<FTierBatchCell>& OutCells) const;
 
 	bool GenerateTierBatchGPU(
 		const TArray<FTierBatchCell>& InCells,
 		FNiagaraParticleBuffer& InBuffer,
 		const FTierParams& InTierParams,
 		int32 InSeedOffset,
+		/** Whether MANY cells feed ONE slot, which decides how the tier's placement
+		 *  constant is calibrated -- against the total mass of its grid rather than the
+		 *  largest single cell. Stated rather than inferred from the cell count, because
+		 *  subdivision also makes cells outnumber slots and means the opposite thing:
+		 *  those cells all belong to one parent, not to the whole tier. */
+		bool bInCellsShareSlot,
 		TArray<int32>& OutSlotCounts) const;
 
 private:
-
-#pragma endregion
-
-#pragma region Large Tier Culling
-
-	struct FActiveLargeTierCell
-	{
-		FVector Center = FVector::ZeroVector;
-		double HalfExt = 0.0;
-		FIntVector GridCoord = FIntVector::ZeroValue;
-
-		/** Highest density found in this cell -- the REJECTION ENVELOPE for
-		 *  candidates generated inside it. A local envelope is what takes acceptance
-		 *  from a fraction of a percent to roughly a quarter: the field spans four
-		 *  decades globally but only a narrow band within one cell.
-		 *
-		 *  It is an estimate from a finite sample, so it can under-shoot the true
-		 *  maximum and clip a peak. Erring high costs only acceptance rate, which is
-		 *  why the estimate is padded. */
-		float MaxDensity = 0.0f;
-	};
-
-	/** Cells with no density anywhere are skipped entirely, concentrating candidates
-	 *  on arms, disc and bulge. Also records each surviving cell's peak density for
-	 *  use as a local rejection envelope.
+	/** Calibrated placement constants, keyed by tier seed offset.
 	 *
-	 *  Samples corners AND interior points: corners alone miss an arm that passes
-	 *  through the middle of a cell without reaching any vertex, which both discards
-	 *  live cells and under-estimates the envelope of the ones it keeps. */
-	TArray<FActiveLargeTierCell> CollectActiveLargeTierCells() const;
+	 *  Mutable and lock-guarded because tier generation runs on background workers and
+	 *  two tiers can enter this concurrently. The measurement is deterministic, so a
+	 *  duplicated one is wasteful rather than wrong -- the lock is held across it anyway
+	 *  because a GPU probe of a whole grid is not something to run twice. */
+	mutable TMap<int32, float> TierBudgetScales;
+
+	/** Held by pointer because THIS CLASS IS MOVABLE and FCriticalSection is not.
+	 *
+	 *  The generator owns a TUniquePtr member already, so it is move-only, and a
+	 *  defaulted move constructor over a mutex member fails to compile -- the mutex
+	 *  deletes both its copy and its move. Indirecting through TUniquePtr moves the
+	 *  pointer and leaves the mutex where it is.
+	 *
+	 *  A moved-from generator has a null lock, which GetTierBudgetScale treats the same
+	 *  way SampleDensity treats a null Derived: return zero rather than dereference. */
+	mutable TUniquePtr<FCriticalSection> TierBudgetScaleLock =
+		MakeUnique<FCriticalSection>();
 
 #pragma endregion
 };

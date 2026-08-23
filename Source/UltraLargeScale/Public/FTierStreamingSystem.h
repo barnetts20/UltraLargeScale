@@ -43,20 +43,56 @@ struct ULTRALARGESCALE_API FTierParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming")
 	int32 NeighborhoodRadius = 1;
 
-	/** Max particles per slot. This is now a CAP on accepted entities only; the
-	 *  number of candidates drawn is CandidateBudget below.
+	/** Max particles per slot, and for GPU generation THE ONLY PLACEMENT KNOB.
 	 *
-	 *  They used to be the same value, which made a cell's yield depend on how full
-	 *  the buffer already was rather than on the field, so the same cell produced
-	 *  different counts depending on visit order. */
+	 *  It is both the buffer size and the target: the dispatch solves each cell's
+	 *  candidate count so the tier accepts this many in total, distributed by cell mass.
+	 *  Raising it makes the tier denser and its buffer larger, together, which is the
+	 *  relationship the name always implied.
+	 *
+	 *  Pooling is across the whole batch, not per slot. Per-slot targets would give every
+	 *  slot the same count regardless of what is in it, erasing exactly the structure
+	 *  between cells that per-cell normalisation exists to preserve. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming")
 	int32 SlotCapacity = 500;
 
-	/** Candidate draws per cell, independent of SlotCapacity. Fixed budget, variable
-	 *  acceptance: how hard a cell is probed is authored, how many entities survive
-	 *  is decided by the field, and the result is reproducible from (cell, slot)
-	 *  alone -- which is what a compute dispatch needs to size itself. */
+	/** Levels of extra subdivision applied to each streamed cell before generation.
+	 *  0 generates at the streaming depth; each level splits every cell into eight.
+	 *
+	 *  GENERATION GRANULARITY IS NOT SLOT GRANULARITY. A streamed cell has to be big
+	 *  enough that a neighbourhood of them is affordable to keep resident; the field's
+	 *  structure has no reason to be that size. A galaxy disc is a few percent of a cell
+	 *  in its thin axis, so a cell's mean density is a small fraction of its peak -- and
+	 *  rejection against a per-cell envelope accepts at exactly that ratio.
+	 *
+	 *  Subdividing cuts both costs at once. Subcells clear of the structure are culled by
+	 *  the probe pass for sixty-four evaluations and draw no candidates at all, and the
+	 *  ones that survive have a peak much closer to their own mean. Measured on a disc
+	 *  occupying seven percent of its cell, two levels ran about three times cheaper.
+	 *
+	 *  There is a floor: probe cost grows as 8^N while candidate cost falls, so past the
+	 *  crossover more levels cost more. Two is usually near it. The large tier does not
+	 *  use this -- it already generates on its own cull grid rather than its slot grid,
+	 *  which is the same separation arrived at from the other direction. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming",
+		meta = (ClampMin = "0", ClampMax = "4"))
+	int32 GenerationSubdivision = 0;
+
+	/** DEPRECATED for GPU generation, and not read by it.
+	 *
+	 *  It was the candidate count a cell drew, and it could not be tuned in isolation:
+	 *  the value that worked was a function of the subdivision depth, the slot capacity,
+	 *  the density reference and the field's own tuning, all at once. Push it past what
+	 *  those allowed and cells started clipping against a cap, which is a cell-constant
+	 *  multiplier and therefore a visible cubic lattice.
+	 *
+	 *  It is now SOLVED rather than authored. The dispatch weighs each cell during its
+	 *  probe pass, sums the weights, and divides SlotCapacity across them -- accepted
+	 *  count per cell is K x mass_i with the envelope cancelling, so K = capacity/sum
+	 *  lands the tier on its buffer by construction. SlotCapacity is the whole knob.
+	 *
+	 *  Kept only for tiers that still generate on the CPU through GenerateCallback. */
+	UPROPERTY(BlueprintReadWrite, Category = "Streaming",
 		meta = (ClampMin = "1"))
 	int32 CandidateBudget = 500;
 

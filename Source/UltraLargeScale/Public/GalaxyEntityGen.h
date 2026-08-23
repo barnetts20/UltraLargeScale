@@ -31,23 +31,37 @@ struct FGalaxyEntityOut
 	FVector3f Decor = FVector3f::ZeroVector;
 	float Density = 0.0f;
 	/** The candidate index that produced this entity, NOT its position in the buffer.
-	 *  The dispatch compacts per cell with an atomic, so the ORDER within a cell is
-	 *  nondeterministic while the set, and each entity's identity within it, is not. */
-	 /** Written as a float by the shader so the whole record is three float4s. */
+	 *  The dispatch compacts with a global atomic, so storage ORDER is scheduling
+	 *  dependent while the set, and each entity's identity within it, is not.
+	 *
+	 *  Written as a float by the shader so the whole record is three float4s. */
 	float Slot = 0.0f;
-	float Pad[3] = { 0.0f, 0.0f, 0.0f };
+
+	/** Index into the batch's cell array. Required, not diagnostic: entities are
+	 *  appended to one shared buffer, so position no longer says which cell -- and
+	 *  therefore which SLOT -- an entity belongs to. */
+	float CellIndex = 0.0f;
+
+	float Pad[2] = { 0.0f, 0.0f };
 };
 static_assert(sizeof(FGalaxyEntityOut) == 48, "FGalaxyEntityOut must match the .usf layout");
 
-/** Mirrors FGalaxyGenCell in GalaxyEntityGen.usf. 32 bytes. */
+/** Mirrors FGalaxyGenCell in GalaxyEntityGen.usf.
+ *
+ *  GEOMETRY ONLY. A centre, a half extent, and the grid coord that keys the cell.
+ *  Nothing about the field: the shader probes each cell, derives its own rejection
+ *  envelope and its own candidate budget, and the CPU never evaluates the density.
+ *
+ *  DensityReference and Candidates used to live here. Filling them was the last thing
+ *  requiring GalaxyDensityCore.ush to compile as C++, which is why they are gone rather
+ *  than merely unused. The padding that replaces them keeps the record at 48 bytes so
+ *  the layout assert below still means what it did. */
 struct FGalaxyGenCell
 {
 	FVector3f Centre = FVector3f::ZeroVector;
 	float HalfExtent = 0.0f;
 	FIntVector3 Coord = FIntVector3(0, 0, 0);
-	float DensityReference = 1.0f;
-	uint32 Candidates = 0;
-	uint32 Pad[3] = { 0, 0, 0 };
+	uint32 Pad[5] = { 0, 0, 0, 0, 0 };
 };
 static_assert(sizeof(FGalaxyGenCell) == 48, "FGalaxyGenCell must match the .usf layout");
 
@@ -63,10 +77,13 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGalaxyGenCell>, InCells)
 
 		SHADER_PARAMETER(uint32, NumCells)
-		SHADER_PARAMETER(uint32, CandidateBudget)
-		SHADER_PARAMETER(uint32, SlotStride)
+		SHADER_PARAMETER(uint32, EntityCapacity)
+		SHADER_PARAMETER(float, BudgetScale)
+		SHADER_PARAMETER(uint32, ProbeRounds)
 		SHADER_PARAMETER(int32, KeySeed)
 		SHADER_PARAMETER(float, InvGalaxyExtent)
+		SHADER_PARAMETER(float, BudgetAnchor)
+		SHADER_PARAMETER(float, EnvelopePad)
 
 		SHADER_PARAMETER(float, PlaceCompression)
 		SHADER_PARAMETER(float, PlaceSpawnExponent)
@@ -115,12 +132,39 @@ public:
 		SHADER_PARAMETER(float, InNoiseEnable)
 		END_SHADER_PARAMETER_STRUCT()
 
-		static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Params)
+		/** Which pass this permutation compiles.
+		 *
+		 *    0 PROBE    -- one group per cell: cull, envelope, and weigh it
+		 *    1 REDUCE   -- one group total: total and largest of the weights
+		 *    2 GENERATE -- one group per cell: draw and place candidates
+		 *
+		 *  TWO OF THE THREE RUN PER BATCH. Generation is probe then generate; reduce runs
+		 *  only during CALIBRATION, which happens once per tier over its whole grid and
+		 *  produces the single constant generation needs.
+		 *
+		 *  Calibrating per tier rather than per batch is the point. Accepted count per cell
+		 *  is BudgetScale x mass_i, so dividing a target across whatever cells happened to be
+		 *  in a batch made a cell's yield depend on its neighbours -- a void neighbourhood
+		 *  came back as full as an arm, and cost more candidates to produce.
+		 *
+		 *  A permutation rather than separate shader classes: one parameter struct, one
+		 *  IMPLEMENT_GLOBAL_SHADER, one entry point, and no chance of them drifting apart in
+		 *  what they bind. */
+		class FPassDim : SHADER_PERMUTATION_INT("GALAXY_ENTITYGEN_PASS", 3);
+
+	using FPermutationDomain = TShaderPermutationDomain<FPassDim>;
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Params)
 	{
 		return IsFeatureLevelSupported(Params.Platform, ERHIFeatureLevel::SM5);
 	}
 
 	static constexpr uint32 ThreadGroupSize = 64;
+
+	/** Pass indices, named so the dispatch site does not read as magic numbers. */
+	static constexpr int32 PassProbe = 0;
+	static constexpr int32 PassReduce = 1;
+	static constexpr int32 PassGenerate = 2;
 };
 
 /** One in-flight dispatch. Owns its readback fence and its result.
@@ -134,8 +178,12 @@ public:
 class FGalaxyEntityGenRequest
 {
 public:
-	/** Number of entries reserved per cell, and the number of cells requested. */
-	int32 SlotStride = 0;
+	/** Records in the shared entity buffer, and the number of cells requested.
+	 *
+	 *  EntityCapacity is a budget for the whole dispatch, not a per-cell run. Counts is
+	 *  NumCells * 5 + 3 elements; the extras are the global append cursor and the two
+	 *  mass reductions the budget is calibrated from. */
+	int32 EntityCapacity = 0;
 	int32 NumCells = 0;
 
 	/** True once there is something to consume, or once we know there never will be.
@@ -206,6 +254,18 @@ namespace GalaxyEntityGen
 	 *  hit on healthy hardware the timeout is not the problem. */
 	inline constexpr double ReadbackTimeoutSeconds = 2.0;
 
+	/** Rounds of sixty-four probes per cell during CALIBRATION.
+	 *
+	 *  Generation always uses one, because it probes a subcell. Calibration probes the
+	 *  whole streamed cell that subcell came from, and sixty-four samples of a cell whose
+	 *  structure occupies a few percent of its volume under-reports the mean badly.
+	 *
+	 *  The error is BIAS, not noise, and always in the same direction: mass too low ->
+	 *  scale too high -> generation over-delivers, by more the deeper the subdivision.
+	 *  Eight rounds is five hundred and twelve samples per cell, and calibration runs
+	 *  once per tier per galaxy, so the cost does not appear in any frame. */
+	inline constexpr int32 CalibrationProbeRounds = 8;
+
 	/** Enqueues the dispatch and a readback copy. Safe to call from the game thread;
 	 *  the work is deferred to the render thread.
 	 *
@@ -230,24 +290,92 @@ namespace GalaxyEntityGen
 	  *  Returns false on timeout, leaving OutEntities untouched. There is no CPU path
 	  *  behind this any more, so the caller blanks the affected slots rather than
 	  *  filling them another way -- see GalaxyDataGenerator::GenerateTierBatchGPU. */
+	  /** Measure a tier's whole grid so its placement constant can be solved.
+	   *
+	   *  Runs the probe pass over every cell and reduces, returning the TOTAL mass and the
+	   *  LARGEST single cell mass. Which one the caller divides capacity by depends on how
+	   *  the tier maps cells to slots -- total when they share one, largest when each cell
+	   *  owns its own. Generation itself never reduces anything.
+	   *
+	   *  ONCE PER TIER, not per batch. Dividing a target across whatever cells were in a
+	   *  batch made a cell's yield depend on which neighbours streamed in with it: a void
+	   *  neighbourhood came back as densely populated as an arm, and burned several times
+	   *  the candidates doing it.
+	   *
+	   *  BACKGROUND THREAD ONLY, like GenerateBatchBlocking, and for the same reason. */
+	bool CalibrateBlocking(
+		const FGalaxyParams& InParams,
+		const FTierParams& InTierParams,
+		const TArray<FGalaxyGenCell>& InCells,
+		int32 InKeySeed,
+		UTexture* InNoiseTexture,
+		float& OutTotalMass,
+		float& OutMaxCellMass);
+
 	bool GenerateBatchBlocking(
 		const FGalaxyParams& InParams,
 		const FTierParams& InTierParams,
 		const TArray<FGalaxyGenCell>& InCells,
-		int32 InSlotStride,
+		int32 InEntityCapacity,
 		int32 InKeySeed,
 		UTexture* InNoiseTexture,
-		int32 InMaxCandidates,
+		float InBudgetScale,
 		TArray<FGalaxyEntityOut>& OutEntities,
 		TArray<uint32>& OutCounts);
 
+	/** COUNTER BUFFER LAYOUT, in one place.
+	 *
+	 *  Five slots per cell -- accepted, candidates evaluated, envelope, largest candidate
+	 *  density, cell mass -- then three globals past the end: the entity append cursor
+	 *  and the two mass reductions calibration divides by.
+	 *
+	 *  Named rather than spelled out because it was spelled out in four places and one of
+	 *  them did not move when the layout widened. The buffer stayed at four per cell
+	 *  while the copy asked for five plus three, so the copy ran off the end and the
+	 *  shader's global writes landed outside the view -- and RDG's buffer POOLING hid it
+	 *  for weeks by handing back oversized allocations left over from bigger dispatches.
+	 *  It surfaced as an out-of-bounds copy assert with no connection to the layout.
+	 *
+	 *  GalaxyEntityGen.usf indexes the same layout with literals and cannot share these.
+	 *  Change one and change the other. */
+	inline constexpr int32 CountersPerCell = 5;
+	inline constexpr int32 CountGlobals = 3;
+
+	inline constexpr int32 CountElementsFor(int32 InNumCells)
+	{
+		return InNumCells * CountersPerCell + CountGlobals;
+	}
+
+	/** Total accepted, including anything the entity buffer had no room for. */
+	inline constexpr int32 GlobalCursorIndex(int32 InNumCells)
+	{
+		return InNumCells * CountersPerCell;
+	}
+
+	inline constexpr int32 GlobalTotalMassIndex(int32 InNumCells)
+	{
+		return InNumCells * CountersPerCell + 1;
+	}
+
+	inline constexpr int32 GlobalMaxMassIndex(int32 InNumCells)
+	{
+		return InNumCells * CountersPerCell + 2;
+	}
+
+	/** Enqueue the passes and a readback copy.
+	 *
+	 *  bInCalibrateOnly runs probe and reduce and skips generation -- the mass reductions
+	 *  without any entities, which is what CalibrateBlocking wants. Otherwise it runs
+	 *  probe and generate and skips the reduce, because generation carries its constant
+	 *  as a uniform rather than solving for it. */
 	void Dispatch(
 		const FGalaxyParams& InParams,
 		const FTierParams& InTierParams,
 		TArray<FGalaxyGenCell> InCells,
-		int32 InSlotStride,
+		int32 InEntityCapacity,
 		int32 InKeySeed,
 		UTexture* InNoiseTexture,
-		int32 InMaxCandidates,
+		float InBudgetScale,
+		bool bInCalibrateOnly,
 		TSharedRef<FGalaxyEntityGenRequest> OutRequest);
 }
