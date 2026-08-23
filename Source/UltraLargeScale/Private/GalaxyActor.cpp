@@ -421,27 +421,34 @@ void AGalaxyActor::BuildTierConfigs()
 	LargeTierConfig.bWantRotations = { false };
 	LargeTierConfig.OctreeInsertBufferIndex = 0;
 	LargeTierConfig.TierIndex = 0;
-	// The large tier goes through the SAME GPU path as the others. It differs only in
-	// where its cells come from -- an active set from the cull prepass rather than a
-	// grid neighbourhood -- and in rejecting against each cell's own peak density
-	// instead of the global reference. Both are data, not a second code path.
+	// IDENTICAL IN SHAPE TO THE OTHER TWO. Build one cell per queued slot, hand it over.
 	//
-	// NO GenerateCallback. This layer is GPU-only: the batch callback is the whole
-	// generation path, and a false return means these slots are deliberately blanked
-	// rather than filled by something that cannot read the volume texture.
+	// The large tier differs only in data: one slot covering the whole galaxy, subdivided
+	// deeply enough to resolve structure, with every child writing to that one slot. It
+	// used to have a bespoke cull grid and a bespoke cell builder; those described the
+	// same tiling GenerationSubdivision already produces.
+	//
+	// bCellsShareSlot is the one flag that distinguishes it, and it is about CALIBRATION,
+	// not generation: many cells feeding one slot means the slot holds their sum, so the
+	// tier's constant divides capacity by total mass rather than by the largest cell.
 	LargeTierConfig.GenerateBatchCallback =
 		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts) -> bool
 		{
-			TArray<GalaxyDataGenerator::FTierBatchCell> Cells;
+			const double CellExt = GetGridCellExtent(LargeTierConfig.GridDepth);
 
-			if (!GalaxyGenerator.BuildLargeTierCells(Slots, Cells))
+			TArray<GalaxyDataGenerator::FTierBatchCell> Cells;
+			Cells.Reserve(Slots.Num());
+
+			for (const TPair<FIntVector, int32>& Slot : Slots)
 			{
-				return false;
+				GalaxyDataGenerator::FTierBatchCell Cell;
+				Cell.Coord = Slot.Key;
+				Cell.SlotIndex = Slot.Value;
+				Cell.Centre = GridCoordToCenter(Slot.Key, LargeTierConfig.GridDepth);
+				Cell.HalfExtent = CellExt;
+				Cells.Add(Cell);
 			}
 
-			// SHARE A SLOT: the whole cull grid feeds this tier's single slot, so its
-			// placement constant is calibrated against the grid's total mass rather than
-			// its largest single cell.
 			return GalaxyGenerator.GenerateTierBatchGPU(
 				Cells, LargeTierState.Buffers[0], Params.LargeTier, 0, true, OutCounts);
 		};
@@ -489,8 +496,9 @@ void AGalaxyActor::BuildTierConfigs()
 				Cells.Add(Cell);
 			}
 
-			// ONE CELL PER SLOT. Subdivision happens inside the generator and does
-						// not change that: the children of a streamed cell all write to its slot.
+			// ONE CELL PER SLOT, so the tier's constant is calibrated against the
+			// largest single cell. Subdivision does not change that: the children of a
+			// streamed cell all write to its slot.
 			return GalaxyGenerator.GenerateTierBatchGPU(
 				Cells, MidTierState.Buffers[0], Params.MidTier, 7, false, OutCounts);
 		};
@@ -538,8 +546,9 @@ void AGalaxyActor::BuildTierConfigs()
 				Cells.Add(Cell);
 			}
 
-			// ONE CELL PER SLOT. Subdivision happens inside the generator and does
-			// not change that: the children of a streamed cell all write to its slot.
+			// ONE CELL PER SLOT, so the tier's constant is calibrated against the
+// largest single cell. Subdivision does not change that: the children of a
+// streamed cell all write to its slot.
 			return GalaxyGenerator.GenerateTierBatchGPU(
 				Cells, SmallTierState.Buffers[0], Params.SmallTier, 13, false, OutCounts);
 		};

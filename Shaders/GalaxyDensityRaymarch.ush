@@ -20,21 +20,14 @@
 // into the core. "Resource-free" was never the real boundary; "never binds, only
 // receives" is, and that is what the core enforces.
 #include "/UltraLargeScale/GalaxyDensityCore.ush"
-// TODO: POTENTIAL RAYMARCH OPTIMIZATIONS - PERFORMANCE + QUALITY
-//
-// TODO: PERFORMANCE:
-// TODO: Screen Space Constant Step Sizing optimization
-// TODO: Determine minimum step size close to camera as step size
-// TODO: Scale step size to maintain a constant angular scale of the step based on distance from the camera
-// TODO: example: A step 2x as far from the camera can be 2x as large without losing perceived size
-//
-// TOOD: QUALITY:
-// TODO: Quantized step grid + partial steps - Avoid raymarch "sliding" artifacts by pegging the steps to a grid. 
-// TODO: Instead of the first step starting at the camera at full size, and all remaining steps inheriting that initial distance along the ray
-// TODO: The first step from the camera should be a partial step to intersect the quatization grid, then allow the full sized steps and adaptive step sizing to take over
-// TODO: The idea is, instead of the ray sample points sliding along with the camera as it moves, they stay static relative to the quantization grid and the first step(s) are there to basically align the ray
+// TODO: QUANTIZED STEP GRID + PARTIAL FIRST STEP.
+// Sample points currently slide along the ray as the camera moves, because the lattice
+// is anchored to the camera. Pegging it to a fixed grid and bridging the gap with one
+// partial step would hold samples still. Note it only fixes RADIAL sliding -- the ray
+// direction still changes under rotation, so samples still slide laterally.
+// With adaptive steps there is no uniform lattice to snap to; the quantisation has to
+// happen in log space, against a lattice of ln(1 + AngularStep).
 
-// TODO: This has some tension with the adaptive step sizing, however the artifacts from that should be relatively far along the ray so it may be fine
 // --- RAYMARCH: ANALYTIC SPHERE-BOUNDED DENSITY ACCUMULATION ---
 // The proxy mesh decides which pixels run; the unit sphere decides where to march.
 // Step length adapts to chord length, so quality does not vary with view angle and no
@@ -47,11 +40,41 @@
 //
 // InViewVec is the LOCAL camera vector, surface toward camera, need not be
 // normalized. Returns emissive in RGB, transmittance in A.
-float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 InStartPos, float3 InViewVec, int InMaxSteps, float InDensityScale, float InJitter, float InNoisePower)
+// InViewVec is the LOCAL camera vector, surface toward camera. DIRECTION ONLY --
+// normalized or not, it makes no difference.
+//
+// InCamPosN is the camera position in NORMALIZED space -- the same frame as the marched
+// position, box spanning -1 to 1 -- so this function applies no remap to it at all.
+//
+// Normalized rather than [0,1] because the shader cannot verify a convention it does not
+// own. A remap applied here silently biases anything supplied in a different frame, and a
+// biased camera position is indistinguishable from a correct one until the geometry it
+// produces is wrong.
+//
+// It is a position rather than a distance because a distance cannot be recovered from
+// InViewVec: a camera vector is unit length, and transforming an unnormalized world
+// offset into local space divides by object scale, landing in mesh units rather than box
+// units.
+//
+// RETURNS  (emission, steps taken, 0, transmittance).
+//
+// The step count rides in G because it is the only quantity here with no other observer:
+// cost is invisible from the outside, so a march that truncates looks identical to one
+// that finished, and the far half of the volume simply is not there. It is a RAW COUNT,
+// not normalized -- the material divides by whatever range it wants to look at, and a
+// normalization baked in here would be one more number to keep in agreement with
+// MaxSteps.
+float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler,
+                      float3 InStartPos, float3 InViewVec, float3 InCamPosN,
+                      float InStepRatio, float InMinStep, float InMinSamples, int InMaxSteps,
+                      float InDensityScale, float InJitter, float InNoisePower)
 {
-    // Unit box [0,1] -> normalized galaxy space [-1,1]. Uniform scale, so a direction is identical in both.
+    // Unit box [0,1] -> normalized galaxy space [-1,1]. Uniform scale, so a direction
+    // is identical in both.
     float3 o = 2.0 * (InStartPos - 0.5);
     float3 dir = normalize(-InViewVec);
+    float3 camN = InCamPosN;
+
 
     float b = dot(o, dir);
     float c = dot(o, o) - 1.0;
@@ -63,7 +86,9 @@ float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSam
 
     float sq = sqrt(disc);
 
-    // Origin inside the sphere: clamp the near end. Outside: take the whole chord WITHOUT clamping to zero, because with an inverted-normal proxy the shaded point is the far face and the chord lies at negative t.
+    // Origin inside the sphere: clamp the near end. Outside: take the whole chord
+    // WITHOUT clamping to zero, because with an inverted-normal proxy the shaded point
+    // is the far face and the chord lies at negative t.
     float tEnter = (c < 0.0) ? 0.0 : (-b - sq);
     float tExit = -b + sq;
     if (tExit <= tEnter)
@@ -71,29 +96,112 @@ float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSam
         return float4(0.0, 0.0, 0.0, 1.0);
     }
 
-    int steps = max(InMaxSteps, 1);
-    float normStep = (tExit - tEnter) / float(steps);
+    // DISTANCE FROM THE CAMERA, which is what sets step size. The sample at t sits at
+    // o + dir*t and the camera at o - dCam*dir, so their separation is (dCam + t) along
+    // dir.
+    float dCam = dot(o - camN, dir);
 
-    // Optical path is in LOCAL units and normalized space is 2x local.
-    float localStep = normStep * 0.5;
+    // START AT THE CAMERA WHEN IT IS INSIDE THE VOLUME.
+    //
+    // The chord then begins behind the viewer, and every step of that stretch runs at
+    // the floor because the separation there is zero -- up to a full normalized unit, so
+    // five hundred steps at a floor of 0.002, the entire budget spent on geometry nobody
+    // can see before the march reaches anything visible. It shows as the volume
+    // dissolving and reforming as the camera crosses the boundary.
+    //
+    // GUARDED SO IT CAN ONLY SHORTEN. Each condition rules out a way a wrong InCamPosN
+    // could empty the chord instead of trimming it: a non-positive distance means the
+    // input is nonsense for a visible pixel, and a camera plane at or past the exit would
+    // leave nothing to march. Either way the march falls back to the full chord, which is
+    // slower but still correct -- the failure this replaced returned a transparent pixel
+    // and read as view-dependent geometry dropout.
+    float tStart = tEnter;
+    if (dCam > 0.0 && -dCam > tEnter && -dCam < tExit)
+    {
+        tStart = -dCam;
+    }
 
-    // Dither the entry point, not the step length, so every ray keeps an identical total path and density does not shimmer with the noise.
-    float t = tEnter + InJitter * normStep;
+    // CONSTANT ANGULAR STEP SIZE.
+    //
+    // A step twice as far away covers twice the distance for the same apparent size, so
+    // stepping by a fixed fraction of the camera distance keeps every step the same size
+    // ON SCREEN. The recurrence s -> s(1 + k) is geometric, which makes the step count
+    // LOGARITHMIC in range rather than linear -- for a volume viewed across orders of
+    // magnitude that is the difference between a budget spent mostly on the far half and
+    // one spent where the pixels are.
+    //
+    // InStepRatio IS that fraction, and it is authored directly rather than derived from
+    // the projection. It is already an angle in the small-angle sense -- a step of k
+    // times the distance subtends about k radians -- so nothing here needs the field of
+    // view, the viewport size or the View uniform buffer at all. Tuning it by eye
+    // against the actual content beats computing a pixel-exact value that then has to be
+    // multiplied by a fudge factor to be affordable.
+    //
+    // MinStep is load-bearing at both ends: it bounds the near field where the distance
+    // goes to zero, and it is the only thing stopping a zero ratio from stalling.
+    float k = max(InStepRatio, 0.0);
+    float minStep = max(InMinStep, 1e-5);
+
+    // Jitter shortens the FIRST step only. That offsets each pixel's lattice
+    // independently, breaking up the concentric banding a fixed lattice produces, and it
+    // costs no energy because the loop clamps the last step to the exit -- the total path
+    // is identical whatever the offset.
+    float firstScale = clamp(InJitter, 0.05, 1.0);
 
     bool bShape = (InNoisePower != 1.0);
 
+    // FLOOR ON SAMPLES ACROSS THE CHORD, which is what keeps a distant volume from
+    // collapsing to a couple of steps.
+    //
+    // Angular sizing is the right rule for how much detail a step needs, but it says
+    // nothing about how much detail the volume HAS: past a certain range one step spans
+    // the whole thing, and the structure disappears rather than merely softening. This
+    // bounds the far field the way MinStep bounds the near one, and it is bounded work --
+    // a couple of dozen samples on something a few pixels wide, against the hundreds a
+    // march anchored to the volume rather than the camera would spend at any range.
+    float maxStep = (tExit - tStart) / max(InMinSamples, 1.0);
+
     float transmittance = 1.0;
     float emission = 0.0;
+    float t = tStart;
+    float stepsTaken = 0.0;
 
-    for (int i = 0; i < steps; i++)
+    // InMaxSteps is a SAFETY BOUND, not the step count. The geometric progression sets
+    // the count; this only stops a pathological AngularStep from hanging the shader.
+    [loop]
+    for (int i = 0; i < InMaxSteps; i++)
     {
-        float density = GalaxySample(P, InTex, InSampler, o + dir * t);
+        float remaining = tExit - t;
+        if (remaining <= 1e-6)
+        {
+            break;
+        }
+
+        // max against zero, not just against the floor: a sample behind the camera has a
+        // negative separation, and without this a wrong camera position would produce
+        // negative step lengths and a march that never terminates.
+        float stepLen = max(minStep, max(dCam + t, 0.0) * k);
+        stepLen = min(stepLen, maxStep);
+        if (i == 0)
+        {
+            stepLen *= firstScale;
+        }
+        stepLen = min(stepLen, remaining);
+
+        // Sampled at the step MIDPOINT. With uniform steps the choice only shifts the
+        // result half a step; with steps that grow along the ray, sampling at the near
+        // edge weights every interval by its own leading face and biases the whole
+        // integral toward the camera.
+        stepsTaken += 1.0;
+
+        float density = GalaxySample(P, InTex, InSampler, o + dir * (t + stepLen * 0.5));
         if (bShape)
         {
             density = P.PowSafe(density, InNoisePower);
         }
 
-        float alpha = 1.0 - exp(-density * InDensityScale * localStep);
+        // Optical path is in LOCAL units and normalized space is 2x local.
+        float alpha = 1.0 - exp(-density * InDensityScale * stepLen * 0.5);
 
         // Flat white emission: structure only.
         emission += alpha * transmittance;
@@ -104,8 +212,8 @@ float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSam
             break;
         }
 
-        t += normStep;
+        t += stepLen;
     }
 
-    return float4(emission.xxx, transmittance);
+    return float4(emission, stepsTaken, 0.0, transmittance);
 }

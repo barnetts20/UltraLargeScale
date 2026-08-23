@@ -95,9 +95,19 @@ float2 UniverseSampleStep(UniverseDensityParams P, Texture3D InTex, SamplerState
 }
 
 // --- RAYMARCH: ANALYTIC SPHERE-BOUNDED DENSITY ACCUMULATION ---
-// Unchanged from the galaxy layer. The proxy mesh decides which pixels run; the unit
-// sphere decides where to march. Step length adapts to chord length, so quality does
-// not vary with view angle and no trailing partial step is needed.
+// Same stepping rule as the galaxy layer. The proxy mesh decides which pixels run; the
+// unit sphere decides where to march.
+//
+// STEP LENGTH IS A FRACTION OF CAMERA DISTANCE, so every step subtends about the same
+// angle and covers about the same screen area wherever it is. The recurrence
+// s -> s(1 + StepRatio) is geometric, which makes the step count LOGARITHMIC in range
+// rather than linear -- against a fixed count spread evenly along the chord, that is the
+// difference between a budget spent mostly where nothing is visible and one spent where
+// the pixels are.
+//
+// It composes with the empty-space skip rather than replacing it: this sets the FLOOR
+// and the skip still wins wherever it is larger. The two answer different questions --
+// how much detail a step needs, and how much detail is there.
 //
 // Do not add a box bounds test on the marched position. InStartPos sits exactly on
 // the proxy surface, so a component is exactly 0 or 1 before any FP error, and such a
@@ -108,11 +118,24 @@ float2 UniverseSampleStep(UniverseDensityParams P, Texture3D InTex, SamplerState
 // a constant length and the entry/exit maths collapses to a fixed span rather than an
 // intersection. Correct as written for a fixed test volume; not the final bounding.
 //
-// InViewVec is the LOCAL camera vector, surface toward camera, need not be
-// normalized. Returns emissive in RGB, transmittance in A.
+// InViewVec is the LOCAL camera vector, surface toward camera. DIRECTION ONLY.
+//
+// InCamPosN is the camera in NORMALIZED space -- the same frame as the marched position,
+// box spanning -1 to 1 -- and no remap is applied to it here. A remap applied in the
+// shader silently biases anything supplied in a different frame, and a biased camera
+// position is indistinguishable from a correct one until the geometry is wrong.
+//
+// Once the proxy becomes a sphere centred on the camera this collapses: the camera is
+// always at the origin, InCamPosN is zero, and the distance is just t.
+//
+// RETURNS  (emission, steps taken, 0, transmittance).
+//
+// The step count rides in G because cost has no other observer: a march that truncates
+// looks identical to one that finished, and the far half of the volume is simply absent.
 float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState InSampler,
-                        float3 InStartPos, float3 InViewVec,
+                        float3 InStartPos, float3 InViewVec, float3 InCamPosN,
                         float3 InOffsetCell, float3 InOffsetFrac,
+                        float InStepRatio, float InMinStep, float InMinSamples,
                         int InMaxSteps, float InDensityScale, float InJitter,
                         float InNoisePower, float InStepSafety)
 {
@@ -141,12 +164,37 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
         return float4(0.0, 0.0, 0.0, 1.0);
     }
 
-    int steps = max(InMaxSteps, 1);
-    float normStep = (tExit - tEnter) / float(steps);
+    // DISTANCE FROM THE CAMERA, which is what sets step size. The sample at t sits at
+    // o + dir*t and the camera at o - dCam*dir, so their separation is (dCam + t).
+    float dCam = dot(o - InCamPosN, dir);
 
-    // Dither the entry point, not the step length, so every ray keeps an identical
-    // total path and density does not shimmer with the noise.
-    float t = tEnter + InJitter * normStep;
+    // START AT THE CAMERA WHEN IT IS INSIDE THE VOLUME. The chord otherwise begins
+    // behind the viewer, and every step of that stretch runs at the floor because the
+    // separation there is zero -- the whole budget spent on geometry nobody can see.
+    //
+    // GUARDED SO IT CAN ONLY SHORTEN. Each condition rules out a way a wrong InCamPosN
+    // could empty the chord instead of trimming it; the fallback is the full chord,
+    // which is slower but still correct.
+    float tStart = tEnter;
+    if (dCam > 0.0 && -dCam > tEnter && -dCam < tExit)
+    {
+        tStart = -dCam;
+    }
+
+    float k = max(InStepRatio, 0.0);
+    float minStep = max(InMinStep, 1e-5);
+
+    // FLOOR ON SAMPLES ACROSS THE CHORD. Angular sizing says how much detail a step
+    // needs and nothing about how much the volume has; past some range one step spans
+    // the whole thing and the structure disappears rather than softening.
+    float maxStep = (tExit - tStart) / max(InMinSamples, 1.0);
+
+    // Dither shortens the FIRST step. It costs no path length -- the loop clamps the
+    // last step to the exit -- and it offsets each pixel's lattice independently.
+    float firstScale = clamp(InJitter, 0.05, 1.0);
+
+    float t = tStart;
+    float stepsTaken = 0.0;
 
     bool bShape = (InNoisePower != 1.0);
 
@@ -162,13 +210,22 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
     float transmittance = 1.0;
     float emission = 0.0;
 
-    for (int i = 0; i < steps; i++)
+    // InMaxSteps is a SAFETY BOUND, not the step count. The geometric progression sets
+    // the count; this only stops a pathological ratio from hanging the shader.
+    [loop]
+    for (int i = 0; i < InMaxSteps; i++)
     {
         if (t >= tExit)
         {
             break;
         }
 
+        stepsTaken += 1.0;
+
+        // SAMPLED AT THE STEP START, not the midpoint. The galaxy march samples the
+        // midpoint because growing steps otherwise weight each interval by its leading
+        // face; here the skip distance below is a bound anchored at the SAMPLED point,
+        // so moving the sample would invalidate it.
         float2 s = UniverseSampleStep(P, InTex, InSampler, o + dir * t,
                                       InOffsetCell, InOffsetFrac, axes);
         float density = s.x;
@@ -182,18 +239,45 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
         // as accurately as a hundred would -- the exponentials multiply, so a
         // homogeneous span is the same whether it is crossed in one step or many.
         //
-        // InStepSafety scales that distance. At 1 the skip is provably exact. Above
-        // 1 it is a quality knob, and a generous one: measured against an eight-times
-        // oversampled reference, the fixed march's own error is 0.193% and this at a
-        // safety of 6 is 0.187% while taking 1.5x fewer steps. The bound is derived
-        // for the worst possible alignment of every term at once, which is far more
-        // pessimistic than any real sample.
-        float h = normStep;
+        // InStepSafety scales that distance. At 1 the skip is provably exact. Above 1 it
+        // is a quality knob whose error budget WAS MEASURED AGAINST A UNIFORM MARCH, and
+        // that measurement no longer applies: the reference had a couple of hundred
+        // evenly spread samples for an overshoot to average against, while a geometric
+        // march has a couple of dozen in the far field. The same safety factor therefore
+        // concentrates far more error per sample out there than the 0.187% figure it was
+        // characterised at. Treat anything above 1 as unmeasured until it is measured
+        // again against this march.
+        // max against zero, not just against the floor: a sample behind the camera has
+        // a negative separation, and without it a wrong camera position gives negative
+        // step lengths and a march that never terminates.
+        float h = max(minStep, max(dCam + t, 0.0) * k);
+        h = min(h, maxStep);
+
         float skip = s.y * cellToNorm;
         if (skip > h)
         {
             h = skip;
         }
+        // DITHER LAST, AFTER THE SKIP HAS HAD ITS SAY.
+        //
+        // Applied before it, the skip overwrites it: in void -- most of the field -- the
+        // skip is always the larger of the two, so the first step is replaced wholesale
+        // and the offset never reaches the march. Every ray then starts at the same place
+        // and takes identical skip-sized steps, so sample positions lock to the field
+        // across every pixel at once. That is structured aliasing, and it swims as the
+        // field scrolls under the proxy.
+        //
+        // Shortening a skip is always safe. The skip is a distance within which no
+        // feature can appear, so travelling less than it is strictly more conservative --
+        // the dither costs a fraction of one step and buys back the decorrelation.
+        //
+        // No path is lost either way: the clamp below pulls the last step to the exit, so
+        // every ray covers the same span whatever its offset.
+        if (i == 0)
+        {
+            h *= firstScale;
+        }
+
         if (t + h > tExit)
         {
             h = tExit - t;
@@ -214,5 +298,5 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
         t += h;
     }
 
-    return float4(emission.xxx, transmittance);
+    return float4(emission, stepsTaken, 0.0, transmittance);
 }

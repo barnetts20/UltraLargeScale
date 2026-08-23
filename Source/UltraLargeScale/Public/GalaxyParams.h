@@ -563,22 +563,6 @@ struct ULTRALARGESCALE_API FGalaxyParams : public FBaseParams
 
 #pragma endregion
 
-#pragma region Large Tier SDF Culling Grid
-
-	/** Grid depth used to subdivide the galaxy volume for SDF-based cell
-	 *  culling during large tier generation. Cells whose every corner has
-	 *  zero composite density are skipped entirely, concentrating candidate
-	 *  sampling on arms/disc/bulge.
-	 *
-	 *  Depth N produces (2^N)^3 cells over the GridExtentMultiplier-scaled
-	 *  volume. Depth 3 = 8^3 = 512 cells. Higher values give finer culling
-	 *  at the cost of more corner evaluations (8 * CellCount SDF samples).
-	 *  Values of 2-4 are recommended; 5+ rarely improves acceptance rate
-	 *  enough to justify the overhead. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Large Tier")
-	int32 LargeTierCullDepth = 4;
-
-#pragma endregion
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density")
 	FGalaxyDensityParams DensityParams;
@@ -635,6 +619,7 @@ struct ULTRALARGESCALE_API FGalaxyParams : public FBaseParams
 		// NeighborhoodRadius = 0 -> 1x1x1 = 1 slot, exhaustive single-pass.
 		LargeTier.GridDepth = 1;
 		LargeTier.NeighborhoodRadius = 0;
+		LargeTier.GenerationSubdivision = 4;
 		LargeTier.SlotCapacity = 10000;
 
 		MidTier.GridDepth = 3;

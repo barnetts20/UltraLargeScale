@@ -223,98 +223,10 @@ TArray<uint8> GalaxyDataGenerator::SampleNoiseVolume(int InNoiseResolution) cons
 
 #pragma region Tier Generation Callbacks
 
-bool GalaxyDataGenerator::BuildLargeTierCells(
-	const TArray<TPair<FIntVector, int32>>& InSlots,
-	TArray<FTierBatchCell>& OutCells) const
-{
-	OutCells.Reset();
-
-	if (InSlots.Num() == 0)
-	{
-		return true;
-	}
-
-	// -----------------------------------------------------------------------
-	// GEOMETRY ONLY. This used to be a density prepass: it walked the grid sampling
-	// the analytic field, kept the cells with something in them, and handed each one a
-	// peak to reject against and a share of a pooled budget.
-	//
-	// All of that is in the shader now, where it can sample the TEXTURED field instead
-	// of an analytic stand-in for it. What is left here is the one question the GPU
-	// cannot answer more cheaply than the CPU: which cells exist at all.
-	//
-	// The bounds test is worth keeping because it costs nothing and halves the work.
-	// The field is zero outside the unit sphere, so a cell whose nearest corner is
-	// already beyond it can hold nothing -- and a sphere fills only pi/6 of its
-	// bounding cube, so roughly half the grid goes without a single field evaluation.
-	// Every surviving cell still gets probed by its own group.
-	// -----------------------------------------------------------------------
-
-	const int32 CullDepth = FMath::Max(Params.LargeTierCullDepth, 1);
-	const int32 GridSide = 1 << CullDepth;
-	const double FullExtent = static_cast<double>(Params.Extent);
-	const double CellFull = (2.0 * FullExtent) / static_cast<double>(GridSide);
-	const double HalfCell = CellFull * 0.5;
-	const double InvExtent = 1.0 / FMath::Max(FullExtent, 1e-9);
-
-	// The large tier has ONE slot, and every cell feeds it. Each cell is tagged with
-	// that slot so the scatter writes them into the same run, and the dispatch's
-	// per-cell counters still keep the runs apart.
-	//
-	// Not the grid coord of the slot: the KEY has to be the cell's own coord or two
-	// cells sharing a slot would draw identical candidates.
-	const int32 SlotIndex = InSlots[0].Value;
-
-	const int32 TotalCells = GridSide * GridSide * GridSide;
-	OutCells.Reserve(TotalCells / 2);
-
-	for (int32 iz = 0; iz < GridSide; ++iz)
-	{
-		for (int32 iy = 0; iy < GridSide; ++iy)
-		{
-			for (int32 ix = 0; ix < GridSide; ++ix)
-			{
-				const FVector Centre(
-					-FullExtent + HalfCell + static_cast<double>(ix) * CellFull,
-					-FullExtent + HalfCell + static_cast<double>(iy) * CellFull,
-					-FullExtent + HalfCell + static_cast<double>(iz) * CellFull);
-
-				// Nearest point of the cell to the origin, normalised. If even that is
-				// outside the unit sphere the whole cell is, and no probe would find
-				// anything.
-				const FVector Nearest(
-					FMath::Max(FMath::Abs(Centre.X) - HalfCell, 0.0) * InvExtent,
-					FMath::Max(FMath::Abs(Centre.Y) - HalfCell, 0.0) * InvExtent,
-					FMath::Max(FMath::Abs(Centre.Z) - HalfCell, 0.0) * InvExtent);
-
-				if (Nearest.SizeSquared() > 1.0)
-				{
-					continue;
-				}
-
-				FTierBatchCell Out;
-				Out.Coord = FIntVector(ix, iy, iz);
-				Out.SlotIndex = SlotIndex;
-				Out.Centre = Centre;
-				Out.HalfExtent = HalfCell;
-
-				OutCells.Add(Out);
-			}
-		}
-	}
-
-	UE_LOG(LogTemp, Verbose,
-		TEXT("GalaxyDataGenerator::BuildLargeTierCells - depth=%d grid=%d^3 total=%d ")
-		TEXT("in bounds=%d (%.1f%%); density culling happens in the dispatch."),
-		CullDepth, GridSide, TotalCells, OutCells.Num(),
-		TotalCells > 0 ? 100.0f * static_cast<float>(OutCells.Num()) / static_cast<float>(TotalCells) : 0.0f);
-
-	return OutCells.Num() > 0;
-}
-
 void GalaxyDataGenerator::SubdivideCells(
 	const TArray<FTierBatchCell>& InCells,
 	int32 InLevels,
+	double InExtent,
 	TArray<FTierBatchCell>& OutCells)
 {
 	OutCells.Reset();
@@ -325,20 +237,20 @@ void GalaxyDataGenerator::SubdivideCells(
 		return;
 	}
 
+	const double InvExtent = 1.0 / FMath::Max(InExtent, 1e-9);
 	const int32 Side = 1 << InLevels;
 	const int32 PerCell = Side * Side * Side;
 
-	OutCells.Reserve(InCells.Num() * PerCell);
+	OutCells.Reserve(InCells.Num() * PerCell / 2);
 
 	for (const FTierBatchCell& Parent : InCells)
 	{
 		const double SubHalf = Parent.HalfExtent / static_cast<double>(Side);
 		const double SubFull = SubHalf * 2.0;
 
-		// Centres run from one corner of the parent, offset so the set is symmetric
-		// about it. The children tile the parent exactly, which is what keeps the sum of
-		// their masses equal to 8^Levels times the parent's -- the relation the tier's
-		// calibrated constant is scaled by.
+		// Children tile the parent exactly, which is what keeps the sum of their masses
+		// equal to 8^Levels times the parent's -- the relation the tier's calibrated
+		// constant is scaled by.
 		const double Origin = -(static_cast<double>(Side) - 1.0) * 0.5;
 
 		for (int32 iz = 0; iz < Side; ++iz)
@@ -347,6 +259,26 @@ void GalaxyDataGenerator::SubdivideCells(
 			{
 				for (int32 ix = 0; ix < Side; ++ix)
 				{
+					const FVector Centre = Parent.Centre + FVector(
+						(Origin + static_cast<double>(ix)) * SubFull,
+						(Origin + static_cast<double>(iy)) * SubFull,
+						(Origin + static_cast<double>(iz)) * SubFull);
+
+					// BOUNDS CULL, on geometry alone. The field is zero outside the unit
+					// sphere, so a child whose nearest point already lies past it can
+					// hold nothing -- and a sphere fills only pi/6 of its bounding cube.
+					// One dot product here against sixty-four field evaluations if the
+					// child's thread group has to discover it instead.
+					const FVector Nearest(
+						FMath::Max(FMath::Abs(Centre.X) - SubHalf, 0.0) * InvExtent,
+						FMath::Max(FMath::Abs(Centre.Y) - SubHalf, 0.0) * InvExtent,
+						FMath::Max(FMath::Abs(Centre.Z) - SubHalf, 0.0) * InvExtent);
+
+					if (Nearest.SizeSquared() >= 1.0)
+					{
+						continue;
+					}
+
 					FTierBatchCell Child;
 
 					// The SLOT is the parent's. Children are a generation detail; the
@@ -358,11 +290,7 @@ void GalaxyDataGenerator::SubdivideCells(
 						Parent.Coord.Y * Side + iy - Side / 2,
 						Parent.Coord.Z * Side + iz - Side / 2);
 
-					Child.Centre = Parent.Centre + FVector(
-						(Origin + static_cast<double>(ix)) * SubFull,
-						(Origin + static_cast<double>(iy)) * SubFull,
-						(Origin + static_cast<double>(iz)) * SubFull);
-
+					Child.Centre = Centre;
 					Child.HalfExtent = SubHalf;
 
 					OutCells.Add(Child);
@@ -420,18 +348,27 @@ float GalaxyDataGenerator::GetTierBudgetScale(
 		return *Cached;
 	}
 
-	TArray<FTierBatchCell> AllCells;
+	const int32 Subdivision = FMath::Clamp(InTierParams.GenerationSubdivision, 0, 6);
 
-	if (bInCellsShareSlot)
+	TArray<FTierBatchCell> AllCells;
+	BuildFullTierGrid(InTierParams.GridDepth, AllCells);
+
+	// SUBDIVIDED ONLY WHEN THE ANSWER IS A SUM.
+	//
+	// A tier whose cells share a slot needs the TOTAL mass of its grid, and a total is
+	// only as good as the resolution it was summed at -- one cell spanning the galaxy
+	// cannot be characterised by five hundred samples of a mostly empty cube.
+	//
+	// A tier with one cell per slot needs the LARGEST PARENT's total instead, and that
+	// cannot be read off the subdivided grid at all: the reduce pass produces a global
+	// max, not a max of per-parent sums. It measures parents and scales, which is exact
+	// because children tile their parent -- a parent's mass is the mean of theirs, so
+	// their sum is 8^Levels times it.
+	if (bInCellsShareSlot && Subdivision > 0)
 	{
-		// The large tier already hands its whole grid over on every batch, so the cell
-		// set it calibrates against is the one it generates with.
-		const TArray<TPair<FIntVector, int32>> OneSlot = { TPair<FIntVector, int32>(FIntVector::ZeroValue, 0) };
-		BuildLargeTierCells(OneSlot, AllCells);
-	}
-	else
-	{
-		BuildFullTierGrid(InTierParams.GridDepth, AllCells);
+		TArray<FTierBatchCell> Parents = MoveTemp(AllCells);
+		SubdivideCells(Parents, Subdivision,
+			static_cast<double>(Params.Extent), AllCells);
 	}
 
 	float Scale = 0.0f;
@@ -461,18 +398,9 @@ float GalaxyDataGenerator::GetTierBudgetScale(
 			Params.Seed + InSeedOffset, Params.NoiseTexture,
 			TotalMass, MaxCellMass))
 		{
-			// CALIBRATED AT THE STREAMING DEPTH, then scaled for subdivision.
-			//
-			// Generation may descend inside each streamed cell, and a slot then receives
-			// the sum of that cell's children rather than the cell itself. Children tile
-			// their parent, so a parent's mass is the MEAN of theirs and the sum is
-			// exactly 8^Levels times it -- which is why the tree does not have to be
-			// walked here to account for it.
-			//
-			// Measuring at the deeper level instead would answer a different question:
-			// the largest SUBCELL mass, when what a slot has to fit is the largest
-			// PARENT's total.
-			const int32 Subdivision = FMath::Clamp(InTierParams.GenerationSubdivision, 0, 4);
+			// Share-slot measured the subdivided grid, so its total is already the sum
+			// the slot receives. One-cell-per-slot measured parents, so the largest is
+			// scaled by the number of children each has.
 			const double SubCellsPerCell = FMath::Pow(8.0, static_cast<double>(Subdivision));
 
 			const double Divisor = bInCellsShareSlot
@@ -559,7 +487,7 @@ void GalaxyDataGenerator::BuildFullTierGrid(
 					FMath::Max(FMath::Abs(Centre.Y) - HalfCell, 0.0) * InvExtent,
 					FMath::Max(FMath::Abs(Centre.Z) - HalfCell, 0.0) * InvExtent);
 
-				if (Nearest.SizeSquared() > 1.0)
+				if (Nearest.SizeSquared() >= 1.0)
 				{
 					continue;
 				}
@@ -600,7 +528,8 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	// streamed cell; only the generation grid got finer.
 	TArray<FTierBatchCell> Subdivided;
 	SubdivideCells(InQueuedCells,
-		FMath::Clamp(InTierParams.GenerationSubdivision, 0, 4), Subdivided);
+		FMath::Clamp(InTierParams.GenerationSubdivision, 0, 6),
+		static_cast<double>(Params.Extent), Subdivided);
 
 	const TArray<FTierBatchCell>& InCells = Subdivided;
 

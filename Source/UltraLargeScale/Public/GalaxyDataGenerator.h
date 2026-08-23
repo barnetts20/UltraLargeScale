@@ -125,21 +125,6 @@ public:
 		double HalfExtent = 0.0;
 	};
 
-	/** Every cell of the large tier's bounding grid that could hold anything.
-	 *
-	 *  A BOUNDS test, not a density test. The field is zero outside the unit sphere, so
-	 *  a cell whose nearest corner already lies beyond it can hold nothing -- and since
-	 *  a sphere fills only pi/6 of its bounding cube, that discards roughly half the
-	 *  grid for one dot product each.
-	 *
-	 *  Density culling happens in the dispatch, where a dead cell costs its group
-	 *  thirty-two probes and an exit. This used to walk the same grid sampling the
-	 *  analytic field on the game thread, and hand each survivor a peak to reject
-	 *  against and a share of a pooled budget. */
-	bool BuildLargeTierCells(
-		const TArray<TPair<FIntVector, int32>>& InSlots,
-		TArray<FTierBatchCell>& OutCells) const;
-
 	/** GPU generation for a whole batch of tier slots, in one dispatch.
 	 *
 	 *  ONE GROUP PER CELL. The group probes its cell to get a rejection envelope,
@@ -185,9 +170,13 @@ public:
 	 *  parents and depend on nothing but the parent -- the placement key and the probe
 	 *  jitter both read them, and a child whose coord shifted with the batch would
 	 *  regenerate differently. They do NOT correspond to positions on the streaming grid
-	 *  at the deeper level, and nothing requires them to. */
+	 *  at the deeper level, and nothing requires them to.
+	 *
+	 *  Children whose nearest point lies outside the field are dropped here rather than
+	 *  discovered by their thread group, which costs one dot product against sixty-four
+	 *  field evaluations. */
 	static void SubdivideCells(const TArray<FTierBatchCell>& InCells, int32 InLevels,
-		TArray<FTierBatchCell>& OutCells);
+		double InExtent, TArray<FTierBatchCell>& OutCells);
 
 	/** Every cell of a streamed tier's grid, enumerated exhaustively.
 	 *
