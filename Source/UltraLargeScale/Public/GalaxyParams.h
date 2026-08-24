@@ -27,27 +27,20 @@ USTRUCT(BlueprintType)
 struct ULTRALARGESCALE_API FGalaxyDensityParams
 {
 	GENERATED_BODY()
-	// ===========================================================================
-// Add to FGalaxyDensityParams in GalaxyParams.h, immediately below ToDerived().
-//
-// A TEMPLATE on purpose. The obvious signature takes
-// FGalaxyEntityGenCS::FParameters&, which would make GalaxyParams.h depend on
-// GalaxyEntityGen.h, which depends on GalaxyParams.h -- a cycle, and one that drags
-// RenderCore into every translation unit that only wanted the authored struct.
-// Templating on the destination keeps GalaxyParams.h free of render headers, and
-// costs nothing: the parameter struct is a POD with named members, so the compiler
-// resolves it at the one call site.
-//
-// The three places these values are marshalled are ToDerived (CPU), this (compute
-// dispatch) and the material's Custom node body. Adding a parameter to
-// MakeGalaxyDensityParams breaks the first two at compile time. THE CUSTOM NODE IS
-// THE ONE THAT WILL NOT -- a material Custom node fails at shader compile, not at
-// build, so a new parameter shows up as a red material rather than a build error.
-// Check it whenever the derivation signature changes.
-// ===========================================================================
 
 	/** Fills a compute shader parameter struct with the same raw values ToDerived
 	 *  passes to MakeGalaxyDensityParams, in the same order.
+	 *
+	 *  THREE PLACES MARSHAL THESE: ToDerived, this, and the material's Custom node body.
+	 *  Adding a parameter to MakeGalaxyDensityParams breaks the first two at compile
+	 *  time. THE CUSTOM NODE WILL NOT -- a Custom node fails at shader compile rather
+	 *  than at build, so a missed parameter shows up as a red material. Check it
+	 *  whenever the derivation signature changes.
+	 *
+	 *  A TEMPLATE on purpose. Taking FGalaxyEntityGenCS::FParameters& directly would
+	 *  make this header depend on GalaxyEntityGen.h, which depends on this one -- a
+	 *  cycle, and one that drags RenderCore into every translation unit that only wanted
+	 *  the authored struct.
 	 *
 	 *  Raw rather than derived on purpose. Uploading a packed GalaxyDensityParams
 	 *  would require HLSL's constant buffer packing to agree with the C++ layout

@@ -6,20 +6,14 @@
 //
 // NEVER BINDS A RESOURCE, ONLY RECEIVES ONE. Every function that samples takes the
 // texture and sampler its caller already holds; nothing here declares one, and nothing
-// here touches Parameters or View. That is the rule, and it is what lets a material
-// Custom node, a compute dispatch and C++ behind a small shim all call the same code
-// rather than keeping three implementations in agreement by hand.
-//
-// It used to say NO RESOURCES, with texture sampling exiled to GalaxyDensity.ush purely
-// because it could not cross into C++. The shim stubs Texture3D and SamplerState now --
-// returning the neutral 0.5, so the C++ field reduces exactly to the analytic one -- and
-// that file merged back in. Resource-FREE was never the property that mattered; not
-// binding is.
+// here touches Parameters or View. That rule is what lets a material Custom node, a
+// compute dispatch and C++ behind a small shim all call the same code rather than
+// keeping three implementations in agreement by hand.
 //
 // The C++ side exists for parameter derivation, authoring and diagnostics. IT MUST NEVER
-// PLACE ENTITIES: it cannot see the texture, and a texture-free approximation of a
-// textured field produces a perfectly ordinary-looking galaxy that quietly ignores what
-// the material draws. That was the defect this whole migration removed.
+// PLACE ENTITIES. The shim stubs Texture3D to the neutral 0.5, so the C++ field reduces
+// exactly to the analytic one -- and a texture-free approximation of a textured field
+// produces a perfectly ordinary-looking galaxy that ignores what the material draws.
 //
 // The ray march lives in GalaxyDensityRaymarch.ush, which includes this file. Entity
 // generation lives in GalaxyEntityGen.usf, which also includes it.
@@ -27,9 +21,11 @@
 // PARITY RULES -- both compilers see this file, so:
 //   - Guard every pow() base away from zero. HLSL evaluates pow(x,y) as
 //     exp2(y*log2(x)); log2(0) is -INF and some compilers yield NaN.
-//   - Bound anything that can overflow float32. exp overflows near 88 on GPU
-//     against 709 for double on CPU, so the GPU fails first and over a wider region.
-//   - No swizzles beyond .x/.y/.z/.w and no HLSL-only intrinsics outside the shim.
+//   - Bound anything that can overflow float32. exp overflows near 88 on GPU against
+//     709 for double on CPU, so the GPU fails first and over a wider region.
+//   - No swizzles beyond .x/.y/.z/.w, and no HLSL intrinsic the shim does not define.
+//     VECTOR FORMS ARE THE TRAP: uint3, a vector saturate or float3 * float compile
+//     cleanly as HLSL and fail on the C++ side alone, where nothing routine catches it.
 //
 // SPACE: normalized galaxy space, [-1,1] per axis, where 1.0 is Params.Extent.
 //
@@ -53,32 +49,21 @@
 // correlate. Arbitrary; only needs to be large against feature size.
 #define GALAXY_HALO_DOMAIN float3(53.7f, 29.1f, 71.3f)
 
-// One placed entity. Returned BY VALUE, one slot at a time, rather than filling an
-// output array: an array would need `out float3 A[N]` in HLSL and a pointer in C++,
-// which is exactly the spelled-differently-in-each-language divergence the no-`out`
-// rule exists to prevent.
+// Per-tier placement rules. Separate from GalaxyDensityParams because these change per
+// tier while the field does not.
 //
-// Colour and rotation are deliberately absent. Everything decorative derives from
-// Hash downstream, which keeps them bit-identical on both sides for free and lets
-// new attributes be added without touching this signature.
-// Per-tier placement rules. Separate from GalaxyDensityParams because these change
-// per tier while the field does not, and because both of the curves they replace --
-// DensityResponse and ScaleDistribution -- were UCurveFloat assets that no shader can
-// read. An exponent covers what those curves were doing, bending the response toward
-// or away from the dense end, without a LUT or a second authored asset only one side
-// can evaluate.
+// RETURNED BY VALUE, one candidate at a time, never through an output array: that would
+// need `out float3 A[N]` in HLSL and a pointer in C++, which is exactly the
+// spelled-differently-in-each-language divergence the no-`out` rule prevents.
 //
-// Extent is in the caller's FINAL units: divide by UnitScale before filling this in,
-// so the field stays unit-agnostic and the conversion happens once where UnitScale
-// already lives.
+// Extent is in the caller's FINAL units. Divide by UnitScale before filling this in, so
+// the field stays unit-agnostic and the conversion happens once, where UnitScale lives.
 struct GalaxyPlacement
 {
-    // Held inverted, and per-call rather than in GalaxyDensityParams. The large tier
-    // rejects against ITS OWN CELL's peak density instead of a global reference --
-    // that is the point of its prepass, since the ratio then runs order-1 across the
-    // cell instead of order-1e-3 and most candidates land. A global field parameter
-    // could not express that; a per-call one does, and the mid and small tiers just
-    // pass the global value.
+    // The density that reads as a certain spawn, held inverted. PER-CALL rather than a
+    // field parameter, because every cell rejects against ITS OWN probed peak: the ratio
+    // then runs order-1 across the cell instead of order-1e-3, so most candidates land,
+    // and the cell cancels out of the result exactly.
     float InvDensityReference;
     float SpawnExponent; // 1 = the raw response; <1 spawns more in faint regions
     float ExtentMin;
@@ -127,16 +112,13 @@ GalaxyPlacement MakeGalaxyPlacement(
     return Q;
 }
 
-// A candidate before the field has been consulted. Split out so the DENSITY SOURCE
-// is the caller's choice, exactly as it already is for the field itself: NoiseFrame
-// computes a coordinate in here, the wrapper fetches the texture, and the values come
-// back in. Placement works the same way.
+// A candidate before the field has been consulted.
 //
-// MakeCandidate / FinishEntity IS THE CONTRACT the other layers copy. A single
-// SampleEntity that did both would have to name its own density source, and naming it
-// means hardcoding SampleAnalytic -- which puts the textured path, warp and modulation
-// included, permanently out of reach of placement. That convenience wrapper existed
-// while the CPU was the only caller; it is gone, and this split is what replaced it.
+// MAKECANDIDATE / FINISHENTITY IS THE CONTRACT the other layers copy, and the split is
+// the whole of it: the DENSITY SOURCE stays the caller's choice. A single SampleEntity
+// doing both would have to name its own source, and naming it means hardcoding the
+// analytic field -- which puts the textured path, warp and modulation included,
+// permanently out of reach of placement.
 struct GalaxyCandidate
 {
     float3 Pos; // caller's units
@@ -172,7 +154,7 @@ struct GalaxyDensityParams
     float DiscRadius;
     float InvDiscRadius;
     float DiscHeightRatio; // h/R at the centre
-    float DiscDensityOverPath; // face-on optical depth / half the profile integral
+    float DiscDensityOverPath; // face-on optical depth / the profile integral
     float InvDiscScaleL; // 1 / radial scale length
     float DiscVerticalFalloff; // profile exponent, same meaning as concentration
     float DiscFlare; // 0 = constant scale height; >0 thickens outward
@@ -734,12 +716,9 @@ struct GalaxyDensityParams
         return saturate(PowSafe(ratio, max(InPlace.SpawnExponent, 1e-3f)));
     }
 
-    // One candidate, decided entirely by its own key.
-    //
-    // A sample point inside a cell, for estimating that cell's density ENVELOPE
-    // before any candidate is drawn. Resource-free like everything else here: the
-    // caller evaluates the field at the returned point with whatever source it has,
-    // which is the same split MakeCandidate/FinishEntity uses.
+    // A sample point inside a cell, for estimating that cell's density ENVELOPE before
+    // any candidate is drawn. The caller evaluates the field at the returned point with
+    // whatever source it holds -- the same split MakeCandidate/FinishEntity uses.
     //
     // Eight corners, then jitter. Corners alone miss an arm passing through the middle
     // of a cell without reaching any vertex, which both discards live cells and
@@ -841,20 +820,13 @@ struct GalaxyDensityParams
         return (uint) whole + ((h.x < fracPart) ? 1u : 0u);
     }
 
-    // InCellCentre and InCellExtent describe the cell in the caller's units;
-    // InInvGalaxyExtent converts into the normalized [-1,1] frame the field is
-    // defined in. The caller already holds that reciprocal, and passing it beats
-    // storing a second extent here that could disagree with the one the proxy uses.
+    // One candidate, decided entirely by its own key. Everything that does not need the
+    // field.
     //
-    // Four hashed uniforms: three place the candidate, the fourth is the accept
-    // draw. Extent needs a fifth and MUST NOT reuse the fourth: acceptance keeps
-    // only candidates whose accept draw fell below p, so among survivors that value
-    // is biased low, and in a sparse region where p is small only the very lowest
-    // draws survive at all. Reusing it made extent correlate with local density --
-    // measured as a mean of 1.15 against the 2.25 a uniform 0.5-4.0 should give,
-    // with sparse regions holding systematically tiny stars. A scrambled
-    // recombination of the first three costs four ops instead of a second hash.
-    // Everything that does not need the field. Resource-free on both sides.
+    // InCellCentre and InCellExtent describe the cell in the caller's units;
+    // InInvGalaxyExtent converts into the normalized [-1,1] frame the field is defined
+    // in. The caller already holds that reciprocal, and passing it beats storing a
+    // second extent here that could disagree with the one the proxy uses.
     GalaxyCandidate MakeCandidate(float3 InCellCentre, float InCellExtent,
                                   float InInvGalaxyExtent, int InCellX, int InCellY,
                                   int InCellZ, int InSlot)
@@ -874,12 +846,12 @@ struct GalaxyDensityParams
 
         C.AcceptDraw = h.w;
 
-        // MUST NOT reuse AcceptDraw. Acceptance keeps only candidates whose draw fell
-        // below p, so among survivors that value is biased low, and in a sparse region
-        // where p is small only the very lowest draws survive at all. Reusing it made
-        // extent correlate with local density -- measured as a mean of 1.15 against
-        // the 2.25 a uniform 0.5-4.0 should give, with sparse regions holding
-        // systematically tiny stars.
+        // MUST NOT REUSE AcceptDraw, or share a hash component with it. Acceptance
+        // keeps only candidates whose draw fell below p, so among survivors that value
+        // is biased low -- and in a sparse region, where p is small, only the very
+        // lowest draws survive at all. Sharing it correlates extent with local density
+        // and leaves sparse regions holding systematically tiny stars. A scrambled
+        // recombination of the other three costs four ops against a second hash.
         float e = h.x * 7.31f + h.y * 3.17f + h.z * 11.71f;
         C.ExtentDraw = e - floor(e);
 
@@ -1082,20 +1054,25 @@ GalaxyDensityParams MakeGalaxyDensityParams(
     P.NoiseEnable = InNoiseEnable;
 
     // --- OPTICAL DEPTH NORMALISATION ---
-    // LayerDensity is an optical depth per layer, not a density: what you would
-    // measure looking through that layer along its natural axis. Dividing by the
-    // layer's own path length here makes the four values comparable and independent
-    // of the march step count.
-    P.ArmDensityOverPath = InLayerDensity.x / (0.5f * P.ArmWidth);
+    // LayerDensity is an OPTICAL DEPTH per layer, not a density: what you would measure
+    // looking through that layer along its natural axis. Dividing by the layer's own
+    // path length makes the four comparable, independent of the march step count, and
+    // readable as the number the marcher will accumulate -- ArmDensity = 1 draws as 1.
+    //
+    // The divisor is the FULL integral of that layer's profile along its axis, which is
+    // what makes the marcher's job a plain sum with no compensating factor. All four
+    // divisors and the marcher's accumulation are one convention: change any of them and
+    // every layer's authored brightness shifts.
+    P.ArmDensityOverPath = InLayerDensity.x / P.ArmWidth;
 
     P.DiscDensityOverPath = InLayerDensity.y
-        / max(0.5f * P.CompactProfileIntegral(P.DiscVerticalFalloff), 1e-6f);
+        / max(P.CompactProfileIntegral(P.DiscVerticalFalloff), 1e-6f);
 
     P.BulgeDensityOverPath = InLayerDensity.z
-        / max(0.5f * bulgeR * P.CompactProfileIntegral(P.BulgeConcentration), 1e-6f);
+        / max(bulgeR * P.CompactProfileIntegral(P.BulgeConcentration), 1e-6f);
 
     P.BackgroundDensityOverPath = InLayerDensity.w
-        / max(0.5f * bgR * P.CompactProfileIntegral(P.BackgroundConcentration), 1e-6f);
+        / max(bgR * P.CompactProfileIntegral(P.BackgroundConcentration), 1e-6f);
 
     // --- PER-ARM RECORDS ---
     // Invariant along a ray, so hashing them per sample would repeat identical work.
@@ -1128,21 +1105,13 @@ GalaxyDensityParams MakeGalaxyDensityParams(
 // ===========================================================================
 // TEXTURE-SAMPLING FIELD
 //
-// Merged in from GalaxyDensity.ush, which existed only because texture sampling
-// could not cross into C++. It can now: the shim stubs Texture3D and SamplerState
-// so this compiles either side, and on the C++ side every noise term comes out zero
-// and GalaxySample reduces to SampleAnalytic term for term.
+// Compiles on both sides: the shim stubs Texture3D and SamplerState to the neutral
+// 0.5, so every noise term comes out zero and GalaxySample reduces to SampleAnalytic
+// term for term.
 //
-// THE RULE THAT REPLACED "RESOURCE-FREE" IS: NEVER BIND, ONLY RECEIVE. Nothing here
-// owns a texture -- each function takes the one its caller already has -- which is
-// what lets a material Custom node, a compute dispatch and the C++ shim all use the
-// same code. Anything that binds a resource, or touches Parameters or View, belongs
-// in the material or the compute shader instead.
-//
-// Written componentwise, like the rest of this file. The shim provides no swizzles
-// and only the operators the core actually uses, so idiomatic HLSL vector arithmetic
-// breaks the C++ build -- which is the intended failure, a compile error rather than
-// a silent divergence.
+// NEVER BIND, ONLY RECEIVE, as everywhere else here. Nothing owns a texture; each
+// function takes the one its caller already has. Anything that binds a resource, or
+// touches Parameters or View, belongs in the material or the compute shader.
 // ===========================================================================
 
 // --- VOLUME TEXTURE LOOKUP, SIGNED ---

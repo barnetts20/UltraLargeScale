@@ -535,22 +535,11 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 
 	// ONE SHARED BUFFER, sized on what the SLOTS can hold -- not on cells.
 	//
-	// It used to be a uniform run per cell, and a uniform run has to be as wide as the
-	// densest cell needs while every cell pays for it. Measured on a real galaxy: 2728
-	// cells with the densest wanting a few thousand entities is over half a gigabyte of
-	// readback, so the run gets set to what fits instead -- 32 -- and a third of the live
-	// cells pin against it exactly. A pinned cell emits the same count whatever it holds,
-	// which is a cubic lattice in the sky, and the arms clip hardest because they are
-	// what exceeds the run.
-	//
-	// No cell has a ceiling now, so the only question is how many entities can possibly
-	// be KEPT. That is the slots' business, and it is known here.
-	//
-	// Twice capacity as headroom. Acceptance is stochastic and the anchor is authored,
-	// so the total lands near capacity rather than on it. Overshoot within the headroom
-	// is thinned deterministically below; overshoot BEYOND it is truncated by the GPU's
-	// arrival order, which is both nondeterministic and spatially biased -- the failure
-	// this change exists to remove, so the headroom is what protects it.
+	// No cell has a ceiling, so the only question is how many entities can possibly be
+	// KEPT, and that is the slots' business. Sizing per cell instead means a uniform run
+	// as wide as the densest cell needs with every cell paying for it: either hundreds of
+	// megabytes of readback, or a run small enough that dense cells pin against it and
+	// emit identical counts, which is a cubic lattice in the sky.
 	TSet<int32> DistinctSlots;
 	for (const FTierBatchCell& In : InCells)
 	{
@@ -576,11 +565,6 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 		return FailBatch();
 	}
 
-	// Headroom over what the slots can hold. A quarter.
-	//
-	// It was doubled while the budget was authored and could miss by any factor, then cut
-	// to a tenth once calibration made overshoot stochastic. A tenth turned out to be too
-	// tight: calibration measures a whole streamed cell while generation measures its
 	// AN EIGHTH OVER TARGET, against stochastic overshoot alone.
 	//
 	// Calibration measures the cells generation will actually use, so the realised count

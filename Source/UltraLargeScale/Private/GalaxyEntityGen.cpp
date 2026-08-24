@@ -95,31 +95,23 @@ namespace GalaxyEntityGen
 		FRHIGPUBufferReadback* EntityReadback = OutRequest->Readback.Get();
 		FRHIGPUBufferReadback* CountReadbackPtr = OutRequest->CountReadback.Get();
 
-		// Enqueued from the GAME THREAD, not from the calling worker.
+		// ENQUEUED FROM THE GAME THREAD, not from the calling worker.
 		//
-		// ENQUEUE_RENDER_COMMAND from a background task can execute the command inline
-		// on that task instead of handing it to the render thread, and RDG then runs
-		// on a thread carrying no rendering task tag -- which is the
-		// FTaskTagScope(EParallelRenderingThread) ensure. Marshalling first costs one
-		// hop and removes the whole class of problem.
+		// ENQUEUE_RENDER_COMMAND from a background task can execute the command inline on
+		// that task rather than handing it to the render thread, and RDG then runs on a
+		// thread carrying no rendering task tag -- the FTaskTagScope ensure. Marshalling
+		// first costs one hop and removes the whole class of problem.
 		//
 		// Safe against deadlock because the game thread does not block on generation:
-		// InitializeTier hands its rendezvous off through a TPromise and returns, so
-		// the game thread keeps pumping while the worker waits on the readback fence.
-		// EVERYTHING THE RENDER COMMAND NEEDS, IN ONE SHARED PAYLOAD.
+		// InitializeTier hands its rendezvous off through a TPromise and returns, so the
+		// game thread keeps pumping while the worker waits on the readback fence.
 		//
-		// This replaces a chain of [=] captures, and the chain was the bug. The outer
-		// lambda took Cells with MoveTemp(InCells); the inner lambda then said
-		// MoveTemp(InCells) AGAIN -- moving a second time from a parameter the outer
-		// capture had already emptied. The render command therefore ran with zero
-		// cells and a garbage budget, computed a group count of zero, and dispatched
-		// nothing. No error, no RDG complaint, buffers exactly as cleared: which is
-		// every symptom this took a long time to find.
-		//
-		// Nested [=] across two thread hops is what made it possible to write and
-		// impossible to see. A single shared payload captured explicitly by value in
-		// both lambdas cannot express the same mistake -- there is one copy of the
-		// data and both hops name it.
+		// EVERYTHING THE RENDER COMMAND NEEDS GOES IN ONE SHARED PAYLOAD, captured
+		// explicitly by value in both lambdas. DO NOT REPLACE IT WITH NESTED [=]
+		// CAPTURES: across two thread hops it is possible to move from the same parameter
+		// twice, and the second move silently yields an empty array. The dispatch then
+		// runs with zero cells, computes a group count of zero, and writes nothing --
+		// with no error, no RDG complaint, and buffers reading exactly as cleared.
 		struct FDispatchPayload
 		{
 			TArray<FGalaxyGenCell> Cells;

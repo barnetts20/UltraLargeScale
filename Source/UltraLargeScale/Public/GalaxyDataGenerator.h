@@ -126,40 +126,19 @@ public:
 		double HalfExtent = 0.0;
 	};
 
-	/** GPU generation for a whole batch of tier slots, in one dispatch.
+	/** The tier's placement constant: accepted count per cell is this times cell mass.
 	 *
-	 *  ONE GROUP PER CELL. The group probes its cell to get a rejection envelope,
-	 *  derives its own candidate budget from that envelope, and then spends itself on
-	 *  that cell's candidates. Nothing on this side evaluates the field.
+	 *  Measured ONCE per tier, lazily, by probing its whole grid -- SUBDIVIDED EXACTLY AS
+	 *  GENERATION WILL SUBDIVIDE IT -- and reducing on the CPU. Cached against the tier's
+	 *  seed offset, which is what distinguishes the three.
 	 *
-	 *  This is the reason for the migration: the compute path can sample the volume
-	 *  texture, so entity placement sees the warp and modulation the material draws
-	 *  instead of a texture-free approximation of it. It also lifts the constraint that
-	 *  shaped the field in the first place -- features no longer have to be affordable
-	 *  analytically to be reachable from placement.
+	 *  Which reduction divides the capacity depends on how the tier maps cells to slots:
+	 *  the total when they share one, the largest per-parent sum when each streamed cell
+	 *  owns its own. Getting that wrong is what made a void neighbourhood come back as
+	 *  densely populated as an arm.
 	 *
-	 *  BACKGROUND THREAD ONLY; it blocks on a GPU readback. That is safe because tier
-	 *  generation already runs on AnyBackgroundHiPriTask, so the wait costs a worker
-	 *  rather than a frame.
-	 *
-	 *  Returns false if the dispatch could not run or the readback timed out. There is
-	 *  no CPU path behind it, so it FAILS CLOSED: the affected slots are blanked and
-	 *  their counts zeroed before returning, because a slot is reused as the player
-	 *  crosses boundaries and leaving it untouched would show the previous occupant's
-	 *  entities at a coord they no longer belong to. Every such path logs. */
-	 /** The tier's placement constant: accepted count per cell is this times cell mass.
-	  *
-	  *  Measured ONCE per tier, lazily, by probing its whole grid -- SUBDIVIDED EXACTLY AS
-	  *  GENERATION WILL SUBDIVIDE IT -- and reducing on the CPU. Cached against the tier's
-	  *  seed offset, which is what distinguishes the three.
-	  *
-	  *  Which reduction divides the capacity depends on how the tier maps cells to slots:
-	  *  the total when they share one, the largest per-parent sum when each streamed cell
-	  *  owns its own. Getting that wrong is what made a void neighbourhood come back as
-	  *  densely populated as an arm.
-	  *
-	  *  Returns 0 if calibration could not run, which the caller treats as a failed
-	  *  batch rather than generating with a meaningless constant. */
+	 *  Returns 0 if calibration could not run, which the caller treats as a failed
+	 *  batch rather than generating with a meaningless constant. */
 	float GetTierBudgetScale(const FTierParams& InTierParams, int32 InSeedOffset,
 		bool bInCellsShareSlot) const;
 
@@ -188,6 +167,20 @@ public:
 	 *  the probe jitter and answer a slightly different question. Bounds-culled only. */
 	void BuildFullTierGrid(int32 InGridDepth, TArray<FTierBatchCell>& OutCells) const;
 
+	/** GPU generation for a whole batch of tier slots, in one dispatch.
+	 *
+	 *  ONE GROUP PER CELL. The group probes its cell to get a rejection envelope,
+	 *  derives its own candidate budget from that envelope, and then spends itself on
+	 *  that cell's candidates. Nothing on this side evaluates the field.
+	 *
+	 *  BACKGROUND THREAD ONLY; it blocks on a GPU readback. Safe because tier generation
+	 *  already runs on AnyBackgroundHiPriTask, so the wait costs a worker, not a frame.
+	 *
+	 *  Returns false if the dispatch could not run or the readback timed out. There is no
+	 *  CPU path behind it, so it FAILS CLOSED: the affected slots are blanked and their
+	 *  counts zeroed before returning. A slot is reused as the player crosses boundaries,
+	 *  and leaving one untouched shows the previous occupant's entities at a coord they
+	 *  no longer belong to. Every such path logs. */
 	bool GenerateTierBatchGPU(
 		const TArray<FTierBatchCell>& InCells,
 		FNiagaraParticleBuffer& InBuffer,

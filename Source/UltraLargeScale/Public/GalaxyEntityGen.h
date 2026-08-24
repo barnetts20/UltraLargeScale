@@ -69,13 +69,12 @@ static_assert(sizeof(FGalaxyEntityOut) == 32, "FGalaxyEntityOut must match the .
 /** Mirrors FGalaxyGenCell in GalaxyEntityGen.usf.
  *
  *  GEOMETRY ONLY. A centre, a half extent, and the grid coord that keys the cell.
- *  Nothing about the field: the shader probes each cell, derives its own rejection
- *  envelope and its own candidate budget, and the CPU never evaluates the density.
+ *  NOTHING ABOUT THE FIELD may be added here: the shader probes each cell and derives
+ *  its own envelope and budget, and anything the CPU had to fill in would drag density
+ *  evaluation back onto this side.
  *
- *  DensityReference and Candidates used to live here. Filling them was the last thing
- *  requiring GalaxyDensityCore.ush to compile as C++, which is why they are gone rather
- *  than merely unused. The padding that replaces them keeps the record at 48 bytes so
- *  the layout assert below still means what it did. */
+ *  The padding holds the record at 48 bytes and splits it so no vector straddles a
+ *  sixteen-byte boundary. */
 struct FGalaxyGenCell
 {
 	FVector3f Centre = FVector3f::ZeroVector;
@@ -207,10 +206,9 @@ public:
 
 	/** True once there is something to consume, or once we know there never will be.
 	 *
-	 *  bSubmitted matters: the readbacks are allocated on the calling thread but the
-	 *  copies are enqueued later, on the render thread. Polling only IsReady() on a
-	 *  readback that has not been enqueued yet returns false forever -- which is what
-	 *  made the first version fall back to the CPU on nearly every batch. */
+	 *  bSubmitted IS LOAD-BEARING. The readbacks are allocated on the calling thread but
+	 *  the copies are enqueued later, on the render thread, and a readback that has not
+	 *  been enqueued yet reports not-ready forever rather than erroring. */
 	bool IsReady() const
 	{
 		if (bAborted)
@@ -243,11 +241,10 @@ public:
 	TArray<FGalaxyEntityOut> Entities;
 	TArray<uint32> Counts;
 
-	// Consume() is gone. It locked the staging buffers on whatever thread called it,
-	// and Lock() maps through the RHI and is render-thread only -- so it was a
-	// function that crashed if anyone used it. GenerateBatchBlocking marshals the
-	// copy to the render thread instead; if a non-blocking consumer is wanted later
-	// it has to do the same, not read the readbacks directly.
+	// DO NOT ADD A CONSUMER THAT READS THE READBACKS DIRECTLY. Lock() maps through the
+	// RHI and is render-thread only, so any such call crashes on a worker.
+	// GenerateBatchBlocking marshals the copy to the render thread; a non-blocking
+	// consumer has to do the same.
 
 	TUniquePtr<FRHIGPUBufferReadback> Readback;
 
@@ -273,43 +270,19 @@ namespace GalaxyEntityGen
 	 *  hit on healthy hardware the timeout is not the problem. */
 	inline constexpr double ReadbackTimeoutSeconds = 2.0;
 
-	/** Enqueues the dispatch and a readback copy. Safe to call from the game thread;
-	 *  the work is deferred to the render thread.
+	/** Weigh every cell of a tier's grid, so its placement constant can be solved.
 	 *
-	 *  InCells carries the placement KEY per cell, not the dispatch index. The large
-	 *  tier's active set is sparse after its cull prepass, so cells are supplied
-	 *  explicitly rather than derived from the thread id, which would repeat the cull
-	 *  on the GPU. It also carries the per-cell DensityReference, which is how the
-	 *  large tier's local envelope survives the move. */
-	 /** Dispatch, wait, and return the fixed-slot buffer.
-	  *
-	  *  CALL FROM A BACKGROUND THREAD ONLY. It blocks, which is safe here and nowhere
-	  *  else: tier generation already runs on AnyBackgroundHiPriTask inside a
-	  *  ParallelFor, so the wait stalls a worker rather than a frame, and the streaming
-	  *  system already tolerates generation taking arbitrary time -- that is what the
-	  *  cache-miss path exists for. Calling this from the game or render thread would
-	  *  deadlock against the very work it is waiting on.
-	  *
-	  *  ONE dispatch for the whole batch, not one per slot. Per-slot dispatches would
-	  *  serialise on a GPU round-trip each, and the latency compounds across a
-	  *  neighbourhood.
-	  *
-	  *  Returns false on timeout, leaving OutEntities untouched. There is no CPU path
-	  *  behind this any more, so the caller blanks the affected slots rather than
-	  *  filling them another way -- see GalaxyDataGenerator::GenerateTierBatchGPU. */
-	  /** Weigh every cell of a tier's grid, so its placement constant can be solved.
-	   *
-	   *  Runs the probe pass and returns the PER-CELL masses, one per entry of InCells and
-	   *  in the same order. It does not reduce them: which reduction the capacity divides
-	   *  by depends on how the tier maps cells to slots, that is the caller's business, and
-	   *  a max of per-parent sums is not something a single thread group can see.
-	   *
-	   *  ONCE PER TIER, not per batch. Dividing a target across whatever cells were in a
-	   *  batch made a cell's yield depend on which neighbours streamed in with it: a void
-	   *  neighbourhood came back as densely populated as an arm, and burned several times
-	   *  the candidates doing it.
-	   *
-	   *  BACKGROUND THREAD ONLY, like GenerateBatchBlocking, and for the same reason. */
+	 *  Runs the probe pass and returns the PER-CELL masses, one per entry of InCells and
+	 *  in the same order. It does not reduce them: which reduction the capacity divides
+	 *  by depends on how the tier maps cells to slots, that is the caller's business, and
+	 *  a max of per-parent sums is not something a single thread group can see.
+	 *
+	 *  ONCE PER TIER, not per batch. Dividing a target across whatever cells were in a
+	 *  batch made a cell's yield depend on which neighbours streamed in with it: a void
+	 *  neighbourhood came back as densely populated as an arm, and burned several times
+	 *  the candidates doing it.
+	 *
+	 *  BACKGROUND THREAD ONLY, like GenerateBatchBlocking, and for the same reason. */
 	bool CalibrateBlocking(
 		const FGalaxyParams& InParams,
 		const FTierParams& InTierParams,
@@ -318,6 +291,20 @@ namespace GalaxyEntityGen
 		UTexture* InNoiseTexture,
 		TArray<float>& OutCellMass);
 
+	/** Dispatch, wait, and return the placed entities.
+	 *
+	 *  CALL FROM A BACKGROUND THREAD ONLY. It blocks, which is safe here and nowhere
+	 *  else: tier generation already runs on AnyBackgroundHiPriTask inside a ParallelFor,
+	 *  so the wait stalls a worker rather than a frame. Calling it from the game or
+	 *  render thread deadlocks against the very work it is waiting on.
+	 *
+	 *  ONE dispatch for the whole batch, never one per slot -- per-slot dispatches
+	 *  serialise on a GPU round-trip each and the latency compounds across a
+	 *  neighbourhood.
+	 *
+	 *  Returns false on timeout, leaving OutEntities untouched. There is no CPU path
+	 *  behind this, so the caller blanks the affected slots rather than filling them
+	 *  another way -- see GalaxyDataGenerator::GenerateTierBatchGPU. */
 	bool GenerateBatchBlocking(
 		const FGalaxyParams& InParams,
 		const FTierParams& InTierParams,
@@ -334,12 +321,11 @@ namespace GalaxyEntityGen
 	 *  Five slots per cell -- accepted, candidates evaluated, envelope, largest candidate
 	 *  density, cell mass -- then one global past the end: the entity append cursor.
 	 *
-	 *  Named rather than spelled out because it was spelled out in four places and one of
-	 *  them did not move when the layout widened. The buffer stayed at four per cell
-	 *  while the copy asked for five plus three, so the copy ran off the end and the
-	 *  shader's global writes landed outside the view -- and RDG's buffer POOLING hid it
-	 *  for weeks by handing back oversized allocations left over from bigger dispatches.
-	 *  It surfaced as an out-of-bounds copy assert with no connection to the layout.
+	 *  DERIVE EVERY SIZE FROM THESE, never from a spelled-out expression. A buffer sized
+	 *  smaller than the copy asks for runs the copy off the end and lands the shader's
+	 *  global write outside the view -- and RDG's buffer POOLING masks it, handing back
+	 *  oversized allocations left over from bigger dispatches, so it surfaces as an
+	 *  out-of-bounds assert with no visible connection to the layout.
 	 *
 	 *  GalaxyEntityGen.usf indexes the same layout with literals and cannot share these.
 	 *  Change one and change the other. */

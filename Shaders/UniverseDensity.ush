@@ -283,7 +283,10 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
             h = tExit - t;
         }
 
-        // Optical path is in LOCAL units and normalized space is 2x local.
+        // The 0.5 is a bare CONSTANT here, not a unit conversion: the universe layers
+        // author raw amplitudes against a void floor and have no path-length
+        // normalisation to pair with, so it is folded into their tuning. It is not the
+        // galaxy's factor and does not move with it.
         float alpha = 1.0 - exp(-density * InDensityScale * h * 0.5);
 
         // Flat white emission: structure only.

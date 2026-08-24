@@ -65,28 +65,21 @@ struct ULTRALARGESCALE_API FTierParams
 	 *  in its thin axis, so a cell's mean density is a small fraction of its peak -- and
 	 *  rejection against a per-cell envelope accepts at exactly that ratio.
 	 *
-	 *  Subdividing cuts both costs at once. Subcells clear of the structure are culled by
-	 *  the probe pass for sixty-four evaluations and draw no candidates at all, and the
-	 *  ones that survive have a peak much closer to their own mean. Measured on a disc
-	 *  occupying seven percent of its cell, two levels ran about three times cheaper.
+	 *  Subdividing cuts both costs at once: subcells clear of the structure are culled
+	 *  by the probe pass and draw no candidates, and the ones that survive have a peak
+	 *  much closer to their own mean.
 	 *
-	 *  THERE IS A CROSSOVER, and every tier has its own. Probe cost grows as 8^N while
-	 *  candidate cost falls, so past it more levels cost more. Read the C/P ratio in the
-	 *  batch log -- probes and candidates are both field evaluations, so their ratio says
-	 *  which side the tier is on. Below about 1 the probes have overtaken placement and
-	 *  the tier wants one level fewer; above about 9 it wants one more. Every tier sits
-	 *  near 4-6 when it is right.
-	 *
-	 *  Which level that lands on depends on the tier's GridDepth and its slot capacity,
-	 *  not on the field, so it is per-tier rather than global: a tier that spreads few
-	 *  entities over the whole galaxy reaches the crossover early, one holding tens of
-	 *  thousands per resident slot reaches it late.
+	 *  THERE IS A CROSSOVER, and every tier has its own -- probe cost grows as 8^N while
+	 *  candidate cost falls. Read the C/P ratio in the batch log: below about 1 the
+	 *  probes have overtaken placement and the tier wants one level fewer, above about 9
+	 *  it wants one more, and a tier that is right sits near 4-6. Where that lands
+	 *  depends on the tier's GridDepth and slot capacity rather than on the field, which
+	 *  is why this is per-tier.
 	 *
 	 *  THE CEILING IS THE CALIBRATION GRID, not the batch. Calibration descends the
 	 *  tier's WHOLE grid at this depth, so a level costs 8x there whether or not any of
-	 *  it ever streams in. At depth 5 with three levels that is already over a million
-	 *  cells and a 22 MB counter readback; a fourth would be nine million and would not
-	 *  fit. */
+	 *  it ever streams in -- depth 5 with three levels is already over a million cells
+	 *  and a 22 MB counter readback. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming",
 		meta = (ClampMin = "0", ClampMax = "3"))
 	int32 GenerationSubdivision = 0;
@@ -243,12 +236,11 @@ struct FParticleTierConfig
 	 *  neighbourhood. Returning true means it has filled every queued slot and written
 	 *  SlotCounts; returning false means it could not run.
 	 *
-	 *  The bool selects between the two paths for a tier that binds both. For a tier
-	 *  that binds only this one there is nothing to select, so false means those slots
-	 *  get nothing -- and the batch generator is then responsible for leaving them in a
-	 *  defined state (blanked, counts zeroed) and for logging why. Silently returning
-	 *  false from a batch-only tier produces an empty region with no explanation, which
-	 *  is the failure this system keeps being debugged for. */
+	 *  The bool selects between the two paths for a tier that binds both. A tier binding
+	 *  only this one has nothing to select, so false means those slots get nothing --
+	 *  AND THE BATCH GENERATOR OWNS THEM ANYWAY: it must leave them in a defined state,
+	 *  blanked with counts zeroed, and log why. Returning false silently from a
+	 *  batch-only tier produces an empty region with no explanation. */
 	TFunction<bool(const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutSlotCounts)> GenerateBatchCallback;
 
 	/** Returns the fixed AABB set once at InitializeTier as the Niagara bounds
