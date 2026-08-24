@@ -582,17 +582,21 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	// It was doubled while the budget was authored and could miss by any factor, then cut
 	// to a tenth once calibration made overshoot stochastic. A tenth turned out to be too
 	// tight: calibration measures a whole streamed cell while generation measures its
-	// subcells, and the coarser estimate is BIASED low rather than merely noisy, so the
-	// realised count lands consistently above target rather than scattering around it.
-	// More probe rounds during calibration shrink that bias but do not erase it.
+	// AN EIGHTH OVER TARGET, against stochastic overshoot alone.
+	//
+	// Calibration measures the cells generation will actually use, so the realised count
+	// lands ON the slot rather than above it -- and what is left is the square root of
+	// the count, about 0.7% at a slot of twenty thousand. An eighth is roughly eighteen
+	// sigma of that.
+	//
+	// Envelope clipping pushes the realised count UNDER target, never over, so it costs
+	// nothing here.
 	//
 	// Headroom exists at all because the alternative when it runs out is the GPU
-	// truncating by arrival order, which is nondeterministic and spatially biased -- so
-	// it is sized against the residual bias, not against the square-root noise, which at
-	// a slot of ten thousand is only a hundred either way.
+	// truncating by arrival order, which is nondeterministic and spatially biased.
 	const int32 EntityCapacity = FMath::Max(
 		FMath::DivideAndRoundUp(
-			DistinctSlots.Num() * FMath::Max(InBuffer.SlotCapacity, 1) * 5, 4), 64);
+			DistinctSlots.Num() * FMath::Max(InBuffer.SlotCapacity, 1) * 9, 8), 64);
 
 	for (const FTierBatchCell& In : InCells)
 	{
@@ -616,7 +620,7 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	// SIZE GUARD. Both axes are bounded by construction now -- the dispatch is one group
 	// per cell, the readback is slots x capacity -- so this fires only on an absurd
 	// authored capacity, never on the cell count, which is what it used to catch.
-	constexpr int64 kMaxEntries = 4 * 1024 * 1024;   // 192 MB at 48 bytes each
+	constexpr int64 kMaxEntries = 4 * 1024 * 1024;   // 128 MB at 32 bytes each
 
 	if (static_cast<int64>(EntityCapacity) > kMaxEntries)
 	{
@@ -807,7 +811,7 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 
 	for (int32 i = 0; i < Landed; ++i)
 	{
-		const int32 CellIndex = static_cast<int32>(Entities[i].CellIndex);
+		const int32 CellIndex = static_cast<int32>(Entities[i].CellIndex);  // exact: uint32
 		if (!InCells.IsValidIndex(CellIndex))
 		{
 			continue;
@@ -891,7 +895,7 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 			const uint32 Key = HashCombine(
 				HashCombine(GetTypeHash(Coord.X), GetTypeHash(Coord.Y)),
 				HashCombine(GetTypeHash(Coord.Z),
-					GetTypeHash(static_cast<int32>(E.Slot))));
+					GetTypeHash(E.Slot)));
 
 			const uint32 Scrambled = Key * 2654435761u;
 			const float U = static_cast<float>(Scrambled >> 8) * (1.0f / 16777216.0f);
@@ -909,7 +913,8 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 		// AUTHORED SIZE IS TRUTH: Extent already carries the real-unit range divided by
 		// UnitScale exactly once, on the GPU via MakeGalaxyPlacement.
 		InBuffer.Extents[Idx] = E.Extent;
-		InBuffer.Colors[Idx] = FLinearColor(E.Decor.X, E.Decor.Y, E.Decor.Z);
+		const FVector3f Decor = E.DecodeDecor();
+		InBuffer.Colors[Idx] = FLinearColor(Decor.X, Decor.Y, Decor.Z);
 
 		++Cursor[SlotIndex];
 	}

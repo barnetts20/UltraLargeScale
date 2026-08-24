@@ -17,34 +17,54 @@
 #include "GalaxyParams.h"
 #include "FTierStreamingSystem.h"
 
-/** Mirrors FGalaxyEntityOut in GalaxyEntityGen.usf.
+/** One placed entity, as the dispatch writes it.
  *
- *  48 bytes with explicit padding. The .usf side pads to the same size deliberately:
- *  a structured buffer element whose members straddle a 16-byte boundary packs
- *  differently on some backends, and the failure is silent -- every field after the
- *  straddle reads shifted. Keeping both sides at a flat multiple of 16 with no
- *  implicit tail padding removes the question rather than documenting it. */
+ *  EXACTLY TWO uint4s. GalaxyEntityGen.usf writes OutEntities[Base + 0] and [Base + 1]
+ *  from this layout; there is no shared declaration, so the two are kept in step by
+ *  this comment and the assert below.
+ *
+ *  AN INTEGER BUFFER carrying the floats as bit patterns, not the reverse. A float's
+ *  bit pattern is always a valid integer; an arbitrary integer read as a float can be a
+ *  denormal or a NaN, and neither round-trips reliably.
+ *
+ *  A member that straddles a 16-byte boundary packs differently on some backends and
+ *  the failure is silent -- every field after the straddle reads shifted. Keeping the
+ *  record a flat multiple of 16 with no implicit tail padding removes the question. */
 struct FGalaxyEntityOut
 {
 	FVector3f Pos = FVector3f::ZeroVector;
 	float Extent = 0.0f;
-	FVector3f Decor = FVector3f::ZeroVector;
-	float Density = 0.0f;
+
+	/** Three decorrelated uniforms in [0,1), ten bits each. Read it through
+	 *  DecodeDecor rather than by hand. */
+	uint32 DecorPacked = 0;
+
 	/** The candidate index that produced this entity, NOT its position in the buffer.
 	 *  The dispatch compacts with a global atomic, so storage ORDER is scheduling
-	 *  dependent while the set, and each entity's identity within it, is not.
-	 *
-	 *  Written as a float by the shader so the whole record is three float4s. */
-	float Slot = 0.0f;
+	 *  dependent while the set, and each entity's identity within it, is not. */
+	uint32 Slot = 0;
 
 	/** Index into the batch's cell array. Required, not diagnostic: entities are
 	 *  appended to one shared buffer, so position no longer says which cell -- and
 	 *  therefore which SLOT -- an entity belongs to. */
-	float CellIndex = 0.0f;
+	uint32 CellIndex = 0;
 
-	float Pad[2] = { 0.0f, 0.0f };
+	/** Raw field value where the entity landed, before any spawn shaping. Carried
+	 *  because the slot exists, not because anything reads it yet. */
+	float Density = 0.0f;
+
+	/** Undoes PackDecor in GalaxyDensityCore.ush. Keep the two together. */
+	FVector3f DecodeDecor() const
+	{
+		constexpr float Inv = 1.0f / 1023.0f;
+
+		return FVector3f(
+			static_cast<float>(DecorPacked & 1023u) * Inv,
+			static_cast<float>((DecorPacked >> 10) & 1023u) * Inv,
+			static_cast<float>((DecorPacked >> 20) & 1023u) * Inv);
+	}
 };
-static_assert(sizeof(FGalaxyEntityOut) == 48, "FGalaxyEntityOut must match the .usf layout");
+static_assert(sizeof(FGalaxyEntityOut) == 32, "FGalaxyEntityOut must match the .usf layout");
 
 /** Mirrors FGalaxyGenCell in GalaxyEntityGen.usf.
  *
@@ -72,7 +92,7 @@ public:
 	SHADER_USE_PARAMETER_STRUCT(FGalaxyEntityGenCS, FGlobalShader);
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<float4>, OutEntities)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint4>, OutEntities)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, OutCounts)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGalaxyGenCell>, InCells)
 

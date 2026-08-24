@@ -210,7 +210,7 @@ namespace GalaxyEntityGen
 						// Typed float4 elements, three per entity: same bytes, a view the
 						// pipeline has already shown it can write through.
 						FRDGBufferDesc EntityDesc =
-							FRDGBufferDesc::CreateBufferDesc(sizeof(FVector4f), Total * 3);
+							FRDGBufferDesc::CreateBufferDesc(sizeof(FUintVector4), Total * 2);
 						EntityDesc.Usage |= EBufferUsageFlags::SourceCopy;
 
 						FRDGBufferRef EntityBuffer = GraphBuilder.CreateBuffer(
@@ -255,7 +255,12 @@ namespace GalaxyEntityGen
 						// would conflate three passes' access patterns into one.
 						FGalaxyEntityGenCS::FParameters Common;
 
-						Common.OutEntities = GraphBuilder.CreateUAV(EntityBuffer, PF_A32B32G32R32F);
+						// PF_R32G32B32A32_UINT, matching RWBuffer<uint4>. The record is an
+						// integer buffer carrying floats as bit patterns rather than the
+						// reverse -- see FGalaxyEntityOut. A format mismatch between the
+						// UAV and the shader declaration is undefined rather than an error.
+						Common.OutEntities =
+							GraphBuilder.CreateUAV(EntityBuffer, PF_R32G32B32A32_UINT);
 						Common.InCells = GraphBuilder.CreateSRV(CellBuffer);
 						// PF_R32_UINT so the UAV has a FORMAT. A structured UAV has none, and RDG's
 						// clear path needs one: AddClearUAVPass over a formatless UAV leaves the

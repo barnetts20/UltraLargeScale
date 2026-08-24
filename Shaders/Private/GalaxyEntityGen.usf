@@ -77,7 +77,7 @@
 //   [0] Pos.xyz, Extent
 //   [1] Decor.xyz, Density
 //   [2] Slot, CellIndex, unused, unused
-RWBuffer<float4> OutEntities;
+RWBuffer<uint4> OutEntities;
 // TYPED, not structured. A structured buffer UAV has no format, and RDG's clear
 // path needs one -- AddClearUAVPass over a structured UAV leaves the counters at
 // whatever the allocator handed back. Uncleared, InterlockedAdd returns a huge index,
@@ -442,18 +442,29 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
             continue;
         }
 
-        const uint Base = Global * 3u;
+        const uint Base = Global * 2u;
 
-        // CellIndex travels WITH the entity, because arrival order no longer says where
-        // it came from. Exact as a float well past any plausible cell count -- floats
-        // carry integers to 2^24.
+        // TWO uint4s, not three float4s. Decor packs into one word, which frees room for
+        // Slot, CellIndex and Density without a third register, and the record is read
+        // back over PCIe on every boundary cross -- so a third of it is real traffic.
         //
-        // Slot is still the candidate index, not the position here. Identity remains
-        // (cell, slot); only storage order is scheduling-dependent, and nothing
+        // AN INTEGER BUFFER, with the floats carried as their own bit patterns. The
+        // other way round -- a float buffer carrying a packed integer -- looks the same
+        // and is not: an arbitrary bit pattern read as a float can be a denormal or a
+        // NaN, and neither round-trips reliably. A float's bit pattern is always a valid
+        // integer, so this direction has no such case.
+        //
+        // Slot and CellIndex are therefore exact at any magnitude rather than only up to
+        // 2^24, which matters: a subdivided calibration grid already runs past a million
+        // cells.
+        //
+        // CellIndex travels WITH the entity, because arrival order no longer says where
+        // it came from. Slot is the candidate index, not the position here -- identity
+        // remains (cell, slot), only storage order is scheduling-dependent, and nothing
         // downstream may key off it.
-        OutEntities[Base + 0u] = float4(E.Pos, E.Extent);
-        OutEntities[Base + 1u] = float4(E.Decor, E.Density);
-        OutEntities[Base + 2u] = float4(float(Slot), float(CellIndex), 0.0f, 0.0f);
+        OutEntities[Base + 0u] = uint4(asuint(E.Pos), asuint(E.Extent));
+        OutEntities[Base + 1u] = uint4(
+            P.PackDecor(E.Decor), Slot, CellIndex, asuint(E.Density));
     }
 #endif
 }

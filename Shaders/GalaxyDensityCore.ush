@@ -782,6 +782,41 @@ struct GalaxyDensityParams
             InCellCentre.z + (h.z * 2.0f - 1.0f) * InCellExtent);
     }
 
+    // Three decorrelated uniforms in [0,1) folded into one 32-bit word, ten bits each.
+    //
+    // Halves the entity record, which is readback traffic on every boundary cross. Ten
+    // bits is 1024 levels per channel against the eight a colour target carries, so
+    // nothing downstream can see the quantisation.
+    //
+    // The word is stored in an INTEGER buffer and must stay in one. Smuggling a packed
+    // payload through a float channel looks equivalent and is not: an arbitrary bit
+    // pattern read as a float can land on a denormal, which hardware may flush to zero,
+    // or on the all-ones exponent, which is a NaN. Neither survives a round trip
+    // reliably, and both fail silently on a subset of values.
+    //
+    // SCALAR ONLY, in both directions. The C++ shim provides float3 and a scalar
+    // saturate; it has no uint3 and no vector saturate, and this file has to compile
+    // through it. Vector forms here fail on the C++ side alone, which is a build the
+    // shader compiler will never catch.
+    uint PackDecor(float3 InDecor)
+    {
+        uint qx = (uint) (saturate(InDecor.x) * 1023.0f + 0.5f);
+        uint qy = (uint) (saturate(InDecor.y) * 1023.0f + 0.5f);
+        uint qz = (uint) (saturate(InDecor.z) * 1023.0f + 0.5f);
+
+        return qx | (qy << 10u) | (qz << 20u);
+    }
+
+    float3 UnpackDecor(uint InPacked)
+    {
+        const float Inv = 1.0f / 1023.0f;
+
+        return float3(
+            (float) (InPacked & 1023u) * Inv,
+            (float) ((InPacked >> 10u) & 1023u) * Inv,
+            (float) ((InPacked >> 20u) & 1023u) * Inv);
+    }
+
     // How many candidates a cell draws, from a real-valued budget.
     //
     // STOCHASTIC, NOT ROUNDED OR FLOORED. A cell's budget is BudgetScale x mass_i and
