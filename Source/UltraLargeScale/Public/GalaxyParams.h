@@ -352,41 +352,26 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 
 #pragma endregion
 
-#pragma region Render and spawn mapping
-	/** Global sigma multiplier in the raymarch. Renderer only. */
+#pragma region Render only
+	/** Global sigma multiplier in the raymarch. RENDERER ONLY.
+	 *
+	 *  NOT A STAR COUNT CONTROL, and it cannot be made into one. Calibration solves
+	 *  BudgetScale = capacity / sum(mass) with mass proportional to density^exponent,
+	 *  so a global multiplier on the field scales every mass and BudgetScale by its
+	 *  inverse -- accepted counts are identical. It also never reaches the compute
+	 *  path: FillShaderParameters does not send it. Use StarDensityScale. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Render", meta = (ClampMin = "0.0"))
 	float MasterDensityScale = 1.0f;
 
-	/** Render-side shaping exponent, applied after Sample. No CPU counterpart. */
+	/** Render-side shaping exponent, applied after Sample. No CPU counterpart, and
+	 *  the same non-control as MasterDensityScale above. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Render", meta = (ClampMin = "0.0"))
 	float MasterDensityPower = 1.0f;
-
-	/** THE DENSITY AT WHICH A CELL DRAWS ITS TIER'S FULL CANDIDATE BUDGET.
-	 *
-	 *  ITS ROLE CHANGED. This was the rejection envelope: every candidate everywhere
-	 *  was measured against it. Every cell now rejects against ITS OWN probed peak,
-	 *  computed by that cell's thread group in GalaxyEntityGen.usf, because the field is
-	 *  an unbounded optical depth spanning four decades -- it peaks near 260 at the
-	 *  default tuning while 83% of the volume sits under 0.01 -- and one global number
-	 *  cannot serve both ends. Against a global reference, dense cells sat at
-	 *  probability 1 throughout and rendered as structureless mush while sparse cells
-	 *  spawned almost nothing.
-	 *
-	 *  What it anchors now is the BUDGET. A cell whose peak reaches this draws the full
 #pragma endregion
 
 	/** Pack into the shared derivation. Defined in GalaxyDataGenerator.cpp, the one
 	 *  translation unit that compiles the shim and the .ush. */
 	GalaxyHLSL::GalaxyDensityParams ToDerived() const;
-
-	/** Pack the acceptance mapping and a tier's size range into the shared placement
-	 *  rules. Defined in GalaxyDataGenerator.cpp alongside ToDerived().
-	 *
-	 *  The old ToSpawnProbability lived here and could not be reached from a shader.
-	 *  Its body is now GalaxyDensityParams::SpawnProbability, so where a star spawns
-	 *  and where gas is drawn are one function. The two inputs below are passed per
-	 *  call rather than baked into the derived field, which is what lets the large
-	 *  tier substitute its own per-cell density envelope. */
 };
 
 /** Material-side parameters for the volumetric proxy.
