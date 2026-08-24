@@ -1,6 +1,7 @@
 ﻿// ProceduralSpaceActor.h
 #pragma once
 #include "CoreMinimal.h"
+#include "Math/RandomStream.h"
 #include "GameFramework/Actor.h"
 #include "FOctree.h"
 #include "Misc/ScopeLock.h"
@@ -10,6 +11,98 @@
 
 class UActorPoolManager;
 class AUniverseActor;
+
+
+/** SEED FAN-OUT.
+ *
+ *  A layer's Seed arrives already unique and well scattered -- FVoxelData::ComposeSeed
+ *  hash-combines the parent seed with the node coordinate and the particle index. What
+ *  it does NOT do is separate the several independent consumers INSIDE one actor, and
+ *  FRandomStream is deterministic on its seed, so two consumers that each build
+ *  FRandomStream(Seed) draw the identical sequence. An archetype roll and a rotation
+ *  roll seeded that way are not merely correlated: the first draw of each is the same
+ *  float, and every galaxy of one morphology comes out in one rotation band.
+ *
+ *  A CHANNEL NAMES A DRAW. Sharing one stream identifies a draw by its POSITION in the
+ *  sequence instead, so inserting a roll shifts every draw after it and an authoring
+ *  change to the arms silently reshuffles the disc, the bulge and the rotation. Seed
+ *  stability across implementation changes is explicitly NOT a goal -- generated
+ *  content is expected to change between passes. This narrower property is: an edit to
+ *  one channel does not move another channel's output, which is what makes "what did
+ *  my change actually do" answerable during authoring.
+ *
+ *  MECHANISM ONLY. Each layer declares its own channel constants beside the code that
+ *  draws from them -- see GalaxySeed in GalaxyParams.h. Nothing layer-specific belongs
+ *  in the base. */
+namespace ProcSeed
+{
+    /** Compile-time FNV-1a over a channel name, so the identifier IS the name and
+     *  nobody has to invent or collision-check magic constants. Distinctness is all
+     *  that is asked of the value; MixSeed does the spreading. */
+    constexpr uint32 ChannelId(const char* InName)
+    {
+        uint32 Hash = 2166136261u;
+        while (*InName)
+        {
+            Hash ^= static_cast<uint32>(static_cast<unsigned char>(*InName++));
+            Hash *= 16777619u;
+        }
+        return Hash;
+    }
+
+    /** MurmurHash3's fmix32 finalizer.
+     *
+     *  NOT OPTIONAL, AND HASHCOMBINE ALONE IS NOT ENOUGH. UE's HashCombine reduces to
+     *  `Channel ^ (Seed + K)` once the channel-dependent shift terms are folded, so a
+     *  near-sequential run of root seeds comes out near-sequential: measured over
+     *  200k roots it occupied 0.047% of the int32 range, chi-squared of 1.3e7 against
+     *  63 degrees of freedom. With this finalizer the same run is uniform (chi-squared
+     *  48 against an expected 63).
+     *
+     *  FVoxelData::ComposeSeed uses bare HashCombine and is fine, because ITS inputs
+     *  are already hashed coordinate values. These inputs are a raw seed and a raw
+     *  channel constant, so the spreading has to happen here. */
+    inline uint32 Avalanche(uint32 InValue)
+    {
+        InValue ^= InValue >> 16;
+        InValue *= 0x85EBCA6Bu;
+        InValue ^= InValue >> 13;
+        InValue *= 0xC2B2AE35u;
+        InValue ^= InValue >> 16;
+        return InValue;
+    }
+
+    /** Root seed + channel -> an independent seed. Masked to 31 bits so it stays
+     *  non-negative, matching every other seed in the system. */
+    inline int32 MixSeed(int32 InRootSeed, uint32 InChannel)
+    {
+        const uint32 Raw = Avalanche(HashCombine(static_cast<uint32>(InRootSeed), InChannel));
+        return static_cast<int32>(Raw & 0x7FFFFFFFu);
+    }
+
+    /** Indexed variant, for a channel with N instances: the three tiers, an arm index,
+     *  a batch. REPLACES `Seed + Index`. Additive offsets alias -- galaxy S's index 1
+     *  is galaxy S+1's index 0 -- and index 0 would otherwise hand back the unmixed
+     *  root, which is the collision this whole helper exists to prevent. */
+    inline int32 MixSeed(int32 InRootSeed, uint32 InChannel, int32 InIndex)
+    {
+        return MixSeed(InRootSeed, HashCombine(InChannel, static_cast<uint32>(InIndex)));
+    }
+
+    /** PURE, AND THAT IS THE FOOTGUN. Calling this twice with the same arguments hands
+     *  back two streams that draw the identical sequence -- it reads like a getter and
+     *  is not one. Take the stream ONCE at the top of the function that draws, hold it
+     *  by value, and draw from the local. */
+    inline FRandomStream Stream(int32 InRootSeed, uint32 InChannel)
+    {
+        return FRandomStream(MixSeed(InRootSeed, InChannel));
+    }
+
+    inline FRandomStream Stream(int32 InRootSeed, uint32 InChannel, int32 InIndex)
+    {
+        return FRandomStream(MixSeed(InRootSeed, InChannel, InIndex));
+    }
+}
 
 /** Base generation params shared across Universe/Galaxy/StarSystem. */
 USTRUCT(BlueprintType)
@@ -60,6 +153,18 @@ struct ULTRALARGESCALE_API FBaseParams {
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
     FLinearColor ParentColor = FLinearColor(1, 1, 1, 0);
+
+    /** ProcSeed::Stream against this actor's Seed. Same purity caveat as the free
+     *  function: take it once and hold it, or the second call repeats the first. */
+    FRandomStream SeedStream(uint32 InChannel) const
+    {
+        return ProcSeed::Stream(Seed, InChannel);
+    }
+
+    FRandomStream SeedStream(uint32 InChannel, int32 InIndex) const
+    {
+        return ProcSeed::Stream(Seed, InChannel, InIndex);
+    }
 };
 
 /** Abstract base for Universe/Galaxy/StarSystem. Provides shared state (octree,

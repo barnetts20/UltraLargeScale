@@ -657,9 +657,15 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 		}
 	}
 
-	// Rotation is seed-derived and parent-owned for now (folds into Generate in step
-	// E). One stream, three sequential draws.
-	FRandomStream RandStream(InNode->Data.Seed);
+	// Rotation is CONTEXT, not a rolled parameter: it lives on FBaseParams beside
+	// Extent, and both are the parent's to set. It stays here rather than folding into
+	// Generate.
+	//
+	// ITS OWN CHANNEL. Seeding this FRandomStream(Seed) directly -- as it did -- makes
+	// its first draw identical to the first draw of anything else seeded the same way,
+	// which once Generate rolls an archetype would pin each morphology to one rotation
+	// band. See ProcSeed in ProceduralSpaceActor.h.
+	FRandomStream RandStream = ProcSeed::Stream(InNode->Data.Seed, GalaxySeed::Rotation);
 	P.Rotation = FRotator(
 		RandStream.FRandRange(-180.0f, 180.0f),
 		RandStream.FRandRange(-180.0f, 180.0f),

@@ -195,6 +195,18 @@ public:
 		TArray<int32>& OutSlotCounts) const;
 
 private:
+	/** The GPU placement key seed for one tier. THE ONE PLACE that maps a tier index to
+	 *  a seed, because CalibrateBlocking and GenerateBatchBlocking must be handed the
+	 *  identical value -- see GalaxySeed::Placement.
+	 *
+	 *  Was `Params.Seed + InSeedOffset`. Additive offsets alias across galaxies whose
+	 *  seeds land within the offset range of each other, and offset 0 handed the
+	 *  large tier the unmixed galaxy seed, which is also whatever else reaches for it. */
+	int32 TierKeySeed(int32 InSeedOffset) const
+	{
+		return ProcSeed::MixSeed(Params.Seed, GalaxySeed::Placement, InSeedOffset);
+	}
+
 	/** Calibrated placement constants, keyed by tier seed offset.
 	 *
 	 *  Mutable and lock-guarded because tier generation runs on background workers and

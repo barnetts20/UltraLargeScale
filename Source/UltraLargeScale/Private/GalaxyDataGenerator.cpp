@@ -300,7 +300,7 @@ float GalaxyDataGenerator::GetTierBudgetScale(
 
 		if (GalaxyEntityGen::CalibrateBlocking(
 			Params, InTierParams, Cells,
-			Params.Seed + InSeedOffset, Params.NoiseTexture, CellMass)
+			TierKeySeed(InSeedOffset), Params.NoiseTexture, CellMass)
 			&& CellMass.Num() == AllCells.Num())
 		{
 			// REDUCED HERE, NOT ON THE GPU, and in double.
@@ -620,7 +620,7 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 
 	const bool bOk = GalaxyEntityGen::GenerateBatchBlocking(
 		Params, InTierParams, Cells, EntityCapacity,
-		Params.Seed + InSeedOffset,
+		TierKeySeed(InSeedOffset),
 		Params.NoiseTexture,
 		BudgetScale,
 		Entities, Counts);

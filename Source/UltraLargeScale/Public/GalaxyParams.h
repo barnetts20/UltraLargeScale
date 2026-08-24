@@ -8,16 +8,68 @@
 #include "ProceduralSpaceActor.h"
 #include "FTierStreamingSystem.h"
 #include "GalaxyParams.generated.h"
-// GalaxyDensityParams.h  (replaces FGalaxyDensityParams in GalaxyParams.h)
+/** GALAXY-LAYER DRAW CHANNELS. Mechanism in ProcSeed (ProceduralSpaceActor.h).
+ *
+ *  Named to match the parameter CATEGORIES on FGalaxyDensityParams, so "I am editing
+ *  the Disc group" means the same thing in the details panel, in the Make function
+ *  that rolls it, and in what moves on the next spawn. Adding a roll to Arms leaves
+ *  the disc, the bulge and the rotation exactly where they were.
+ *
+ *  ADD, NEVER REUSE. A channel is free; sharing one between two consumers reintroduces
+ *  precisely the aliasing this exists to prevent. */
+namespace GalaxySeed
+{
+	inline constexpr uint32 Archetype = ProcSeed::ChannelId("Galaxy.Archetype");
+	inline constexpr uint32 Rotation = ProcSeed::ChannelId("Galaxy.Rotation");
+
+	inline constexpr uint32 Arms = ProcSeed::ChannelId("Galaxy.Arms");
+	inline constexpr uint32 Disc = ProcSeed::ChannelId("Galaxy.Disc");
+	inline constexpr uint32 Bulge = ProcSeed::ChannelId("Galaxy.Bulge");
+	inline constexpr uint32 Background = ProcSeed::ChannelId("Galaxy.Background");
+	inline constexpr uint32 Noise = ProcSeed::ChannelId("Galaxy.Noise");
+	inline constexpr uint32 Void = ProcSeed::ChannelId("Galaxy.Void");
+	inline constexpr uint32 Master = ProcSeed::ChannelId("Galaxy.Master");
+
+	/** The GPU placement key, INDEXED BY TIER (0 Large, 1 Mid, 2 Small).
+	 *
+	 *  Calibration and generation must pass the SAME tier index. The constant is solved
+	 *  against the candidate stream generation then draws from, so two different keys
+	 *  would calibrate one galaxy and generate a different one -- with no error, just
+	 *  counts that miss their capacity. GalaxyDataGenerator::TierKeySeed is the single
+	 *  place that mapping happens; do not spell it out at a call site. */
+	inline constexpr uint32 Placement = ProcSeed::ChannelId("Galaxy.Placement");
+}
+
+// -----------------------------------------------------------------------------
+// FGalaxyDensityParams -- THE AUTHORED FIELD INPUTS.
 //
-// One UPROPERTY per input of MakeGalaxyDensityParams, in the same order. Nothing is
+// One UPROPERTY per input of MakeGalaxyDensityParams, IN THE SAME ORDER. Nothing is
 // combined or scaled here: correlations such as "arm width is a fraction of the disc
 // scale height" are resolved inside the shared derivation, so this struct and the
 // material's pin set are the same list of raw values.
 //
-// Keeping it flat rather than packing float4s is deliberate: the details panel is
-// easier to drive, and the packing into vectors happens in one place, ToDerived().
-// Declared in GalaxyDensityCore.ush, which GalaxyDataGenerator.cpp compiles INSIDE
+// TWO ORGANISATIONS, DELIBERATELY DIFFERENT.
+//
+//   DECLARATION ORDER, and the pragma regions, follow the DERIVATION SIGNATURE: the
+//   packed vectors first in packing order, then the loose scalars. ToDerived() and
+//   FillShaderParameters both read straight down the struct, so a member in the wrong
+//   place is visible by holding the three side by side. That eyeball check is the
+//   ONLY check those marshalling sites have -- DO NOT REORDER MEMBERS to tidy the
+//   file, and add new ones at the end of the block that feeds their vector.
+//
+//   CATEGORY follows the AUTHOR'S view: Arms / Disc / Bulge / Background, each split
+//   into Scale, Density, Noise, Structure and Asymmetry, mirroring the parameter
+//   groups on the volume material so the same knob is in the same place on both. The
+//   details panel sorts by category and ignores declaration order, so the two views
+//   cost nothing to keep apart.
+//
+// Flat rather than pre-packed into float4s for the same reason the categories exist:
+// the panel is easier to drive one scalar at a time, and the packing into vectors
+// happens in exactly one place, ToDerived().
+// -----------------------------------------------------------------------------
+
+// GalaxyHLSL::GalaxyDensityParams is the DERIVED field -- a different type entirely,
+// declared in GalaxyDensityCore.ush, which GalaxyDataGenerator.cpp compiles INSIDE
 // namespace GalaxyHLSL. The namespace is what keeps the shim's sqrt/abs/exp from
 // colliding with the float overloads MSVC's <cmath> puts at global scope, so the type
 // is namespace-qualified everywhere outside that file.
@@ -125,19 +177,19 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 		Out.InNoiseEnable = 1.0f;
 	}
 
-#pragma region Lateral scales
+#pragma region Packed: InLateralScale
 	/** Arm half-width as a FRACTION OF THE DISC SCALE HEIGHT. Arms are thinner than
 	 *  the stellar disc they sit in, so this is a ratio rather than an absolute. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Scale", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arms|Scale", meta = (ClampMin = "0.0"))
 	float ArmRadius = 0.75f;
 
 	/** Disc radius in normalized space. Doubles as the arm system's radial
 	 *  reference: arms live in the disc and have no radius of their own. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Scale", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Disc|Scale", meta = (ClampMin = "0.0"))
 	float DiscRadius = 0.7f;
 
 	/** Bulge zero-density radius, as a fraction of DiscRadius. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Scale", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bulge|Scale", meta = (ClampMin = "0.0"))
 	float BulgeRadius = 0.33f;
 
 	/** The background layer spans the galaxy by definition, so its lateral scale is
@@ -147,212 +199,212 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	static constexpr float BackgroundRadius = 1.0f;
 #pragma endregion
 
-#pragma region Vertical ratios
+#pragma region Packed: InVerticalScale
 	/** All four are axis ratios; smaller flattens. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Scale", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arms|Scale", meta = (ClampMin = "0.0"))
 	float ArmVerticalRatio = 0.75f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Scale", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Disc|Scale", meta = (ClampMin = "0.0"))
 	float DiscVerticalRatio = 0.01f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Scale", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bulge|Scale", meta = (ClampMin = "0.0"))
 	float BulgeVerticalRatio = 0.6f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Scale", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Background|Scale", meta = (ClampMin = "0.0"))
 	float BackgroundVerticalRatio = 0.5f;
 #pragma endregion
 
-#pragma region Layer densities
+#pragma region Packed: InLayerDensity
 	/** OPTICAL DEPTH per layer, not a volume density: what you would measure looking
 	 *  through that layer along its natural axis. The derivation divides each by its
 	 *  own path length, which is what makes these four comparable to each other and
 	 *  independent of the march step count. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Layers", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arms|Density", meta = (ClampMin = "0.0"))
 	float ArmDensity = 1.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Layers", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Disc|Density", meta = (ClampMin = "0.0"))
 	float DiscDensity = 0.5f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Layers", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bulge|Density", meta = (ClampMin = "0.0"))
 	float BulgeDensity = 3.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Layers", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Background|Density", meta = (ClampMin = "0.0"))
 	float BackgroundDensity = 0.1f;
 #pragma endregion
 
-#pragma region Noise response
+#pragma region Packed: InNoiseAmount, InWarpAmount
 	/** Multiplicative depth: density *= 1 + Amount * n. Above 1 the modulator goes
 	 *  negative in places, clamps to zero, and breaks the layer apart.
 	 *
 	 *  Affects the RENDER AND PLACEMENT ALIKE: both sample the same textured field. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arms|Noise")
 	float ArmNoiseAmount = 0.333f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Disc|Noise")
 	float DiscNoiseAmount = 0.1f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bulge|Noise")
 	float BulgeNoiseAmount = 0.5f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Background|Noise")
 	float BackgroundNoiseAmount = 1.0f;
 
 	/** Positional warp per layer. Signed: negative flips the displacement direction.
 	 *  Affects render and placement alike, as the amounts above do. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arms|Noise")
 	float WarpAmountArms = 0.05f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Disc|Noise")
 	float WarpAmountDisc = 0.01f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bulge|Noise")
 	float WarpAmountBulge = 0.05f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Background|Noise")
 	float WarpAmountBackground = 0.0f;
 #pragma endregion
 
-#pragma region Arm asymmetry
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
+#pragma region Packed: InArmAsym (+ ArmAsymSeed scalar)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arms|Asymmetry")
 	float ArmAsymPitch = 0.175f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arms|Asymmetry")
 	float ArmAsymPhase = 0.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arms|Asymmetry")
 	float ArmAsymDensity = 0.5f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arms|Asymmetry")
 	float ArmAsymLength = 0.5f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arms|Asymmetry")
 	float ArmAsymSeed = 211.588882f;
 #pragma endregion
 
-#pragma region Spiral
+#pragma region Packed: InSpiralTwist (+ arm shape scalars)
 	/** Degrees at the disc rim; sign sets chirality. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms", meta = (ClampMin = "-89.0", ClampMax = "89.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arms|Structure", meta = (ClampMin = "-89.0", ClampMax = "89.0"))
 	float ArmPitchAngle = 25.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arms|Structure", meta = (ClampMin = "0.0"))
 	float ArmPitchTightening = 1.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arms|Structure")
 	float ArmPhaseOffset = 0.0f;
 
 	/** How much of the spiral twist the bulge/background noise frame inherits. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
 	float HaloTwistInherit = 1.0f;
 
 	/** CLAMPED TO GALAXY_MAX_ARMS (16) by the derivation. Values above that are
 	 *  silently truncated, not honoured. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms", meta = (ClampMin = "1.0", ClampMax = "16.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arms|Structure", meta = (ClampMin = "1.0", ClampMax = "16.0"))
 	float ArmCount = 16.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arms|Structure", meta = (ClampMin = "0.0"))
 	float ArmProfileExponent = 0.5f;
 
 	/** Coefficient on DiscFlare: arms widen outward in step with the disc thickening.
 	 *  1.0 means they taper together. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arms|Structure", meta = (ClampMin = "0.0"))
 	float ArmRadialGrowth = 2.0f;
 
 	/** How strongly arm strength follows the disc's radial profile.
 	 *  0 = independent, 1 = fades exactly with the disc, >1 faster. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Arms", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Arms|Structure", meta = (ClampMin = "0.0"))
 	float ArmHostFalloff = 1.5f;
 #pragma endregion
 
-#pragma region Disc shape and asymmetry
+#pragma region Scalars: disc shape and asymmetry
 	/** Radial scale length as a MULTIPLE OF THE BULGE RADIUS. The bulge-to-disc
 	 *  scale ratio is a measured quantity; DiscRadius is only a truncation. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Disc|Structure", meta = (ClampMin = "0.0"))
 	float DiscScaleRatio = 2.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc", meta = (ClampMin = "0.1"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Disc|Structure", meta = (ClampMin = "0.1"))
 	float DiscVerticalFalloff = 1.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Disc|Structure", meta = (ClampMin = "0.0"))
 	float DiscFlare = 10.183177f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Disc|Asymmetry")
 	float DiscWarpAmplitude = 0.112f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Disc|Asymmetry")
 	float DiscWarpPhase = 0.0f;
 
 	/** Radians of node-line precession across the disc. Past ~2.5 the warp folds
 	 *  back on itself and reads as corrugation rather than an S-curve. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Disc|Asymmetry")
 	float DiscWarpTwist = 2.276695f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Disc|Asymmetry")
 	float DiscLopsidedAmount = 0.72f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Disc")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Disc|Asymmetry")
 	float DiscLopsidedPhase = 0.074667f;
 #pragma endregion
 
-#pragma region Profile exponents
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bulge", meta = (ClampMin = "0.0"))
+#pragma region Scalars: profile exponents and bounds fade
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bulge|Structure", meta = (ClampMin = "0.0"))
 	float BulgeConcentration = 1.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Background", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Background|Structure", meta = (ClampMin = "0.0"))
 	float BackgroundConcentration = 1.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Background|Structure", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float BoundsFadeStart = 0.33f;
 #pragma endregion
 
-#pragma region Central void
+#pragma region Packed: InCentralVoid
 	/** Radius as a fraction of DiscRadius. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Void", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Void", meta = (ClampMin = "0.0"))
 	float CentralVoidRadius = 0.033f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Void", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Void", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float CentralVoidAmount = 1.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Void", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Void", meta = (ClampMin = "0.0"))
 	float CentralVoidExponent = 1.0f;
 #pragma endregion
 
-#pragma region Noise field (GPU only)
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+#pragma region Packed: InNoiseScale, InWarpScale, InNoiseChannelWeights, InNoiseOffset
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise|Scale")
 	float NoiseDiscLateralScale = 1.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise|Scale")
 	float NoiseDiscVerticalScale = 1.5f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise|Scale")
 	float NoiseHaloLateralScale = 0.75f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise|Scale")
 	float NoiseHaloVerticalScale = 1.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise|Scale")
 	float WarpDiscLateralScale = 1.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise|Scale")
 	float WarpDiscVerticalScale = 2.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise|Scale")
 	float WarpHaloLateralScale = 0.5f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise|Scale")
 	float WarpHaloVerticalScale = 0.5f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
 	FLinearColor NoiseChannelWeights = FLinearColor(-1.0f, -0.7f, -0.4f, -0.4f);
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
 	FVector3f NoiseOffset = FVector3f(1.0f, 0.0f, 0.0f);
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float NoiseRidged = 0.0f;
 
 #pragma endregion
 
-#pragma region Render only
+#pragma region Render only -- NOT marshalled to the compute path
 	/** Global sigma multiplier in the raymarch. RENDERER ONLY.
 	 *
 	 *  NOT A STAR COUNT CONTROL, and it cannot be made into one. Calibration solves
@@ -360,12 +412,12 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	 *  so a global multiplier on the field scales every mass and BudgetScale by its
 	 *  inverse -- accepted counts are identical. It also never reaches the compute
 	 *  path: FillShaderParameters does not send it. Use StarDensityScale. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Render", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Master", meta = (ClampMin = "0.0"))
 	float MasterDensityScale = 1.0f;
 
 	/** Render-side shaping exponent, applied after Sample. No CPU counterpart, and
 	 *  the same non-control as MasterDensityScale above. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Render", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Master", meta = (ClampMin = "0.0"))
 	float MasterDensityPower = 1.0f;
 #pragma endregion
 
