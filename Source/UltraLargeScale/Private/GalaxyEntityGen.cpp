@@ -64,7 +64,7 @@ namespace GalaxyEntityGen
 		// analytic field on the CPU while acceptance ran the textured field on the GPU.
 		// Both now run GalaxySample in the same dispatch, so only the finite probe count
 		// is left to insure against.
-		const float BudgetAnchor = FMath::Max(D.SpawnDensityReference, 1e-3f);
+		const float BudgetAnchor = kBudgetAnchor;
 		constexpr float EnvelopePad = 1.15f;
 
 		// The UObject is captured, NOT dereferenced here.

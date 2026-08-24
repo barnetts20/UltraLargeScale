@@ -70,31 +70,31 @@ struct ULTRALARGESCALE_API FTierParams
 	 *  ones that survive have a peak much closer to their own mean. Measured on a disc
 	 *  occupying seven percent of its cell, two levels ran about three times cheaper.
 	 *
-	 *  There is a floor: probe cost grows as 8^N while candidate cost falls, so past the
-	 *  crossover more levels cost more. Two is usually near it. The large tier does not
-	 *  use this -- it already generates on its own cull grid rather than its slot grid,
-	 *  which is the same separation arrived at from the other direction. */
+	 *  THERE IS A CROSSOVER, and every tier has its own. Probe cost grows as 8^N while
+	 *  candidate cost falls, so past it more levels cost more. Read the C/P ratio in the
+	 *  batch log -- probes and candidates are both field evaluations, so their ratio says
+	 *  which side the tier is on. Below about 1 the probes have overtaken placement and
+	 *  the tier wants one level fewer; above about 9 it wants one more. Every tier sits
+	 *  near 4-6 when it is right.
+	 *
+	 *  Which level that lands on depends on the tier's GridDepth and its slot capacity,
+	 *  not on the field, so it is per-tier rather than global: a tier that spreads few
+	 *  entities over the whole galaxy reaches the crossover early, one holding tens of
+	 *  thousands per resident slot reaches it late.
+	 *
+	 *  THE CEILING IS THE CALIBRATION GRID, not the batch. Calibration descends the
+	 *  tier's WHOLE grid at this depth, so a level costs 8x there whether or not any of
+	 *  it ever streams in. At depth 5 with three levels that is already over a million
+	 *  cells and a 22 MB counter readback; a fourth would be nine million and would not
+	 *  fit. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Streaming",
-		meta = (ClampMin = "0", ClampMax = "4"))
+		meta = (ClampMin = "0", ClampMax = "3"))
 	int32 GenerationSubdivision = 0;
 
-	/** DEPRECATED for GPU generation, and not read by it.
-	 *
-	 *  It was the candidate count a cell drew, and it could not be tuned in isolation:
-	 *  the value that worked was a function of the subdivision depth, the slot capacity,
-	 *  the density reference and the field's own tuning, all at once. Push it past what
-	 *  those allowed and cells started clipping against a cap, which is a cell-constant
-	 *  multiplier and therefore a visible cubic lattice.
-	 *
-	 *  It is now SOLVED rather than authored. The dispatch weighs each cell during its
-	 *  probe pass, sums the weights, and divides SlotCapacity across them -- accepted
-	 *  count per cell is K x mass_i with the envelope cancelling, so K = capacity/sum
-	 *  lands the tier on its buffer by construction. SlotCapacity is the whole knob.
-	 *
-	 *  Kept only for tiers that still generate on the CPU through GenerateCallback. */
-	UPROPERTY(BlueprintReadWrite, Category = "Streaming",
-		meta = (ClampMin = "1"))
-	int32 CandidateBudget = 500;
+	/** The clamp the call sites apply, so the property's ClampMax and the runtime bound
+	 *  cannot drift apart. They did: the property said four while the call sites allowed
+	 *  six, and neither was the real ceiling. */
+	static constexpr int32 MaxGenerationSubdivision = 3;
 
 	/** Shapes the tier's particle size distribution between MinScale and MaxScale.
 	 *  Below 1 biases toward MinScale, above 1 toward MaxScale, 1 is uniform.

@@ -327,6 +327,20 @@ namespace GalaxyEntityGen
 	inline constexpr int32 CountersPerCell = 5;
 	inline constexpr int32 CountGlobals = 1;
 
+	/** The density the mass integral is expressed against: mass_i is the cell's mean of
+	 *  (density / anchor)^exponent.
+	 *
+	 *  NOT A TUNING KNOB, AND NOT AUTHORED. It cancels out of the result entirely.
+	 *  Calibration solves BudgetScale = capacity / sum(mass), so scaling the anchor
+	 *  scales every mass by the same factor and BudgetScale by its inverse; the accepted
+	 *  count per cell is unchanged. Only the logged scale moves.
+	 *
+	 *  It survives as a NUMERICAL NORMALISER. The field peaks in the high hundreds, and
+	 *  the mass is a power of it, so at a large SpawnExponent an anchor of 1 would push
+	 *  the sum toward the top of float range. Ten keeps it comfortable without mattering
+	 *  to anything else. */
+	inline constexpr float kBudgetAnchor = 10.0f;
+
 	inline constexpr int32 CountElementsFor(int32 InNumCells)
 	{
 		return InNumCells * CountersPerCell + CountGlobals;

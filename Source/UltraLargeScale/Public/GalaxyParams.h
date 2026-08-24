@@ -148,9 +148,11 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Scale", meta = (ClampMin = "0.0"))
 	float BulgeRadius = 0.33f;
 
-	/** Background zero-density radius, absolute in normalized space. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Scale", meta = (ClampMin = "0.0"))
-	float BackgroundRadius = 1.0f;
+	/** The background layer spans the galaxy by definition, so its lateral scale is
+	 *  fixed at 1 rather than authored. BoundsFadeStart and BackgroundConcentration
+	 *  shape the outer profile; a third knob over the same falloff only made the three
+	 *  interact. It keeps its slot in InLateralScale so the packing is unchanged. */
+	static constexpr float BackgroundRadius = 1.0f;
 #pragma endregion
 
 #pragma region Vertical ratios
@@ -382,24 +384,6 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	 *  spawned almost nothing.
 	 *
 	 *  What it anchors now is the BUDGET. A cell whose peak reaches this draws the full
-	 *  tier budget; fainter cells draw proportionally fewer candidates and so accept
-	 *  proportionally fewer entities, which is what carries structure between cells now
-	 *  that each cell is normalised to itself.
-	 *
-	 *  SET IT NEAR THE FIELD'S PEAK, not below it. Too low and most cells clamp at the
-	 *  tier budget, flattening inter-cell contrast at the top end. Unlike the old role,
-	 *  raising it no longer costs acceptance rate; it only re-anchors the budget.
-	 *
-	 *  Star count still scales roughly as 1/reference, so retune tier capacities
-	 *  alongside it. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Spawn", meta = (ClampMin = "0.001"))
-	float SpawnDensityReference = 10.0f;
-
-	/** Normaliser applied before quantising to the volume texture, which is a byte
-	 *  channel and would otherwise saturate to white everywhere the field exceeds 1.
-	 *  Only used by the bake path. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bake", meta = (ClampMin = "0.001"))
-	float BakeDensityReference = 250.0f;
 #pragma endregion
 
 	/** Pack into the shared derivation. Defined in GalaxyDataGenerator.cpp, the one
@@ -416,24 +400,14 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	 *  tier substitute its own per-cell density envelope. */
 };
 
-//TODO: DESCRIPTION COMMENT - THIS FORMS THE PARAMETER INTERFACE WITH THE RAYMARCH MATERIAL OUR RAYMARCHER IS NOT MATURE AT THIS POINT SO THIS WILL CHANGE, MANY OF THESE VALUES CURRENTLY HAVE NO EFFECT - THATS FINE, IT WILL NEED REFACTORING WHEN WE DO A GALAXY RAYMARCHER DEEP DIVE ANYWAY
+/** Material-side parameters for the volumetric proxy.
+ *
+ *  PROVISIONAL. The galaxy raymarcher is a debug marcher until the paradigm has
+ *  propagated to the other layers; this set will be rebuilt against the real one. */
 USTRUCT(BlueprintType)
 struct ULTRALARGESCALE_API FGalaxyMaterialParams
 {
 	GENERATED_BODY()
-	/** Bake the density field into a pseudovolume texture.
-	 *
-	 *  Only the OLD raymarch material reads it; the analytic material evaluates the
-	 *  field directly. Off by default: baking costs a full 256^3 evaluation plus a
-	 *  4096^2 upscale and upload on every spawn, and ~64 MB resident per galaxy.
-	 *
-	 *  Kept as an INDEPENDENT cross-check of the CPU implementation rather than as a
-	 *  render path -- the CPU evaluates and bakes, the old material renders the
-	 *  texture, and that should agree with the analytic material evaluating the same
-	 *  parameters live. Set BakeDensityReference on the density params first: the
-	 *  field is an unbounded optical depth and this channel is a byte. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	bool bBakeDensityVolume = false;
 
 	/** March steps across the chord. Step length adapts to chord length, so this is
 	 *  quality, not scale -- and because LayerDensity is an optical depth normalised
@@ -441,42 +415,10 @@ struct ULTRALARGESCALE_API FGalaxyMaterialParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
 	float VolumeMaxSteps = 64.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	int32 DensityVolumeResolution = 256;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	FLinearColor VolumeAmbientColor = FLinearColor(1, 1, 1, 1);
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	FLinearColor VolumeCoolShift = FLinearColor(.2, .5, .8);
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	FLinearColor VolumeHotShift = FLinearColor(.5, 1.5, 3);
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	double VolumeHueVariance = .1;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	double VolumeHueVarianceScale = .5;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	double VolumeSaturationVariance = .1;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	double VolumeTemperatureInfluence = 32;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	double VolumeTemperatureScale = 1;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	double VolumeDensity = .5;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	double VolumeWarpAmount = .00;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	double VolumeWarpScale = 1;
-
+	/** The volume texture the material samples for modulation and positional warp.
+	 *
+	 *  Distinct from FGalaxyParams::NoiseTexture, which is the same asset reached by the
+	 *  compute path. They must be the same texture, or placement and render disagree. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
 	FString VolumeNoise = "/UltraLargeScale/VolumeTextures/VT_PerlinWorley_Balanced";
 };
@@ -592,18 +534,18 @@ struct ULTRALARGESCALE_API FGalaxyParams : public FBaseParams
 		// NeighborhoodRadius = 0 -> 1x1x1 = 1 slot, exhaustive single-pass.
 		LargeTier.GridDepth = 1;
 		LargeTier.NeighborhoodRadius = 0;
-		LargeTier.GenerationSubdivision = 3;
+		LargeTier.GenerationSubdivision = 4;
 		LargeTier.SlotCapacity = 10000;
 
 		MidTier.GridDepth = 3;
 		MidTier.NeighborhoodRadius = 1;
 		MidTier.GenerationSubdivision = 2;
-		MidTier.SlotCapacity = 20000;
+		MidTier.SlotCapacity = 8000;
 
 		SmallTier.GridDepth = 5;
 		SmallTier.NeighborhoodRadius = 1;
 		SmallTier.GenerationSubdivision = 2;
-		SmallTier.SlotCapacity = 10000;
+		SmallTier.SlotCapacity = 6000;
 
 		DeriveScaleRanges();
 	}

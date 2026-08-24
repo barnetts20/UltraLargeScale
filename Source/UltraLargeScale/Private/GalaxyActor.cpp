@@ -4,7 +4,6 @@
 #include "FTierStreamingSystem.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include "StarSystemActor.h"
-#include "FVolumeTextureUtils.h"
 #include <DrawDebugHelpers.h>
 #include <Kismet/GameplayStatics.h>
 #include <NiagaraFunctionLibrary.h>
@@ -184,26 +183,6 @@ void AGalaxyActor::InitializeData()
 	GalaxyGenerator.Params.DeriveScaleRanges();
 	GalaxyGenerator.Initialize();
 
-	if (InitializationState == ELifecycleState::Pooling) return;
-
-	// The analytic material evaluates the field directly, so nothing reads this
-	// texture. Baking it costs a full 256^3 evaluation plus a 4096^2 upscale and
-	// upload on every spawn, and roughly 64 MB resident per galaxy -- which is most
-	// of what keeps galaxies from being loaded further out.
-	//
-	// Kept behind a flag rather than deleted: it is an INDEPENDENT cross-check of the
-	// CPU implementation. The CPU evaluates and bakes, the old material renders the
-	// texture, and that should agree with the new material evaluating the same
-	// parameters live.
-	if (Params.MaterialParams.bBakeDensityVolume)
-	{
-		TArray<uint8> VolumeData = GalaxyGenerator.SampleNoiseVolume(Params.MaterialParams.DensityVolumeResolution);
-
-		if (InitializationState == ELifecycleState::Pooling) return;
-
-		PseudoVolumeTexture = FVolumeTextureUtils::CreatePseudoVolumeTexture(FVolumeTextureUtils::PackToPseudoVolumeLayout(FVolumeTextureUtils::UpscaleVolumeData(VolumeData, Params.MaterialParams.DensityVolumeResolution)));
-	}
-
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeData took: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
 }
 
@@ -227,9 +206,6 @@ void AGalaxyActor::InitializeVolumetric()
 			UMaterialInterface* ParentMat = LoadObject<UMaterialInterface>(nullptr, *Self->VolumetricMaterialPath);
 			UVolumeTexture* NoiseTex = LoadObject<UVolumeTexture>(nullptr, *Self->Params.MaterialParams.VolumeNoise);
 
-			// PseudoVolumeTexture is NOT required: the analytic material evaluates the
-			// field rather than sampling a bake, so gating on it here would keep the
-			// bake on the critical path for a texture nothing reads.
 			if (!BoxMesh || !ParentMat)
 			{
 				UE_LOG(LogTemp, Error, TEXT("AGalaxyActor::InitializeVolumetric - ABORT, required assets unresolved. ") TEXT("mesh=%s material=%s"), BoxMesh ? TEXT("ok") : TEXT("NULL /UltraLargeScale/UnitBoxInvertedNormals"), ParentMat ? TEXT("ok") : *FString::Printf(TEXT("NULL %s"), *Self->VolumetricMaterialPath));
@@ -284,7 +260,10 @@ void AGalaxyActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
 	InMID->SetScalarParameterValue(TEXT("ArmRadius"), D.ArmRadius);
 	InMID->SetScalarParameterValue(TEXT("DiscRadius"), D.DiscRadius);
 	InMID->SetScalarParameterValue(TEXT("BulgeRadius"), D.BulgeRadius);
-	InMID->SetScalarParameterValue(TEXT("BackgroundRadius"), D.BackgroundRadius);
+	// Pushed rather than left to the material's own default, so the render cannot
+	// disagree with placement about how far the background layer reaches.
+	InMID->SetScalarParameterValue(TEXT("BackgroundRadius"),
+		FGalaxyDensityParams::BackgroundRadius);
 
 	// --- VERTICAL RATIOS ---
 	InMID->SetScalarParameterValue(TEXT("ArmVerticalRatio"), D.ArmVerticalRatio);

@@ -8,9 +8,9 @@
 #include "GalaxyDataGenerator.h"
 
 #include "GalaxyEntityGen.h"
-#include "GalaxyGenProbe.h"
 #include "ProceduralSpaceActor.h"
 #include "Misc/ScopeLock.h"
+#include <atomic>
 // SHIM FIRST, then the shared field compiled INSIDE the shim's namespace.
 //
 // The namespace is never opened. MSVC's <cmath> declares float overloads of
@@ -117,51 +117,6 @@ void GalaxyDataGenerator::Initialize()
 	// reciprocal; per-candidate it would dominate generation.
 	Derived = MakeUnique<GalaxyDensityParams>(Params.DensityParams.ToDerived());
 
-	// PARITY PROBE.
-	// The shader runs this same derivation on the values PushDensityParams sends, so
-	// if the render and the star placement disagree the cause is the INPUTS, not the
-	// maths. Several property names survived the FGalaxyDensityParams rewrite --
-	// DiscRadius, ArmVerticalRatio, ArmProfileExponent, ArmRadialGrowth, ArmCount,
-	// ArmPitchAngle, ArmPitchTightening, ArmPhaseOffset, DiscVerticalFalloff,
-	// BackgroundDensity, BoundsFadeStart, ArmAsym* -- and UE keeps the SERIALIZED
-	// value for a name that still exists, so those silently carry old data while only
-	// the genuinely new names fall through to the C++ defaults.
-	//
-	// Compare this against the material instance's parameter values. A mismatch on a
-	// carried-over name is the expected failure.
-	{
-		const FGalaxyDensityParams& D = Params.DensityParams;
-		UE_LOG(LogTemp, Log, TEXT("=== GalaxyDensity inputs (seed %d) ==="), Params.Seed);
-		UE_LOG(LogTemp, Log, TEXT("  lateral   arm %.4f  disc %.4f  bulge %.4f  bg %.4f"),
-			D.ArmRadius, D.DiscRadius, D.BulgeRadius, D.BackgroundRadius);
-		UE_LOG(LogTemp, Log, TEXT("  vertical  arm %.4f  disc %.4f  bulge %.4f  bg %.4f"),
-			D.ArmVerticalRatio, D.DiscVerticalRatio, D.BulgeVerticalRatio, D.BackgroundVerticalRatio);
-		UE_LOG(LogTemp, Log, TEXT("  density   arm %.4f  disc %.4f  bulge %.4f  bg %.4f"),
-			D.ArmDensity, D.DiscDensity, D.BulgeDensity, D.BackgroundDensity);
-		UE_LOG(LogTemp, Log, TEXT("  arms      count %.2f  pitch %.2f  tighten %.2f  growth %.3f  host %.3f  profile %.3f"),
-			D.ArmCount, D.ArmPitchAngle, D.ArmPitchTightening, D.ArmRadialGrowth, D.ArmHostFalloff, D.ArmProfileExponent);
-		UE_LOG(LogTemp, Log, TEXT("  disc      flare %.3f  scaleRatio %.3f  vFalloff %.3f  boundsFade %.3f"),
-			D.DiscFlare, D.DiscScaleRatio, D.DiscVerticalFalloff, D.BoundsFadeStart);
-
-		UE_LOG(LogTemp, Log, TEXT("=== derived ==="));
-		UE_LOG(LogTemp, Log, TEXT("  ArmWidth %.6f   ArmRadialGrowth %.3f   ArmN %d   K0 %.4f"),
-			Derived->ArmWidth, Derived->ArmRadialGrowth, Derived->ArmN, Derived->ArmSpiralK0);
-		UE_LOG(LogTemp, Log, TEXT("  OverPath  arm %.2f  disc %.2f  bulge %.2f  bg %.4f"),
-			Derived->ArmDensityOverPath, Derived->DiscDensityOverPath,
-			Derived->BulgeDensityOverPath, Derived->BackgroundDensityOverPath);
-
-		// Half-heights at mid-disc, the two numbers the silhouette is made of.
-		const float rn = 0.5f;
-		const float edge = 1.0f - rn * rn;
-		const float DiscH = Derived->DiscRadius * Derived->DiscHeightRatio
-			* (1.0f + Derived->DiscFlare * rn) * FMath::Sqrt(edge);
-		const float ArmH = Derived->ArmWidth
-			* FMath::Lerp(1.0f, Derived->ArmRadialGrowth, rn) * FMath::Sqrt(edge)
-			/ FMath::Max(Derived->InvArmVerticalRatio, 1e-6f);
-		UE_LOG(LogTemp, Log, TEXT("  at rn=0.5: disc h %.5f   arm H %.5f   ratio %.2f"),
-			DiscH, ArmH, DiscH > 1e-9f ? ArmH / DiscH : 0.0f);
-	}
-
 	// Kept for a future FastNoise swap-in; unused on the active path.
 	DensityNoise = BuildNoise();
 }
@@ -169,57 +124,6 @@ void GalaxyDataGenerator::Initialize()
 FastNoise::SmartNode<> GalaxyDataGenerator::BuildNoise() const
 {
 	return FastNoise::NewFromEncodedNodeTree(Params.EncodedTree);
-}
-
-TArray<uint8> GalaxyDataGenerator::SampleNoiseVolume(int InNoiseResolution) const
-{
-	// BGRA8, 4 bytes per voxel, linear [z][y][x] order, density in alpha.
-	//
-	// TRANSITIONAL, and it cannot represent the field faithfully: at 256 a voxel is
-	// 0.0078 in normalized space against an arm half-width near 0.011, so arms are
-	// under three voxels across. Gross structure reads, fine detail does not. That is
-	// a property of the texture, not of the field.
-
-	const int BytesPerVoxel = 4;
-	const int64 TotalBytes = (int64)InNoiseResolution * InNoiseResolution * InNoiseResolution * BytesPerVoxel;
-
-	TArray<uint8> TextureData;
-	TextureData.SetNumZeroed(TotalBytes);
-
-	const double VoxelSize = 2.0 / InNoiseResolution;  // normalized [-1, 1] space
-
-	// The field is an unbounded optical depth and this channel is a byte. Without the
-	// divide every voxel where density exceeds 1.0 -- the arms, the inner disc and
-	// the entire bulge -- writes 255 and the bake is a solid blob.
-	const float InvBakeRef = 1.0f / FMath::Max(Params.DensityParams.BakeDensityReference, 0.001f);
-	const float BakePower = Params.DensityParams.MasterDensityPower;
-
-	ParallelFor(InNoiseResolution, [&](int z)
-		{
-			const double nz = -1.0 + (z + 0.5) * VoxelSize;
-
-			for (int y = 0; y < InNoiseResolution; ++y)
-			{
-				const double ny = -1.0 + (y + 0.5) * VoxelSize;
-
-				for (int x = 0; x < InNoiseResolution; ++x)
-				{
-					const double nx = -1.0 + (x + 0.5) * VoxelSize;
-
-					float Density = SampleDensity(FVector(nx, ny, nz)) * InvBakeRef;
-					Density = FMath::Pow(FMath::Clamp(Density, 0.0f, 1.0f), BakePower);
-
-					const uint8 DensityByte =
-						static_cast<uint8>(FMath::Clamp(Density * 255.0f, 0.0f, 255.0f));
-
-					const int64 Idx = ((int64)z * InNoiseResolution * InNoiseResolution
-						+ (int64)y * InNoiseResolution + x) * BytesPerVoxel;
-					TextureData[Idx + 3] = DensityByte;  // Alpha channel
-				}
-			}
-		}, EParallelForFlags::BackgroundPriority);
-
-	return TextureData;
 }
 
 #pragma endregion
@@ -353,7 +257,8 @@ float GalaxyDataGenerator::GetTierBudgetScale(
 		return *Cached;
 	}
 
-	const int32 Subdivision = FMath::Clamp(InTierParams.GenerationSubdivision, 0, 6);
+	const int32 Subdivision = FMath::Clamp(InTierParams.GenerationSubdivision, 0,
+		FTierParams::MaxGenerationSubdivision);
 
 	// MEASURE THE CELLS GENERATION WILL ACTUALLY USE.
 	//
@@ -572,21 +477,11 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	// streamed cell; only the generation grid got finer.
 	TArray<FTierBatchCell> Subdivided;
 	SubdivideCells(InQueuedCells,
-		FMath::Clamp(InTierParams.GenerationSubdivision, 0, 6),
+		FMath::Clamp(InTierParams.GenerationSubdivision, 0,
+			FTierParams::MaxGenerationSubdivision),
 		static_cast<double>(Params.Extent), Subdivided);
 
 	const TArray<FTierBatchCell>& InCells = Subdivided;
-
-	// Once per run, not per batch. This confirms the compute plumbing -- module, shader
-	// path, parameter struct, UAV binding, dispatch, readback -- without touching a real
-	// shader, which is what separated setup from shader in the first place. It costs
-	// microseconds, but this function runs on every boundary cross.
-	static bool bProbed = false;
-	if (!bProbed)
-	{
-		bProbed = true;
-		GalaxyGenProbe::Run();
-	}
 
 	if (InCells.Num() == 0)
 	{
@@ -813,10 +708,15 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	const int32 Landed = FMath::Min(static_cast<int32>(GlobalAccepted), EntityCapacity);
 	const bool bOverflowed = static_cast<int32>(GlobalAccepted) > EntityCapacity;
 
-	static bool bAnnounced = false;
-	if (!bAnnounced || TotalAccepted == 0 || bOverflowed || ExceededCells > 0)
+	// ATOMIC, because this runs on background workers for several galaxies at once.
+	// A plain bool here is a data race -- benign in effect, since the worst outcome is a
+	// duplicate log line, but a race the sanitizers are right to flag.
+	static std::atomic<bool> bAnnounced{ false };
+
+	const bool bFirst = !bAnnounced.exchange(true);
+
+	if (bFirst || TotalAccepted == 0 || bOverflowed || ExceededCells > 0)
 	{
-		bAnnounced = true;
 
 		// PROBES AND CANDIDATES ARE BOTH FIELD EVALUATIONS, so their ratio is what says
 		// whether the tier's GenerationSubdivision sits on the right side of its
@@ -848,10 +748,9 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	// off by more than 2x -- which is the biased-probe case above, not a tuning miss.
 	if (bOverflowed)
 	{
-		static bool bWarnedOverflow = false;
-		if (!bWarnedOverflow)
+		static std::atomic<bool> bWarnedOverflow{ false };
+		if (!bWarnedOverflow.exchange(true))
 		{
-			bWarnedOverflow = true;
 			UE_LOG(LogTemp, Warning,
 				TEXT("GalaxyEntityGen: %u accepted against a %d-record buffer -- the excess ")
 				TEXT("was dropped by GPU arrival order, which is nondeterministic and ")
@@ -942,10 +841,9 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 
 	if (ThinnedSlots > 0)
 	{
-		static bool bWarnedThin = false;
-		if (!bWarnedThin || MinKeep < 0.25f)
+		static std::atomic<bool> bWarnedThin{ false };
+		if (!bWarnedThin.exchange(true) || MinKeep < 0.25f)
 		{
-			bWarnedThin = true;
 			UE_LOG(LogTemp, Warning,
 				TEXT("GalaxyEntityGen: %d slot(s) over capacity and thinned, keeping as ")
 				TEXT("little as %.1f%%. The shape is preserved but the candidates behind ")

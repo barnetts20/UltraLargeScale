@@ -16,7 +16,6 @@
 #include "ProceduralSpaceActor.h"
 #include "GalaxyParams.h"
 #include "FTierStreamingSystem.h"
-#include "FVolumeTextureUtils.h"
 #include "FNiagaraParticleBuffer.h"
 
 /** Declared in GalaxyDensityCore.ush, compiled inside namespace GalaxyHLSL by
@@ -74,16 +73,6 @@ public:
 
 	/** Build noise from encoded tree. Kept for a future FastNoise swap-in. */
 	FastNoise::SmartNode<> BuildNoise() const;
-
-	/** Sample the field into a CPU-side BGRA8 volume buffer.
-	 *
-	 *  TRANSITIONAL. Once the raymarch material evaluates the field directly there is
-	 *  nothing to bake, and removing this path also removes the async upload, the
-	 *  upscale, and roughly 320 MB of resident volume texture. It is kept for now as
-	 *  an independent cross-check: the CPU evaluates and bakes, the old material
-	 *  renders the texture, and that should match the new material evaluating the
-	 *  same parameters live. */
-	TArray<uint8> SampleNoiseVolume(int InNoiseResolution) const;
 
 #pragma endregion
 
