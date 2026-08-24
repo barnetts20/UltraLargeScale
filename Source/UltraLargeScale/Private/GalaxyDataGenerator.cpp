@@ -79,7 +79,6 @@ GalaxyHLSL::GalaxyDensityParams FGalaxyDensityParams::ToDerived() const
 		ArmHostFalloff,
 		BulgeConcentration,
 		BackgroundConcentration,
-		NoiseOctaves,
 		NoiseRidged,
 		// The shim's Texture3D returns the neutral 0.5, so every noise term is zero
 		// and this field reduces to the analytic one whatever is passed here. Kept at

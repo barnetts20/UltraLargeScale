@@ -124,7 +124,6 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 		Out.InArmHostFalloff = ArmHostFalloff;
 		Out.InBulgeConcentration = BulgeConcentration;
 		Out.InBackgroundConcentration = BackgroundConcentration;
-		Out.InNoiseOctaves = NoiseOctaves;
 		Out.InNoiseRidged = NoiseRidged;
 		// ALWAYS TEXTURED. Placement samples the volume texture unconditionally --
 		// that is the whole point of the GPU path, and a switch that turned it off
@@ -355,9 +354,6 @@ struct ULTRALARGESCALE_API FGalaxyDensityParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise")
 	FVector3f NoiseOffset = FVector3f(1.0f, 0.0f, 0.0f);
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise", meta = (ClampMin = "1.0", ClampMax = "2.0"))
-	float NoiseOctaves = 1.0f;
-
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Noise", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float NoiseRidged = 0.0f;
 
@@ -409,11 +405,75 @@ struct ULTRALARGESCALE_API FGalaxyMaterialParams
 {
 	GENERATED_BODY()
 
-	/** March steps across the chord. Step length adapts to chord length, so this is
-	 *  quality, not scale -- and because LayerDensity is an optical depth normalised
-	 *  by path, changing it no longer requires retuning any density. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	float VolumeMaxSteps = 64.0f;
+	/** THE MARCH CONTROLS. All four reach the material, so the baseline lives here
+	 *  rather than only on the material asset.
+	 *
+	 *  Step length is max(MinStep, StepRatio x cameraDistance), capped so the chord
+	 *  always takes at least MinSamples steps. THREE OF THE FOUR ARE STEP BUDGETS, in
+	 *  steps, because that is what an author is actually choosing:
+	 *
+	 *    NearSteps    the ceiling, reached on close approach
+	 *    MinSamples   the floor, reached in the far field
+	 *    MaxSteps     the safety stop, which should never be reached
+	 *
+	 *  StepRatio is the remaining shape control: it decides WHERE between those two
+	 *  ends the cost sits, not how high either end is.
+	 *
+	 *  These are PERFORMANCE controls rather than look controls: because LayerDensity is
+	 *  an optical depth normalised by path length, changing any of them does not require
+	 *  retuning a density. They are candidates for the game's quality settings. */
+
+	 /** Steps across the chord on closest approach -- the CEILING on march cost.
+	  *
+	  *  MinStep is derived from this, as 2 / NearSteps, because the galaxy spans two
+	  *  units in normalized space and a march floored at MinStep takes chord/MinStep
+	  *  steps. Authoring the length instead hid that: 0.005 units reads as a small
+	  *  number and means four hundred steps.
+	  *
+	  *  STEPRATIO CANNOT REDUCE THIS. The ratio only controls how close the camera has
+	  *  to get before the floor takes over; once it does, the march is uniform at
+	  *  MinStep and the adaptive term is irrelevant. A step count that will not respond
+	  *  to StepRatio is this budget, not a bug. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
+		meta = (ClampMin = "8.0", ClampMax = "1024.0"))
+	float VolumeNearSteps = 160.0f;
+
+	/** Fewest steps across the chord, which caps step length at chord/MinSamples -- the
+	 *  FLOOR on march cost, and what stops a distant galaxy resolving to a handful of
+	 *  samples. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
+		meta = (ClampMin = "1.0", ClampMax = "512.0"))
+	float VolumeMinSamples = 24.0f;
+
+	/** Hard bound on iterations. A SAFETY STOP, not the step count -- the march should
+	 *  reach NearSteps and stop there, so hitting this means the budget above is not
+	 *  being respected, and raising it hides that. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
+		meta = (ClampMin = "1.0", ClampMax = "2048.0"))
+	float VolumeMaxSteps = 512.0f;
+
+	/** Fraction of camera distance a step spans, before the two budgets clamp it.
+	 *
+	 *  The SHAPE of the cost curve between them. The floor takes over within
+	 *  D* = 2 / (NearSteps x StepRatio) galaxy radii of the centre, so lowering the
+	 *  ratio widens the expensive band outward rather than making the peak cheaper. At
+	 *  the defaults that distance is 1.6 radii -- just outside the volume. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
+		meta = (ClampMin = "0.0001", ClampMax = "0.5"))
+	float VolumeStepRatio = 0.005f;
+
+	/** Shortest step, in normalized space where the galaxy spans -1 to 1. */
+	float GetMinStep() const
+	{
+		return 2.0f / FMath::Max(VolumeNearSteps, 1.0f);
+	}
+
+	/** Camera distance, in galaxy radii from the centre, inside which the march runs at
+	 *  MinStep and costs NearSteps. Diagnostic rather than plumbed anywhere. */
+	float GetFloorDistance() const
+	{
+		return GetMinStep() / FMath::Max(VolumeStepRatio, 1e-6f);
+	}
 
 	/** The volume texture the material samples for modulation and positional warp.
 	 *

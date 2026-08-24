@@ -335,13 +335,23 @@ void AGalaxyActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
 	InMID->SetScalarParameterValue(TEXT("WarpHaloVerticalScale"), D.WarpHaloVerticalScale);
 	InMID->SetVectorParameterValue(TEXT("NoiseChannelWeights"), D.NoiseChannelWeights);
 	InMID->SetVectorParameterValue(TEXT("NoiseOffset"), FLinearColor(D.NoiseOffset.X, D.NoiseOffset.Y, D.NoiseOffset.Z, 0.0f));
-	InMID->SetScalarParameterValue(TEXT("NoiseOctaves"), D.NoiseOctaves);
 	InMID->SetScalarParameterValue(TEXT("NoiseRidged"), D.NoiseRidged);
 
 	// --- RENDER ---
 	InMID->SetScalarParameterValue(TEXT("MasterDensityScale"), D.MasterDensityScale);
 	InMID->SetScalarParameterValue(TEXT("MasterDensityPower"), D.MasterDensityPower);
-	InMID->SetScalarParameterValue(TEXT("MaxSteps"), Params.MaterialParams.VolumeMaxSteps);
+	// ALL FOUR MARCH CONTROLS, not just MaxSteps. Three of them used to live only on the
+	// material asset, so the baseline the marcher actually ran at was invisible from the
+	// code and the step count could not be reasoned about against it.
+	const FGalaxyMaterialParams& M = Params.MaterialParams;
+
+	InMID->SetScalarParameterValue(TEXT("StepRatio"), M.VolumeStepRatio);
+	InMID->SetScalarParameterValue(TEXT("MinSamples"), M.VolumeMinSamples);
+	InMID->SetScalarParameterValue(TEXT("MaxSteps"), M.VolumeMaxSteps);
+
+	// The marcher wants a LENGTH; the property is a step BUDGET. Derived here rather
+	// than authored, because the two differ by the chord and nobody authors the chord.
+	InMID->SetScalarParameterValue(TEXT("MinStep"), M.GetMinStep());
 
 	// NOT PUSHED: EnableNoise. It is a StaticSwitchParameter, resolved at material
 	// compile time -- a MID cannot change one, and setting it silently does nothing.

@@ -48,12 +48,6 @@
 #define GALAXY_PI 3.14159265358979323846f
 #define GALAXY_POW_EPSILON 1e-6f
 #define GALAXY_MAX_ARMS 16
-#define GALAXY_MAX_OCTAVES 2
-
-// Each octave doubles frequency and halves amplitude. Constants because a pre-baked
-// FBm asset already carries the spectrum.
-#define GALAXY_NOISE_LACUNARITY 2.0f
-#define GALAXY_NOISE_GAIN 0.5f
 
 // Separates the halo noise domain from the gas one so their structure does not
 // correlate. Arbitrary; only needs to be large against feature size.
@@ -234,11 +228,9 @@ struct GalaxyDensityParams
     float4 NoiseScale; // modulation frequency, frame convention
     float4 WarpScale; // warp frequency, frame convention
     float4 NoiseChannelWeights; // signed channel mix
-    float NoiseRidged; // 0 = fbm, 1 = ridged filaments and lanes
-    float InvNoiseNorm; // 1 / sum of octave amplitudes
+    float NoiseRidged; // 0 = smooth, 1 = ridged filaments and lanes
     float NoiseEnable; // 0 skips every texture read
     float HaloTwistInherit; // fraction of the spiral twist the halo frame takes
-    int NoiseOctaveCount;
 
     // SpawnExponent, extent range and extent shaping are PER TIER and live in
     // GalaxyPlacement instead. They cannot sit here: the derivation runs sixteen arm
@@ -999,7 +991,6 @@ GalaxyDensityParams MakeGalaxyDensityParams(
     float InArmHostFalloff,
     float InBulgeConcentration,
     float InBackgroundConcentration,
-    float InNoiseOctaves,
     float InNoiseRidged,
     float InNoiseEnable)
 {
@@ -1089,12 +1080,6 @@ GalaxyDensityParams MakeGalaxyDensityParams(
     P.NoiseChannelWeights = InNoiseChannelWeights;
     P.NoiseRidged = saturate(InNoiseRidged);
     P.NoiseEnable = InNoiseEnable;
-    P.NoiseOctaveCount = (int) clamp(InNoiseOctaves, 1.0f, (float) GALAXY_MAX_OCTAVES);
-
-    // The amplitude sum depends only on the octave count. Tied to
-    // GALAXY_NOISE_GAIN = 0.5 and GALAXY_MAX_OCTAVES = 2; change either and this
-    // expression must follow.
-    P.InvNoiseNorm = 1.0f / ((P.NoiseOctaveCount >= 2) ? 1.5f : 1.0f);
 
     // --- OPTICAL DEPTH NORMALISATION ---
     // LayerDensity is an optical depth per layer, not a density: what you would
@@ -1195,31 +1180,15 @@ float GalaxySampleNoiseTex(GalaxyDensityParams P, Texture3D InTex, SamplerState 
     return dot(P.NoiseChannelWeights, float4(cx, cy, cz, cw));
 }
 
-float GalaxyFBm(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 Pos)
+// ONE FETCH. The texture is a pre-baked Perlin-Worley volume that already carries a
+// spectrum, so summing octaves of it re-filters something already filtered -- at one
+// texture read each, in a dynamic loop, on the hottest path in the stack.
+//
+// For genuinely more fractal detail, bake a deeper field into a larger volume rather
+// than stacking reads here: the cost lands once at bake time instead of per sample.
+float GalaxyNoise(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 Pos)
 {
-    float sum = 0.0f;
-    float amp = 1.0f;
-
-    for (int o = 0; o < GALAXY_MAX_OCTAVES; o++)
-    {
-        if (o >= P.NoiseOctaveCount)
-        {
-            break;
-        }
-
-        // A texture has no seed, so octaves decorrelate by offset.
-        float3 Offset = float3(
-            Pos.x + 17.3f * float(o),
-            Pos.y + 11.7f * float(o),
-            Pos.z + 23.1f * float(o));
-
-        sum += GalaxySampleNoiseTex(P, InTex, InSampler, Offset) * amp;
-
-        Pos *= GALAXY_NOISE_LACUNARITY;
-        amp *= GALAXY_NOISE_GAIN;
-    }
-
-    return sum * P.InvNoiseNorm;
+    return GalaxySampleNoiseTex(P, InTex, InSampler, Pos);
 }
 
 // Full field: analytic layers, positionally warped, then modulated.
@@ -1298,7 +1267,7 @@ float GalaxySample(GalaxyDensityParams P, Texture3D InTex, SamplerState InSample
         && (L.x + L.y) > 1e-4f)
     {
         float3 nf = P.NoiseFrame(NormPos, gasTwist, float2(P.NoiseScale.x, P.NoiseScale.y), P.NoiseOffset);
-        gasNoise = GalaxyFBm(P, InTex, InSampler, nf);
+        gasNoise = GalaxyNoise(P, InTex, InSampler, nf);
     }
 
     if (bHaloNoise && (P.NoiseAmountBulge != 0.0f || P.NoiseAmountBackground != 0.0f)
@@ -1306,7 +1275,7 @@ float GalaxySample(GalaxyDensityParams P, Texture3D InTex, SamplerState InSample
     {
         float3 hf = P.NoiseFrame(NormPos, haloTwist, float2(P.NoiseScale.z, P.NoiseScale.w),
                                  P.NoiseOffset + GALAXY_HALO_DOMAIN);
-        haloNoise = GalaxyFBm(P, InTex, InSampler, hf);
+        haloNoise = GalaxyNoise(P, InTex, InSampler, hf);
     }
 
     L = P.ApplyModulation(L, gasNoise, haloNoise);

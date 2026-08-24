@@ -146,7 +146,6 @@ public:
 		SHADER_PARAMETER(float, InArmHostFalloff)
 		SHADER_PARAMETER(float, InBulgeConcentration)
 		SHADER_PARAMETER(float, InBackgroundConcentration)
-		SHADER_PARAMETER(float, InNoiseOctaves)
 		SHADER_PARAMETER(float, InNoiseRidged)
 		SHADER_PARAMETER(float, InNoiseEnable)
 		END_SHADER_PARAMETER_STRUCT()

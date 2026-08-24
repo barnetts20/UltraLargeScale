@@ -223,7 +223,6 @@ float InArmRadialGrowth;
 float InArmHostFalloff;
 float InBulgeConcentration;
 float InBackgroundConcentration;
-float InNoiseOctaves;
 float InNoiseRidged;
 float InNoiseEnable;
 
@@ -264,7 +263,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
         InDiscLopsidedAmount, InDiscLopsidedPhase, InArmCount, InArmAsymSeed,
         InArmProfileExponent, InArmRadialGrowth, InArmHostFalloff,
         InBulgeConcentration, InBackgroundConcentration,
-        InNoiseOctaves, InNoiseRidged, InNoiseEnable);
+        InNoiseRidged, InNoiseEnable);
 
     const float InvAnchor = 1.0f / max(BudgetAnchor, 1e-6f);
     const float Exponent = max(PlaceSpawnExponent, 1e-3f);
