@@ -97,7 +97,7 @@
 // samples cross over and the web tears rather than bends -- once that reaches one.
 // The clamp in MakeUniverseDensityParams is derived from the period for that reason;
 // changing this define changes the usable amplitude with it.
-#define UNIVERSE_WARP_SHIFT 0
+#define UNIVERSE_WARP_SHIFT 2
 #define UNIVERSE_WARP_MASK ((1 << UNIVERSE_WARP_SHIFT) - 1)
 #define UNIVERSE_WARP_INV (1.0f / (float) (1 << UNIVERSE_WARP_SHIFT))
 

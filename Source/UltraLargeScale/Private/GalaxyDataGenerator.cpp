@@ -116,6 +116,26 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 
 void GalaxyDataGenerator::Initialize()
 {
+	// DROP THE CALIBRATION. It is solved against a SPECIFIC density field, and this
+	// generator is a by-value member of AGalaxyActor, which is POOLED -- ReInit assigns
+	// new Params and calls straight back through here on an object that has already run
+	// a different galaxy.
+	//
+	// Keeping it meant a recycled actor found a cached entry for tier offset 0, 7 or 13
+	// and returned it without calibrating, so the new galaxy's entities were placed at a
+	// density solved for the old one's field. Silent in every way that matters: no
+	// warning, and the only visible trace is the absence of the "calibrated tier" line
+	// that a first-run galaxy logs. Counts then miss SlotCapacity by whatever ratio the
+	// two fields' masses happened to differ by.
+	//
+	// BEFORE Derived is rebuilt, so a caller racing this cannot find a stale scale
+	// beside a fresh field.
+	if (TierBudgetScaleLock.IsValid())
+	{
+		FScopeLock Lock(TierBudgetScaleLock.Get());
+		TierBudgetScales.Empty();
+	}
+
 	// Derived once. MakeGalaxyDensityParams runs 16 arm hashes, a tan and every
 	// reciprocal; per-candidate it would dominate generation.
 	Derived = MakeUnique<GalaxyDensityParams>(Params.Procedural.ToDerived());
