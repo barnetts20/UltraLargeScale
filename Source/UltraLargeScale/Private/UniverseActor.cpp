@@ -324,6 +324,16 @@ void AUniverseActor::LoadRuntimeAssets()
 
 void AUniverseActor::BuildTierConfigs()
 {
+	// Every archetype checked ONCE, here, rather than per spawn.
+	//
+	// Min above Max and stale parameter names produce SILENT garbage -- FRandRange with
+	// inverted bounds returns a value outside the interval and no clamp catches it, and
+	// an unresolvable name simply rolls nothing. Both look identical to "the archetype
+	// is authored wrong", which is indistinguishable from every other galaxy during the
+	// phase where galaxies are supposed to look unfamiliar. Checking is cheap; the
+	// alternative is finding out afterwards.
+	FGalaxySpawnConfig::Validate(GalaxySpawnConfig);
+
 	// Derive MinScale/MaxScale for all tiers from MaxEntityScale + depth spacing.
 	// Must be called before any generate callback reads scale ranges.
 	UniverseParams.DeriveScaleRanges();
@@ -636,9 +646,11 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 		ParticleExtent = Buf.Extents[AbsIdx];
 	}
 
-	// Config: bounds -> Generate -> context overlay (Seed, ParentColor), then the
-	// cross-layer spawn-time fields the parent owns (derived Extent, seed Rotation).
-	FGalaxyParams P = FGalaxyParamBounds::Generate(GalaxyParamBounds, InNode->Data.Seed).ApplyContext(*InNode);
+	// Config -> Generate -> resolved params. Generate sets Seed and ParentColor from
+	// the node itself, so there is no separate context overlay any more; what remains
+	// below are the cross-layer spawn-time fields the PARENT owns -- derived Extent
+	// and seed rotation -- which Generate has no business knowing about.
+	FGalaxyParams P = FGalaxySpawnConfig::Generate(GalaxySpawnConfig, *InNode);
 
 	// INVERTED DERIVATION: UnitScale is the per-layer constant; the galaxy's LOCAL
 	// Extent is derived from the particle's real size (real size -> model size ->
@@ -657,19 +669,13 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 		}
 	}
 
-	// Rotation is CONTEXT, not a rolled parameter: it lives on FBaseParams beside
-	// Extent, and both are the parent's to set. It stays here rather than folding into
-	// Generate.
+	// NOTHING ROLLS Params.Rotation ANY MORE. It was written here and read by nobody,
+	// which is why every galaxy came out disc-up; orientation now lives in the field, on
+	// FGalaxyProceduralParams::Orientation, where both the placement dispatch and the
+	// material read it from the same derivation.
 	//
-	// ITS OWN CHANNEL. Seeding this FRandomStream(Seed) directly -- as it did -- makes
-	// its first draw identical to the first draw of anything else seeded the same way,
-	// which once Generate rolls an archetype would pin each morphology to one rotation
-	// band. See ProcSeed in ProceduralSpaceActor.h.
-	FRandomStream RandStream = ProcSeed::Stream(InNode->Data.Seed, GalaxySeed::Rotation);
-	P.Rotation = FRotator(
-		RandStream.FRandRange(-180.0f, 180.0f),
-		RandStream.FRandRange(-180.0f, 180.0f),
-		RandStream.FRandRange(-180.0f, 180.0f));
+	// FBaseParams::Rotation stays for the star-system layer, which has its own use for
+	// it. GalaxySeed::Rotation is likewise still declared and now unused at this layer.
 
 	// Typed re-init: sets Params, arms deferred placement (PendingNodeCenter =
 	// ParticlePos), hides, and runs the async init chain. FinalizeGalaxyPlacement
@@ -692,6 +698,17 @@ void AUniverseActor::FinalizeGalaxyPlacement(AGalaxyActor* Galaxy)
 
 	const FVector SpawnLoc = ComputeChildSpawnLocation(Galaxy->PendingNodeCenter, Galaxy->Params.UnitScale);
 	Galaxy->SetActorLocation(SpawnLoc);
+
+	// NO SetActorRotation HERE, deliberately. Orientation lives in the density field
+	// (FGalaxyOrientationParams), not on the actor transform.
+	//
+	// Rotating the actor looked cheaper -- the proxy and the Niagara components both
+	// inherit it for free -- but it also rotates the octree, the tier grids and
+	// VirtualTraversal, and the streaming scheme assumes galaxy-local and world axes
+	// coincide: AGalaxyActor::UpdateSpawnScan assigns VirtualTraversal, a WORLD delta,
+	// straight into a LOCAL position, PositionToGridCoord then selects cells with it,
+	// and SpawnScan adds a LOCAL octree centre to a world location unrotated. A rotated
+	// actor streams the wrong cells and spawns star systems at unrotated offsets.
 	Galaxy->SetActorHiddenInGame(false);
 
 	Galaxy->VirtualTraversal = CurrentFrameOfReferenceLocation - SpawnLoc;

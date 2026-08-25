@@ -72,6 +72,28 @@ namespace ProcSeed
         return InValue;
     }
 
+    /** Runtime channel from an FName, for channels that are DATA rather than code --
+     *  a rolled parameter identified by its property name, for instance.
+     *
+     *  NOT GetTypeHash(FName). That derives from the name table's registration order,
+     *  which differs between runs, so the same authored name would seed differently
+     *  every launch. The characters are hashed instead.
+     *
+     *  UPPERCASED FIRST because FName comparison is case-insensitive: "ArmRadius" and
+     *  "armradius" resolve to the same property, and without this they would resolve to
+     *  different streams -- a difference nothing in the editor would show you. */
+    inline uint32 ChannelId(FName InName)
+    {
+        const FString Text = InName.ToString().ToUpper();
+        uint32 Hash = 2166136261u;
+        for (const TCHAR Char : Text)
+        {
+            Hash ^= static_cast<uint32>(Char);
+            Hash *= 16777619u;
+        }
+        return Hash;
+    }
+
     /** Root seed + channel -> an independent seed. Masked to 31 bits so it stays
      *  non-negative, matching every other seed in the system. */
     inline int32 MixSeed(int32 InRootSeed, uint32 InChannel)

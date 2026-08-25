@@ -102,8 +102,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
 	FUniverseParamBounds UniverseParamBounds;
 
+	/** THE authored configuration for every galaxy this universe spawns: the archetype
+	 *  array, the default-mode toggle, and the shared config block.
+	 *
+	 *  Replaces FGalaxyParamBounds, which is gone. Its Min/Max were whole FGalaxyParams
+	 *  and so carried a config block of their own -- leaving it here would have put two
+	 *  config sources in this panel, one of which does nothing.
+	 *
+	 *  Nothing else authors galaxy params. AGalaxyActor::Params is resolved OUTPUT and
+	 *  is overwritten at spawn. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy Properties")
-	FGalaxyParamBounds GalaxyParamBounds;
+	FGalaxySpawnConfig GalaxySpawnConfig;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Star System Properties")
 	FStarSystemParamBounds StarSystemParamBounds;

@@ -43,7 +43,7 @@ GalaxyDataGenerator& GalaxyDataGenerator::operator=(GalaxyDataGenerator&&) noexc
 
 #pragma region Parameter Derivation
 
-GalaxyHLSL::GalaxyDensityParams FGalaxyDensityParams::ToDerived() const
+GalaxyHLSL::GalaxyDensityParams FGalaxyProceduralParams::ToDerived() const
 {
 	// Pure packing. Every correlation -- arm width from the disc scale height, bulge
 	// and void radii from the disc radius, arm growth from the disc flare -- is
@@ -51,35 +51,35 @@ GalaxyHLSL::GalaxyDensityParams FGalaxyDensityParams::ToDerived() const
 	// what lets this struct and the material's pin set be the same list of raw
 	// values, so neither side can drift from the other.
 	return MakeGalaxyDensityParams(
-		float4(ArmRadius, DiscRadius, BulgeRadius, BackgroundRadius),
-		float4(ArmVerticalRatio, DiscVerticalRatio, BulgeVerticalRatio, BackgroundVerticalRatio),
-		float4(ArmDensity, DiscDensity, BulgeDensity, BackgroundDensity),
-		float4(ArmNoiseAmount, DiscNoiseAmount, BulgeNoiseAmount, BackgroundNoiseAmount),
-		float4(WarpAmountArms, WarpAmountDisc, WarpAmountBulge, WarpAmountBackground),
-		float4(ArmAsymPitch, ArmAsymPhase, ArmAsymDensity, ArmAsymLength),
-		float4(ArmPitchAngle, ArmPitchTightening, ArmPhaseOffset, HaloTwistInherit),
-		float3(CentralVoidRadius, CentralVoidAmount, CentralVoidExponent),
-		float4(NoiseDiscLateralScale, NoiseDiscVerticalScale, NoiseHaloLateralScale, NoiseHaloVerticalScale),
-		float4(WarpDiscLateralScale, WarpDiscVerticalScale, WarpHaloLateralScale, WarpHaloVerticalScale),
-		float4(NoiseChannelWeights.R, NoiseChannelWeights.G, NoiseChannelWeights.B, NoiseChannelWeights.A),
-		float3(NoiseOffset.X, NoiseOffset.Y, NoiseOffset.Z),
-		BoundsFadeStart,
-		DiscScaleRatio,
-		DiscVerticalFalloff,
-		DiscFlare,
-		DiscWarpAmplitude,
-		DiscWarpPhase,
-		DiscWarpTwist,
-		DiscLopsidedAmount,
-		DiscLopsidedPhase,
-		ArmCount,
-		ArmAsymSeed,
-		ArmProfileExponent,
-		ArmRadialGrowth,
-		ArmHostFalloff,
-		BulgeConcentration,
-		BackgroundConcentration,
-		NoiseRidged,
+		float4(Arms.ArmRadius, Disc.DiscRadius, Bulge.BulgeRadius, FGalaxyBackgroundParams::BackgroundRadius),
+		float4(Arms.ArmVerticalRatio, Disc.DiscVerticalRatio, Bulge.BulgeVerticalRatio, Background.BackgroundVerticalRatio),
+		float4(Arms.ArmDensity, Disc.DiscDensity, Bulge.BulgeDensity, Background.BackgroundDensity),
+		float4(Arms.ArmNoiseAmount, Disc.DiscNoiseAmount, Bulge.BulgeNoiseAmount, Background.BackgroundNoiseAmount),
+		float4(Arms.WarpAmountArms, Disc.WarpAmountDisc, Bulge.WarpAmountBulge, Background.WarpAmountBackground),
+		float4(Arms.ArmAsymPitch, Arms.ArmAsymPhase, Arms.ArmAsymDensity, Arms.ArmAsymLength),
+		float4(Arms.ArmPitchAngle, Arms.ArmPitchTightening, Arms.ArmPhaseOffset, Noise.HaloTwistInherit),
+		float3(Void.CentralVoidRadius, Void.CentralVoidAmount, Void.CentralVoidExponent),
+		float4(Noise.NoiseDiscLateralScale, Noise.NoiseDiscVerticalScale, Noise.NoiseHaloLateralScale, Noise.NoiseHaloVerticalScale),
+		float4(Noise.WarpDiscLateralScale, Noise.WarpDiscVerticalScale, Noise.WarpHaloLateralScale, Noise.WarpHaloVerticalScale),
+		float4(Noise.NoiseChannelWeights.R, Noise.NoiseChannelWeights.G, Noise.NoiseChannelWeights.B, Noise.NoiseChannelWeights.A),
+		float3(Noise.NoiseOffset.X, Noise.NoiseOffset.Y, Noise.NoiseOffset.Z),
+		Background.BoundsFadeStart,
+		Disc.DiscScaleRatio,
+		Disc.DiscVerticalFalloff,
+		Disc.DiscFlare,
+		Disc.DiscWarpAmplitude,
+		Disc.DiscWarpPhase,
+		Disc.DiscWarpTwist,
+		Disc.DiscLopsidedAmount,
+		Disc.DiscLopsidedPhase,
+		Arms.ArmCount,
+		Arms.ArmAsymSeed,
+		Arms.ArmProfileExponent,
+		Arms.ArmRadialGrowth,
+		Arms.ArmHostFalloff,
+		Bulge.BulgeConcentration,
+		Background.BackgroundConcentration,
+		Noise.NoiseRidged,
 		// The shim's Texture3D returns the neutral 0.5, so every noise term is zero
 		// and this field reduces to the analytic one whatever is passed here. Kept at
 		// 1 to match the compute path rather than describing a mode nothing uses.
@@ -114,7 +114,7 @@ void GalaxyDataGenerator::Initialize()
 {
 	// Derived once. MakeGalaxyDensityParams runs 16 arm hashes, a tan and every
 	// reciprocal; per-candidate it would dominate generation.
-	Derived = MakeUnique<GalaxyDensityParams>(Params.DensityParams.ToDerived());
+	Derived = MakeUnique<GalaxyDensityParams>(Params.Procedural.ToDerived());
 
 	// Kept for a future FastNoise swap-in; unused on the active path.
 	DensityNoise = BuildNoise();
@@ -277,7 +277,7 @@ float GalaxyDataGenerator::GetTierBudgetScale(
 
 	float Scale = 0.0f;
 
-	if (AllCells.Num() > 0 && Params.NoiseTexture != nullptr)
+	if (AllCells.Num() > 0 && Params.Procedural.NoiseTexture != nullptr)
 	{
 		TArray<FGalaxyGenCell> Cells;
 		Cells.Reserve(AllCells.Num());
@@ -300,7 +300,7 @@ float GalaxyDataGenerator::GetTierBudgetScale(
 
 		if (GalaxyEntityGen::CalibrateBlocking(
 			Params, InTierParams, Cells,
-			TierKeySeed(InSeedOffset), Params.NoiseTexture, CellMass)
+			TierKeySeed(InSeedOffset), Params.Procedural.NoiseTexture, CellMass)
 			&& CellMass.Num() == AllCells.Num())
 		{
 			// REDUCED HERE, NOT ON THE GPU, and in double.
@@ -517,7 +517,7 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	// log, and it does not then spam a warning on every boundary cross for the rest of
 	// the run. A misconfiguration would otherwise surface only as a tier that never
 	// populates, which reads as a streaming problem rather than a setup one.
-	if (Params.NoiseTexture == nullptr)
+	if (Params.Procedural.NoiseTexture == nullptr)
 	{
 		ensureMsgf(false,
 			TEXT("GalaxyEntityGen: NoiseTexture is unset, so the galaxy will generate ")
@@ -621,7 +621,7 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	const bool bOk = GalaxyEntityGen::GenerateBatchBlocking(
 		Params, InTierParams, Cells, EntityCapacity,
 		TierKeySeed(InSeedOffset),
-		Params.NoiseTexture,
+		Params.Procedural.NoiseTexture,
 		BudgetScale,
 		Entities, Counts);
 

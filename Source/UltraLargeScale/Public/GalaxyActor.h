@@ -27,11 +27,49 @@ public:
 	~AGalaxyActor();
 
 #pragma region Editor Exposed Parameters
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy Properties")
+	/** RESOLVED OUTPUT, NOT INPUT. FGalaxySpawnConfig::Generate overwrites this whole
+	 *  struct at spawn, so editing it in the details panel does nothing -- hence
+	 *  VisibleAnywhere. It is the natural place to reach for and it would otherwise
+	 *  waste an afternoon. Author on AUniverseActor's spawn config instead. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Galaxy Properties")
 	FGalaxyParams Params;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Galaxy Parent Actor")
 	AUniverseActor* Universe;
+
+	/** Fallback for Params.Procedural.NoiseTexture, resolved in the constructor and
+	 *  applied in InitializeData.
+	 *
+	 *  ON THE ACTOR, NOT IN PARAMS, and that is the whole point. ReInit assigns Params
+	 *  WHOLESALE, so anything the constructor writes into Params is overwritten before
+	 *  a pooled galaxy ever generates -- which is every galaxy that is not level
+	 *  placed. Held here, it survives the assignment and can be applied afterwards.
+	 *
+	 *  ConstructorHelpers only runs during UObject construction, so the reference has
+	 *  to be acquired there; keeping it also means the asset is cooked rather than
+	 *  hoping a runtime LoadObject finds it. */
+	UPROPERTY(Transient)
+	TObjectPtr<UVolumeTexture> DefaultNoiseTexture = nullptr;
+
+	/** THE noise texture this galaxy uses, on BOTH paths. Rolled value if the archetype
+	 *  set one, otherwise the fallback.
+	 *
+	 *  ONE SOURCE, ORDER-INDEPENDENT. The compute path and the material must sample the
+	 *  IDENTICAL asset or placement and render disagree -- the texture drives positional
+	 *  warp, so a mismatch shows up as stars sitting beside the field they were placed
+	 *  in rather than as anything that looks like an error. This used to hold by luck,
+	 *  because the material loaded FGalaxyMaterialParams::VolumeNoise by path and both
+	 *  happened to name the same asset. Once NoiseTexture became procedural and
+	 *  rollable that stopped being true, so VolumeNoise is gone and both paths call
+	 *  this.
+	 *
+	 *  A function rather than a fixup in one Initialize phase because
+	 *  InitializeVolumetric and InitializeData do not have a guaranteed order between
+	 *  them. */
+	UVolumeTexture* ResolveNoiseTexture() const
+	{
+		return Params.Procedural.NoiseTexture ? Params.Procedural.NoiseTexture.Get() : DefaultNoiseTexture.Get();
+	}
 
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -132,7 +170,7 @@ protected:
 	/** Pushes the density parameter set onto a material instance.
 	 *
 	 *  The material graph is a PASS-THROUGH: these are the identical raw values
-	 *  FGalaxyDensityParams::ToDerived hands MakeGalaxyDensityParams, and every
+	 *  FGalaxyProceduralParams::ToDerived hands MakeGalaxyDensityParams, and every
 	 *  correlation between them is resolved inside that shared derivation. Scaling or
 	 *  combining anything here instead would desync the render from star placement,
 	 *  which is exactly what the shared field exists to prevent. */

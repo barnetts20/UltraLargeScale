@@ -4,16 +4,26 @@
 //
 // The proxy mesh decides which pixels run; the unit sphere decides where to march.
 //
-// InStartPos is the shaded point on the proxy surface, in unit-box [0,1] space.
+// THE RAY IS BUILT FROM THE CAMERA, NOT FROM THE SHADED SURFACE.
 //
-// InViewVec is the LOCAL camera vector, surface toward camera. Direction only --
-// normalized or not makes no difference.
+// This used to take the proxy's shaded position and intersect from there, which dragged
+// in three things that have all now gone: a box-intersect node in the material graph to
+// produce it, a signed-t special case because an INVERTED-NORMAL proxy shades the FAR
+// face so the chord lay at negative t, and a dCam correction to recover camera distance
+// from a surface-relative parameter. The march never needed the surface -- it needed a
+// ray, and the camera position plus the view direction already are one. Parameterising
+// from the camera makes t the distance from the camera by construction, which is the
+// quantity step size is built on.
 //
-// InCamPosN is the camera in NORMALIZED space, the same frame as the marched position,
-// box spanning -1 to 1. NO REMAP IS APPLIED TO IT HERE. Supply it in any other frame and
-// the march is silently biased rather than visibly broken -- a wrong camera position
-// produces a plausible image at the wrong step sizes. It is a position rather than a
-// distance because a distance cannot be recovered from InViewVec, which is unit length.
+// InViewVec is the LOCAL camera vector, SURFACE TOWARD CAMERA -- unchanged, still
+// CameraVector through TransformVector [World -> Local]. Direction only; normalized or
+// not makes no difference.
+//
+// InCamPosN is the camera in NORMALIZED space, the box spanning -1 to 1. NO REMAP IS
+// APPLIED TO IT HERE. It is now the ray ORIGIN rather than only a distance reference, so
+// a wrong value no longer merely biases step sizes -- it moves the ray. That is a
+// promotion in consequence: the old failure was a plausible image at the wrong cost, the
+// new one is visibly wrong geometry, which is the better way round.
 //
 // RETURNS (emission, steps taken, 0, transmittance).
 //
@@ -22,15 +32,14 @@
 // there. RAW COUNT, not normalized -- the material divides by whatever range it wants,
 // and normalizing here would be one more number to keep in agreement with MaxSteps.
 float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler,
-                      float3 InStartPos, float3 InViewVec, float3 InCamPosN,
+                      float3 InViewVec, float3 InCamPosN,
                       float InStepRatio, float InMinStep, float InMinSamples, int InMaxSteps,
                       float InDensityScale, float InJitter, float InNoisePower)
 {
-    // Unit box [0,1] -> normalized galaxy space [-1,1]. Uniform scale, so a direction is
-    // identical in both.
-    float3 o = 2.0 * (InStartPos - 0.5);
+    // THE CAMERA IS THE ORIGIN, so t IS the distance from the camera and every step-size
+    // term below reads directly off it.
+    float3 o = InCamPosN;
     float3 dir = normalize(-InViewVec);
-    float3 camN = InCamPosN;
 
     float b = dot(o, dir);
     float c = dot(o, o) - 1.0;
@@ -42,32 +51,26 @@ float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSam
 
     float sq = sqrt(disc);
 
-    // Origin inside the sphere: clamp the near end. Outside: take the whole chord
-    // WITHOUT clamping to zero, because with an inverted-normal proxy the shaded point is
-    // the far face and the chord lies at negative t.
-    float tEnter = (c < 0.0) ? 0.0 : (-b - sq);
+    float tEnter = -b - sq;
     float tExit = -b + sq;
-    if (tExit <= tEnter)
+
+    // BEHIND THE CAMERA. With the ray anchored at the camera this is a real case rather
+    // than an impossible one: the proxy is drawn with inverted normals, so its far face
+    // can be rasterized while the volume itself is behind the viewer. The old
+    // surface-anchored form could not express this and had no test for it.
+    if (tExit <= 0.0)
     {
         return float4(0.0, 0.0, 0.0, 1.0);
     }
 
-    // DISTANCE FROM THE CAMERA, which is what sets step size. The sample at t sits at
-    // o + dir*t and the camera at o - dCam*dir, so their separation is (dCam + t).
-    float dCam = dot(o - camN, dir);
-
-    // START AT THE CAMERA WHEN IT IS INSIDE THE VOLUME, or the chord begins behind the
-    // viewer and that whole stretch runs at the floor -- the budget spent on geometry
-    // nobody can see, before the march reaches anything visible.
-    //
-    // GUARDED SO IT CAN ONLY SHORTEN THE CHORD. Each condition rules out a way a wrong
-    // InCamPosN could empty it instead of trimming it; the fallback is the full chord,
-    // which is slower but correct. An emptied chord returns a transparent pixel and reads
-    // as view-dependent geometry dropout.
-    float tStart = tEnter;
-    if (dCam > 0.0 && -dCam > tEnter && -dCam < tExit)
+    // CAMERA INSIDE THE VOLUME falls out of the same clamp rather than needing its own
+    // branch: tEnter is negative there, so starting at zero starts at the camera. That
+    // replaces the guarded dCam trim, which existed only to reconstruct this from a
+    // surface-anchored parameterisation and could fail open to the full chord.
+    float tStart = max(tEnter, 0.0);
+    if (tExit <= tStart)
     {
-        tStart = -dCam;
+        return float4(0.0, 0.0, 0.0, 1.0);
     }
 
     // CONSTANT ANGULAR STEP SIZE, bounded at both ends.
@@ -116,10 +119,11 @@ float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSam
             break;
         }
 
-        // max against ZERO, not just against the floor. A sample behind the camera has a
-        // negative separation, and without this a wrong camera position produces negative
-        // step lengths and a march that never terminates.
-        float stepLen = max(minStep, max(dCam + t, 0.0) * k);
+        // t IS the camera distance now, so no dCam term and no max against zero: the ray
+        // starts at the camera or ahead of it, so t is never negative. The old form
+        // needed both because a surface-anchored t could run behind the viewer, and a
+        // negative step length there made the march non-terminating.
+        float stepLen = max(minStep, t * k);
         stepLen = min(stepLen, maxStep);
         if (i == 0)
         {
@@ -134,10 +138,10 @@ float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSam
         // edge weights every interval by its own leading face and biases the whole
         // integral toward the camera.
         //
-        // DO NOT ADD A BOX BOUNDS TEST HERE. InStartPos sits exactly on the proxy
-        // surface, so a component is exactly 0 or 1 before any FP error, and such a test
-        // fails on iteration zero wherever rounding pushes it outside. It is
-        // view-direction dependent, so it shows as angle-dependent dropout at silhouettes.
+        // DO NOT ADD A BOUNDS TEST HERE. The sphere chord already bounds the march, and
+        // the field is zero outside the unit sphere anyway. A redundant test on the first
+        // sample fails wherever rounding pushes tStart a hair outside, and because it is
+        // view-direction dependent it shows as angle-dependent dropout at silhouettes.
         float density = GalaxySample(P, InTex, InSampler, o + dir * (t + stepLen * 0.5));
         if (bShape)
         {

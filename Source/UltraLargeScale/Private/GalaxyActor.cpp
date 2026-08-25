@@ -20,30 +20,34 @@ AGalaxyActor::AGalaxyActor()
 	SetActorTickEnabled(false);
 	Octree = MakeShared<FOctree>(Params.Extent);
 
-	// Default the placement noise texture to the same asset the material samples.
+	// Acquire the fallback placement noise texture -- the same asset the material
+	// samples. APPLIED IN InitializeData, NOT HERE.
 	//
 	// NOT a convenience. Placement is GPU-only and the dispatch samples this texture,
-	// so an unset NoiseTexture means the galaxy generates nothing at all. Defaulting
-	// here is what keeps that a deliberate act rather than an easy accident; clearing
-	// it on an instance still fails, loudly, at the first batch.
+	// so an unset NoiseTexture means the galaxy generates nothing at all, silently.
 	//
-	// Resolved here rather than as a UPROPERTY default because FGalaxyParams is a
-	// USTRUCT: ConstructorHelpers only runs during UObject construction, so a plain
-	// struct cannot reference an asset by path at all. Assigned only when unset, so
-	// anything authored on the instance wins.
+	// Writing it into Params here would accomplish nothing for a POOLED galaxy:
+	// ReInit assigns Params wholesale from the universe's resolved params, so the
+	// constructor's value is gone before the first batch. It survives only for a
+	// level-placed actor, which is the path that matters least. So the reference is
+	// parked on the actor and applied after Params is assigned, where every path
+	// passes through.
+	//
+	// Acquired here regardless because ConstructorHelpers only runs during UObject
+	// construction -- and keeping it means the asset is cooked rather than left to a
+	// runtime LoadObject that may not find it.
 	//
 	// Set NEVER STREAM on this asset. GalaxyDensityCore.ush reads mip 0 on both paths, but
 	// the material handles streaming residency and a compute dispatch does not: if
 	// mip 0 is not resident when the dispatch runs it reads whatever is, and placement
 	// silently stops matching the render.
-	if (Params.NoiseTexture == nullptr)
 	{
 		static ConstructorHelpers::FObjectFinder<UVolumeTexture> DefaultNoise(
 			TEXT("/UltraLargeScale/VolumeTextures/VT_PerlinWorley_Balanced.VT_PerlinWorley_Balanced"));
 
 		if (DefaultNoise.Succeeded())
 		{
-			Params.NoiseTexture = DefaultNoise.Object;
+			DefaultNoiseTexture = DefaultNoise.Object;
 		}
 	}
 }
@@ -178,9 +182,28 @@ void AGalaxyActor::InitializeData()
 {
 	double StartTime = FPlatformTime::Seconds();
 
-	// MaxEntityScale is a fixed absolute world-cm value on FGalaxyParams. DeriveScaleRanges cascades it through the tier depth sequence to set MinScale/MaxScale per tier. No per-instance derivation needed.
+	// Bake the resolved texture back into Params so the generator, which only sees
+	// Params, samples exactly what the material samples. HERE rather than in the
+	// constructor because ReInit assigns Params wholesale.
+	if (Params.Procedural.NoiseTexture == nullptr)
+	{
+		Params.Procedural.NoiseTexture = ResolveNoiseTexture();
+		if (!Params.Procedural.NoiseTexture)
+		{
+			// Nothing behind this. The tier batches will fail closed and log, but they
+			// will do it three times per galaxy with no indication of the cause.
+			UE_LOG(LogTemp, Error,
+				TEXT("AGalaxyActor::InitializeData - NoiseTexture is unset and the ")
+				TEXT("fallback asset did not resolve. Placement is GPU-only, so this ")
+				TEXT("galaxy will generate NO entities at any tier."));
+		}
+	}
+
+	// MaxEntityScale is a fixed absolute world-cm value on FGalaxyConfigParams, the
+	// same for every galaxy. DeriveScaleRanges cascades it through the tier depth
+	// sequence to set MinScale/MaxScale per tier. No per-instance derivation needed.
 	GalaxyGenerator.Params = Params;
-	GalaxyGenerator.Params.DeriveScaleRanges();
+	GalaxyGenerator.Params.Config.DeriveScaleRanges();
 	GalaxyGenerator.Initialize();
 
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeData took: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
@@ -204,7 +227,9 @@ void AGalaxyActor::InitializeVolumetric()
 			// Resolve every asset up front and bail loudly.
 			UStaticMesh* BoxMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/UltraLargeScale/UnitBoxInvertedNormals.UnitBoxInvertedNormals"));
 			UMaterialInterface* ParentMat = LoadObject<UMaterialInterface>(nullptr, *Self->VolumetricMaterialPath);
-			UVolumeTexture* NoiseTex = LoadObject<UVolumeTexture>(nullptr, *Self->Params.MaterialParams.VolumeNoise);
+			// THE SAME OBJECT the compute path samples, not a second lookup by path.
+			// See AGalaxyActor::ResolveNoiseTexture.
+			UVolumeTexture* NoiseTex = Self->ResolveNoiseTexture();
 
 			if (!BoxMesh || !ParentMat)
 			{
@@ -214,7 +239,7 @@ void AGalaxyActor::InitializeVolumetric()
 			}
 			if (!NoiseTex)
 			{
-				UE_LOG(LogTemp, Warning, TEXT("AGalaxyActor::InitializeVolumetric - noise texture '%s' unresolved; ") TEXT("the field will render without modulation or positional warp."), *Self->Params.MaterialParams.VolumeNoise);
+				UE_LOG(LogTemp, Warning, TEXT("AGalaxyActor::InitializeVolumetric - no noise texture resolved; ") TEXT("the field will render without modulation or positional warp, and will not match placement."));
 			}
 
 			Self->VolumeMaterial = UMaterialInstanceDynamic::Create(ParentMat, Self);
@@ -254,96 +279,96 @@ void AGalaxyActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
 {
 	if (!InMID) return;
 
-	const FGalaxyDensityParams& D = Params.DensityParams;
+	const FGalaxyProceduralParams& D = Params.Procedural;
 
 	// --- LATERAL SCALES ---
-	InMID->SetScalarParameterValue(TEXT("ArmRadius"), D.ArmRadius);
-	InMID->SetScalarParameterValue(TEXT("DiscRadius"), D.DiscRadius);
-	InMID->SetScalarParameterValue(TEXT("BulgeRadius"), D.BulgeRadius);
+	InMID->SetScalarParameterValue(TEXT("ArmRadius"), D.Arms.ArmRadius);
+	InMID->SetScalarParameterValue(TEXT("DiscRadius"), D.Disc.DiscRadius);
+	InMID->SetScalarParameterValue(TEXT("BulgeRadius"), D.Bulge.BulgeRadius);
 	// Pushed rather than left to the material's own default, so the render cannot
 	// disagree with placement about how far the background layer reaches.
 	InMID->SetScalarParameterValue(TEXT("BackgroundRadius"),
-		FGalaxyDensityParams::BackgroundRadius);
+		FGalaxyBackgroundParams::BackgroundRadius);
 
 	// --- VERTICAL RATIOS ---
-	InMID->SetScalarParameterValue(TEXT("ArmVerticalRatio"), D.ArmVerticalRatio);
-	InMID->SetScalarParameterValue(TEXT("DiscVerticalRatio"), D.DiscVerticalRatio);
-	InMID->SetScalarParameterValue(TEXT("BulgeVerticalRatio"), D.BulgeVerticalRatio);
-	InMID->SetScalarParameterValue(TEXT("BackgroundVerticalRatio"), D.BackgroundVerticalRatio);
+	InMID->SetScalarParameterValue(TEXT("ArmVerticalRatio"), D.Arms.ArmVerticalRatio);
+	InMID->SetScalarParameterValue(TEXT("DiscVerticalRatio"), D.Disc.DiscVerticalRatio);
+	InMID->SetScalarParameterValue(TEXT("BulgeVerticalRatio"), D.Bulge.BulgeVerticalRatio);
+	InMID->SetScalarParameterValue(TEXT("BackgroundVerticalRatio"), D.Background.BackgroundVerticalRatio);
 
 	// --- LAYER OPTICAL DEPTHS ---
-	InMID->SetScalarParameterValue(TEXT("ArmDensity"), D.ArmDensity);
-	InMID->SetScalarParameterValue(TEXT("DiscDensity"), D.DiscDensity);
-	InMID->SetScalarParameterValue(TEXT("BulgeDensity"), D.BulgeDensity);
-	InMID->SetScalarParameterValue(TEXT("BackgroundDensity"), D.BackgroundDensity);
+	InMID->SetScalarParameterValue(TEXT("ArmDensity"), D.Arms.ArmDensity);
+	InMID->SetScalarParameterValue(TEXT("DiscDensity"), D.Disc.DiscDensity);
+	InMID->SetScalarParameterValue(TEXT("BulgeDensity"), D.Bulge.BulgeDensity);
+	InMID->SetScalarParameterValue(TEXT("BackgroundDensity"), D.Background.BackgroundDensity);
 
 	// --- NOISE RESPONSE (render only: the CPU evaluates the analytic field) ---
-	InMID->SetScalarParameterValue(TEXT("ArmNoiseAmount"), D.ArmNoiseAmount);
-	InMID->SetScalarParameterValue(TEXT("DiscNoiseAmount"), D.DiscNoiseAmount);
-	InMID->SetScalarParameterValue(TEXT("BulgeNoiseAmount"), D.BulgeNoiseAmount);
-	InMID->SetScalarParameterValue(TEXT("BackgroundNoiseAmount"), D.BackgroundNoiseAmount);
-	InMID->SetScalarParameterValue(TEXT("WarpAmountArms"), D.WarpAmountArms);
-	InMID->SetScalarParameterValue(TEXT("WarpAmountDisc"), D.WarpAmountDisc);
-	InMID->SetScalarParameterValue(TEXT("WarpAmountBulge"), D.WarpAmountBulge);
-	InMID->SetScalarParameterValue(TEXT("WarpAmountBackground"), D.WarpAmountBackground);
+	InMID->SetScalarParameterValue(TEXT("ArmNoiseAmount"), D.Arms.ArmNoiseAmount);
+	InMID->SetScalarParameterValue(TEXT("DiscNoiseAmount"), D.Disc.DiscNoiseAmount);
+	InMID->SetScalarParameterValue(TEXT("BulgeNoiseAmount"), D.Bulge.BulgeNoiseAmount);
+	InMID->SetScalarParameterValue(TEXT("BackgroundNoiseAmount"), D.Background.BackgroundNoiseAmount);
+	InMID->SetScalarParameterValue(TEXT("WarpAmountArms"), D.Arms.WarpAmountArms);
+	InMID->SetScalarParameterValue(TEXT("WarpAmountDisc"), D.Disc.WarpAmountDisc);
+	InMID->SetScalarParameterValue(TEXT("WarpAmountBulge"), D.Bulge.WarpAmountBulge);
+	InMID->SetScalarParameterValue(TEXT("WarpAmountBackground"), D.Background.WarpAmountBackground);
 
 	// --- ARM ASYMMETRY ---
-	InMID->SetScalarParameterValue(TEXT("ArmAsymPitch"), D.ArmAsymPitch);
-	InMID->SetScalarParameterValue(TEXT("ArmAsymPhase"), D.ArmAsymPhase);
-	InMID->SetScalarParameterValue(TEXT("ArmAsymDensity"), D.ArmAsymDensity);
-	InMID->SetScalarParameterValue(TEXT("ArmAsymLength"), D.ArmAsymLength);
-	InMID->SetScalarParameterValue(TEXT("ArmAsymSeed"), D.ArmAsymSeed);
+	InMID->SetScalarParameterValue(TEXT("ArmAsymPitch"), D.Arms.ArmAsymPitch);
+	InMID->SetScalarParameterValue(TEXT("ArmAsymPhase"), D.Arms.ArmAsymPhase);
+	InMID->SetScalarParameterValue(TEXT("ArmAsymDensity"), D.Arms.ArmAsymDensity);
+	InMID->SetScalarParameterValue(TEXT("ArmAsymLength"), D.Arms.ArmAsymLength);
+	InMID->SetScalarParameterValue(TEXT("ArmAsymSeed"), D.Arms.ArmAsymSeed);
 
 	// --- SPIRAL ---
-	InMID->SetScalarParameterValue(TEXT("ArmPitchAngle"), D.ArmPitchAngle);
-	InMID->SetScalarParameterValue(TEXT("ArmPitchTightening"), D.ArmPitchTightening);
-	InMID->SetScalarParameterValue(TEXT("ArmPhaseOffset"), D.ArmPhaseOffset);
-	InMID->SetScalarParameterValue(TEXT("HaloTwistInherit"), D.HaloTwistInherit);
-	InMID->SetScalarParameterValue(TEXT("ArmCount"), D.ArmCount);
-	InMID->SetScalarParameterValue(TEXT("ArmProfileExponent"), D.ArmProfileExponent);
-	InMID->SetScalarParameterValue(TEXT("ArmRadialGrowth"), D.ArmRadialGrowth);
-	InMID->SetScalarParameterValue(TEXT("ArmHostFalloff"), D.ArmHostFalloff);
+	InMID->SetScalarParameterValue(TEXT("ArmPitchAngle"), D.Arms.ArmPitchAngle);
+	InMID->SetScalarParameterValue(TEXT("ArmPitchTightening"), D.Arms.ArmPitchTightening);
+	InMID->SetScalarParameterValue(TEXT("ArmPhaseOffset"), D.Arms.ArmPhaseOffset);
+	InMID->SetScalarParameterValue(TEXT("HaloTwistInherit"), D.Noise.HaloTwistInherit);
+	InMID->SetScalarParameterValue(TEXT("ArmCount"), D.Arms.ArmCount);
+	InMID->SetScalarParameterValue(TEXT("ArmProfileExponent"), D.Arms.ArmProfileExponent);
+	InMID->SetScalarParameterValue(TEXT("ArmRadialGrowth"), D.Arms.ArmRadialGrowth);
+	InMID->SetScalarParameterValue(TEXT("ArmHostFalloff"), D.Arms.ArmHostFalloff);
 
 	// --- DISC SHAPE AND ASYMMETRY ---
-	InMID->SetScalarParameterValue(TEXT("DiscScaleRatio"), D.DiscScaleRatio);
-	InMID->SetScalarParameterValue(TEXT("DiscVerticalFalloff"), D.DiscVerticalFalloff);
-	InMID->SetScalarParameterValue(TEXT("DiscFlare"), D.DiscFlare);
-	InMID->SetScalarParameterValue(TEXT("DiscWarpAmplitude"), D.DiscWarpAmplitude);
-	InMID->SetScalarParameterValue(TEXT("DiscWarpPhase"), D.DiscWarpPhase);
-	InMID->SetScalarParameterValue(TEXT("DiscWarpTwist"), D.DiscWarpTwist);
-	InMID->SetScalarParameterValue(TEXT("DiscLopsidedAmount"), D.DiscLopsidedAmount);
-	InMID->SetScalarParameterValue(TEXT("DiscLopsidedPhase"), D.DiscLopsidedPhase);
+	InMID->SetScalarParameterValue(TEXT("DiscScaleRatio"), D.Disc.DiscScaleRatio);
+	InMID->SetScalarParameterValue(TEXT("DiscVerticalFalloff"), D.Disc.DiscVerticalFalloff);
+	InMID->SetScalarParameterValue(TEXT("DiscFlare"), D.Disc.DiscFlare);
+	InMID->SetScalarParameterValue(TEXT("DiscWarpAmplitude"), D.Disc.DiscWarpAmplitude);
+	InMID->SetScalarParameterValue(TEXT("DiscWarpPhase"), D.Disc.DiscWarpPhase);
+	InMID->SetScalarParameterValue(TEXT("DiscWarpTwist"), D.Disc.DiscWarpTwist);
+	InMID->SetScalarParameterValue(TEXT("DiscLopsidedAmount"), D.Disc.DiscLopsidedAmount);
+	InMID->SetScalarParameterValue(TEXT("DiscLopsidedPhase"), D.Disc.DiscLopsidedPhase);
 
 	// --- PROFILE EXPONENTS AND BOUNDS ---
-	InMID->SetScalarParameterValue(TEXT("BulgeConcentration"), D.BulgeConcentration);
-	InMID->SetScalarParameterValue(TEXT("BackgroundConcentration"), D.BackgroundConcentration);
-	InMID->SetScalarParameterValue(TEXT("BoundsFadeStart"), D.BoundsFadeStart);
+	InMID->SetScalarParameterValue(TEXT("BulgeConcentration"), D.Bulge.BulgeConcentration);
+	InMID->SetScalarParameterValue(TEXT("BackgroundConcentration"), D.Background.BackgroundConcentration);
+	InMID->SetScalarParameterValue(TEXT("BoundsFadeStart"), D.Background.BoundsFadeStart);
 
 	// --- CENTRAL VOID ---
-	InMID->SetScalarParameterValue(TEXT("CentralVoidRadius"), D.CentralVoidRadius);
-	InMID->SetScalarParameterValue(TEXT("CentralVoidAmount"), D.CentralVoidAmount);
-	InMID->SetScalarParameterValue(TEXT("CentralVoidExponent"), D.CentralVoidExponent);
+	InMID->SetScalarParameterValue(TEXT("CentralVoidRadius"), D.Void.CentralVoidRadius);
+	InMID->SetScalarParameterValue(TEXT("CentralVoidAmount"), D.Void.CentralVoidAmount);
+	InMID->SetScalarParameterValue(TEXT("CentralVoidExponent"), D.Void.CentralVoidExponent);
 
 	// --- NOISE FIELD SHAPE ---
-	InMID->SetScalarParameterValue(TEXT("NoiseDiscLateralScale"), D.NoiseDiscLateralScale);
-	InMID->SetScalarParameterValue(TEXT("NoiseDiscVerticalScale"), D.NoiseDiscVerticalScale);
-	InMID->SetScalarParameterValue(TEXT("NoiseHaloLateralScale"), D.NoiseHaloLateralScale);
-	InMID->SetScalarParameterValue(TEXT("NoiseHaloVerticalScale"), D.NoiseHaloVerticalScale);
-	InMID->SetScalarParameterValue(TEXT("WarpDiscLateralScale"), D.WarpDiscLateralScale);
-	InMID->SetScalarParameterValue(TEXT("WarpDiscVerticalScale"), D.WarpDiscVerticalScale);
-	InMID->SetScalarParameterValue(TEXT("WarpHaloLateralScale"), D.WarpHaloLateralScale);
-	InMID->SetScalarParameterValue(TEXT("WarpHaloVerticalScale"), D.WarpHaloVerticalScale);
-	InMID->SetVectorParameterValue(TEXT("NoiseChannelWeights"), D.NoiseChannelWeights);
-	InMID->SetVectorParameterValue(TEXT("NoiseOffset"), FLinearColor(D.NoiseOffset.X, D.NoiseOffset.Y, D.NoiseOffset.Z, 0.0f));
-	InMID->SetScalarParameterValue(TEXT("NoiseRidged"), D.NoiseRidged);
+	InMID->SetScalarParameterValue(TEXT("NoiseDiscLateralScale"), D.Noise.NoiseDiscLateralScale);
+	InMID->SetScalarParameterValue(TEXT("NoiseDiscVerticalScale"), D.Noise.NoiseDiscVerticalScale);
+	InMID->SetScalarParameterValue(TEXT("NoiseHaloLateralScale"), D.Noise.NoiseHaloLateralScale);
+	InMID->SetScalarParameterValue(TEXT("NoiseHaloVerticalScale"), D.Noise.NoiseHaloVerticalScale);
+	InMID->SetScalarParameterValue(TEXT("WarpDiscLateralScale"), D.Noise.WarpDiscLateralScale);
+	InMID->SetScalarParameterValue(TEXT("WarpDiscVerticalScale"), D.Noise.WarpDiscVerticalScale);
+	InMID->SetScalarParameterValue(TEXT("WarpHaloLateralScale"), D.Noise.WarpHaloLateralScale);
+	InMID->SetScalarParameterValue(TEXT("WarpHaloVerticalScale"), D.Noise.WarpHaloVerticalScale);
+	InMID->SetVectorParameterValue(TEXT("NoiseChannelWeights"), D.Noise.NoiseChannelWeights);
+	InMID->SetVectorParameterValue(TEXT("NoiseOffset"), FLinearColor(D.Noise.NoiseOffset.X, D.Noise.NoiseOffset.Y, D.Noise.NoiseOffset.Z, 0.0f));
+	InMID->SetScalarParameterValue(TEXT("NoiseRidged"), D.Noise.NoiseRidged);
 
 	// --- RENDER ---
-	InMID->SetScalarParameterValue(TEXT("MasterDensityScale"), D.MasterDensityScale);
-	InMID->SetScalarParameterValue(TEXT("MasterDensityPower"), D.MasterDensityPower);
+	InMID->SetScalarParameterValue(TEXT("MasterDensityScale"), D.Master.MasterDensityScale);
+	InMID->SetScalarParameterValue(TEXT("MasterDensityPower"), D.Master.MasterDensityPower);
 	// ALL FOUR MARCH CONTROLS, not just MaxSteps. Three of them used to live only on the
 	// material asset, so the baseline the marcher actually ran at was invisible from the
 	// code and the step count could not be reasoned about against it.
-	const FGalaxyMaterialParams& M = Params.MaterialParams;
+	const FGalaxyMaterialParams& M = Params.Config.MaterialParams;
 
 	InMID->SetScalarParameterValue(TEXT("StepRatio"), M.VolumeStepRatio);
 	InMID->SetScalarParameterValue(TEXT("MinSamples"), M.VolumeMinSamples);
@@ -402,13 +427,13 @@ void AGalaxyActor::LoadRuntimeAssets()
 
 void AGalaxyActor::BuildTierConfigs()
 {
-	Params.DeriveScaleRanges();
+	Params.Config.DeriveScaleRanges();
 
 	// --- Large tier: exhaustive single cell, no streaming ---
 	LargeTierConfig.TierName = TEXT("Large");
-	LargeTierConfig.GridDepth = Params.LargeTier.GridDepth;
+	LargeTierConfig.GridDepth = Params.Config.LargeTier.GridDepth;
 	LargeTierConfig.NeighborhoodRadius = 0;
-	LargeTierConfig.SlotCapacity = Params.LargeTier.SlotCapacity;
+	LargeTierConfig.SlotCapacity = Params.Config.LargeTier.SlotCapacity;
 	LargeTierConfig.NiagaraAssets = { GalaxyLargeCloud };
 	LargeTierConfig.bWantRotations = { false };
 	LargeTierConfig.OctreeInsertBufferIndex = 0;
@@ -442,14 +467,14 @@ void AGalaxyActor::BuildTierConfigs()
 			}
 
 			return GalaxyGenerator.GenerateTierBatchGPU(
-				Cells, LargeTierState.Buffers[0], Params.LargeTier, 0, true, OutCounts);
+				Cells, LargeTierState.Buffers[0], Params.Config.LargeTier, 0, true, OutCounts);
 		};
 
 	// --- Mid tier: neighborhood streaming ---
 	MidTierConfig.TierName = TEXT("Mid");
-	MidTierConfig.GridDepth = Params.MidTier.GridDepth;
-	MidTierConfig.NeighborhoodRadius = Params.MidTier.NeighborhoodRadius;
-	MidTierConfig.SlotCapacity = Params.MidTier.SlotCapacity;
+	MidTierConfig.GridDepth = Params.Config.MidTier.GridDepth;
+	MidTierConfig.NeighborhoodRadius = Params.Config.MidTier.NeighborhoodRadius;
+	MidTierConfig.SlotCapacity = Params.Config.MidTier.SlotCapacity;
 	MidTierConfig.NiagaraAssets = { GalaxyMidCloud };
 	MidTierConfig.bWantRotations = { false };
 	MidTierConfig.OctreeInsertBufferIndex = 0;
@@ -492,14 +517,14 @@ void AGalaxyActor::BuildTierConfigs()
 			// largest single cell. Subdivision does not change that: the children of a
 			// streamed cell all write to its slot.
 			return GalaxyGenerator.GenerateTierBatchGPU(
-				Cells, MidTierState.Buffers[0], Params.MidTier, 7, false, OutCounts);
+				Cells, MidTierState.Buffers[0], Params.Config.MidTier, 7, false, OutCounts);
 		};
 
 	// --- Small tier: neighborhood streaming ---
 	SmallTierConfig.TierName = TEXT("Small");
-	SmallTierConfig.GridDepth = Params.SmallTier.GridDepth;
-	SmallTierConfig.NeighborhoodRadius = Params.SmallTier.NeighborhoodRadius;
-	SmallTierConfig.SlotCapacity = Params.SmallTier.SlotCapacity;
+	SmallTierConfig.GridDepth = Params.Config.SmallTier.GridDepth;
+	SmallTierConfig.NeighborhoodRadius = Params.Config.SmallTier.NeighborhoodRadius;
+	SmallTierConfig.SlotCapacity = Params.Config.SmallTier.SlotCapacity;
 	SmallTierConfig.NiagaraAssets = { GalaxySmallCloud };
 	SmallTierConfig.bWantRotations = { false };
 	SmallTierConfig.OctreeInsertBufferIndex = 0;
@@ -542,7 +567,7 @@ void AGalaxyActor::BuildTierConfigs()
 // largest single cell. Subdivision does not change that: the children of a
 // streamed cell all write to its slot.
 			return GalaxyGenerator.GenerateTierBatchGPU(
-				Cells, SmallTierState.Buffers[0], Params.SmallTier, 13, false, OutCounts);
+				Cells, SmallTierState.Buffers[0], Params.Config.SmallTier, 13, false, OutCounts);
 		};
 
 	// Shared bounds convention — see the derivation in AUniverseActor::BuildTierConfigs. Tight half-bound is (2R+2) * CellHalfExtent; we provision 2 * (2R+1) to match the universe tiers. The previous (2R+1) * CellHalfExtent under-bounded by up to one half-cell when VT sat near a cell boundary, risking edge-cell culling pops.

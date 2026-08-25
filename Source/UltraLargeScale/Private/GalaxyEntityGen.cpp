@@ -42,7 +42,7 @@ namespace GalaxyEntityGen
 		// InParams or InTierParams after this point: the game thread is free to mutate
 		// them the instant this function returns, and a dangling reference into tier
 		// params is the kind of race that only reproduces under streaming load.
-		const FGalaxyDensityParams D = InParams.DensityParams;
+		const FGalaxyProceduralParams D = InParams.Procedural;
 		const double InvUnit = 1.0 / FMath::Max(InParams.UnitScale, UE_DOUBLE_SMALL_NUMBER);
 
 		const float InvGalaxyExtent =
@@ -115,7 +115,7 @@ namespace GalaxyEntityGen
 		struct FDispatchPayload
 		{
 			TArray<FGalaxyGenCell> Cells;
-			FGalaxyDensityParams Density;
+			FGalaxyProceduralParams Density;
 			TWeakObjectPtr<UTexture> Noise;
 			int32 EntityCapacity = 0;
 			int32 KeySeed = 0;
