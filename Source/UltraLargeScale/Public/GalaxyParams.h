@@ -108,24 +108,35 @@ struct ULTRALARGESCALE_API FGalaxyOrientationParams
 {
 	GENERATED_BODY()
 
-	/** Degrees. All zero is disc-up, normal along +Z.
+	/** The disc normal, in galaxy space. Normalized in the derivation, so magnitude is
+	 *  free. (0,0,1) is disc-up.
 	 *
-	 *  THREE INDEPENDENT RANGES ARE NOT A UNIFORM ORIENTATION. Euler angles rolled
-	 *  independently are uniform in ANGLE, not on the sphere, so disc normals bunch
-	 *  toward the poles and edge-on galaxies come out over-represented along one axis.
-	 *  Nothing about that looks broken -- it looks like a preferred direction in the
-	 *  universe. Range these for a CONSTRAINED orientation (a cluster that shares a
-	 *  plane, a deliberately edge-on type); for genuinely uniform orientation use
-	 *  ApplyGenerationLogic and FRandomStream::GetUnitVector, which samples the sphere
-	 *  correctly. */
+	 *  A NORMAL, NOT EULER ANGLES, so the value the universe already computes per
+	 *  particle -- a uniform unit vector, used for sprite orientation -- drops straight
+	 *  in with no conversion. Euler would need a convention translation, and a rotation
+	 *  convention guessed wrong renders plausibly rather than visibly.
+	 *
+	 *  NORMALLY INHERITED, NOT ROLLED. FGalaxySpawnConfig::bInheritParticleOrientation
+	 *  overwrites this at spawn from the parent particle, which is what keeps a galaxy
+	 *  facing the same way as the sprite that stood in for it a moment earlier. Ranging
+	 *  the components while that flag is set does nothing -- turn it off first.
+	 *
+	 *  MARSHALLED WITH FieldSpin as one float4 -- xyz normal, w spin -- under the single
+	 *  material parameter name "FieldNormal". Split here because the details panel and
+	 *  the archetype range list want them apart: a normal rolls as three components with
+	 *  a sampling caveat, a spin rolls as one clean scalar. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Orientation")
-	float FieldPitch = 0.0f;
+	FVector3f FieldNormal = FVector3f(0.0f, 0.0f, 1.0f);
 
+	/** Degrees about the normal. The one remaining freedom once the disc plane is
+	 *  fixed, and free to roll -- a spin is uniform on a circle, so unlike a normal it
+	 *  has no sampling subtlety. Never inherited; the particle sprite has no meaningful
+	 *  spin about its own axis.
+	 *
+	 *  Rides in w of the FieldNormal vector on the material side. There is no FieldSpin
+	 *  material parameter -- do not add one. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Orientation")
-	float FieldYaw = 0.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Orientation")
-	float FieldRoll = 0.0f;
+	float FieldSpin = 0.0f;
 };
 
 /** The spiral arms. Zeroing ArmDensity skips the entire arm merge loop
@@ -639,8 +650,9 @@ struct ULTRALARGESCALE_API FGalaxyProceduralParams
 		// to say so.
 		Out.InNoiseEnable = 1.0f;
 
-		Out.InFieldOrientation = FVector3f(
-			Orientation.FieldPitch, Orientation.FieldYaw, Orientation.FieldRoll);
+		Out.InFieldOrientation = FVector4f(
+			Orientation.FieldNormal.X, Orientation.FieldNormal.Y,
+			Orientation.FieldNormal.Z, Orientation.FieldSpin);
 	}
 };
 
@@ -806,8 +818,8 @@ struct ULTRALARGESCALE_API FGalaxyConfigParams
 		// NeighborhoodRadius = 0 -> 1x1x1 = 1 slot, exhaustive single-pass.
 		LargeTier.GridDepth = 1;
 		LargeTier.NeighborhoodRadius = 0;
-		LargeTier.GenerationSubdivision = 4;
-		LargeTier.SlotCapacity = 10000;
+		LargeTier.GenerationSubdivision = 3;
+		LargeTier.SlotCapacity = 6000;
 
 		MidTier.GridDepth = 3;
 		MidTier.NeighborhoodRadius = 1;
@@ -921,6 +933,21 @@ struct ULTRALARGESCALE_API FGalaxySpawnConfig
 	 *  rolling, which selects by weight. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy Spawn")
 	int32 DefaultArchetype = 0;
+
+	/** Take each galaxy's disc normal from its PARENT PARTICLE's rotation.
+	 *
+	 *  The universe already generates a uniform unit vector per particle and feeds it to
+	 *  Niagara for sprite orientation. Inheriting it means the galaxy faces the way the
+	 *  sprite that stood in for it was facing -- so flying in does not snap the disc to
+	 *  a new angle -- and it comes correctly distributed for free, which three
+	 *  independent Euler ranges never would.
+	 *
+	 *  WHILE THIS IS SET, an archetype's FieldNormal and any range on it are OVERWRITTEN
+	 *  at spawn. That is a deliberate, greppable override rather than a silent one: turn
+	 *  it off to author orientation per archetype. FieldSpin is never inherited and
+	 *  rolls normally either way. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy Spawn")
+	bool bInheritParticleOrientation = true;
 
 	/** One line per spawned galaxy naming the archetype and its silhouette
 	 *  parameters. The alternative is spawning and eyeballing, which is the whole cost

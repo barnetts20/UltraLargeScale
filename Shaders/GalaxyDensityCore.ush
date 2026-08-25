@@ -994,31 +994,55 @@ GalaxyDensityParams MakeGalaxyDensityParams(
     // material's Custom node calls this positionally and a Custom node fails at SHADER
     // compile rather than at build, so inserting an argument mid-list silently shifts
     // every pin after it. Appending only ever leaves the existing ones where they were.
-    float3 InFieldOrientation) // pitch, yaw, roll in DEGREES; zero is disc-up
+    float4 InFieldOrientation) // xyz disc normal in GALAXY space, w spin in DEGREES
 {
     GalaxyDensityParams P;
 
     // --- GLOBAL ORIENTATION ---
-    // Built once per thread, beside the arm hashes. Standard ZYX composition; the rows
-    // below are the TRANSPOSE of the rotation, which is its inverse for an orthonormal
-    // basis, because samples travel galaxy -> field and the authored angles describe
+    // Built once per thread, beside the arm hashes.
+    //
+    // A NORMAL AND A SPIN, not Euler angles. The universe layer already produces a
+    // uniform unit vector per particle for its sprite orientation, so taking a normal
+    // means the galaxy inherits it with NO CONVERSION -- and a conversion between
+    // rotation conventions is exactly the kind of blind guess that renders plausibly
+    // and wrongly. A normal also pins the disc plane directly, which is the thing being
+    // authored; the spin is the one remaining freedom.
+    //
+    // The rows are the TRANSPOSE of the basis, which is its inverse for an orthonormal
+    // one, because samples travel galaxy -> field while the normal describes
     // field -> galaxy.
     {
-        const float kDeg2Rad = 0.01745329252f;
-        float sp, cp, sy, cy, sr, cr;
-        sincos(InFieldOrientation.x * kDeg2Rad, sp, cp);
-        sincos(InFieldOrientation.y * kDeg2Rad, sy, cy);
-        sincos(InFieldOrientation.z * kDeg2Rad, sr, cr);
+        // COMPONENTWISE, AND NORMALIZED BY HAND. This file compiles as C++ too, through
+        // GalaxyHLSLShim.h, and the shim has neither swizzles nor normalize -- a struct
+        // member cannot present a .xyz the way an HLSL vector does. Shared code stays in
+        // the intersection of the two languages; dot and rsqrt are both in the shim.
+        float3 Raw = float3(InFieldOrientation.x, InFieldOrientation.y, InFieldOrientation.z);
+        float LenSq = dot(Raw, Raw);
 
-        P.FieldX = float3(cy * cp,
-                          cy * sp * sr - sy * cr,
-                          cy * sp * cr + sy * sr);
-        P.FieldY = float3(sy * cp,
-                          sy * sp * sr + cy * cr,
-                          sy * sp * cr - cy * sr);
-        P.FieldZ = float3(-sp,
-                          cp * sr,
-                          cp * cr);
+        // A ZERO NORMAL IS REACHABLE -- an unset FVector3f, or a rolled range that
+        // brackets the origin on all three components. rsqrt(0) is infinity, which would
+        // poison the whole basis and hand back a galaxy of NaNs. Disc-up is the same
+        // fallback the struct default uses.
+        float3 N = (LenSq > 1e-12f)
+            ? (Raw * rsqrt(LenSq))
+            : float3(0.0f, 0.0f, 1.0f);
+
+        // Duff et al. branchless orthonormal basis. BRANCHLESS MATTERS AT THE POLE: the
+        // usual cross-with-an-arbitrary-axis construction degenerates as the normal
+        // approaches it, and the sign trick here is exactly what keeps N.z = -1 finite.
+        float s = (N.z >= 0.0f) ? 1.0f : -1.0f;
+        float a = -1.0f / (s + N.z);
+        float b = N.x * N.y * a;
+
+        float3 T = float3(1.0f + s * N.x * N.x * a, s * b, -s * N.x);
+        float3 B = float3(b, s + N.y * N.y * a, -N.y);
+
+        float sn, cs;
+        sincos(InFieldOrientation.w * 0.01745329252f, sn, cs);
+
+        P.FieldX = cs * T + sn * B;
+        P.FieldY = cs * B - sn * T;
+        P.FieldZ = N;
     }
 
     P.BoundsFadeStart = InBoundsFadeStart;

@@ -147,7 +147,7 @@ public:
 		SHADER_PARAMETER(float, InBackgroundConcentration)
 		SHADER_PARAMETER(float, InNoiseRidged)
 		SHADER_PARAMETER(float, InNoiseEnable)
-		SHADER_PARAMETER(FVector3f, InFieldOrientation)
+		SHADER_PARAMETER(FVector4f, InFieldOrientation)
 		END_SHADER_PARAMETER_STRUCT()
 
 		/** Which pass this permutation compiles.

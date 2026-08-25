@@ -374,6 +374,13 @@ void UniverseDataGenerator::GenerateSmallTierNode(
 
 		FVector CompVec = Stream.GetUnitVector();
 
+		// DRAWN HERE, matching the large and mid generators, so the stream advances
+		// identically across all three. Small-tier particles were the only ones with no
+		// rotation: the buffer allocates the array (bWantRotations is set on this tier)
+		// and it stayed zeroed, so the sprites had no orientation and every galaxy born
+		// from a small-tier particle inherited nothing and came out disc-up.
+		const FVector NodeRotation = Stream.GetUnitVector();
+
 		const float ScaleSample = Stream.FRand();
 		const double Scale = FPointData::SampleScaleFromDistribution(
 			Params.SmallTier.MinScale,
@@ -387,6 +394,7 @@ void UniverseDataGenerator::GenerateSmallTierNode(
 		const int32 Idx = BufferStart + ActualCount;
 		InBuffer.Positions[Idx] = CandidatePositions[i];
 		InBuffer.Extents[Idx] = FinalExtent;
+		InBuffer.Rotations[Idx] = NodeRotation;
 		InBuffer.Colors[Idx] = FLinearColor(FMath::Abs(CompVec.X), FMath::Abs(CompVec.Y), FMath::Abs(CompVec.Z));
 
 		ActualCount++;

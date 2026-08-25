@@ -177,7 +177,7 @@ float InBulgeConcentration;
 float InBackgroundConcentration;
 float InNoiseRidged;
 float InNoiseEnable;
-float3 InFieldOrientation;
+float4 InFieldOrientation;
 
 // Lanes per group, and therefore probes per cell. Both groupshared arrays are sized on
 // it and both reductions iterate to it; there is deliberately no second constant.
@@ -402,8 +402,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
         // so this direction has no such case -- and it lets Slot and CellIndex stay
         // exact at any magnitude rather than only to 2^24.
         OutEntities[Base + 0u] = uint4(asuint(E.Pos), asuint(E.Extent));
-        OutEntities[Base + 1u] = uint4(
-            P.PackDecor(E.Decor), Slot, CellIndex, asuint(E.Density));
+        OutEntities[Base + 1u] = uint4(P.PackDecor(E.Decor), Slot, CellIndex, asuint(E.Density));
     }
 #endif
 }

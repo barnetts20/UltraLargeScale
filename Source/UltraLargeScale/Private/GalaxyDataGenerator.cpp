@@ -86,7 +86,8 @@ GalaxyHLSL::GalaxyDensityParams FGalaxyProceduralParams::ToDerived() const
 		1.0f,
 		// APPENDED. See the note on MakeGalaxyDensityParams: the material calls it
 		// positionally and fails only at shader compile, so nothing is ever inserted.
-		float3(Orientation.FieldPitch, Orientation.FieldYaw, Orientation.FieldRoll));
+		float4(Orientation.FieldNormal.X, Orientation.FieldNormal.Y,
+			Orientation.FieldNormal.Z, Orientation.FieldSpin));
 }
 
 #pragma endregion

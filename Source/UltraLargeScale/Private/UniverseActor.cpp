@@ -669,13 +669,35 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 		}
 	}
 
-	// NOTHING ROLLS Params.Rotation ANY MORE. It was written here and read by nobody,
-	// which is why every galaxy came out disc-up; orientation now lives in the field, on
-	// FGalaxyProceduralParams::Orientation, where both the placement dispatch and the
-	// material read it from the same derivation.
+	// ORIENTATION INHERITED FROM THE PARENT PARTICLE.
 	//
-	// FBaseParams::Rotation stays for the star-system layer, which has its own use for
-	// it. GalaxySeed::Rotation is likewise still declared and now unused at this layer.
+	// The buffer rotation is already a uniform unit vector -- see
+	// UniverseDataGenerator, which draws it with GetUnitVector and hands it to Niagara
+	// for sprite orientation. Reusing it costs one array read, arrives correctly
+	// distributed on the sphere, and keeps the galaxy facing the way the sprite that
+	// stood in for it was facing, so approaching one does not snap the disc.
+	//
+	// The same single-buffer read guard as the position above: the rotations live in
+	// Buffers[0], the one tier buffer that requests them. FieldNormal keeps whatever
+	// Generate produced when the guard fails or the flag is off, so this can only ever
+	// specialise the archetype's value, never leave it undefined.
+	//
+	// NOTHING WRITES Params.Rotation ANY MORE. It was rolled here and read by nobody,
+	// which is why every galaxy came out disc-up. FBaseParams::Rotation stays for the
+	// star-system layer, which has its own use for it.
+	if (GalaxySpawnConfig.bInheritParticleOrientation && AbsIdx >= 0 &&
+		MatchedState.Buffers.Num() > 0 && !MatchedState.bUpdateInProgress.load())
+	{
+		const FNiagaraParticleBuffer& OrientBuf = MatchedState.Buffers[0];
+		if (OrientBuf.Rotations.IsValidIndex(AbsIdx))
+		{
+			const FVector& Normal = OrientBuf.Rotations[AbsIdx];
+			if (!Normal.IsNearlyZero())
+			{
+				P.Procedural.Orientation.FieldNormal = FVector3f(Normal);
+			}
+		}
+	}
 
 	// Typed re-init: sets Params, arms deferred placement (PendingNodeCenter =
 	// ParticlePos), hides, and runs the async init chain. FinalizeGalaxyPlacement
