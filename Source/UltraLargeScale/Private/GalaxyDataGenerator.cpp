@@ -83,7 +83,10 @@ GalaxyHLSL::GalaxyDensityParams FGalaxyProceduralParams::ToDerived() const
 		// The shim's Texture3D returns the neutral 0.5, so every noise term is zero
 		// and this field reduces to the analytic one whatever is passed here. Kept at
 		// 1 to match the compute path rather than describing a mode nothing uses.
-		1.0f);
+		1.0f,
+		// APPENDED. See the note on MakeGalaxyDensityParams: the material calls it
+		// positionally and fails only at shader compile, so nothing is ever inserted.
+		float3(Orientation.FieldPitch, Orientation.FieldYaw, Orientation.FieldRoll));
 }
 
 #pragma endregion

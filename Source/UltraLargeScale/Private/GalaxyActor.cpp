@@ -362,6 +362,10 @@ void AGalaxyActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
 	InMID->SetVectorParameterValue(TEXT("NoiseOffset"), FLinearColor(D.Noise.NoiseOffset.X, D.Noise.NoiseOffset.Y, D.Noise.NoiseOffset.Z, 0.0f));
 	InMID->SetScalarParameterValue(TEXT("NoiseRidged"), D.Noise.NoiseRidged);
 
+	InMID->SetScalarParameterValue(TEXT("FieldPitch"), D.Orientation.FieldPitch);
+	InMID->SetScalarParameterValue(TEXT("FieldYaw"), D.Orientation.FieldYaw);
+	InMID->SetScalarParameterValue(TEXT("FieldRoll"), D.Orientation.FieldRoll);
+
 	// --- RENDER ---
 	InMID->SetScalarParameterValue(TEXT("MasterDensityScale"), D.Master.MasterDensityScale);
 	InMID->SetScalarParameterValue(TEXT("MasterDensityPower"), D.Master.MasterDensityPower);

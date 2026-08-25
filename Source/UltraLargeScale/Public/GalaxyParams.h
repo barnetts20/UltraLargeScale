@@ -90,6 +90,44 @@ namespace GalaxySeed
  *  is namespace-qualified everywhere outside that file. */
 namespace GalaxyHLSL { struct GalaxyDensityParams; }
 
+/** GLOBAL ORIENTATION of the whole field. Applied at the sample entry point, so every
+ *  layer, the noise frame and the m=1 modes all turn together.
+ *
+ *  IN THE FIELD, NOT ON THE ACTOR TRANSFORM, and that is not the obvious choice. The
+ *  scene graph would rotate the proxy and the Niagara components for free -- but it
+ *  would also rotate the octree, the tier grids and VirtualTraversal, and the streaming
+ *  scheme assumes galaxy-local and world axes coincide (AGalaxyActor::UpdateSpawnScan
+ *  uses VirtualTraversal, a WORLD delta, directly as a LOCAL position). Rotating here
+ *  costs three dot products per sample and leaves all of that untouched, because a
+ *  rotation preserves dot(p,p) and every bounds test in the system is a radius.
+ *
+ *  It also means orientation reaches both paths through MakeGalaxyDensityParams like
+ *  every other field parameter, so placement and render cannot disagree about it. */
+USTRUCT(BlueprintType)
+struct ULTRALARGESCALE_API FGalaxyOrientationParams
+{
+	GENERATED_BODY()
+
+	/** Degrees. All zero is disc-up, normal along +Z.
+	 *
+	 *  THREE INDEPENDENT RANGES ARE NOT A UNIFORM ORIENTATION. Euler angles rolled
+	 *  independently are uniform in ANGLE, not on the sphere, so disc normals bunch
+	 *  toward the poles and edge-on galaxies come out over-represented along one axis.
+	 *  Nothing about that looks broken -- it looks like a preferred direction in the
+	 *  universe. Range these for a CONSTRAINED orientation (a cluster that shares a
+	 *  plane, a deliberately edge-on type); for genuinely uniform orientation use
+	 *  ApplyGenerationLogic and FRandomStream::GetUnitVector, which samples the sphere
+	 *  correctly. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Orientation")
+	float FieldPitch = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Orientation")
+	float FieldYaw = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Orientation")
+	float FieldRoll = 0.0f;
+};
+
 /** The spiral arms. Zeroing ArmDensity skips the entire arm merge loop
  *  including the sixteen arm hashes -- most of the field's cost -- which is what makes a
  *  globular archetype cheap rather than merely correct. */
@@ -468,6 +506,11 @@ struct ULTRALARGESCALE_API FGalaxyProceduralParams
 	float StarDensityScale = 1.0f;
 #pragma endregion
 
+	/** Applies to everything below. Rolled like any other procedural member -- but see
+	 *  the uniformity caveat on FGalaxyOrientationParams before ranging all three. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy")
+	FGalaxyOrientationParams Orientation;
+
 #pragma region Layers
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy")
 	FGalaxyArmParams Arms;
@@ -595,6 +638,9 @@ struct ULTRALARGESCALE_API FGalaxyProceduralParams
 		// here would make the placed field differ from the drawn one with nothing
 		// to say so.
 		Out.InNoiseEnable = 1.0f;
+
+		Out.InFieldOrientation = FVector3f(
+			Orientation.FieldPitch, Orientation.FieldYaw, Orientation.FieldRoll);
 	}
 };
 

@@ -177,6 +177,7 @@ float InBulgeConcentration;
 float InBackgroundConcentration;
 float InNoiseRidged;
 float InNoiseEnable;
+float3 InFieldOrientation;
 
 // Lanes per group, and therefore probes per cell. Both groupshared arrays are sized on
 // it and both reductions iterate to it; there is deliberately no second constant.
@@ -214,7 +215,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
         InDiscLopsidedAmount, InDiscLopsidedPhase, InArmCount, InArmAsymSeed,
         InArmProfileExponent, InArmRadialGrowth, InArmHostFalloff,
         InBulgeConcentration, InBackgroundConcentration,
-        InNoiseRidged, InNoiseEnable);
+        InNoiseRidged, InNoiseEnable, InFieldOrientation);
 
     const float InvAnchor = 1.0f / max(BudgetAnchor, 1e-6f);
     const float Exponent = max(PlaceSpawnExponent, 1e-3f);

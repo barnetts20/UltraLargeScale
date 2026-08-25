@@ -164,6 +164,27 @@ struct GalaxyDensityParams
     float DiscLopsidedAmount; // m=1 in-plane density mode; 0.2-0.4 typical
     float DiscLopsidedPhase; // radians; azimuth of the dense side
 
+    // --- GLOBAL ORIENTATION ---
+    // Rows of the INVERSE (transposed) basis, so a sample position is carried from
+    // galaxy space into field space by three dots. Identity when the angles are zero.
+    float3 FieldX;
+    float3 FieldY;
+    float3 FieldZ;
+
+    // Galaxy space -> field space. THE ONE PLACE the orientation is applied, called at
+    // the top of both sample entry points so nothing downstream knows it exists.
+    //
+    // A ROTATION IS AN ISOMETRY, which is what makes this safe to bolt on: dot(p,p) is
+    // unchanged, so every bounds test -- the shader's rBoundsSq, the C++ cell cull's
+    // nearest-point dot -- keeps working untouched. That is why orientation lives here
+    // rather than on the actor transform, where it would have rotated the octree, the
+    // tier grids and VirtualTraversal out from under a streaming scheme that assumes
+    // galaxy-local and world axes coincide.
+    float3 ToFieldSpace(float3 InPos)
+    {
+        return float3(dot(FieldX, InPos), dot(FieldY, InPos), dot(FieldZ, InPos));
+    }
+
     // --- ARMS ---
     float ArmSpiralK0; // signed 1/tan(pitch); sign sets chirality
     float ArmPitchFactorMax; // 1 + |ArmAsymPitch|; bounds the angular reject
@@ -671,15 +692,19 @@ struct GalaxyDensityParams
     // rejection sampler calls, and what the shader produces at NoiseEnable = 0.
     float SampleAnalytic(float3 InNormPos)
     {
-        // Squared, so out-of-bounds samples never pay for the sqrt.
+        // Squared, so out-of-bounds samples never pay for the sqrt. BEFORE the rotation,
+        // which cannot change it -- and this way the majority of samples, which are out
+        // of bounds, never pay for the basis transform either.
         float rBoundsSq = dot(InNormPos, InNormPos);
         if (rBoundsSq >= 1.0f)
         {
             return 0.0f;
         }
 
+        float3 FieldPos = ToFieldSpace(InNormPos);
+
         float3 Zero = float3(0.0f, 0.0f, 0.0f);
-        return Compose(SampleLayersWarped(InNormPos, Zero, Zero), rBoundsSq);
+        return Compose(SampleLayersWarped(FieldPos, Zero, Zero), rBoundsSq);
     }
 
     // ======================================================================
@@ -964,9 +989,37 @@ GalaxyDensityParams MakeGalaxyDensityParams(
     float InBulgeConcentration,
     float InBackgroundConcentration,
     float InNoiseRidged,
-    float InNoiseEnable)
+    float InNoiseEnable,
+    // APPENDED, not inserted, and it stays that way for anything added later. The
+    // material's Custom node calls this positionally and a Custom node fails at SHADER
+    // compile rather than at build, so inserting an argument mid-list silently shifts
+    // every pin after it. Appending only ever leaves the existing ones where they were.
+    float3 InFieldOrientation) // pitch, yaw, roll in DEGREES; zero is disc-up
 {
     GalaxyDensityParams P;
+
+    // --- GLOBAL ORIENTATION ---
+    // Built once per thread, beside the arm hashes. Standard ZYX composition; the rows
+    // below are the TRANSPOSE of the rotation, which is its inverse for an orthonormal
+    // basis, because samples travel galaxy -> field and the authored angles describe
+    // field -> galaxy.
+    {
+        const float kDeg2Rad = 0.01745329252f;
+        float sp, cp, sy, cy, sr, cr;
+        sincos(InFieldOrientation.x * kDeg2Rad, sp, cp);
+        sincos(InFieldOrientation.y * kDeg2Rad, sy, cy);
+        sincos(InFieldOrientation.z * kDeg2Rad, sr, cr);
+
+        P.FieldX = float3(cy * cp,
+                          cy * sp * sr - sy * cr,
+                          cy * sp * cr + sy * sr);
+        P.FieldY = float3(sy * cp,
+                          sy * sp * sr + cy * cr,
+                          sy * sp * cr - cy * sr);
+        P.FieldZ = float3(-sp,
+                          cp * sr,
+                          cp * cr);
+    }
 
     P.BoundsFadeStart = InBoundsFadeStart;
     P.BoundsFadeStartSq = InBoundsFadeStart * InBoundsFadeStart;
@@ -1165,14 +1218,21 @@ float GalaxyNoise(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler
 // displaces the position they are evaluated at, but modulation is sampled AFTER,
 // gated on the layers being non-zero -- most of the volume is empty, so that gate
 // skips the octave loop for the majority of march steps.
-float GalaxySample(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 NormPos)
+float GalaxySample(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 InSamplePos)
 {
-    // Squared, so out-of-bounds samples never pay for the sqrt.
-    float rBoundsSq = dot(NormPos, NormPos);
+    // Squared, so out-of-bounds samples never pay for the sqrt. BEFORE the rotation,
+    // which cannot change it -- and this way the majority of samples, which are out of
+    // bounds, never pay for the basis transform either.
+    float rBoundsSq = dot(InSamplePos, InSamplePos);
     if (rBoundsSq >= 1.0f)
     {
         return 0.0f;
     }
+
+    // GALAXY SPACE -> FIELD SPACE, once, here. Everything below -- layers, noise frame,
+    // warp lookup, the m=1 modes -- works in field space and is unaware the galaxy is
+    // oriented at all.
+    float3 NormPos = P.ToFieldSpace(InSamplePos);
 
     bool bNoise = P.NoiseEnable > 0.5f;
 
