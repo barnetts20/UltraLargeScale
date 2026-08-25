@@ -1,8 +1,16 @@
 #pragma once
 
 // UniverseDensity.ush
-// Shader-side wrapper around UniverseDensityCore.ush. Everything here touches a
-// texture, which is exactly what the core cannot do if C++ is to compile it.
+// The ray march, and the noise modulation that rides on it. The domain warp used to
+// live here in spirit -- everything touching a texture did -- but the core now takes
+// a Texture3D directly and warps inside the ranking, so this file's job has narrowed
+// to marching the volume and multiplying the web by a detail field.
+//
+// The texture and sampler are threaded down into the core rather than sampled here.
+// The warp has to happen BEFORE the neighbourhood search, on the cell-and-fraction
+// split, and there is no way to hand a warped position across this boundary without
+// reconstructing a float3 -- which stops resolving a fraction of a cell long before
+// the magnitudes this layer reaches.
 //
 // The proxy for this layer is pegged to the camera, so it never moves through the
 // field -- the FIELD SCROLLS UNDER IT. That offset is threaded through every entry
@@ -61,6 +69,12 @@ float UniverseFBm(UniverseDensityParams P, Texture3D InTex, SamplerState InSampl
 // than against zero -- otherwise the gate never fires and costs a comparison for
 // nothing.
 //
+// The noise coordinate is still built by reconstructing a float3 and wrapping the
+// cell offset at 512. The warp no longer does this -- it masks the integer cell and
+// converts only the remainder, which is exact at any magnitude -- and the same
+// treatment is the obvious next thing to give the noise, which would remove the 512
+// wrap along with the precision floor underneath it.
+//
 // The noise coordinate scrolls with the field. If it did not, the texture detail
 // would sit still in the proxy while the web moved through it, which reads as the
 // structure sliding under a fixed layer of grain. It scrolls on the cell offset
@@ -75,7 +89,8 @@ float2 UniverseSampleStep(UniverseDensityParams P, Texture3D InTex, SamplerState
                           float3 NormPos, float3 OffsetCell, float3 OffsetFrac,
                           float4 InAxes)
 {
-    float2 r = P.SampleAtPositionStep(NormPos, OffsetCell, OffsetFrac, InAxes);
+    float2 r = P.SampleAtPositionStep(InTex, InSampler, NormPos, OffsetCell,
+                                      OffsetFrac, InAxes);
     float d = r.x;
 
     bool bNoise = (P.NoiseEnable > 0.5) && (P.NoiseAmount != 0.0);

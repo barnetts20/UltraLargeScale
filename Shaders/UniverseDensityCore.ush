@@ -1,9 +1,15 @@
 #pragma once
 
 // UniverseDensityCore.ush
-// Analytic cosmic-web density field. NO RESOURCES: no Texture3D, SamplerState or
-// texture fetch, so C++ compiles it behind GalaxyHLSLShim.h as well as the shader
-// compiler does. Texture sampling and the ray march live in UniverseDensity.ush.
+// Cosmic-web density field. TAKES RESOURCES: the domain warp is a Texture3D fetch,
+// so this file is compiled by C++ behind GalaxyHLSLShim.h exactly as the galaxy core
+// is -- the shim stubs Texture3D::SampleLevel to a neutral 0.5, and the C++ field
+// therefore reduces to the UNWARPED analytic web while the shader gets the warped
+// one. That divergence is deliberate and bounded: it is a displacement of at most
+// WarpAmount cells, it affects nothing that is currently consuming the CPU field,
+// and entity generation for this layer lands on the compute harness the galaxy layer
+// already uses, which samples the same texture the shader does. UniverseDensity.ush
+// is now the ray march and the noise modulation and nothing else.
 //
 // PARITY RULES -- both compilers see this file:
 //   - Suffix every float literal (0.5f, not 0.5). C++ types an unsuffixed literal as
@@ -35,7 +41,8 @@
 // corrections, none of which cost a hash in the 27-cell loop:
 //   - a per-node additive radius offset, so voids differ in size
 //   - a per-node anisotropic metric, so bisectors are quadrics rather than planes
-//   - one coarse-lattice fetch supplying a domain warp and a regional richness
+//   - one volume-texture fetch supplying the domain warp
+//   - one coarse hash-lattice fetch supplying the regional richness
 //
 // COORDINATES: sampled as an integer cell plus a fractional offset, not a single
 // float3. That is not premature -- virtual traversal reaches magnitudes near 1e11,
@@ -83,20 +90,108 @@
 // normalized to within a tenth of a percent.
 #define UNIVERSE_NORMALIZE_ANISO_AXIS 0
 
-// Coarse lattice period in cells, as a power of two so the cell index splits by
-// shift and mask instead of dividing. Exact at any magnitude, which a float division
-// by the lattice size would not be out at 1e11.
+// ==========================================================================
+// THE DOMAIN WARP
+// ==========================================================================
+// A volume-texture fetch, not the hash value lattice. Set UNIVERSE_WARP_TEXTURE to 0
+// to get the lattice path back; both are kept because they are worth comparing and
+// the parameters mean different things in each.
 //
-// ONE cell, not four. What breaks up the polygonal read is not the warp's amplitude
-// but its SHEAR, amplitude over period: a warp whose period is several cells is
-// near-constant across a single void, so it translates whole regions rigidly and the
-// straight Voronoi edges arrive straight. Shear is what curves them.
+// WHY THE TEXTURE. Cost is the smaller half of it -- the lattice is eight CellHash
+// calls plus a quintic trilinear blend, roughly 190 ALU on every march step, against
+// one fetch on a unit that is otherwise idle during a march. The larger half is that
+// a hash lattice CANNOT be incommensurate with the cell grid. Its index is derived
+// by shifting the cell index, so its period is structurally forced to a power-of-two
+// multiple of the cell size, and its own lattice planes therefore land on cell planes
+// forever. A texture's frequency is a float, its orientation is free, and neither has
+// to agree with anything.
 //
-// The fold limit is shear ~ 0.53. A quintic-faded value lattice has a maximum
-// gradient of about 1.88 * A / P, and the displacement field folds -- neighbouring
-// samples cross over and the web tears rather than bends -- once that reaches one.
-// The clamp in MakeUniverseDensityParams is derived from the period for that reason;
-// changing this define changes the usable amplitude with it.
+// WHAT IT DOES NOT FIX. The warp is not the cause of the cell-boundary artifact --
+// it is an amplifier of it. High shear stretches the effective neighbourhood and
+// pushes true neighbours out of the searched 3x3x3 span, so the damage concentrates
+// where the warp shears hardest, not on the warp's own planes. Changing how the warp
+// is generated moves that around; it does not remove it. The search span is the thing
+// to fix, separately.
+#define UNIVERSE_WARP_TEXTURE 1
+
+// Precision wrap, in cells, as a power of two. The UV is built as
+//     (cell & MASK + frac) * WarpScale
+// so the integer part is MASKED, never converted -- exact at 1e11, where a UV derived
+// from a reconstructed float3 world position has no fractional bits left at all. This
+// is the whole reason a texture was previously ruled out at this layer, and masking
+// the cell index is what removes the objection.
+//
+// 4096 cells. The wrap is seamless rather than merely distant: MakeUniverseDensityParams
+// QUANTIZES WarpScale so that WRAP * WarpScale is a whole number, which makes the UV
+// on either side of the wrap congruent modulo one and therefore identical under the
+// sampler's repeat addressing -- value and every derivative. The quantum is 1/4096 of
+// a repeat per cell, far below any tuning granularity that matters.
+//
+// Verified rather than assumed: stepping across cell 4096, where the mask rolls over,
+// the largest density change is 7.2e-2 against 3.5e-2 for the same step taken at an
+// ordinary cell plane -- the same order, so there is no seam, only ordinary variation.
+// Measured the same way at shifts 8, 10 and 14 the wrap is likewise indistinguishable
+// from an ordinary plane, so this is free to move: it trades how far you can travel
+// before the warp pattern repeats against nothing much. Raise it if 4096 cells of
+// non-repetition is ever reachable in one session.
+//
+// The wrap also bounds the UV magnitude at 4096 * WarpScale, which is what keeps
+// float32 resolving a fraction of a texel there.
+#ifndef UNIVERSE_WARP_WRAP_SHIFT
+#define UNIVERSE_WARP_WRAP_SHIFT 12
+#endif
+#define UNIVERSE_WARP_WRAP_MASK ((1 << UNIVERSE_WARP_WRAP_SHIFT) - 1)
+#define UNIVERSE_WARP_WRAP ((float) (1 << UNIVERSE_WARP_WRAP_SHIFT))
+
+// Displaces the warp fetch off the noise fetch. Both read the same texture, and
+// without this the warp correlates with the detail it is supposed to be displacing.
+// Whole numbers would be invisible under repeat addressing, so these are fractional.
+#define UNIVERSE_WARP_TEX_OFFSET_X 0.317f
+#define UNIVERSE_WARP_TEX_OFFSET_Y 0.631f
+#define UNIVERSE_WARP_TEX_OFFSET_Z 0.149f
+
+// The largest gradient the FILTERED texture reaches, per unit UV. A property of the
+// asset, not of this file, and it feeds two things that both go quietly wrong if it
+// is understated: the march's empty-space bound, and the fold limit.
+//
+// The displacement gradient per cell is  WarpAmount * G * WarpScale. Once that
+// reaches one the warp folds -- neighbouring samples cross over and the web tears
+// rather than bends -- so the usable amplitude is 1 / (G * WarpScale).
+//
+// 16 is a measured default, not a guess, and the first guess of 4 was wrong by 3.5x.
+// A 64^3 three-octave smooth noise volume -- about as tame as a warp asset gets --
+// measures a maximum |dTex/dUV| of 14.09. Trilinear filtering bounds the worst case
+// at the texture resolution itself, so a 128^3 volume of salt-and-pepper would need
+// 128 here.
+//
+// The fold prediction was checked against that measurement by walking the map
+// x -> x + disp(x) and counting non-monotone steps, at WarpScale 0.25:
+//
+//   WarpAmount   true shear (A*14.09*S)   steps that folded
+//     0.25              0.88                  0 of 153300
+//     0.50              1.76              0.33%
+//     1.00              3.52              6.99%
+//     2.00              7.05             20.99%
+//
+// Nothing folds below a shear of one and folding sets in immediately above it, which
+// is the model working. MEASURE THIS AGAIN IF THE WARP ASSET IS SWAPPED, and err
+// high: understating it makes warpJac too small, which makes InvLipschitz too large,
+// which lets the march skip further than it may and step over the occasional feature
+// while the mean error stays negligible. That is the shape of bug that survives an
+// eyeball test.
+#define UNIVERSE_WARP_TEX_GRADIENT 16.0f
+
+// --- the hash value lattice, retained for UNIVERSE_WARP_TEXTURE 0 -------------
+// Period in cells, as a power of two so the cell index splits by shift and mask
+// instead of dividing.
+//
+// What breaks up the polygonal read is not the warp's amplitude but its SHEAR,
+// amplitude over period: a warp whose period is several cells is near-constant across
+// a single void, so it translates whole regions rigidly and the straight Voronoi edges
+// arrive straight. Shear is what curves them.
+//
+// The fold limit is shear ~ 0.53. A quintic-faded value lattice has a maximum gradient
+// of about 1.88 * A / P, and the displacement folds once that reaches one.
 #define UNIVERSE_WARP_SHIFT 2
 #define UNIVERSE_WARP_MASK ((1 << UNIVERSE_WARP_SHIFT) - 1)
 #define UNIVERSE_WARP_INV (1.0f / (float) (1 << UNIVERSE_WARP_SHIFT))
@@ -155,6 +250,11 @@ struct UniverseDensityParams
     float VoidSizeSkew; // >1 makes large voids rare and small ones common
     float Anisotropy; // per-node ellipsoid eccentricity; 0 = spherical
     float WarpAmount; // domain warp displacement, cell units
+    // Texture repeats per CELL, quantized to 1/UNIVERSE_WARP_WRAP so the precision
+    // wrap stays seamless. Small values are a broad slow warp, large values a fine
+    // one; shear -- what actually curves the web -- is WarpAmount * WarpScale, so the
+    // two knobs are not independent and the fold limit couples them.
+    float WarpScale;
     // Four regional axes, not nine independent knobs. One lattice fetch yields four
     // channels, and tying several parameters to each makes a region read as a KIND
     // of universe -- rich and tangled, or sparse and knotty -- rather than as a soup
@@ -164,7 +264,7 @@ struct UniverseDensityParams
     float RegionTurbulence; // warp and anisotropy: how contorted the web is
     float RegionVoidScale; // void size spread and skew: how uneven the voids are
     float InvLipschitz; // cells of guaranteed-empty travel per unit of wall slack
-    float bWarpEnable; // skips the 8-hash warp fetch when the warp is off
+    float bWarpEnable; // skips the warp fetch entirely when the warp is off
     float bRegionEnable; // skips the 8-hash regional fetch when variance is zero
 
     // --- BOUNDS ---
@@ -282,9 +382,17 @@ struct UniverseDensityParams
     // THE COARSE LATTICE
     // ======================================================================
 
-    // Shared trilinear value fetch on a lattice InShift powers of two coarser than
-    // the cell grid. Both the warp and the regional variation use it; they differ
-    // only in period and in which hash offsets they take.
+    // Trilinear value fetch on a lattice InShift powers of two coarser than the cell
+    // grid. The regional variation runs on this; so does the warp when
+    // UNIVERSE_WARP_TEXTURE is 0. They differ only in period and in which hash
+    // offsets they take.
+    //
+    // The regional axes stay on the hash rather than following the warp onto a
+    // texture, and the reason is the one already given at UNIVERSE_REGION_SHIFT: they
+    // are fetched once per ray and the CPU has to be able to reproduce them exactly
+    // for placement, which a filtered texture fetch cannot promise. The warp has
+    // neither constraint -- it is per sample, and a displacement the CPU reproduces
+    // approximately is a placement that lands approximately on the drawn filament.
     //
     // The cell index splits by arithmetic shift and two's-complement mask rather
     // than dividing. Both floor toward negative infinity in both languages, so
@@ -582,7 +690,12 @@ struct UniverseDensityParams
     // of one lattice cell and holding the axes constant along it changes the field by
     // less than the dither. It was costing 8 hashes on every one of 256 steps to
     // resolve a variation that cannot occur within a single ray.
-    float2 SampleCellStep(int InCellX, int InCellY, int InCellZ, float3 InFrac,
+    // Takes the texture and sampler because the warp is a fetch. Threaded through
+    // rather than held as a struct member: HLSL resource types in a struct that is
+    // also constructed as a local are a portability problem, and the galaxy core
+    // settled the same question the same way.
+    float2 SampleCellStep(Texture3D InTex, SamplerState InSampler,
+                          int InCellX, int InCellY, int InCellZ, float3 InFrac,
                           float4 InAxes)
     {
         int cx = InCellX;
@@ -609,6 +722,24 @@ struct UniverseDensityParams
             // inverted, so this is the reciprocal of the width multiplier.
             mInvWidth = 1.0f / max(1.0f + a.x * 0.6f, 1e-3f);
 
+            // Turbulence drives the warp AMOUNT and the anisotropy together, which
+            // is what makes a region read as contorted rather than merely displaced.
+            //
+            // IT DOES NOT DRIVE WarpScale, and the asymmetry is not an oversight. The
+            // amount multiplies the displacement, which is bounded by the amplitude.
+            // The scale multiplies a coordinate that reaches UNIVERSE_WARP_WRAP --
+            // 4096 -- before the mask closes it, so a regional variation of d in the
+            // scale shifts the UV by up to 4096*d. At the 32-cell regional period and
+            // RegionTurbulence 0.3, d across a single cell is about 0.019, which is
+            // seventy-eight texture repeats: the fetch lands somewhere unrelated and
+            // the warp field tears rather than bends. ANYTHING MULTIPLYING THE WRAPPED
+            // COORDINATE HAS TO BE UNIFORM ACROSS THE DRAW, for the same reason
+            // CellSize does -- see the note in RegionAxes.
+            //
+            // If a region needs to look finer-grained rather than just more displaced,
+            // the way to get it is a second fetch at a fixed higher scale whose
+            // AMPLITUDE is regionally modulated. The frequency stays put and only the
+            // mix moves, which costs one more fetch and no correctness.
             mAniso = 1.0f + a.z;
             mWarp = 1.0f + a.z;
 
@@ -618,6 +749,37 @@ struct UniverseDensityParams
 
         if (bWarpEnable > 0.5f)
         {
+#if UNIVERSE_WARP_TEXTURE
+            // CELL-RELATIVE UV. The integer cell is MASKED and only then converted,
+            // so nothing ever holds 1e11 in a float and the coordinate is exact at
+            // any magnitude the traversal reaches. WarpScale is pre-quantized so the
+            // masked wrap is congruent modulo one and the sampler's repeat addressing
+            // closes it seamlessly.
+            float3 uv = float3(
+                (float(cx & UNIVERSE_WARP_WRAP_MASK) + frac.x) * WarpScale
+                    + UNIVERSE_WARP_TEX_OFFSET_X,
+                (float(cy & UNIVERSE_WARP_WRAP_MASK) + frac.y) * WarpScale
+                    + UNIVERSE_WARP_TEX_OFFSET_Y,
+                (float(cz & UNIVERSE_WARP_WRAP_MASK) + frac.z) * WarpScale
+                    + UNIVERSE_WARP_TEX_OFFSET_Z);
+
+            // SampleLevel, not Sample. Inside a dynamic loop the derivatives that
+            // drive mip selection are undefined, and the galaxy core makes the same
+            // call for the same reason.
+            float4 v = InTex.SampleLevel(InSampler, uv, 0.0f);
+
+            float amp = WarpAmount * mWarp;
+
+            // Centred and scaled, NOT doubled. The lattice path below builds its
+            // displacement as (v - 0.5) * 2 * amp, so a WarpAmount tuned against the
+            // lattice has to be DOUBLED coming over here to displace by the same
+            // distance. Deliberate rather than an oversight: amplitude is now the
+            // peak displacement in cells directly, which is what the fold limit and
+            // the march's Lipschitz bound are both written in terms of.
+            float wx = frac.x + (v.x - 0.5f) * amp;
+            float wy = frac.y + (v.y - 0.5f) * amp;
+            float wz = frac.z + (v.z - 0.5f) * amp;
+#else
             float4 v = ValueLattice(cx, cy, cz, frac,
                                     UNIVERSE_WARP_SHIFT, UNIVERSE_WARP_MASK,
                                     UNIVERSE_WARP_INV,
@@ -629,7 +791,12 @@ struct UniverseDensityParams
             float wx = frac.x + (v.x - 0.5f) * 2.0f * amp;
             float wy = frac.y + (v.y - 0.5f) * 2.0f * amp;
             float wz = frac.z + (v.z - 0.5f) * 2.0f * amp;
+#endif
 
+            // Re-normalizes the split, so the displaced sample is still an exact
+            // integer cell plus a fraction in [0,1). Displacing a reconstructed
+            // float3 would work for a few thousand cells and then quietly stop
+            // resolving.
             float ix = floor(wx);
             float iy = floor(wy);
             float iz = floor(wz);
@@ -671,9 +838,11 @@ struct UniverseDensityParams
         return float2(DensityFromWeb(F, mNode, mWall, mFilament, mInvWidth), step);
     }
 
-    float SampleCell(int InCellX, int InCellY, int InCellZ, float3 InFrac, float4 InAxes)
+    float SampleCell(Texture3D InTex, SamplerState InSampler,
+                     int InCellX, int InCellY, int InCellZ, float3 InFrac, float4 InAxes)
     {
-        return SampleCellStep(InCellX, InCellY, InCellZ, InFrac, InAxes).x;
+        return SampleCellStep(InTex, InSampler, InCellX, InCellY, InCellZ,
+                              InFrac, InAxes).x;
     }
 
     // Entry point for a proxy pegged to the camera.
@@ -713,7 +882,8 @@ struct UniverseDensityParams
                           float3(cellPos.x - fx, cellPos.y - fy, cellPos.z - fz));
     }
 
-    float2 SampleAtPositionStep(float3 InNormPos, float3 InOffsetCell,
+    float2 SampleAtPositionStep(Texture3D InTex, SamplerState InSampler,
+                                float3 InNormPos, float3 InOffsetCell,
                                 float3 InOffsetFrac, float4 InAxes)
     {
         float rBoundsSq = dot(InNormPos, InNormPos);
@@ -734,14 +904,16 @@ struct UniverseDensityParams
         int cy = (int) fy + (int) InOffsetCell.y;
         int cz = (int) fz + (int) InOffsetCell.z;
 
-        float2 r = SampleCellStep(cx, cy, cz, frac, InAxes);
+        float2 r = SampleCellStep(InTex, InSampler, cx, cy, cz, frac, InAxes);
         return float2(r.x * BoundsFade(rBoundsSq), r.y);
     }
 
-    float SampleAtPosition(float3 InNormPos, float3 InOffsetCell, float3 InOffsetFrac,
+    float SampleAtPosition(Texture3D InTex, SamplerState InSampler,
+                           float3 InNormPos, float3 InOffsetCell, float3 InOffsetFrac,
                            float4 InAxes)
     {
-        return SampleAtPositionStep(InNormPos, InOffsetCell, InOffsetFrac, InAxes).x;
+        return SampleAtPositionStep(InTex, InSampler, InNormPos, InOffsetCell,
+                                    InOffsetFrac, InAxes).x;
     }
 };
 
@@ -771,11 +943,21 @@ struct UniverseDensityParams
 //   VoidSizeSpread  larger values shorten distances and shrink the radius within
 //                   which the 27-cell search is correct; measured 0.03% of samples
 //                   wrong at 0.45, 0.51% at 0.80, 1.21% at 1.00.
-//   WarpAmount      what curves the web is SHEAR, amplitude over lattice period.
-//                   A quintic-faded lattice reaches a gradient of 1.88*A/P, and
-//                   the displacement folds -- neighbouring samples cross over and
-//                   the web tears rather than bends -- once that reaches one. At
-//                   the current one-cell period that is A ~ 0.53.
+//   WarpAmount      peak displacement in cells, and NOT the same convention the
+//                   lattice path used: that one centred and doubled, so a value
+//                   tuned against UNIVERSE_WARP_TEXTURE 0 must be doubled to
+//                   displace the same distance here.
+//   WarpScale       texture repeats per cell. What curves the web is SHEAR, which
+//                   is WarpAmount * WarpScale * G, so these two are one knob with
+//                   two halves and neither is meaningful alone. The displacement
+//                   folds -- neighbouring samples cross over and the web tears
+//                   rather than bends -- once that product reaches one, which puts
+//                   the ceiling at WarpAmount ~ 1 / (G * WarpScale); at the default
+//                   G of 4 and a scale of 0.25 that is an amplitude of 1.0. Small
+//                   scale with large amplitude translates whole regions rigidly and
+//                   the straight Voronoi edges arrive straight; large scale with
+//                   small amplitude is grain rather than curvature. The interesting
+//                   settings are in the middle and they are found together.
 //   Region*         above 1 drives the modulated quantity negative in the weakest
 //                   regions. For a density that subtracts from the others; for the
 //                   spread it inverts which nodes claim space; for anisotropy it
@@ -811,6 +993,7 @@ UniverseDensityParams MakeUniverseDensityParams(
     float InVoidSizeSpread, // additive radius offset per node, cell units
     float InVoidSizeSkew, // >1 makes large voids rare and small ones common
     float InWarpAmount, // domain warp displacement, cell units
+    float InWarpScale, // warp texture repeats per cell
     float InRegionRichness, // 0.4 means densities range 0.6x to 1.4x by region
     float InRegionMorphology, // tilts the budget between sheets and strands
     float InRegionTurbulence, // scales warp and anisotropy together
@@ -850,6 +1033,22 @@ UniverseDensityParams MakeUniverseDensityParams(
     P.VoidSizeSpread = InVoidSizeSpread;
     P.VoidSizeSkew = InVoidSizeSkew;
     P.WarpAmount = InWarpAmount;
+
+    // QUANTIZED, and this is correctness rather than taste. The UV wraps every
+    // UNIVERSE_WARP_WRAP cells by masking the cell index; the two sides of that wrap
+    // are the same point in the texture only if WRAP * WarpScale is a whole number,
+    // and otherwise there is a hard seam every 4096 cells that no amount of amplitude
+    // tuning will hide. The quantum is 1/4096 of a repeat per cell.
+    //
+    // floor(x + 0.5) rather than round(): HLSL rounds halves away from zero and the
+    // C++ shim's round() defers to nearbyint, which rounds halves to even. One
+    // parameter landing exactly on a half would then quantize differently on the two
+    // sides, which is exactly the class of silent divergence the shared file exists
+    // to prevent.
+    float warpScale = max(InWarpScale, 0.0f);
+    warpScale = floor(warpScale * UNIVERSE_WARP_WRAP + 0.5f) / UNIVERSE_WARP_WRAP;
+    P.WarpScale = warpScale;
+
     P.RegionRichness = InRegionRichness;
     P.RegionMorphology = InRegionMorphology;
     P.RegionTurbulence = InRegionTurbulence;
@@ -874,7 +1073,17 @@ UniverseDensityParams MakeUniverseDensityParams(
     // warp up by at most their own amount, which is why both appear inflated here.
     float anisoMax = max(InAnisotropy, 0.0f) * (1.0f + max(InRegionTurbulence, 0.0f));
     float warpMax = abs(InWarpAmount) * (1.0f + max(InRegionTurbulence, 0.0f));
+#if UNIVERSE_WARP_TEXTURE
+    // Displacement gradient per cell is amplitude * texture gradient * scale. No
+    // centring factor here -- the texture path does not double, see SampleCellStep --
+    // and no period term, because for a texture the frequency IS the scale. The
+    // sqrt(3) is unchanged: three independent displacement channels, so the largest
+    // singular value of the 3x3 Jacobian can reach sqrt(3) times a single row's norm.
+    float warpJac = 1.0f + 1.7320508f * warpMax
+                  * UNIVERSE_WARP_TEX_GRADIENT * warpScale;
+#else
     float warpJac = 1.0f + 1.7320508f * 3.76f * warpMax * UNIVERSE_WARP_INV;
+#endif
     P.InvLipschitz = 1.0f / max(2.0f * sqrt(1.0f + anisoMax) * warpJac, 1e-6f);
 
     // A uniform branch: the eight-hash warp fetch is skipped entirely when the
