@@ -86,10 +86,11 @@ float UniverseFBm(UniverseDensityParams P, Texture3D InTex, SamplerState InSampl
 // already being above the floor, so in the skippable span the density is exactly
 // VoidFloor and integrates in closed form over any step length.
 float2 UniverseSampleStep(UniverseDensityParams P, Texture3D InTex, SamplerState InSampler,
+                          Texture3D InWarpTex, SamplerState InWarpSampler,
                           float3 NormPos, float3 OffsetCell, float3 OffsetFrac,
                           float4 InAxes)
 {
-    float2 r = P.SampleAtPositionStep(InTex, InSampler, NormPos, OffsetCell,
+    float2 r = P.SampleAtPositionStep(InWarpTex, InWarpSampler, NormPos, OffsetCell,
                                       OffsetFrac, InAxes);
     float d = r.x;
 
@@ -148,6 +149,7 @@ float2 UniverseSampleStep(UniverseDensityParams P, Texture3D InTex, SamplerState
 // The step count rides in G because cost has no other observer: a march that truncates
 // looks identical to one that finished, and the far half of the volume is simply absent.
 float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState InSampler,
+                        Texture3D InWarpTex, SamplerState InWarpSampler,
                         float3 InStartPos, float3 InViewVec, float3 InCamPosN,
                         float3 InOffsetCell, float3 InOffsetFrac,
                         float InStepRatio, float InMinStep, float InMinSamples,
@@ -213,11 +215,19 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
 
     bool bShape = (InNoisePower != 1.0);
 
-    // ONE regional fetch for the whole ray. The regional lattice is 32 cells across
-    // and the proxy is 8, so a ray cannot span more than a quarter of one lattice
-    // cell; resolving that variation per step cost eight hashes on every step to
-    // reproduce something that does not vary within a ray.
-    float4 axes = P.RegionAxesAtPosition(o + dir * t, InOffsetCell, InOffsetFrac);
+    // ONE regional fetch for the whole ray, taken at the ray's ENTRY POINT. The region
+    // field is roughly 34 cells across and the proxy is 8, so a ray cannot span more
+    // than a quarter of one region cell and holding the axes constant along it changes
+    // the field by less than the dither.
+    //
+    // This used to be a cost argument -- eight hashes on every step to reproduce
+    // something that does not vary within a ray -- and it is not one any more. The
+    // regional lattice became a single texture fetch, which is affordable per sample.
+    // What is left is the compromise the hoist actually carries: the axes are sampled
+    // where the ray ENTERS rather than where the sample sits, so the field is very
+    // slightly view-dependent. Reads from NoiseTex, not WarpTex.
+    float4 axes = P.RegionAxesAtPosition(InTex, InSampler,
+                                         o + dir * t, InOffsetCell, InOffsetFrac);
 
     // Cell units to normalized units.
     float cellToNorm = InStepSafety / max(P.InvCellSize, 1e-6);
@@ -241,7 +251,8 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
         // midpoint because growing steps otherwise weight each interval by its leading
         // face; here the skip distance below is a bound anchored at the SAMPLED point,
         // so moving the sample would invalidate it.
-        float2 s = UniverseSampleStep(P, InTex, InSampler, o + dir * t,
+        float2 s = UniverseSampleStep(P, InTex, InSampler, InWarpTex, InWarpSampler,
+                                      o + dir * t,
                                       InOffsetCell, InOffsetFrac, axes);
         float density = s.x;
         if (bShape)
