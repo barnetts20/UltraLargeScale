@@ -189,37 +189,28 @@
 #define UNIVERSE_WARP_WRAP_MASK ((1 << UNIVERSE_WARP_WRAP_SHIFT) - 1)
 #define UNIVERSE_WARP_WRAP ((float) (1 << UNIVERSE_WARP_WRAP_SHIFT))
 
-// TWO TEXTURES, AND THE TWO WARP OCTAVES DO NOT BOTH COME FROM THE SAME ONE.
+// ONE TEXTURE, EVERY FETCH. The large warp octave used to read a separate curl volume
+// so its three channels were guaranteed to be one coherent vector field rather than
+// three unrelated archetypes at three scales -- an axis-aligned warp was the failure
+// mode that guarded against:
 //
-//   large octave   WarpTex, a curl volume
+//   large octave   NoiseTex, the packed Perlin-Worley
 //   small octave   NoiseTex, the packed Perlin-Worley
 //   region axes    NoiseTex
 //   detail fBm     NoiseTex
 //
-// The large octave wants a homogeneous vector field. Its three channels are read as
-// the components of one displacement, so if they are three archetypes at three scales
-// then each axis warps at a different rate -- an axis-aligned warp, which is the
-// artifact class this path exists to remove. At the structural scale that bias would
-// be plainly visible, so the large octave takes the curl volume, whose channels are
-// the components of one field by construction.
+// Measurement went the other way: the packed Perlin-Worley volume simply looked
+// better as the large octave than the curl volume did, so it now reads NoiseTex like
+// everything else, WarpTex is gone as a resource, and UNIVERSE_WARPTEX_SIGNED goes
+// with it -- there is only one decode now, the same UNORM v*2-1 the small octave and
+// the region fetches already used.
 //
-// The small octave takes the Perlin-Worley anyway, on the evidence that it looks
-// better, and the reason the same objection does not bite is scale. At half a repeat
-// per cell the small octave is grain rather than structure: the per-axis frequency
-// difference is still there, but it modulates texture rather than shape and there is
-// no large feature for it to align. It is a real trade rather than a free lunch --
-// worth re-checking with the swizzle test if the small octave is ever pushed up in
-// amplitude or down in frequency.
-//
-// SWIZZLE TEST: read .yzx instead of .xyz for an octave and see whether the character
-// of the field rotates with it. If it does, that octave is axis-coupled, and that is
-// then a choice rather than an oversight.
-//
-// WARPTEX SHOULD BE A CURL VOLUME. Curl noise is divergence-free by construction, so
+// WHAT THIS COSTS. Curl noise is divergence-free by construction, so
 // det(I + A*grad v) = 1 + A*div(v) + O(A^2) = 1 + O(A^2): the first-order volume
-// change vanishes identically and the map folds only at second order. Measured
-// against a generic three-channel field at matched gradient, fraction of samples with
-// a negative Jacobian determinant:
+// change vanishes identically and the map folds only at second order. A generic field
+// folds at first order and has no such guarantee. Measured against a generic
+// three-channel field at matched gradient, fraction of samples with a negative
+// Jacobian determinant:
 //
 //   shear     generic     curl
 //    1.00      0.000%    0.000%
@@ -227,124 +218,30 @@
 //    1.80      2.536%    0.565%
 //    2.50     12.400%    4.750%
 //
-// Both are clean at or below one, so the shear ceiling below is still the rule; curl
-// buys headroom above it rather than moving it.
+// Both octaves are now the generic column: the shear ceiling below is no longer a
+// conservative bound with headroom above it, it is close to the actual tear point.
+// Amplitudes tuned near the old ceiling are worth re-checking against this table.
 //
-// WHAT DIVERGENCE-FREE COSTS: a volume-preserving warp cannot vary void size. The
-// large octave curves and swirls the lattice but every void comes out the same size
-// it went in, so VoidSizeSpread is the only thing supplying that variation and is not
-// removable while WarpTex is a curl volume. If the macro scale ever reads as
-// uniformly sized voids, that is the mechanism, and the fix is a compressible source
-// for the large octave rather than more amplitude.
+// It also means void size is no longer purely VoidSizeSpread's job. A
+// divergence-free warp cannot vary void size, which is why VoidSizeSpread was the
+// only source of that variation; Perlin-Worley carries no such guarantee, so some of
+// what reads as size variation now may be coming from the large octave instead. Not
+// necessarily a problem -- may be exactly the organic read that was wanted -- but it
+// is a second mechanism doing a job that used to have one, worth an eye if void size
+// ever needs to be tuned independently of warp amplitude again.
+//
+// SWIZZLE TEST still applies as a diagnostic even without a per-octave asset choice
+// to defend: read .yzx instead of .xyz for an octave and see whether the field's
+// character rotates with it. If it does, that octave is axis-coupled.
 
 // Fractional UV offsets, one per fetch. The two warp octaves are already decorrelated
-// by their scale ratio and now live in a different texture from the noise, so these
-// mostly guard against a scale ratio someone has set to one. The region offset is
-// load-bearing: the region fetch and the detail fetch read the SAME texture, and
-// without a phase offset a region that is rich is also one where the detail happens
-// to be bright. Whole numbers would be invisible under repeat addressing.
-// Whether a WarpTex sample already arrives signed. A curl volume in a float or SNORM
-// format returns [-1,1] and is used directly; the same data in a UNORM format returns
-// [0,1] and needs decoding. Getting this wrong is quiet rather than loud -- a UNORM
-// texture read as signed applies a constant positive bias on all three axes, which is
-// a rigid translation of the entire field plus half the intended range, and reads as
-// "the warp is weaker than it should be" rather than as a bug.
-//
-// Applies to the LARGE octave only. The small octave reads NoiseTex, which is a packed
-// UNORM asset by construction, so it always decodes.
-#define UNIVERSE_WARPTEX_SIGNED 1
-
-// Precision wrap, in cells, as a power of two. The UV is built as
-//     (cell & MASK + frac) * WarpScale
-// so the integer part is MASKED, never converted -- exact at 1e11, where a UV derived
-// from a reconstructed float3 world position has no fractional bits left at all. This
-// is the whole reason a texture was previously ruled out at this layer, and masking
-// the cell index is what removes the objection.
-//
-// 4096 cells. The wrap is seamless rather than merely distant: MakeUniverseDensityParams
-// QUANTIZES both scales so that WRAP * scale is a whole number, which makes the UV on
-// either side of the wrap congruent modulo one and therefore identical under the
-// sampler's repeat addressing -- value and every derivative. The quantum is 1/4096 of
-// a repeat per cell, far below any tuning granularity that matters.
-//
-// Verified rather than assumed: stepping across cell 4096, where the mask rolls over,
-// the largest density change is the same order as the same step taken at an ordinary
-// cell plane. Measured the same way at shifts 8, 10 and 14 the wrap is likewise
-// indistinguishable from an ordinary plane, so this is free to move.
-//
-// THE ASSET MUST BE PERIODIC. Repeat addressing is what closes the wrap, and it only
-// closes it if the volume actually tiles -- generated from wrapped lattice hashes,
-// not cropped out of a larger field. A non-tiling volume seams here, at a 4096-cell
-// spacing, which is far enough apart to read as an unexplained occasional artifact
-// rather than as an obvious tiling bug.
-#define UNIVERSE_WARP_WRAP_SHIFT 12
-#define UNIVERSE_WARP_WRAP_MASK ((1 << UNIVERSE_WARP_WRAP_SHIFT) - 1)
-#define UNIVERSE_WARP_WRAP ((float) (1 << UNIVERSE_WARP_WRAP_SHIFT))
-
-// TWO TEXTURES, AND THE TWO WARP OCTAVES DO NOT BOTH COME FROM THE SAME ONE.
-//
-//   large octave   WarpTex, a curl volume
-//   small octave   NoiseTex, the packed Perlin-Worley
-//   region axes    NoiseTex
-//   detail fBm     NoiseTex
-//
-// The large octave wants a homogeneous vector field. Its three channels are read as
-// the components of one displacement, so if they are three archetypes at three scales
-// then each axis warps at a different rate -- an axis-aligned warp, which is the
-// artifact class this path exists to remove. At the structural scale that bias would
-// be plainly visible, so the large octave takes the curl volume, whose channels are
-// the components of one field by construction.
-//
-// The small octave takes the Perlin-Worley anyway, on the evidence that it looks
-// better, and the reason the same objection does not bite is scale. At half a repeat
-// per cell the small octave is grain rather than structure: the per-axis frequency
-// difference is still there, but it modulates texture rather than shape and there is
-// no large feature for it to align. It is a real trade rather than a free lunch --
-// worth re-checking with the swizzle test if the small octave is ever pushed up in
-// amplitude or down in frequency.
-//
-// SWIZZLE TEST: read .yzx instead of .xyz for an octave and see whether the character
-// of the field rotates with it. If it does, that octave is axis-coupled, and that is
-// then a choice rather than an oversight.
-//
-// WARPTEX SHOULD BE A CURL VOLUME. Curl noise is divergence-free by construction, so
-// det(I + A*grad v) = 1 + A*div(v) + O(A^2) = 1 + O(A^2): the first-order volume
-// change vanishes identically and the map folds only at second order. Measured
-// against a generic three-channel field at matched gradient, fraction of samples with
-// a negative Jacobian determinant:
-//
-//   shear     generic     curl
-//    1.00      0.000%    0.000%
-//    1.30      0.102%    0.007%
-//    1.80      2.536%    0.565%
-//    2.50     12.400%    4.750%
-//
-// Both are clean at or below one, so the shear ceiling below is still the rule; curl
-// buys headroom above it rather than moving it.
-//
-// WHAT DIVERGENCE-FREE COSTS: a volume-preserving warp cannot vary void size. The
-// large octave curves and swirls the lattice but every void comes out the same size
-// it went in, so VoidSizeSpread is the only thing supplying that variation and is not
-// removable while WarpTex is a curl volume. If the macro scale ever reads as
-// uniformly sized voids, that is the mechanism, and the fix is a compressible source
-// for the large octave rather than more amplitude.
-
-// Fractional UV offsets, one per fetch. The two warp octaves are already decorrelated
-// by their scale ratio and now live in a different texture from the noise, so these
-// mostly guard against a scale ratio someone has set to one. The region offset is
-// load-bearing: the region fetch and the detail fetch read the SAME texture, and
-// without a phase offset a region that is rich is also one where the detail happens
-// to be bright. Whole numbers would be invisible under repeat addressing.
-// Whether a WarpTex sample already arrives signed. A curl volume in a float or SNORM
-// format returns [-1,1] and is used directly; the same data in a UNORM format returns
-// [0,1] and needs decoding. Getting this wrong is quiet rather than loud -- a UNORM
-// texture read as signed applies a constant positive bias on all three axes, which is
-// a rigid translation of the entire field plus half the intended range, and reads as
-// "the warp is weaker than it should be" rather than as a bug.
-//
-// Applies to the LARGE octave only. The small octave reads NoiseTex, which is a packed
-// UNORM asset by construction, so it always decodes.
-#define UNIVERSE_WARPTEX_SIGNED 1
+// by their scale ratio, and now share a texture with the noise and region fetches, so
+// these offsets mostly guard against a scale ratio someone has set to one and against
+// every fetch that shares this asset landing on the same phase. The region offset is
+// load-bearing for the same reason: the region fetch and the detail fetch read the
+// SAME texture, and without a phase offset a region that is rich is also one where
+// the detail happens to be bright. Whole numbers would be invisible under repeat
+// addressing.
 
 // EXPERIMENT TOGGLE: let the region field modulate the warp SCALES as well as their
 // amplitudes. Off, and it should stay off; it exists so the result can be looked at
@@ -886,7 +783,6 @@ struct UniverseDensityParams
     // also constructed as a local are a portability problem, and the galaxy core
     // settled the same question the same way.
     float SampleCell(Texture3D InTex, SamplerState InSampler,
-                     Texture3D InWarpTex, SamplerState InWarpSampler,
                      int InCellX, int InCellY, int InCellZ, float3 InFrac)
     {
         int cx = InCellX;
@@ -991,18 +887,17 @@ struct UniverseDensityParams
             // SampleLevel, not Sample. Inside a dynamic loop the derivatives that
             // drive mip selection are undefined, and the galaxy core makes the same
             // call for the same reason.
-            // DIFFERENT TEXTURES, so the two fetches are independent in every sense --
-            // different asset, different sampler, different decode. They still issue
-            // together because neither address depends on the other's result.
-            float4 vL = InWarpTex.SampleLevel(InWarpSampler, uvL, 0.0f);
+            // SAME TEXTURE now, but still two independent fetches: neither address
+            // depends on the other's result, so they still issue together. What used
+            // to make them independent -- different assets -- is gone; issuing
+            // together never depended on that, only on the addresses being computed
+            // first, which is still true.
+            float4 vL = InTex.SampleLevel(InSampler, uvL, 0.0f);
             float4 vS = InTex.SampleLevel(InSampler, uvS, 0.0f);
 
-#if UNIVERSE_WARPTEX_SIGNED
-            float3 dL = float3(vL.x, vL.y, vL.z);
-#else
+            // Same UNORM decode for both now -- one texture, one convention. NoiseTex
+            // is UNORM by construction, so this is unconditional.
             float3 dL = float3(vL.x * 2.0f - 1.0f, vL.y * 2.0f - 1.0f, vL.z * 2.0f - 1.0f);
-#endif
-            // NoiseTex is UNORM by construction, so this decode is unconditional.
             float3 dS = float3(vS.x * 2.0f - 1.0f, vS.y * 2.0f - 1.0f, vS.z * 2.0f - 1.0f);
 
             // Regional turbulence rides the SMALL octave only. The large one sets the
@@ -1067,7 +962,6 @@ struct UniverseDensityParams
     }
 
     float SampleAtPosition(Texture3D InTex, SamplerState InSampler,
-                           Texture3D InWarpTex, SamplerState InWarpSampler,
                            float3 InNormPos, float3 InOffsetCell, float3 InOffsetFrac)
     {
         float rBoundsSq = dot(InNormPos, InNormPos);
@@ -1088,7 +982,7 @@ struct UniverseDensityParams
         int cy = (int) fy + (int) InOffsetCell.y;
         int cz = (int) fz + (int) InOffsetCell.z;
 
-        return SampleCell(InTex, InSampler, InWarpTex, InWarpSampler,
+        return SampleCell(InTex, InSampler,
                           cx, cy, cz, frac) * BoundsFade(rBoundsSq);
     }
 
@@ -1299,16 +1193,17 @@ UniverseDensityParams MakeUniverseDensityParams(
     //
     // The ceiling is still real and still has to be respected by hand:
     //
-    //     AmountLarge*ScaleLarge*G_curl + AmountSmall*ScaleSmall*G_noise  <=  1
+    //     (AmountLarge*ScaleLarge + AmountSmall*ScaleSmall) * G  <=  1
     //
-    // where G is the largest |dTex/dUV| the filtered asset reaches. Past one the
-    // displacement folds, neighbouring samples cross over, and the web tears rather
-    // than bends. Curl noise is divergence-free so it folds only at second order and
-    // has real headroom above one -- 0.007% of samples folded at shear 1.3 against
-    // 0.102% for a generic field -- but the ceiling is where to start.
+    // where G is the largest |dTex/dUV| the filtered asset reaches -- one value now,
+    // both octaves reading the same texture. Past one the displacement folds,
+    // neighbouring samples cross over, and the web tears rather than bends. Neither
+    // octave is divergence-free any more, so there is no headroom above one the way
+    // curl noise had -- see the domain-warp section above -- so this ceiling is close
+    // to the real tear point rather than a conservative bound under it.
     //
-    // Practical version, since nothing checks it any more: fix the scales, raise one
-    // amplitude until the web visibly tears, back off about thirty percent.
+    // Practical version, unchanged: fix the scales, raise one amplitude until the web
+    // visibly tears, back off about thirty percent.
     P.bWarpEnable = ((InWarpAmountLarge != 0.0f) || (InWarpAmountSmall != 0.0f))
                   ? 1.0f : 0.0f;
     P.bRegionEnable = ((InRegionNodeVariance != 0.0f) || (InRegionWallVariance != 0.0f)

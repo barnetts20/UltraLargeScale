@@ -87,11 +87,9 @@ float UniverseFBm(UniverseDensityParams P, Texture3D InTex, SamplerState InSampl
 // already being above the floor, so in the skippable span the density is exactly
 // VoidFloor and integrates in closed form over any step length.
 float UniverseSample(UniverseDensityParams P, Texture3D InTex, SamplerState InSampler,
-                     Texture3D InWarpTex, SamplerState InWarpSampler,
                      float3 NormPos, float3 OffsetCell, float3 OffsetFrac)
 {
-    float d = P.SampleAtPosition(InTex, InSampler, InWarpTex, InWarpSampler,
-                                 NormPos, OffsetCell, OffsetFrac);
+    float d = P.SampleAtPosition(InTex, InSampler, NormPos, OffsetCell, OffsetFrac);
 
 #if UNIVERSE_COST_PROBE >= 1
     bool bNoise = false;   // probe level 1: detail fBm removed at compile time
@@ -153,7 +151,6 @@ float UniverseSample(UniverseDensityParams P, Texture3D InTex, SamplerState InSa
 // The step count rides in G because cost has no other observer: a march that truncates
 // looks identical to one that finished, and the far half of the volume is simply absent.
 float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState InSampler,
-                        Texture3D InWarpTex, SamplerState InWarpSampler,
                         float3 InStartPos, float3 InViewVec, float3 InCamPosN,
                         float3 InOffsetCell, float3 InOffsetFrac,
                         float InStepRatio, float InMinStep, float InMinSamples,
@@ -241,7 +238,7 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
         // anchor a bound at the sampled point, and it is gone -- so moving to the
         // midpoint is available if the leading-face bias ever proves worse than the
         // half-step offset.
-        float density = UniverseSample(P, InTex, InSampler, InWarpTex, InWarpSampler,
+        float density = UniverseSample(P, InTex, InSampler,
                                        o + dir * t, InOffsetCell, InOffsetFrac);
         if (bShape)
         {
