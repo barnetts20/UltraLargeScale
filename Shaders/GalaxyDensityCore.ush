@@ -1,1337 +1,292 @@
 #pragma once
 
-// GalaxyDensityCore.ush
-// The galaxy density field, entire: analytic layers, texture sampling, placement and
-// candidate generation.
+// UniverseDensity.ush
+// The ray march, and the noise modulation that rides on it. The domain warp used to
+// live here in spirit -- everything touching a texture did -- but the core now takes
+// a Texture3D directly and warps inside the ranking, so this file's job has narrowed
+// to marching the volume and multiplying the web by a detail field.
 //
-// NEVER BINDS A RESOURCE, ONLY RECEIVES ONE. Every function that samples takes the
-// texture and sampler its caller already holds; nothing here declares one, and nothing
-// here touches Parameters or View. That rule is what lets a material Custom node, a
-// compute dispatch and C++ behind a small shim all call the same code rather than
-// keeping three implementations in agreement by hand.
+// The texture and sampler are threaded down into the core rather than sampled here.
+// The warp has to happen BEFORE the neighbourhood search, on the cell-and-fraction
+// split, and there is no way to hand a warped position across this boundary without
+// reconstructing a float3 -- which stops resolving a fraction of a cell long before
+// the magnitudes this layer reaches.
 //
-// The C++ side exists for parameter derivation, authoring and diagnostics. IT MUST NEVER
-// PLACE ENTITIES. The shim stubs Texture3D to the neutral 0.5, so the C++ field reduces
-// exactly to the analytic one -- and a texture-free approximation of a textured field
-// produces a perfectly ordinary-looking galaxy that ignores what the material draws.
+// The proxy for this layer is pegged to the camera, so it never moves through the
+// field -- the FIELD SCROLLS UNDER IT. That offset is threaded through every entry
+// point below rather than being folded into the sample position on the way in,
+// because it arrives already split into an integer cell count and a fraction and has
+// to stay split: a float3 carrying the player's position stops resolving a fraction
+// of a cell long before the magnitudes this layer reaches.
 //
-// The ray march lives in GalaxyDensityRaymarch.ush, which includes this file. Entity
-// generation lives in GalaxyEntityGen.usf, which also includes it.
-//
-// PARITY RULES -- both compilers see this file, so:
-//   - Guard every pow() base away from zero. HLSL evaluates pow(x,y) as
-//     exp2(y*log2(x)); log2(0) is -INF and some compilers yield NaN.
-//   - Bound anything that can overflow float32. exp overflows near 88 on GPU against
-//     709 for double on CPU, so the GPU fails first and over a wider region.
-//   - No swizzles beyond .x/.y/.z/.w, and no HLSL intrinsic the shim does not define.
-//     VECTOR FORMS ARE THE TRAP: uint3, a vector saturate or float3 * float compile
-//     cleanly as HLSL and fail on the C++ side alone, where nothing routine catches it.
-//
-// SPACE: normalized galaxy space, [-1,1] per axis, where 1.0 is Params.Extent.
-//
-// LAYER CONVENTION: x = arms, y = disc, z = bulge, w = background. SampleLayers'
-// return and every per-layer float4 input follow it.
-//
-// FRAME CONVENTION, for NoiseScale and WarpScale ONLY: x = disc lateral,
-// y = disc vertical, z = halo lateral, w = halo vertical. Distinct from the layer
-// convention -- frames belong to the noise field, layers consume it.
-//
-// DERIVED STATE: every field arrives pre-clamped and, where a division by it would
-// otherwise recur, pre-inverted. MakeGalaxyDensityParams is the ONLY place that
-// derives them; do not re-clamp inside the sample functions, which run per march
-// step and sit behind early-returns the compiler cannot hoist past.
-
-#define GALAXY_PI 3.14159265358979323846f
-#define GALAXY_POW_EPSILON 1e-6f
-#define GALAXY_MAX_ARMS 16
-
-// Separates the halo noise domain from the gas one so their structure does not
-// correlate. Arbitrary; only needs to be large against feature size.
-#define GALAXY_HALO_DOMAIN float3(53.7f, 29.1f, 71.3f)
-
-// Per-tier placement rules. Separate from GalaxyDensityParams because these change per
-// tier while the field does not.
-//
-// RETURNED BY VALUE, one candidate at a time, never through an output array: that would
-// need `out float3 A[N]` in HLSL and a pointer in C++, which is exactly the
-// spelled-differently-in-each-language divergence the no-`out` rule prevents.
-//
-// Extent is in the caller's FINAL units. Divide by UnitScale before filling this in, so
-// the field stays unit-agnostic and the conversion happens once, where UnitScale lives.
-struct GalaxyPlacement
-{
-    // The density that reads as a certain spawn, held inverted. PER-CALL rather than a
-    // field parameter, because every cell rejects against ITS OWN probed peak: the ratio
-    // then runs order-1 across the cell instead of order-1e-3, so most candidates land,
-    // and the cell cancels out of the result exactly.
-    float InvDensityReference;
-    float SpawnExponent; // 1 = the raw response; <1 spawns more in faint regions
-    float ExtentMin;
-    float ExtentMax;
-    float ExtentExponent; // <1 biases small, >1 biases large
-};
-
-// The spacing of the per-candidate key lattice. Every key a cell derives is
-// KeySeed + GALAXY_SLOT_STRIDE * n for some integer n: candidates take n >= 0 and
-// envelope probes take n < 0, so the two families can never collide however large the
-// candidate budget grows.
-//
-// THE INVARIANT IS NOT WHAT IT LOOKS LIKE. Two keys collide only when
-// GALAXY_SLOT_STRIDE * (nA - nB) equals the difference between two tier offsets, and
-// every tier offset is far smaller than the stride -- so growing the budget moves the
-// whole lattice and introduces nothing. What breaks it is a tier offset reaching the
-// stride, or GALAXY_DECOR_OFFSET landing on an offset difference modulo it.
-#define GALAXY_SLOT_STRIDE 977
-#define GALAXY_DECOR_OFFSET 24337
-
-// A third key family, one draw per cell, for StochasticCount below.
-//
-// Offsets must not share a residue modulo the stride, or two families land on the same
-// lattice point. Residues: candidates 0, decor 889, rounding 945. Tier seed offsets
-// enter through KeySeed and are small, so the check is that no residue difference --
-// 945, 56, 889 -- falls within the tier offset spread.
-#define GALAXY_ROUND_OFFSET 51749
-
-GalaxyPlacement MakeGalaxyPlacement(
-    float InDensityReference, // the density that reads as a certain spawn
-    float InSpawnExponent,
-    float InExtentMin, // FINAL units: divide by UnitScale before calling
-    float InExtentMax,
-    float InExtentExponent)
-{
-    GalaxyPlacement Q;
-
-    // Division guard, not a range limit: a reference of zero is a divide by zero and
-    // the infinity accepts every candidate in the galaxy at once.
-    Q.InvDensityReference = 1.0f / max(InDensityReference, 1e-3f);
-    Q.SpawnExponent = max(InSpawnExponent, 1e-3f);
-    Q.ExtentMin = InExtentMin;
-    Q.ExtentMax = InExtentMax;
-    Q.ExtentExponent = max(InExtentExponent, 1e-3f);
-
-    return Q;
-}
-
-// A candidate before the field has been consulted.
-//
-// MAKECANDIDATE / FINISHENTITY IS THE CONTRACT the other layers copy, and the split is
-// the whole of it: the DENSITY SOURCE stays the caller's choice. A single SampleEntity
-// doing both would have to name its own source, and naming it means hardcoding the
-// analytic field -- which puts the textured path, warp and modulation included,
-// permanently out of reach of placement.
-struct GalaxyCandidate
-{
-    float3 Pos; // caller's units
-    float3 Norm; // the same point in the field's [-1,1] frame
-    float AcceptDraw; // uniform in [0,1), compared against the spawn probability
-    float ExtentDraw; // uniform in [0,1), decorrelated from AcceptDraw
-    float3 Decor;
-};
-
-struct GalaxyEntity
-{
-    float3 Pos; // caller's units, same frame as the cell centre passed in
-    float Extent;
-    float Density; // raw field value at Pos, before any spawn shaping
-    float3 Decor; // three decorrelated uniforms in [0,1) for colour, rotation, type
-    float bValid; // 0 = rejected; the caller skips it
-};
-
-
-struct GalaxyDensityParams
-{
-    float BoundsFadeStart;
-    float BoundsFadeStartSq;
-    float InvBoundsFadeSpan;
-
-    // --- BULGE ---
-    float BulgeInvRadiusSq; // 1 / r^2 at which the layer reaches exactly zero
-    float BulgeDensityOverPath; // optical depth through the centre / path length
-    float BulgeInvSquash; // 1 / (c/a axis ratio); larger flattens
-    float BulgeConcentration; // profile exponent; see SampleSpheroid
-
-    // --- DISC ---
-    float DiscRadius;
-    float InvDiscRadius;
-    float DiscHeightRatio; // h/R at the centre
-    float DiscDensityOverPath; // face-on optical depth / the profile integral
-    float InvDiscScaleL; // 1 / radial scale length
-    float DiscVerticalFalloff; // profile exponent, same meaning as concentration
-    float DiscFlare; // 0 = constant scale height; >0 thickens outward
-    float DiscWarpAmplitude; // m=1 vertical warp, normalized z units
-    float DiscWarpPhase; // radians; azimuth of the rising node at r = 0
-    float DiscWarpTwist; // radians of node-line precession across the disc
-    float DiscLopsidedAmount; // m=1 in-plane density mode; 0.2-0.4 typical
-    float DiscLopsidedPhase; // radians; azimuth of the dense side
-
-    // --- GLOBAL ORIENTATION ---
-    // Rows of the INVERSE (transposed) basis, so a sample position is carried from
-    // galaxy space into field space by three dots. Identity when the angles are zero.
-    float3 FieldX;
-    float3 FieldY;
-    float3 FieldZ;
-
-    // Galaxy space -> field space. THE ONE PLACE the orientation is applied, called at
-    // the top of both sample entry points so nothing downstream knows it exists.
-    //
-    // A ROTATION IS AN ISOMETRY, which is what makes this safe to bolt on: dot(p,p) is
-    // unchanged, so every bounds test -- the shader's rBoundsSq, the C++ cell cull's
-    // nearest-point dot -- keeps working untouched. That is why orientation lives here
-    // rather than on the actor transform, where it would have rotated the octree, the
-    // tier grids and VirtualTraversal out from under a streaming scheme that assumes
-    // galaxy-local and world axes coincide.
-    float3 ToFieldSpace(float3 InPos)
-    {
-        return float3(dot(FieldX, InPos), dot(FieldY, InPos), dot(FieldZ, InPos));
-    }
-
-    // --- ARMS ---
-    float ArmSpiralK0; // signed 1/tan(pitch); sign sets chirality
-    float ArmPitchFactorMax; // 1 + |ArmAsymPitch|; bounds the angular reject
-    float ArmPitchTightening; // 0 = constant pitch; >0 tightens inward
-    float ArmWidth; // true perpendicular half-width at the inner end
-    float InvArmVerticalRatio; // 1 / (H/W). H/W of 1 is a circular tube
-    float ArmProfileExponent; // cross-section falloff. <1 plateaus, >1 sharpens
-    float ArmRadialGrowth; // width multiplier at the rim
-    float ArmHostFalloff; // how strongly arms inherit the disc radial profile
-    float ArmDensityOverPath; // perpendicular optical depth / path length
-    float InvArmFadeW; // 1 / width of the per-arm end fade
-    int ArmN;
-    float4 ArmData[GALAXY_MAX_ARMS]; // x pitch factor, y phase, z strength,
-                                     // w radius at which the end fade STARTS
-
-    // --- BACKGROUND ---
-    float BackgroundInvRadiusSq;
-    float BackgroundDensityOverPath;
-    float BackgroundInvSquash;
-    float BackgroundConcentration;
-
-    // --- CENTRAL VOID ---
-    float InvVoidRadiusSq;
-    float VoidStrength; // 0 = off, 1 = fully empty at the centre
-    float VoidConcentration;
-
-    // --- PER-LAYER NOISE RESPONSE ---
-    // Multiplicative depth: density *= 1 + Amount * n. Above 1 the modulator goes
-    // negative in places, clamps to zero, and breaks the layer apart. Signed warp
-    // amounts flip the displacement direction for that layer.
-    float NoiseAmountArm;
-    float NoiseAmountDisc;
-    float NoiseAmountBulge;
-    float NoiseAmountBackground;
-    float WarpAmountArms;
-    float WarpAmountDisc;
-    float WarpAmountBulge;
-    float WarpAmountBackground;
-
-    // --- NOISE FIELD SHAPE ---
-    // Consumed by the texture-sampling field below, carried here so the whole set travels
-    // as one value.
-    float3 NoiseOffset; // per-galaxy variation; a texture has no seed
-    float4 NoiseScale; // modulation frequency, frame convention
-    float4 WarpScale; // warp frequency, frame convention
-    float4 NoiseChannelWeights; // signed channel mix
-    float NoiseRidged; // 0 = smooth, 1 = ridged filaments and lanes
-    float NoiseEnable; // 0 skips every texture read
-    float HaloTwistInherit; // fraction of the spiral twist the halo frame takes
-
-    // SpawnExponent, extent range and extent shaping are PER TIER and live in
-    // GalaxyPlacement instead. They cannot sit here: the derivation runs sixteen arm
-    // hashes and a tan, so rebuilding this struct once per tier to change a scale
-    // range would repeat all of that to alter two numbers the field never reads.
-
-    // ======================================================================
-    // HELPERS
-    // ======================================================================
-
-    // pow() with the zero base branched out rather than clamped: max(x, EPSILON)
-    // still leaves EPSILON^p behind, which is enough to floor a field.
-    float PowSafe(float x, float p)
-    {
-        return (x > GALAXY_POW_EPSILON) ? pow(x, p) : 0.0f;
-    }
-
-    // Integral of (1 - x^2)^c over [-1,1]. Exactly B(1/2, c+1); this closed form is
-    // within 1.4% at c = 0.25 and under 0.5% above c = 1. Derivation-only.
-    float CompactProfileIntegral(float InConcentration)
-    {
-        return sqrt(GALAXY_PI / (max(InConcentration, 0.0f) + 0.75f));
-    }
-
-    // Integer hash, one float4 per arm index. uint arithmetic wraps identically in
-    // C++ and HLSL, so this is bit-exact across both. Derivation-only.
-    float4 ArmHash(int InIndex, int InSeed)
-    {
-        uint n = (uint) (InIndex * 73856093) ^ (uint) (InSeed * 19349663);
-
-        // Scalar rather than uint4: this was the only integer vector in the file, and
-        // keeping it out means the C++ shim needs no such type. Arithmetic identical.
-        uint a = n * 1664525u + 1013904223u;
-        uint b = a * 1664525u + 1013904223u;
-        uint c = b * 1664525u + 1013904223u;
-        uint d = c * 1664525u + 1013904223u;
-
-        a ^= a >> 16u;
-        b ^= b >> 16u;
-        c ^= c >> 16u;
-        d ^= d >> 16u;
-        a *= 1664525u;
-        b *= 1664525u;
-        c *= 1664525u;
-        d *= 1664525u;
-        a ^= a >> 16u;
-        b ^= b >> 16u;
-        c ^= c >> 16u;
-        d ^= d >> 16u;
-
-        const float Inv32 = 1.0f / 4294967296.0f;
-        return float4(float(a) * Inv32, float(b) * Inv32,
-                      float(c) * Inv32, float(d) * Inv32);
-    }
-
-    // Stateless four-value hash on four integers. Same wrapping uint arithmetic as
-    // ArmHash, widened so a cell and a slot index can both key it.
-    //
-    // This replaces the sequential FRandomStream the CPU sampler used, and the
-    // change is not merely a port. A stream makes candidate i depend on every draw
-    // before it, so one entity cannot be produced without producing all of its
-    // predecessors -- fine in a loop, impossible for one thread per slot. Keyed on
-    // (cell, slot) instead, any entity is recomputable on its own, identity stops
-    // being "position in the append order", and a region regenerates identically
-    // after the player leaves and comes back.
-    float4 Hash4(int InA, int InB, int InC, int InD)
-    {
-        uint n = (uint) InA * 73856093u;
-        n ^= (uint) InB * 19349663u;
-        n ^= (uint) InC * 83492791u;
-        n ^= (uint) InD * 2654435761u;
-
-        uint a = n * 1664525u + 1013904223u;
-        uint b = a * 1664525u + 1013904223u;
-        uint c = b * 1664525u + 1013904223u;
-        uint d = c * 1664525u + 1013904223u;
-
-        a ^= a >> 16u;
-        b ^= b >> 16u;
-        c ^= c >> 16u;
-        d ^= d >> 16u;
-        a *= 1664525u;
-        b *= 1664525u;
-        c *= 1664525u;
-        d *= 1664525u;
-        a ^= a >> 16u;
-        b ^= b >> 16u;
-        c ^= c >> 16u;
-        d ^= d >> 16u;
-
-        const float Inv32 = 1.0f / 4294967296.0f;
-        return float4(float(a) * Inv32, float(b) * Inv32,
-                      float(c) * Inv32, float(d) * Inv32);
-    }
-
-    // ======================================================================
-    // LAYERS
-    // ======================================================================
-
-    // Disc radial profile, shared with the arms. Truncated by edge = 1 - rn^2 so it
-    // reaches zero at the rim rather than being cut there. The caller passes edge
-    // because both call sites already have it.
-    float DiscRadialProfile(float rXY, float edge)
-    {
-        return exp(-rXY * InvDiscScaleL) * edge;
-    }
-
-    // --- COMBINED ARM DENSITY ---
-    // Every arm contributes and the contributions are merged, rather than a
-    // nearest-arm search. Do not revert to nearest-arm: the distance it returns is
-    // continuous but the WINNER'S attributes flip instantly where two arms are
-    // equidistant, so any per-arm strength variation produces a hard density step.
-    //
-    // Affordable per arm because the closest point lies at the SAME RADIUS as the
-    // query, so the in-plane distance is the chord subtending the angular offset:
-    // 2 r sin(d/2). One sin, no cos or sqrt.
-    //
-    // Cross-section is a normalized ellipse: perpendicular and vertical offsets are
-    // each divided by their own half-extent and combined into one coordinate q that
-    // reaches 1 at the surface. One profile on one metric is what makes the arm
-    // tubular -- two separate profiles cannot be round even at matching extents.
-    float SampleArmDensity(float3 InNormPos, float rXY)
-    {
-        if (rXY < 1e-6f || rXY >= DiscRadius)
-        {
-            return 0.0f;
-        }
-
-        // The guard above bounds rXY to (0, DiscRadius), so no saturate is needed.
-        float tRadial = rXY * InvDiscRadius;
-        float edge = 1.0f - tRadial * tRadial;
-
-        // Arms take the SAME sqrt(edge) lens taper as the disc. Without it the two
-        // diverge exactly where the taper bites: the disc closes to zero at the rim
-        // while the arm keeps widening at ArmRadialGrowth, so past rn ~ 0.85 the arms
-        // bulge outside the disc they are supposed to live in and read as a thick
-        // collar. ArmHostFalloff dims that but does not thin it -- brightness cannot
-        // fix a geometry mismatch.
-        float growthFactor = lerp(1.0f, ArmRadialGrowth, tRadial) * sqrt(edge);
-        float invW = 1.0f / max(ArmWidth * growthFactor, 1e-6f);
-
-        // Exact vertical gate: q >= qz always and the surface is q = 1, so qz >= 1
-        // proves every arm is zero here. Skips the merge loop for the large majority
-        // of samples, which sit off the disc plane. H = W * ratio, so its reciprocal
-        // comes from invW rather than a second divide.
-        float qz = abs(InNormPos.z) * invW * InvArmVerticalRatio;
-        if (qz >= 1.0f)
-        {
-            return 0.0f;
-        }
-        float qzSq = qz * qz;
-
-        // Arms are a compression wave in the disc, so their strength follows the disc
-        // hosting them. Evaluated before the loop so a negligible host skips it.
-        float host = PowSafe(DiscRadialProfile(rXY, edge), ArmHostFalloff);
-        if (host <= 0.0f)
-        {
-            return 0.0f;
-        }
-
-        // Logarithmic spiral: constant pitch p means tan(p) = dr/(r dTheta), which
-        // integrates to Theta = ln(r/R)/tan(p). Winding rate grows as 1/r inward, so
-        // the spiral tightens by construction and ln() is self-bounding.
-        // ArmPitchTightening adds k(u) = k0(1 + Tu), so Theta = k0(u + Tu^2/2).
-        //
-        // -log(tRadial) is log(discR/rXY) without a second divide.
-        float u = -log(max(tRadial, 1e-5f));
-        float T = ArmPitchTightening;
-        float uTerm = u + 0.5f * T * u * u;
-        float uRate = 1.0f + T * u;
-
-        float theta = atan2(InNormPos.y, InNormPos.x);
-
-        const float TwoPi = 2.0f * GALAXY_PI;
-        const float InvTwoPi = 1.0f / TwoPi;
-
-        // --- ANGULAR EARLY REJECT ---
-        // dPerp = 2 r |sin(d/2)| * corr, and corr = rsqrt(1 + kLocal^2) is at least
-        // corrMin, taken at the largest kLocal any arm can have here. So an arm whose
-        // |d| exceeds this threshold cannot reach within W and contributes nothing.
-        // One asin per sample replaces the sin, rsqrt, sqrt and merge for the
-        // majority of arms, which at typical widths is most of them.
-        //
-        // The bound depends on ArmPitchFactorMax covering every arm's pitch factor.
-        // If the per-arm pitch model ever exceeds it, arms start disappearing rather
-        // than merely running slow.
-        float kMax = abs(ArmSpiralK0) * ArmPitchFactorMax * uRate;
-        float corrMin = rsqrt(1.0f + kMax * kMax);
-        float sinHalf = 1.0f / max(2.0f * rXY * corrMin * invW, 1e-6f);
-        float dReject = (sinHalf >= 1.0f) ? GALAXY_PI : 2.0f * asin(sinHalf);
-
-        float acc = 0.0f;
-
-        for (int i = 0; i < GALAXY_MAX_ARMS; i++)
-        {
-            if (i >= ArmN)
-            {
-                break;
-            }
-
-            float4 a = ArmData[i];
-            float ki = ArmSpiralK0 * a.x;
-
-            // Signed angular offset, wrapped to [-PI,PI]. Wrapping to +/-PI rather
-            // than +/-armSpacing/2 is what makes uneven arm spacing safe.
-            float dRaw = theta - (ki * uTerm + a.y);
-            float d = dRaw - TwoPi * round(dRaw * InvTwoPi);
-
-            if (abs(d) >= dReject)
-            {
-                continue;
-            }
-
-            // The chord is purely tangential; the spiral tangent makes angle p with
-            // it, so perpendicular distance is chord / sqrt(1+k^2). Unconditional, so
-            // ArmWidth is a true perpendicular half-width and does not shift when the
-            // pitch angle changes.
-            float kLocal = ki * uRate;
-            float dPerp = 2.0f * rXY * abs(sin(0.5f * d)) * rsqrt(1.0f + kLocal * kLocal);
-
-            float qp = dPerp * invW;
-            float q = sqrt(qp * qp + qzSq);
-            if (q >= 1.0f)
-            {
-                continue;
-            }
-
-            float w = 1.0f - q * q * (3.0f - 2.0f * q);
-
-            // a.w is the radius at which the end fade STARTS, folded in the
-            // derivation.
-            float mult = a.z;
-            if (rXY > a.w)
-            {
-                float tf = saturate((rXY - a.w) * InvArmFadeW);
-                mult *= 1.0f - tf * tf * (3.0f - 2.0f * tf);
-            }
-
-            // Plain max. mult is already non-negative: a.z is clamped in the
-            // derivation and the fade factor is a saturated smoothstep.
-            acc = max(acc, w * mult);
-        }
-
-        // Shape applied once to the merged result, so it stays a single pow.
-        acc = PowSafe(acc, ArmProfileExponent);
-
-        return acc * ArmDensityOverPath * host;
-    }
-
-    // --- COMPACT SQUASHED SPHEROID, SHARED BY BULGE AND BACKGROUND ---
-    //     d = InDensityOverPath * (1 - x^2)^p,   x^2 = r_oblate^2 * InInvRadiusSq
-    //
-    // Compact support: exactly zero at x >= 1, so the layer terminates itself and the
-    // test is a free early-out. Works on r^2, so no sqrt.
-    //
-    // p < 1 fills the volume and drops at the rim; 1 parabolic; 2 smooth bump;
-    // >2 concentrates toward the centre.
-    //
-    // Do not swap this for a cusped profile such as Hernquist. It diverges at the
-    // centre, needs a clamp to stay finite, and the clamp turns the peak parameter
-    // into a control over the radius of a saturated ball instead of a density.
-    float SampleSpheroid(float3 InNormPos, float InDensityOverPath, float InInvRadiusSq,
-                         float InInvSquash, float InConcentration)
-    {
-        if (InDensityOverPath <= 0.0f)
-        {
-            return 0.0f;
-        }
-
-        float squashedZ = InNormPos.z * InInvSquash;
-
-        float rSq = InNormPos.x * InNormPos.x
-                  + InNormPos.y * InNormPos.y
-                  + squashedZ * squashedZ;
-
-        float x2 = rSq * InInvRadiusSq;
-        if (x2 >= 1.0f)
-        {
-            return 0.0f;
-        }
-
-        return InDensityOverPath * PowSafe(1.0f - x2, InConcentration);
-    }
-
-    // --- DISC, LENS CROSS-SECTION ---
-    // Radial exp(-r/scaleLength) x vertical (1 - (z/h)^2)^falloff, with h tapering to
-    // zero at the rim.
-    //
-    // All three terms are compact for a reason. An exponential vertical profile sits
-    // at 0.368 of peak where it is cut, and the radial one at 0.135, so both produce
-    // cliffs; and without the sqrt(1-rn^2) taper the cross-section is a rectangle,
-    // which reads as a machined cylinder rather than a disc.
-    //
-    // DiscDensityOverPath divides by the LOCAL h, which is correct: volume density is
-    // surface density over thickness, so where the disc thins the volume density
-    // rises. The h cancels from the face-on integral exactly. At the rim h goes as
-    // sqrt(edge) against radial's edge, so density falls as sqrt(edge) rather than
-    // diverging.
-    float SampleDiscDensity(float rXY, float absZ)
-    {
-        if (DiscDensityOverPath <= 0.0f)
-        {
-            return 0.0f;
-        }
-        if (rXY >= DiscRadius)
-        {
-            return 0.0f;
-        }
-
-        float rn = rXY * InvDiscRadius;
-        float edge = 1.0f - rn * rn;
-
-        float h = DiscRadius * DiscHeightRatio * (1.0f + DiscFlare * rn) * sqrt(edge);
-        if (absZ >= h)
-        {
-            return 0.0f;
-        }
-
-        // One reciprocal: h divides both the vertical coordinate and the density.
-        float invH = 1.0f / h;
-
-        float zNorm = absZ * invH;
-        float verticalProfile = PowSafe(1.0f - zNorm * zNorm, DiscVerticalFalloff);
-
-        return DiscDensityOverPath * invH * DiscRadialProfile(rXY, edge) * verticalProfile;
-    }
-
-    // ======================================================================
-    // COMPOSITION
-    // ======================================================================
-
-    // Region cleared by the central black hole. Returns a multiplier in
-    // [1 - VoidStrength, 1]. Spherical rather than squashed: what accretion clears is
-    // not set by disc rotation.
-    float VoidFactor(float rBoundsSq)
-    {
-        if (VoidStrength <= 0.0f)
-        {
-            return 1.0f;
-        }
-
-        float x2 = rBoundsSq * InvVoidRadiusSq;
-        if (x2 >= 1.0f)
-        {
-            return 1.0f;
-        }
-
-        return 1.0f - VoidStrength * PowSafe(1.0f - x2, VoidConcentration);
-    }
-
-    float BoundsFade(float rBoundsSq)
-    {
-        if (rBoundsSq <= BoundsFadeStartSq)
-        {
-            return 1.0f;
-        }
-
-        float t = (sqrt(rBoundsSq) - BoundsFadeStart) * InvBoundsFadeSpan;
-        return 1.0f - t * t * (3.0f - 2.0f * t);
-    }
-
-    // Density is additive: arms are an overdensity riding on the disc, and the bulge
-    // and disc occupy the same space. Do not use max() here -- it makes the layers
-    // compete, so the disc vanishes inside the arms and every authored value inflates
-    // to out-bid its neighbours.
-    //
-    // Not clamped. The marcher consumes this as sigma and wants the full range; the
-    // CPU rejection sampler maps it to a probability with its own response curve.
-    float Compose(float4 L, float rBoundsSq)
-    {
-        float Density = max(max(max(L.x, L.y), L.z), L.w);
-
-        Density *= VoidFactor(rBoundsSq);
-        Density *= BoundsFade(rBoundsSq);
-
-        return Density;
-    }
-
-    // Returns (arm, disc, bulge, background), unmodulated. No composition, no bounds
-    // fade.
-    //
-    // InGasWarp and InHaloWarp are RAW displacement vectors, centred on zero. The
-    // per-layer amounts are applied here, so the caller samples the warp field once
-    // per family and this decides what each layer does with it. Pass zero for an
-    // unwarped field.
-    float4 SampleLayersWarped(float3 InNormPos, float3 InGasWarp, float3 InHaloWarp)
-    {
-        float3 armPos = InNormPos + InGasWarp * WarpAmountArms;
-        float3 discPos = InNormPos + InGasWarp * WarpAmountDisc;
-        float3 bulgePos = InNormPos + InHaloWarp * WarpAmountBulge;
-        float3 bgPos = InNormPos + InHaloWarp * WarpAmountBackground;
-
-        // --- GALAXY-SCALE m=1 MODES ---
-        // Derived once from the UNWARPED position and shared by both gas layers:
-        // these belong to the galaxy, not a layer, and per-layer derivation would let
-        // positional warp rotate the lopsided axis differently for arms and disc.
-        //
-        // Both ramp with radius. The warp goes as rn^2 because the bulge holds the
-        // inner disc rigid -- which is also why the bulge itself does not warp, being
-        // the plane the warp bends away from. Lopsidedness ramps as rn to avoid an
-        // azimuthal seam on the axis, where theta sweeps the full circle while the
-        // disc profile is at its maximum.
-        float lopsided = 1.0f;
-        if (DiscWarpAmplitude != 0.0f || DiscLopsidedAmount != 0.0f)
-        {
-            float rXY0 = sqrt(InNormPos.x * InNormPos.x + InNormPos.y * InNormPos.y);
-            float rn0 = saturate(rXY0 * InvDiscRadius);
-            float theta0 = atan2(InNormPos.y, InNormPos.x);
-
-            float warpZ = DiscWarpAmplitude * rn0 * rn0
-                        * sin(theta0 - DiscWarpPhase - DiscWarpTwist * rn0);
-
-            lopsided = max(1.0f + DiscLopsidedAmount * rn0
-                               * cos(theta0 - DiscLopsidedPhase), 0.0f);
-
-            armPos.z -= warpZ;
-            discPos.z -= warpZ;
-        }
-
-        // Gated on its own density, as every layer is: zeroing a LayerDensity
-        // component both removes the layer and skips its cost.
-        float ArmDensity = 0.0f;
-        if (ArmDensityOverPath > 0.0f)
-        {
-            float rXYArm = sqrt(armPos.x * armPos.x + armPos.y * armPos.y);
-            ArmDensity = SampleArmDensity(armPos, rXYArm) * lopsided;
-        }
-
-        float rXYDisc = sqrt(discPos.x * discPos.x + discPos.y * discPos.y);
-        float DiscDensity = SampleDiscDensity(rXYDisc, abs(discPos.z)) * lopsided;
-
-        float BulgeDensity = SampleSpheroid(bulgePos, BulgeDensityOverPath,
-                                            BulgeInvRadiusSq, BulgeInvSquash,
-                                            BulgeConcentration);
-
-        float BgDensity = SampleSpheroid(bgPos, BackgroundDensityOverPath,
-                                         BackgroundInvRadiusSq, BackgroundInvSquash,
-                                         BackgroundConcentration);
-
-        return float4(ArmDensity, DiscDensity, BulgeDensity, BgDensity);
-    }
-
-    // Applies the two noise families to the four layers. Passing zero for either
-    // noise value leaves its layers untouched, which is how the caller expresses
-    // "the gate rejected this family" without a second entry point.
-    float4 ApplyModulation(float4 L, float InGasNoise, float InHaloNoise)
-    {
-        L.x *= max(1.0f + NoiseAmountArm * InGasNoise, 0.0f);
-        L.y *= max(1.0f + NoiseAmountDisc * InGasNoise, 0.0f);
-        L.z *= max(1.0f + NoiseAmountBulge * InHaloNoise, 0.0f);
-        L.w *= max(1.0f + NoiseAmountBackground * InHaloNoise, 0.0f);
-        return L;
-    }
-
-    // Entry point for the analytic field with no noise at all. This is what the C++
-    // rejection sampler calls, and what the shader produces at NoiseEnable = 0.
-    float SampleAnalytic(float3 InNormPos)
-    {
-        // Squared, so out-of-bounds samples never pay for the sqrt. BEFORE the rotation,
-        // which cannot change it -- and this way the majority of samples, which are out
-        // of bounds, never pay for the basis transform either.
-        float rBoundsSq = dot(InNormPos, InNormPos);
-        if (rBoundsSq >= 1.0f)
-        {
-            return 0.0f;
-        }
-
-        float3 FieldPos = ToFieldSpace(InNormPos);
-
-        float3 Zero = float3(0.0f, 0.0f, 0.0f);
-        return Compose(SampleLayersWarped(FieldPos, Zero, Zero), rBoundsSq);
-    }
-
-    // ======================================================================
-    // ENTITY PLACEMENT
-    // ======================================================================
-
-    // Density -> acceptance probability.
-    //
-    // The field is an OPTICAL DEPTH, not a probability: it peaks in the hundreds
-    // while most of the volume sits below 0.01, so clamping it to [0,1] here would
-    // accept every candidate across the arms, the inner disc and the bulge at once,
-    // flattening the distribution exactly where the structure is.
-    //
-    // The mapping is a POWER LAW and must stay one. Per-cell normalisation is
-    // artifact-free only because the envelope cancels: a cell's budget scales as E^g
-    // and its acceptance as (d/E)^g, so the realised density is a function of d alone.
-    // Anything that is not a power law -- a Beer-Lambert 1-exp(-r), a soft knee -- puts
-    // the cell back into the result and turns every cell boundary into a visible step.
-    //
-    // Linear (g = 1) keeps star number density proportional to gas density: accepted
-    // count is candidates * p, and only p ~ d makes a region twice as dense hold twice
-    // the stars. SpawnExponent bends that toward or away from the dense end.
-    float SpawnProbability(float InDensity, GalaxyPlacement InPlace)
-    {
-        if (InDensity <= 0.0f)
-        {
-            return 0.0f;
-        }
-
-        // Do NOT name the intermediate `linear`. That is an HLSL interpolation
-        // modifier and a reserved word, which C++ accepts without comment.
-        float ratio = min(InDensity * InPlace.InvDensityReference, 1.0f);
-
-        return saturate(PowSafe(ratio, max(InPlace.SpawnExponent, 1e-3f)));
-    }
-
-    // A sample point inside a cell, for estimating that cell's density ENVELOPE before
-    // any candidate is drawn. The caller evaluates the field at the returned point with
-    // whatever source it holds -- the same split MakeCandidate/FinishEntity uses.
-    //
-    // Eight corners, then jitter. Corners alone miss an arm passing through the middle
-    // of a cell without reaching any vertex, which both discards live cells and
-    // under-estimates the envelope of the ones it keeps. Jitter alone misses a peak
-    // sitting exactly at a vertex. Both happen, so the probe set does both.
-    //
-    // The jitter key runs DOWNWARD from the cell's seed while candidates run upward,
-    // so a probe can never draw the same key as a candidate in the same cell.
-    float3 MakeProbe(float3 InCellCentre, float InCellExtent,
-                     int InCellX, int InCellY, int InCellZ,
-                     int InKeySeed, uint InProbeIndex)
-    {
-        if (InProbeIndex < 8u)
-        {
-            return float3(
-                InCellCentre.x + ((InProbeIndex & 1u) != 0u ? InCellExtent : -InCellExtent),
-                InCellCentre.y + ((InProbeIndex & 2u) != 0u ? InCellExtent : -InCellExtent),
-                InCellCentre.z + ((InProbeIndex & 4u) != 0u ? InCellExtent : -InCellExtent));
-        }
-
-        float4 h = Hash4(InCellX, InCellY, InCellZ,
-                         InKeySeed - (int) (InProbeIndex + 1u) * GALAXY_SLOT_STRIDE);
-
-        // Componentwise, and no swizzle. The shim gives float3/float4 members and
-        // compound assignment only -- no .xyz, no free operator+ -- so the whole core
-        // is written this way and this function is not the place to start relying on
-        // more. Matches MakeCandidate exactly, which is the point: a probe and a
-        // candidate place a point in the cell by the same arithmetic.
-        return float3(
-            InCellCentre.x + (h.x * 2.0f - 1.0f) * InCellExtent,
-            InCellCentre.y + (h.y * 2.0f - 1.0f) * InCellExtent,
-            InCellCentre.z + (h.z * 2.0f - 1.0f) * InCellExtent);
-    }
-
-    // Three decorrelated uniforms in [0,1) folded into one 32-bit word, ten bits each.
-    //
-    // Halves the entity record, which is readback traffic on every boundary cross. Ten
-    // bits is 1024 levels per channel against the eight a colour target carries, so
-    // nothing downstream can see the quantisation.
-    //
-    // The word is stored in an INTEGER buffer and must stay in one. Smuggling a packed
-    // payload through a float channel looks equivalent and is not: an arbitrary bit
-    // pattern read as a float can land on a denormal, which hardware may flush to zero,
-    // or on the all-ones exponent, which is a NaN. Neither survives a round trip
-    // reliably, and both fail silently on a subset of values.
-    //
-    // SCALAR ONLY, in both directions. The C++ shim provides float3 and a scalar
-    // saturate; it has no uint3 and no vector saturate, and this file has to compile
-    // through it. Vector forms here fail on the C++ side alone, which is a build the
-    // shader compiler will never catch.
-    uint PackDecor(float3 InDecor)
-    {
-        uint qx = (uint) (saturate(InDecor.x) * 1023.0f + 0.5f);
-        uint qy = (uint) (saturate(InDecor.y) * 1023.0f + 0.5f);
-        uint qz = (uint) (saturate(InDecor.z) * 1023.0f + 0.5f);
-
-        return qx | (qy << 10u) | (qz << 20u);
-    }
-
-    float3 UnpackDecor(uint InPacked)
-    {
-        const float Inv = 1.0f / 1023.0f;
-
-        return float3(
-            (float) (InPacked & 1023u) * Inv,
-            (float) ((InPacked >> 10u) & 1023u) * Inv,
-            (float) ((InPacked >> 20u) & 1023u) * Inv);
-    }
-
-    // How many candidates a cell draws, from a real-valued budget.
-    //
-    // STOCHASTIC, NOT ROUNDED OR FLOORED. A cell's budget is BudgetScale x mass_i and
-    // most of a galaxy is faint, so in the outer halo that number is a small fraction.
-    // Any deterministic rounding destroys the distribution at the bottom end: a floor
-    // of 1 makes every faint cell draw the same count whatever it holds, so the halo's
-    // entity count tracks CELL COUNT rather than density, and plain rounding empties
-    // everything below half a candidate instead.
-    //
-    // Rounding down and adding one with probability frac() has expectation exactly
-    // InRaw, so the population is right in aggregate at every density while each cell
-    // holds a whole number.
-    //
-    // WAVE-UNIFORM BY CONSTRUCTION: the draw is keyed on the cell alone, so every lane
-    // in the group computes the same count and the strided candidate loop cannot
-    // diverge. Do not key it on the slot or the lane.
-    uint StochasticCount(float InRaw, int InCellX, int InCellY, int InCellZ,
-                         int InKeySeed, float InCeiling)
-    {
-        float r = min(max(InRaw, 0.0f), InCeiling);
-
-        // NOT named `frac`. That is an HLSL intrinsic, and shadowing one with a local
-        // is accepted by some compilers and rejected by others -- the same family of
-        // trap as naming a float `linear`.
-        float whole = floor(r);
-        float fracPart = r - whole;
-
-        float4 h = Hash4(InCellX, InCellY, InCellZ, InKeySeed + GALAXY_ROUND_OFFSET);
-
-        return (uint) whole + ((h.x < fracPart) ? 1u : 0u);
-    }
-
-    // One candidate, decided entirely by its own key. Everything that does not need the
-    // field.
-    //
-    // InCellCentre and InCellExtent describe the cell in the caller's units;
-    // InInvGalaxyExtent converts into the normalized [-1,1] frame the field is defined
-    // in. The caller already holds that reciprocal, and passing it beats storing a
-    // second extent here that could disagree with the one the proxy uses.
-    GalaxyCandidate MakeCandidate(float3 InCellCentre, float InCellExtent,
-                                  float InInvGalaxyExtent, int InCellX, int InCellY,
-                                  int InCellZ, int InSlot)
-    {
-        GalaxyCandidate C;
-
-        float4 h = Hash4(InCellX, InCellY, InCellZ, InSlot);
-
-        C.Pos = float3(
-            InCellCentre.x + (h.x * 2.0f - 1.0f) * InCellExtent,
-            InCellCentre.y + (h.y * 2.0f - 1.0f) * InCellExtent,
-            InCellCentre.z + (h.z * 2.0f - 1.0f) * InCellExtent);
-
-        C.Norm = float3(C.Pos.x * InInvGalaxyExtent,
-                        C.Pos.y * InInvGalaxyExtent,
-                        C.Pos.z * InInvGalaxyExtent);
-
-        C.AcceptDraw = h.w;
-
-        // MUST NOT REUSE AcceptDraw, or share a hash component with it. Acceptance
-        // keeps only candidates whose draw fell below p, so among survivors that value
-        // is biased low -- and in a sparse region, where p is small, only the very
-        // lowest draws survive at all. Sharing it correlates extent with local density
-        // and leaves sparse regions holding systematically tiny stars. A scrambled
-        // recombination of the other three costs four ops against a second hash.
-        float e = h.x * 7.31f + h.y * 3.17f + h.z * 11.71f;
-        C.ExtentDraw = e - floor(e);
-
-        // A second key for the decorative values, so colour is stable for a given
-        // entity without being tied to where it landed.
-        float4 g = Hash4(InCellX, InCellY, InCellZ, InSlot + GALAXY_DECOR_OFFSET);
-        C.Decor = float3(g.x, g.y, g.z);
-
-        return C;
-    }
-
-    // Everything that does need it. InDensity is the RAW field value at C.Norm,
-    // whichever way the caller obtained it: SampleAnalytic for the texture-free path,
-    // GalaxySample for the textured one.
-    GalaxyEntity FinishEntity(GalaxyPlacement InPlace, GalaxyCandidate InC,
-                              float InDensity)
-    {
-        GalaxyEntity E;
-
-        E.Pos = InC.Pos;
-        E.Density = InDensity;
-        E.Decor = InC.Decor;
-        E.bValid = (InC.AcceptDraw < SpawnProbability(InDensity, InPlace))
-            ? 1.0f : 0.0f;
-
-        E.Extent = InPlace.ExtentMin
-            + (InPlace.ExtentMax - InPlace.ExtentMin)
-              * PowSafe(InC.ExtentDraw, max(InPlace.ExtentExponent, 1e-3f));
-
-        return E;
-    }
-
-
-    // ======================================================================
-    // NOISE FRAME
-    // Everything below shapes the domain the noise is sampled in. It reads no
-    // texture, so it lives with the analytic half rather than the sampling half, but it is the
-    // section to alter when changing how noise relates to the geometry.
-    // ======================================================================
-
-    // Rotating a sample by -twist before evaluating noise makes features wind with
-    // the spiral and shear inward. InInherit scales it; 1 is the full gas twist.
-    //
-    // The r/R ramp is load bearing. Raw twist grows as ln(R/r), reaching 11 radians
-    // at r = 0.05R, which would smear halo noise into azimuthal streaks. Ramping
-    // turns the product into a bump peaking near 0.37R at about 1.4 rad -- at the
-    // bulge/disc transition, which is also where the shared kinematics are.
-    //
-    // InU is min(-log(rn), 6) and InRn is rXY/discR, both from the caller: the gas
-    // and halo twists share a radius, so deriving them here would repeat the log.
-    float SpiralTwistAt(float InU, float InRn, float InInherit)
-    {
-        if (InInherit == 0.0f)
-        {
-            return 0.0f;
-        }
-
-        float T = ArmPitchTightening;
-        return ArmSpiralK0 * (InU + 0.5f * T * InU * InU) * InRn * InInherit;
-    }
-
-    // InScale is (lateral, vertical). Vertical above lateral compresses z, so
-    // features read as sheets. InOffset separates the two frames' domains.
-    float3 NoiseFrame(float3 InPos, float InTwist, float2 InScale, float3 InOffset)
-    {
-        float st, ct;
-        sincos(InTwist, st, ct);
-
-        return float3((InPos.x * ct + InPos.y * st) * InScale.x,
-                     (-InPos.x * st + InPos.y * ct) * InScale.x,
-                       InPos.z * InScale.y) + InOffset;
-    }
-};
-
-// ==========================================================================
-// DERIVATION
-// The single place clamping, inversion and per-arm hashing happen. Both the
-// shader and C++ call this, which is what keeps their fields identical rather
-// than merely intended to match.
-// ==========================================================================
-GalaxyDensityParams MakeGalaxyDensityParams(
-    float4 InLateralScale, // x arm width, y disc radius,
-                                    // z bulge radius, w background radius
-    float4 InVerticalScale, // per-layer axis ratios, same order
-    float4 InLayerDensity, // per-layer OPTICAL DEPTH, same order
-    float4 InNoiseAmount, // per-layer modulation depth, same order
-    float4 InWarpAmount, // per-layer warp amount, signed, same order
-    float4 InArmAsym, // x pitch, y phase, z density, w length
-    float4 InSpiralTwist, // x pitch deg, y tightening,
-                                    // z phase offset, w halo inherit
-    float3 InCentralVoid, // x radius, y strength, z concentration
-    float4 InNoiseScale, // frame convention
-    float4 InWarpScale, // frame convention
-    float4 InNoiseChannelWeights,
-    float3 InNoiseOffset,
-    float InBoundsFadeStart,
-    float InDiscScaleLengthRatio, // multiple of the bulge radius
-    float InDiscVerticalFalloff,
-    float InDiscFlare,
-    float InDiscWarpAmplitude,
-    float InDiscWarpPhase,
-    float InDiscWarpTwist,
-    float InDiscLopsidedAmount,
-    float InDiscLopsidedPhase,
-    float InArmCount,
-    float InArmAsymSeed,
-    float InArmProfileExponent,
-    float InArmRadialGrowth,
-    float InArmHostFalloff,
-    float InBulgeConcentration,
-    float InBackgroundConcentration,
-    float InNoiseRidged,
-    float InNoiseEnable,
-    // APPENDED, not inserted, and it stays that way for anything added later. The
-    // material's Custom node calls this positionally and a Custom node fails at SHADER
-    // compile rather than at build, so inserting an argument mid-list silently shifts
-    // every pin after it. Appending only ever leaves the existing ones where they were.
-    float4 InFieldOrientation) // xyz disc normal in GALAXY space, w spin in DEGREES
-{
-    GalaxyDensityParams P;
-
-    // --- GLOBAL ORIENTATION ---
-    // Built once per thread, beside the arm hashes.
-    //
-    // A NORMAL AND A SPIN, not Euler angles. The universe layer already produces a
-    // uniform unit vector per particle for its sprite orientation, so taking a normal
-    // means the galaxy inherits it with NO CONVERSION -- and a conversion between
-    // rotation conventions is exactly the kind of blind guess that renders plausibly
-    // and wrongly. A normal also pins the disc plane directly, which is the thing being
-    // authored; the spin is the one remaining freedom.
-    //
-    // The rows are the TRANSPOSE of the basis, which is its inverse for an orthonormal
-    // one, because samples travel galaxy -> field while the normal describes
-    // field -> galaxy.
-    {
-        // COMPONENTWISE, AND NORMALIZED BY HAND. This file compiles as C++ too, through
-        // GalaxyHLSLShim.h, and the shim has neither swizzles nor normalize -- a struct
-        // member cannot present a .xyz the way an HLSL vector does. Shared code stays in
-        // the intersection of the two languages; dot and rsqrt are both in the shim.
-        float3 Raw = float3(InFieldOrientation.x, InFieldOrientation.y, InFieldOrientation.z);
-        float LenSq = dot(Raw, Raw);
-
-        // A ZERO NORMAL IS REACHABLE -- an unset FVector3f, or a rolled range that
-        // brackets the origin on all three components. rsqrt(0) is infinity, which would
-        // poison the whole basis and hand back a galaxy of NaNs. Disc-up is the same
-        // fallback the struct default uses.
-        float3 N = (LenSq > 1e-12f)
-            ? (Raw * rsqrt(LenSq))
-            : float3(0.0f, 0.0f, 1.0f);
-
-        // Duff et al. branchless orthonormal basis. BRANCHLESS MATTERS AT THE POLE: the
-        // usual cross-with-an-arbitrary-axis construction degenerates as the normal
-        // approaches it, and the sign trick here is exactly what keeps N.z = -1 finite.
-        float s = (N.z >= 0.0f) ? 1.0f : -1.0f;
-        float a = -1.0f / (s + N.z);
-        float b = N.x * N.y * a;
-
-        float3 T = float3(1.0f + s * N.x * N.x * a, s * b, -s * N.x);
-        float3 B = float3(b, s + N.y * N.y * a, -N.y);
-
-        float sn, cs;
-        sincos(InFieldOrientation.w * 0.01745329252f, sn, cs);
-
-        P.FieldX = cs * T + sn * B;
-        P.FieldY = cs * B - sn * T;
-        P.FieldZ = N;
-    }
-
-    P.BoundsFadeStart = InBoundsFadeStart;
-    P.BoundsFadeStartSq = InBoundsFadeStart * InBoundsFadeStart;
-    P.InvBoundsFadeSpan = 1.0f / max(1.0f - InBoundsFadeStart, 1e-6f);
-
-    // --- LATERAL AND VERTICAL SCALES ---
-    // Every layer is a body with a lateral scale S and a vertical extent S * V. The
-    // four vertical controls are all axis ratios despite differing in form; smaller
-    // flattens. LateralScale.y does double duty: the disc radius is also the arm
-    // system's radial reference, since arms live in the disc and have no radius of
-    // their own.
-    // CORRELATED INPUTS are resolved here, not in the material graph, so the
-    // shader and C++ receive the identical raw parameter set:
-    //   arm width      is a fraction of the disc's scale height
-    //   bulge radius   is a fraction of the disc radius
-    //   void radius    is a fraction of the disc radius
-    //   arm growth     is a coefficient on the disc's flare
-    P.DiscHeightRatio = max(InVerticalScale.y, 1e-6f);
-    P.DiscRadius = max(InLateralScale.y, 1e-6f);
-    P.InvDiscRadius = 1.0f / P.DiscRadius;
-    P.ArmWidth = max(InLateralScale.x * P.DiscHeightRatio, 1e-6f);
-
-    float bulgeR = max(InLateralScale.z * P.DiscRadius, 1e-6f);
-    float bgR = max(InLateralScale.w, 1e-6f);
-
-    P.InvArmVerticalRatio = 1.0f / max(InVerticalScale.x, 1e-4f);
-    P.BulgeInvSquash = 1.0f / max(InVerticalScale.z, 1e-3f);
-    P.BackgroundInvSquash = 1.0f / max(InVerticalScale.w, 1e-3f);
-
-    P.BulgeInvRadiusSq = 1.0f / (bulgeR * bulgeR);
-    P.BackgroundInvRadiusSq = 1.0f / (bgR * bgR);
-
-    // Scale length is derived from the bulge rather than the disc radius: the
-    // bulge-to-disc scale ratio is a real measured quantity, while the disc radius is
-    // just where the disc is truncated.
-    P.InvDiscScaleL = 1.0f / max(bulgeR * max(InDiscScaleLengthRatio, 1e-6f), 1e-6f);
-
-    // --- PROFILE EXPONENTS ---
-    P.BulgeConcentration = max(InBulgeConcentration, GALAXY_POW_EPSILON);
-    P.BackgroundConcentration = max(InBackgroundConcentration, GALAXY_POW_EPSILON);
-    P.DiscVerticalFalloff = max(InDiscVerticalFalloff, 0.1f);
-    P.ArmProfileExponent = max(InArmProfileExponent, GALAXY_POW_EPSILON);
-    P.ArmRadialGrowth = InArmRadialGrowth * InDiscFlare;
-    P.ArmHostFalloff = max(InArmHostFalloff, 0.0f);
-
-    // --- DISC ASYMMETRY ---
-    P.DiscFlare = max(InDiscFlare, 0.0f);
-    P.DiscWarpAmplitude = InDiscWarpAmplitude;
-    P.DiscWarpPhase = InDiscWarpPhase;
-    P.DiscWarpTwist = InDiscWarpTwist;
-    P.DiscLopsidedAmount = InDiscLopsidedAmount;
-    P.DiscLopsidedPhase = InDiscLopsidedPhase;
-
-    // --- SPIRAL ---
-    float pitchDeg = clamp(InSpiralTwist.x, -89.0f, 89.0f);
-    float tanP = tan(radians(max(abs(pitchDeg), 1.0f)));
-    P.ArmSpiralK0 = ((pitchDeg < 0.0f) ? -1.0f : 1.0f) / tanP;
-    P.ArmPitchTightening = max(InSpiralTwist.y, 0.0f);
-    P.HaloTwistInherit = InSpiralTwist.w;
-    P.ArmPitchFactorMax = 1.0f + abs(InArmAsym.x);
-
-    // --- CENTRAL VOID ---
-    float voidR = max(InCentralVoid.x * P.DiscRadius, 1e-6f);
-    P.InvVoidRadiusSq = 1.0f / (voidR * voidR);
-    P.VoidStrength = saturate(InCentralVoid.y);
-    P.VoidConcentration = max(InCentralVoid.z, GALAXY_POW_EPSILON);
-
-    // --- PER-LAYER NOISE RESPONSE ---
-    P.NoiseAmountArm = InNoiseAmount.x;
-    P.NoiseAmountDisc = InNoiseAmount.y;
-    P.NoiseAmountBulge = InNoiseAmount.z;
-    P.NoiseAmountBackground = InNoiseAmount.w;
-
-    P.WarpAmountArms = InWarpAmount.x;
-    P.WarpAmountDisc = InWarpAmount.y;
-    P.WarpAmountBulge = InWarpAmount.z;
-    P.WarpAmountBackground = InWarpAmount.w;
-
-    // --- NOISE FIELD ---
-    P.NoiseOffset = InNoiseOffset;
-    P.NoiseScale = max(InNoiseScale, 1e-6f);
-    P.WarpScale = max(InWarpScale, 1e-6f);
-    P.NoiseChannelWeights = InNoiseChannelWeights;
-    P.NoiseRidged = saturate(InNoiseRidged);
-    P.NoiseEnable = InNoiseEnable;
-
-    // --- OPTICAL DEPTH NORMALISATION ---
-    // LayerDensity is an OPTICAL DEPTH per layer, not a density: what you would measure
-    // looking through that layer along its natural axis. Dividing by the layer's own
-    // path length makes the four comparable, independent of the march step count, and
-    // readable as the number the marcher will accumulate -- ArmDensity = 1 draws as 1.
-    //
-    // The divisor is the FULL integral of that layer's profile along its axis, which is
-    // what makes the marcher's job a plain sum with no compensating factor. All four
-    // divisors and the marcher's accumulation are one convention: change any of them and
-    // every layer's authored brightness shifts.
-    P.ArmDensityOverPath = InLayerDensity.x / P.ArmWidth;
-
-    P.DiscDensityOverPath = InLayerDensity.y
-        / max(P.CompactProfileIntegral(P.DiscVerticalFalloff), 1e-6f);
-
-    P.BulgeDensityOverPath = InLayerDensity.z
-        / max(bulgeR * P.CompactProfileIntegral(P.BulgeConcentration), 1e-6f);
-
-    P.BackgroundDensityOverPath = InLayerDensity.w
-        / max(bgR * P.CompactProfileIntegral(P.BackgroundConcentration), 1e-6f);
-
-    // --- PER-ARM RECORDS ---
-    // Invariant along a ray, so hashing them per sample would repeat identical work.
-    // Every slot is filled, not just the first ArmN, so none is read uninitialised.
-    P.ArmN = (int) clamp(InArmCount, 1.0f, (float) GALAXY_MAX_ARMS);
-
-    float armFadeW = max(0.2f * P.DiscRadius, 1e-6f);
-    P.InvArmFadeW = 1.0f / armFadeW;
-
-    float armSpacing = 2.0f * GALAXY_PI / float(P.ArmN);
-    int armSeed = (int) InArmAsymSeed;
-
-    for (int ai = 0; ai < GALAXY_MAX_ARMS; ai++)
-    {
-        float4 h = P.ArmHash(ai, armSeed);
-
-        P.ArmData[ai] = float4(
-            1.0f + InArmAsym.x * (2.0f * h.x - 1.0f),
-            InSpiralTwist.z + float(ai) * armSpacing
-                + InArmAsym.y * armSpacing * (2.0f * h.y - 1.0f),
-            max(1.0f + InArmAsym.z * (2.0f * h.z - 1.0f), 0.0f),
-            P.DiscRadius * (1.0f - InArmAsym.w * h.w) - armFadeW);
-    }
-
-
-    return P;
-}
-
-
-// ===========================================================================
-// TEXTURE-SAMPLING FIELD
-//
-// Compiles on both sides: the shim stubs Texture3D and SamplerState to the neutral
-// 0.5, so every noise term comes out zero and GalaxySample reduces to SampleAnalytic
-// term for term.
-//
-// NEVER BIND, ONLY RECEIVE, as everywhere else here. Nothing owns a texture; each
-// function takes the one its caller already has. Anything that binds a resource, or
-// touches Parameters or View, belongs in the material or the compute shader.
-// ===========================================================================
-
-// --- VOLUME TEXTURE LOOKUP, SIGNED ---
-// SampleLevel, not Sample: inside a dynamic loop the derivatives driving mip
-// selection are undefined. Called as a method rather than through the
-// Texture3DSampleLevel macro so this file does not depend on Common.ush having been
-// included ahead of it.
-//
-// Channels are centred to [-1,1] BEFORE weighting, which is what lets a weight act
-// as a mixer: positive takes the channel, negative inverts it, |w| > 1 is gain,
-// all-zero returns 0. Weighting first would need a signed-sum divide that blows up
-// for (1,-1,0,0).
-//
-// Output is deliberately NOT bounded to [-1,1] -- sum|w| > 1 exceeds it. The
-// downstream modulator is 1 + Amount * n, so large |n| spikes density as well as
-// clamping it to zero. Keep sum|w| near 1 unless gain is wanted.
-//
-// Ridging happens HERE, per channel, not on the weighted sum: the 1-2|c| fold only
-// maps back into [-1,1] when its input is already bounded there, which each centred
-// channel is and the weighted sum is not.
-float GalaxySampleNoiseTex(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 Pos)
+// Nothing here touches Parameters or View -- those exist only inside the generated
+// material function, so the dither that needs them stays in the Custom node body.
+
+#include "/UltraLargeScale/UniverseDensityCore.ush"
+
+// Channels are centred to [-1,1] BEFORE weighting, so a weight acts as a mixer:
+// positive takes the channel, negative inverts it, |w| > 1 is gain. Ridging happens
+// per channel for the same reason it does in the galaxy -- the 1-2|c| fold only maps
+// back into [-1,1] when its input is already bounded there.
+float UniverseSampleNoiseTex(UniverseDensityParams P, Texture3D InTex,
+                             SamplerState InSampler, float3 Pos)
 {
     float4 t = InTex.SampleLevel(InSampler, Pos, 0);
+    float4 c = t * 2.0 - 1.0;
 
-    float cx = t.x * 2.0f - 1.0f;
-    float cy = t.y * 2.0f - 1.0f;
-    float cz = t.z * 2.0f - 1.0f;
-    float cw = t.w * 2.0f - 1.0f;
+    c = lerp(c, 1.0 - 2.0 * abs(c), P.NoiseRidged);
 
-    cx = lerp(cx, 1.0f - 2.0f * abs(cx), P.NoiseRidged);
-    cy = lerp(cy, 1.0f - 2.0f * abs(cy), P.NoiseRidged);
-    cz = lerp(cz, 1.0f - 2.0f * abs(cz), P.NoiseRidged);
-    cw = lerp(cw, 1.0f - 2.0f * abs(cw), P.NoiseRidged);
-
-    return dot(P.NoiseChannelWeights, float4(cx, cy, cz, cw));
+    return dot(P.NoiseChannelWeights, c);
 }
 
-// ONE FETCH. The texture is a pre-baked Perlin-Worley volume that already carries a
-// spectrum, so summing octaves of it re-filters something already filtered -- at one
-// texture read each, in a dynamic loop, on the hottest path in the stack.
+float UniverseFBm(UniverseDensityParams P, Texture3D InTex, SamplerState InSampler, float3 Pos)
+{
+    float sum = 0.0;
+    float amp = 1.0;
+
+    for (int o = 0; o < UNIVERSE_MAX_OCTAVES; o++)
+    {
+        if (o >= P.NoiseOctaveCount)
+        {
+            break;
+        }
+
+        // A texture has no seed, so octaves decorrelate by offset.
+        sum += UniverseSampleNoiseTex(P, InTex, InSampler,
+                                      Pos + float3(17.3, 11.7, 23.1) * float(o)) * amp;
+        Pos *= UNIVERSE_NOISE_LACUNARITY;
+        amp *= UNIVERSE_NOISE_GAIN;
+    }
+
+    return sum * P.InvNoiseNorm;
+}
+
+// Analytic web, then modulation.
 //
-// For genuinely more fractal detail, bake a deeper field into a larger volume rather
-// than stacking reads here: the cost lands once at bake time instead of per sample.
-float GalaxyNoise(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 Pos)
+// Gated on the web being non-zero, as in the galaxy: most of the volume is void, so
+// the gate skips the fetch for the majority of march steps. The void floor makes
+// "non-zero" almost everywhere though, so the threshold is against the floor rather
+// than against zero -- otherwise the gate never fires and costs a comparison for
+// nothing.
+//
+// The noise coordinate is still built by reconstructing a float3 and wrapping the
+// cell offset at 512. The warp no longer does this -- it masks the integer cell and
+// converts only the remainder, which is exact at any magnitude -- and the same
+// treatment is the obvious next thing to give the noise, which would remove the 512
+// wrap along with the precision floor underneath it.
+//
+// The noise coordinate scrolls with the field. If it did not, the texture detail
+// would sit still in the proxy while the web moved through it, which reads as the
+// structure sliding under a fixed layer of grain. It scrolls on the cell offset
+// WRAPPED to a few hundred cells: a texture coordinate has no precision left at the
+// full offset anyway, and the noise is decorrelated well within the wrap distance,
+// so the repeat is not reachable in a single view.
+// Returns density. The second component used to be the distance in CELL units the
+// march could skip without
+// being able to miss a feature. The noise never touches y: it is gated on the web
+// already being above the floor, so in the skippable span the density is exactly
+// VoidFloor and integrates in closed form over any step length.
+float UniverseSample(UniverseDensityParams P, Texture3D InTex, SamplerState InSampler,
+                     Texture3D InWarpTex, SamplerState InWarpSampler,
+                     float3 NormPos, float3 OffsetCell, float3 OffsetFrac)
 {
-    return GalaxySampleNoiseTex(P, InTex, InSampler, Pos);
+    float d = P.SampleAtPosition(InTex, InSampler, InWarpTex, InWarpSampler,
+                                 NormPos, OffsetCell, OffsetFrac);
+
+#if UNIVERSE_COST_PROBE >= 1
+    bool bNoise = false;   // probe level 1: detail fBm removed at compile time
+#else
+    bool bNoise = (P.NoiseEnable > 0.5) && (P.NoiseAmount != 0.0);
+#endif
+    if (bNoise && d > P.VoidFloor * 1.001)
+    {
+        float3 wrapped = fmod(OffsetCell, 512.0) + OffsetFrac;
+        float3 scrolled = NormPos + wrapped / max(P.InvCellSize, 1e-6);
+
+        float3 nf = scrolled * P.NoiseScaleLateral + P.NoiseOffset;
+        nf.z = scrolled.z * P.NoiseScaleVertical + P.NoiseOffset.z;
+
+        float n = UniverseFBm(P, InTex, InSampler, nf);
+        d *= max(1.0 + P.NoiseAmount * n, 0.0);
+    }
+
+    return d;
 }
 
-// Full field: analytic layers, positionally warped, then modulated.
-// The ORDER matters for cost. Warp has to be sampled before the layers because it
-// displaces the position they are evaluated at, but modulation is sampled AFTER,
-// gated on the layers being non-zero -- most of the volume is empty, so that gate
-// skips the octave loop for the majority of march steps.
-float GalaxySample(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 InSamplePos)
+// --- RAYMARCH: ANALYTIC SPHERE-BOUNDED DENSITY ACCUMULATION ---
+// Same stepping rule as the galaxy layer. The proxy mesh decides which pixels run; the
+// unit sphere decides where to march.
+//
+// STEP LENGTH IS A FRACTION OF CAMERA DISTANCE, so every step subtends about the same
+// angle and covers about the same screen area wherever it is. The recurrence
+// s -> s(1 + StepRatio) is geometric, which makes the step count LOGARITHMIC in range
+// rather than linear -- against a fixed count spread evenly along the chord, that is the
+// difference between a budget spent mostly where nothing is visible and one spent where
+// the pixels are.
+//
+// It is now the ONLY thing setting step length. It used to set a floor that an
+// empty-space skip could override wherever the skip was larger; that skip has been
+// removed. The two answered different questions --
+// how much detail a step needs, and how much detail is there.
+//
+// Do not add a box bounds test on the marched position. InStartPos sits exactly on
+// the proxy surface, so a component is exactly 0 or 1 before any FP error, and such a
+// test breaks on iteration zero wherever rounding pushes it outside -- view-direction
+// dependent, so it shows as angle-dependent dropout at silhouettes.
+//
+// WILL CHANGE: the universe proxy is a sphere centred on the CAMERA, so the chord is
+// a constant length and the entry/exit maths collapses to a fixed span rather than an
+// intersection. Correct as written for a fixed test volume; not the final bounding.
+//
+// InViewVec is the LOCAL camera vector, surface toward camera. DIRECTION ONLY.
+//
+// InCamPosN is the camera in NORMALIZED space -- the same frame as the marched position,
+// box spanning -1 to 1 -- and no remap is applied to it here. A remap applied in the
+// shader silently biases anything supplied in a different frame, and a biased camera
+// position is indistinguishable from a correct one until the geometry is wrong.
+//
+// Once the proxy becomes a sphere centred on the camera this collapses: the camera is
+// always at the origin, InCamPosN is zero, and the distance is just t.
+//
+// RETURNS  (emission, steps taken, 0, transmittance).
+//
+// The step count rides in G because cost has no other observer: a march that truncates
+// looks identical to one that finished, and the far half of the volume is simply absent.
+float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState InSampler,
+                        Texture3D InWarpTex, SamplerState InWarpSampler,
+                        float3 InStartPos, float3 InViewVec, float3 InCamPosN,
+                        float3 InOffsetCell, float3 InOffsetFrac,
+                        float InStepRatio, float InMinStep, float InMinSamples,
+                        int InMaxSteps, float InDensityScale, float InJitter,
+                        float InNoisePower)
 {
-    // Squared, so out-of-bounds samples never pay for the sqrt. BEFORE the rotation,
-    // which cannot change it -- and this way the majority of samples, which are out of
-    // bounds, never pay for the basis transform either.
-    float rBoundsSq = dot(InSamplePos, InSamplePos);
-    if (rBoundsSq >= 1.0f)
+    // Unit box [0,1] -> normalized space [-1,1]. Uniform scale, so a direction is
+    // identical in both.
+    float3 o = 2.0 * (InStartPos - 0.5);
+    float3 dir = normalize(-InViewVec);
+
+    float b = dot(o, dir);
+    float c = dot(o, o) - 1.0;
+    float disc = b * b - c;
+    if (disc <= 0.0)
     {
-        return 0.0f;
+        return float4(0.0, 0.0, 0.0, 1.0);
     }
 
-    // GALAXY SPACE -> FIELD SPACE, once, here. Everything below -- layers, noise frame,
-    // warp lookup, the m=1 modes -- works in field space and is unaware the galaxy is
-    // oriented at all.
-    float3 NormPos = P.ToFieldSpace(InSamplePos);
+    float sq = sqrt(disc);
 
-    bool bNoise = P.NoiseEnable > 0.5f;
-
-    // Split so neither twist is built when nothing consumes it.
-    bool bGasNoise = bNoise && (P.WarpAmountArms != 0.0f || P.WarpAmountDisc != 0.0f
-                              || P.NoiseAmountArm != 0.0f || P.NoiseAmountDisc != 0.0f);
-    bool bHaloNoise = bNoise && (P.WarpAmountBulge != 0.0f || P.WarpAmountBackground != 0.0f
-                              || P.NoiseAmountBulge != 0.0f || P.NoiseAmountBackground != 0.0f);
-
-    float gasTwist = 0.0f;
-    float haloTwist = 0.0f;
-
-    if (bGasNoise || bHaloNoise)
+    // Origin inside the sphere: clamp the near end. Outside: take the whole chord
+    // WITHOUT clamping to zero, because with an inverted-normal proxy the shaded
+    // point is the far face and the chord lies at negative t.
+    float tEnter = (c < 0.0) ? 0.0 : (-b - sq);
+    float tExit = -b + sq;
+    if (tExit <= tEnter)
     {
-        // One log for both twists: they share this radius.
-        float rXY0 = sqrt(NormPos.x * NormPos.x + NormPos.y * NormPos.y);
-        float rn0 = saturate(rXY0 * P.InvDiscRadius);
-        float u0 = min(-log(max(rn0, 1e-5f)), 6.0f);
-
-        gasTwist = bGasNoise ? P.SpiralTwistAt(u0, rn0, 1.0f) : 0.0f;
-        haloTwist = bHaloNoise ? P.SpiralTwistAt(u0, rn0, P.HaloTwistInherit) : 0.0f;
+        return float4(0.0, 0.0, 0.0, 1.0);
     }
 
-    // One fetch per family, not an FBm call: warp wants a single low frequency, and
-    // RGB supplies a three-component vector directly. The two layers in a family
-    // share the fetch and scale it independently, so they can warp in opposite
-    // directions for the price of one lookup.
-    float3 gasWarp = float3(0.0f, 0.0f, 0.0f);
-    float3 haloWarp = float3(0.0f, 0.0f, 0.0f);
+    // DISTANCE FROM THE CAMERA, which is what sets step size. The sample at t sits at
+    // o + dir*t and the camera at o - dCam*dir, so their separation is (dCam + t).
+    float dCam = dot(o - InCamPosN, dir);
 
-    if (bGasNoise && (P.WarpAmountArms != 0.0f || P.WarpAmountDisc != 0.0f))
-    {
-        float3 wf = P.NoiseFrame(NormPos, gasTwist, float2(P.WarpScale.x, P.WarpScale.y), P.NoiseOffset);
-        float4 ws = InTex.SampleLevel(InSampler, wf, 0);
-        gasWarp = float3(ws.x - 0.5f, ws.y - 0.5f, ws.z - 0.5f);
-    }
-
-    // From the ORIGINAL position, not a gas-warped one, so the two displacements stay
-    // independent rather than compounding.
-    if (bHaloNoise && (P.WarpAmountBulge != 0.0f || P.WarpAmountBackground != 0.0f))
-    {
-        float3 hf = P.NoiseFrame(NormPos, haloTwist, float2(P.WarpScale.z, P.WarpScale.w),
-                                 P.NoiseOffset + GALAXY_HALO_DOMAIN);
-        float4 hs = InTex.SampleLevel(InSampler, hf, 0);
-        haloWarp = float3(hs.x - 0.5f, hs.y - 0.5f, hs.z - 0.5f);
-    }
-
-    float4 L = P.SampleLayersWarped(NormPos, gasWarp, haloWarp);
-
-    // Sampled at the UNWARPED position: one fetch feeds two layers that are warped
-    // differently, so either warped position would be an arbitrary choice and
-    // sampling both would double the cost for no visible gain.
+    // START AT THE CAMERA WHEN IT IS INSIDE THE VOLUME. The chord otherwise begins
+    // behind the viewer, and every step of that stretch runs at the floor because the
+    // separation there is zero -- the whole budget spent on geometry nobody can see.
     //
-    // != 0.0 rather than > 0.0, so a negative amount -- a valid inversion of the
-    // modulation -- is not silently dropped. Zero means "gate rejected", and
-    // ApplyModulation leaves those layers untouched.
-    float gasNoise = 0.0f;
-    float haloNoise = 0.0f;
-
-    if (bGasNoise && (P.NoiseAmountArm != 0.0f || P.NoiseAmountDisc != 0.0f)
-        && (L.x + L.y) > 1e-4f)
+    // GUARDED SO IT CAN ONLY SHORTEN. Each condition rules out a way a wrong InCamPosN
+    // could empty the chord instead of trimming it; the fallback is the full chord,
+    // which is slower but still correct.
+    float tStart = tEnter;
+    if (dCam > 0.0 && -dCam > tEnter && -dCam < tExit)
     {
-        float3 nf = P.NoiseFrame(NormPos, gasTwist, float2(P.NoiseScale.x, P.NoiseScale.y), P.NoiseOffset);
-        gasNoise = GalaxyNoise(P, InTex, InSampler, nf);
+        tStart = -dCam;
     }
 
-    if (bHaloNoise && (P.NoiseAmountBulge != 0.0f || P.NoiseAmountBackground != 0.0f)
-        && (L.z + L.w) > 1e-4f)
+    float k = max(InStepRatio, 0.0);
+    float minStep = max(InMinStep, 1e-5);
+
+    // FLOOR ON SAMPLES ACROSS THE CHORD. Angular sizing says how much detail a step
+    // needs and nothing about how much the volume has; past some range one step spans
+    // the whole thing and the structure disappears rather than softening.
+    float maxStep = (tExit - tStart) / max(InMinSamples, 1.0);
+
+    // Dither shortens the FIRST step. It costs no path length -- the loop clamps the
+    // last step to the exit -- and it offsets each pixel's lattice independently.
+    float firstScale = clamp(InJitter, 0.05, 1.0);
+
+    float t = tStart;
+    float stepsTaken = 0.0;
+
+    bool bShape = (InNoisePower != 1.0);
+
+    // Cell units to normalized units.
+    float transmittance = 1.0;
+    float emission = 0.0;
+
+    // InMaxSteps is a SAFETY BOUND, not the step count. The geometric progression sets
+    // the count; this only stops a pathological ratio from hanging the shader.
+    [loop]
+    for (int i = 0; i < InMaxSteps; i++)
     {
-        float3 hf = P.NoiseFrame(NormPos, haloTwist, float2(P.NoiseScale.z, P.NoiseScale.w),
-                                 P.NoiseOffset + GALAXY_HALO_DOMAIN);
-        haloNoise = GalaxyNoise(P, InTex, InSampler, hf);
+        if (t >= tExit)
+        {
+            break;
+        }
+
+        stepsTaken += 1.0;
+
+        // SAMPLED AT THE STEP START, not the midpoint. The galaxy march samples the
+        // midpoint because growing steps otherwise weight each interval by its leading
+        // face. That reason is now the only one left -- the empty-space skip used to
+        // anchor a bound at the sampled point, and it is gone -- so moving to the
+        // midpoint is available if the leading-face bias ever proves worse than the
+        // half-step offset.
+        float density = UniverseSample(P, InTex, InSampler, InWarpTex, InWarpSampler,
+                                       o + dir * t, InOffsetCell, InOffsetFrac);
+        if (bShape)
+        {
+            density = P.PowSafe(density, InNoisePower);
+        }
+
+        // max against zero, not just against the floor: a sample behind the camera has
+        // a negative separation, and without it a wrong camera position gives negative
+        // step lengths and a march that never terminates.
+        float h = max(minStep, max(dCam + t, 0.0) * k);
+        h = min(h, maxStep);
+
+        // FIRST-STEP DITHER. Without it every ray starts at the same place and takes
+        // identical steps, so sample positions lock to the field across every pixel at
+        // once -- structured aliasing that swims as the field scrolls under the proxy.
+        //
+        // No path is lost: the clamp below pulls the last step to the exit, so every
+        // ray covers the same span whatever its offset.
+        if (i == 0)
+        {
+            h *= firstScale;
+        }
+
+        if (t + h > tExit)
+        {
+            h = tExit - t;
+        }
+
+        // The 0.5 is a bare CONSTANT here, not a unit conversion: the universe layers
+        // author raw amplitudes against a void floor and have no path-length
+        // normalisation to pair with, so it is folded into their tuning. It is not the
+        // galaxy's factor and does not move with it.
+        float alpha = 1.0 - exp(-density * InDensityScale * h * 0.5);
+
+        // Flat white emission: structure only.
+        emission += alpha * transmittance;
+        transmittance *= 1.0 - alpha;
+
+        if (transmittance < 0.001)
+        {
+            break;
+        }
+
+        t += h;
     }
 
-    L = P.ApplyModulation(L, gasNoise, haloNoise);
-
-    return P.Compose(L, rBoundsSq);
+    return float4(emission, stepsTaken, 0.0, transmittance);
 }

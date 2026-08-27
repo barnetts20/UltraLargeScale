@@ -59,6 +59,34 @@
 // when traversal lands, the caller supplies cell and frac directly and that helper
 // goes away rather than being unpicked.
 
+// ==========================================================================
+// COST PROBE -- temporary, for bisecting an instruction count
+// ==========================================================================
+// A ladder that removes one stage per level AT COMPILE TIME. Read the material's
+// instruction count at each level; the difference between two rungs is what that
+// stage actually costs. Leave it at 0 in anything shipped.
+//
+//   0  everything
+//   1  no detail fBm            (UniverseDensity.ush)
+//   2  also no regional variance
+//   3  also no domain warp
+//   4  also no neighbourhood search -- one cell instead of twenty-seven
+//
+// WHY A COMPILE-TIME LADDER AND NOT THE PARAMETERS. bWarpEnable, bRegionEnable,
+// NoiseEnable and bShape are RUNTIME branches, so both sides of each are compiled and
+// both are counted. Setting WarpAmount to zero in a material instance removes the
+// work at runtime and changes the reported instruction count by nothing at all. The
+// number describes the union of every feature path in the file, whatever the pins are
+// set to, which is why it can only be bisected with defines.
+//
+// Expect level 3 -> 4 to be the largest single drop by a wide margin. The
+// neighbourhood search is a 3x3x3 loop with compile-time bounds, so it is FULLY
+// UNROLLED: twenty-seven copies of the hash, the distance and the insertion chain, on
+// the order of a thousand instructions and the floor under everything else here.
+#ifndef UNIVERSE_COST_PROBE
+#define UNIVERSE_COST_PROBE 0
+#endif
+
 #define UNIVERSE_PI 3.14159265358979323846f
 #define UNIVERSE_POW_EPSILON 1e-6f
 #define UNIVERSE_MAX_OCTAVES 2
@@ -161,16 +189,31 @@
 #define UNIVERSE_WARP_WRAP_MASK ((1 << UNIVERSE_WARP_WRAP_SHIFT) - 1)
 #define UNIVERSE_WARP_WRAP ((float) (1 << UNIVERSE_WARP_WRAP_SHIFT))
 
-// TWO TEXTURES, NOT ONE, and the split is forced by an incompatibility rather than
-// chosen for convenience. A WARP needs three channels that are the SAME field --
-// same archetype, same scale, differing only in seed -- because they are read as the
-// components of one displacement vector, and three different frequencies means each
-// axis warps at a different rate, which is an axis-aligned warp. Regional MODULATION
-// needs four channels that are deliberately different, one archetype per variance
-// term, because that is where the decorrelation comes from. One packed asset cannot
-// satisfy both. So WarpTex carries the warp and NoiseTex carries the modulation and
-// the detail, and either can be swapped without disturbing the other -- which is most
-// of the point of having a library of them.
+// TWO TEXTURES, AND THE TWO WARP OCTAVES DO NOT BOTH COME FROM THE SAME ONE.
+//
+//   large octave   WarpTex, a curl volume
+//   small octave   NoiseTex, the packed Perlin-Worley
+//   region axes    NoiseTex
+//   detail fBm     NoiseTex
+//
+// The large octave wants a homogeneous vector field. Its three channels are read as
+// the components of one displacement, so if they are three archetypes at three scales
+// then each axis warps at a different rate -- an axis-aligned warp, which is the
+// artifact class this path exists to remove. At the structural scale that bias would
+// be plainly visible, so the large octave takes the curl volume, whose channels are
+// the components of one field by construction.
+//
+// The small octave takes the Perlin-Worley anyway, on the evidence that it looks
+// better, and the reason the same objection does not bite is scale. At half a repeat
+// per cell the small octave is grain rather than structure: the per-axis frequency
+// difference is still there, but it modulates texture rather than shape and there is
+// no large feature for it to align. It is a real trade rather than a free lunch --
+// worth re-checking with the swizzle test if the small octave is ever pushed up in
+// amplitude or down in frequency.
+//
+// SWIZZLE TEST: read .yzx instead of .xyz for an octave and see whether the character
+// of the field rotates with it. If it does, that octave is axis-coupled, and that is
+// then a choice rather than an oversight.
 //
 // WARPTEX SHOULD BE A CURL VOLUME. Curl noise is divergence-free by construction, so
 // det(I + A*grad v) = 1 + A*div(v) + O(A^2) = 1 + O(A^2): the first-order volume
@@ -206,7 +249,133 @@
 // texture read as signed applies a constant positive bias on all three axes, which is
 // a rigid translation of the entire field plus half the intended range, and reads as
 // "the warp is weaker than it should be" rather than as a bug.
+//
+// Applies to the LARGE octave only. The small octave reads NoiseTex, which is a packed
+// UNORM asset by construction, so it always decodes.
 #define UNIVERSE_WARPTEX_SIGNED 1
+
+// Precision wrap, in cells, as a power of two. The UV is built as
+//     (cell & MASK + frac) * WarpScale
+// so the integer part is MASKED, never converted -- exact at 1e11, where a UV derived
+// from a reconstructed float3 world position has no fractional bits left at all. This
+// is the whole reason a texture was previously ruled out at this layer, and masking
+// the cell index is what removes the objection.
+//
+// 4096 cells. The wrap is seamless rather than merely distant: MakeUniverseDensityParams
+// QUANTIZES both scales so that WRAP * scale is a whole number, which makes the UV on
+// either side of the wrap congruent modulo one and therefore identical under the
+// sampler's repeat addressing -- value and every derivative. The quantum is 1/4096 of
+// a repeat per cell, far below any tuning granularity that matters.
+//
+// Verified rather than assumed: stepping across cell 4096, where the mask rolls over,
+// the largest density change is the same order as the same step taken at an ordinary
+// cell plane. Measured the same way at shifts 8, 10 and 14 the wrap is likewise
+// indistinguishable from an ordinary plane, so this is free to move.
+//
+// THE ASSET MUST BE PERIODIC. Repeat addressing is what closes the wrap, and it only
+// closes it if the volume actually tiles -- generated from wrapped lattice hashes,
+// not cropped out of a larger field. A non-tiling volume seams here, at a 4096-cell
+// spacing, which is far enough apart to read as an unexplained occasional artifact
+// rather than as an obvious tiling bug.
+#define UNIVERSE_WARP_WRAP_SHIFT 12
+#define UNIVERSE_WARP_WRAP_MASK ((1 << UNIVERSE_WARP_WRAP_SHIFT) - 1)
+#define UNIVERSE_WARP_WRAP ((float) (1 << UNIVERSE_WARP_WRAP_SHIFT))
+
+// TWO TEXTURES, AND THE TWO WARP OCTAVES DO NOT BOTH COME FROM THE SAME ONE.
+//
+//   large octave   WarpTex, a curl volume
+//   small octave   NoiseTex, the packed Perlin-Worley
+//   region axes    NoiseTex
+//   detail fBm     NoiseTex
+//
+// The large octave wants a homogeneous vector field. Its three channels are read as
+// the components of one displacement, so if they are three archetypes at three scales
+// then each axis warps at a different rate -- an axis-aligned warp, which is the
+// artifact class this path exists to remove. At the structural scale that bias would
+// be plainly visible, so the large octave takes the curl volume, whose channels are
+// the components of one field by construction.
+//
+// The small octave takes the Perlin-Worley anyway, on the evidence that it looks
+// better, and the reason the same objection does not bite is scale. At half a repeat
+// per cell the small octave is grain rather than structure: the per-axis frequency
+// difference is still there, but it modulates texture rather than shape and there is
+// no large feature for it to align. It is a real trade rather than a free lunch --
+// worth re-checking with the swizzle test if the small octave is ever pushed up in
+// amplitude or down in frequency.
+//
+// SWIZZLE TEST: read .yzx instead of .xyz for an octave and see whether the character
+// of the field rotates with it. If it does, that octave is axis-coupled, and that is
+// then a choice rather than an oversight.
+//
+// WARPTEX SHOULD BE A CURL VOLUME. Curl noise is divergence-free by construction, so
+// det(I + A*grad v) = 1 + A*div(v) + O(A^2) = 1 + O(A^2): the first-order volume
+// change vanishes identically and the map folds only at second order. Measured
+// against a generic three-channel field at matched gradient, fraction of samples with
+// a negative Jacobian determinant:
+//
+//   shear     generic     curl
+//    1.00      0.000%    0.000%
+//    1.30      0.102%    0.007%
+//    1.80      2.536%    0.565%
+//    2.50     12.400%    4.750%
+//
+// Both are clean at or below one, so the shear ceiling below is still the rule; curl
+// buys headroom above it rather than moving it.
+//
+// WHAT DIVERGENCE-FREE COSTS: a volume-preserving warp cannot vary void size. The
+// large octave curves and swirls the lattice but every void comes out the same size
+// it went in, so VoidSizeSpread is the only thing supplying that variation and is not
+// removable while WarpTex is a curl volume. If the macro scale ever reads as
+// uniformly sized voids, that is the mechanism, and the fix is a compressible source
+// for the large octave rather than more amplitude.
+
+// Fractional UV offsets, one per fetch. The two warp octaves are already decorrelated
+// by their scale ratio and now live in a different texture from the noise, so these
+// mostly guard against a scale ratio someone has set to one. The region offset is
+// load-bearing: the region fetch and the detail fetch read the SAME texture, and
+// without a phase offset a region that is rich is also one where the detail happens
+// to be bright. Whole numbers would be invisible under repeat addressing.
+// Whether a WarpTex sample already arrives signed. A curl volume in a float or SNORM
+// format returns [-1,1] and is used directly; the same data in a UNORM format returns
+// [0,1] and needs decoding. Getting this wrong is quiet rather than loud -- a UNORM
+// texture read as signed applies a constant positive bias on all three axes, which is
+// a rigid translation of the entire field plus half the intended range, and reads as
+// "the warp is weaker than it should be" rather than as a bug.
+//
+// Applies to the LARGE octave only. The small octave reads NoiseTex, which is a packed
+// UNORM asset by construction, so it always decodes.
+#define UNIVERSE_WARPTEX_SIGNED 1
+
+// EXPERIMENT TOGGLE: let the region field modulate the warp SCALES as well as their
+// amplitudes. Off, and it should stay off; it exists so the result can be looked at
+// rather than argued about.
+//
+// The UV is (cell & 4095 + frac) * scale, so a position-varying scale gives
+//     d(uv)/dp = scale + base * d(scale)/dp
+// and `base` runs to 4096. That second term is spurious frequency the octave is not
+// supposed to have, and it is proportional to distance from the wrap origin. Measured
+// on the large octave, base scale 0.05, region amplitude +-40%, as the gradient of
+// the warp value per cell travelled against the same field with a fixed scale:
+//
+//   cells travelled       fixed     modulated      ratio
+//         0 - 30          0.43         1.93         4.5x
+//           100           0.45        11.36        25.2x
+//         1 000           0.66       123.86       189.1x
+//         3 000           1.31       725.49       554.3x
+//
+// So it is not a near/far tradeoff with a usable near field -- it is wrong at the
+// origin and gets worse, which means anywhere it is tuned it is mistuned everywhere
+// else. Turning it on also VOIDS THE EMPTY-SPACE SKIP: the Lipschitz bound is derived
+// from a fixed scale and there is no finite constant that covers a term scaled by the
+// cell index, so the skip is disabled below rather than left quietly unsound.
+//
+// WHAT TO DO INSTEAD, if a region needs to look finer or coarser rather than merely
+// more or less displaced: blend two fetches at two FIXED scales and let the region
+// field drive the blend. Both scales stay constant so no spurious frequency appears,
+// the blend's own gradient is a region-scale quantity and therefore tiny, and the
+// perceptual result -- apparent scale moving with the region -- is the same. It costs
+// one extra fetch per octave that wants it.
+#define UNIVERSE_REGION_WARP_SCALE 0
 
 #define UNIVERSE_WARP_LARGE_OFFSET_X 0.317f
 #define UNIVERSE_WARP_LARGE_OFFSET_Y 0.631f
@@ -219,6 +388,10 @@
 #define UNIVERSE_REGION_OFFSET_U 0.523f
 #define UNIVERSE_REGION_OFFSET_V 0.091f
 #define UNIVERSE_REGION_OFFSET_W 0.677f
+
+#define UNIVERSE_REGION_WARP_OFFSET_U 0.859f
+#define UNIVERSE_REGION_WARP_OFFSET_V 0.437f
+#define UNIVERSE_REGION_WARP_OFFSET_W 0.203f
 
 
 struct UniverseDensityParams
@@ -257,12 +430,26 @@ struct UniverseDensityParams
     // channels, and tying several parameters to each makes a region read as a KIND
     // of universe -- rich and tangled, or sparse and knotty -- rather than as a soup
     // of unrelated values that averages back to the same look everywhere.
-    float RegionRichness; // all three densities together
-    float RegionMorphology; // shifts the budget between sheets and strands
-    float RegionTurbulence; // small warp octave: how smoky the region is
-    float RegionVoidScale; // void size spread and skew: how uneven the voids are
+    // ONE TEXTURE CHANNEL PER VARIANCE TERM. Every term used to be driven off the
+    // same channel or a tilt of two, which meant a rich region was rich in all three
+    // features at once and the field had one degree of freedom pretending to be four.
+    // The packed asset carries a different archetype per channel, so giving each term
+    // its own channel decorrelates them at bake time for no runtime cost.
+    float RegionNodeVariance; // a.x -> cluster density AND cluster width
+    float RegionWallVariance; // a.y -> wall density AND wall width
+    float RegionFilamentVariance; // a.z -> filament density AND filament width
+    float RegionVoidVariance; // a.w -> void size spread
     float RegionScale; // region texture repeats per cell, quantized like the warp
-    float InvLipschitz; // cells of guaranteed-empty travel per unit of wall slack
+
+    // A SECOND FETCH, at its own scale. The four channels above are spoken for, and
+    // the warp amplitudes must not ride the same channels as the densities or a dense
+    // region is a warped region by construction. The second scale is a bonus rather
+    // than overhead: turbulence varying on a different rhythm from richness is more
+    // combinations, which is the entire point of the exercise.
+    float RegionWarpLargeVariance; // b.x -> WarpAmountLarge
+    float RegionWarpSmallVariance; // b.z -> WarpAmountSmall
+    float RegionWarpScale;
+    float bRegionWarpEnable;
     float bWarpEnable; // skips the warp fetch entirely when the warp is off
     float bRegionEnable; // skips the 8-hash regional fetch when variance is zero
 
@@ -427,6 +614,9 @@ struct UniverseDensityParams
     float4 RegionAxes(Texture3D InTex, SamplerState InSampler,
                       int InCellX, int InCellY, int InCellZ, float3 InFrac)
     {
+#if UNIVERSE_COST_PROBE >= 2
+        return float4(0.0f, 0.0f, 0.0f, 0.0f);
+#else
         // Same masked cell-relative construction as the warp, and exact for the same
         // reason. RegionScale is quantized so the 4096-cell wrap closes seamlessly.
         float3 uv = float3(
@@ -439,10 +629,44 @@ struct UniverseDensityParams
 
         float4 v = InTex.SampleLevel(InSampler, uv, 0.0f);
 
-        return float4((v.x - 0.5f) * 2.0f * RegionRichness,
-                      (v.y - 0.5f) * 2.0f * RegionMorphology,
-                      (v.z - 0.5f) * 2.0f * RegionTurbulence,
-                      (v.w - 0.5f) * 2.0f * RegionVoidScale);
+        return float4((v.x - 0.5f) * 2.0f * RegionNodeVariance,
+                      (v.y - 0.5f) * 2.0f * RegionWallVariance,
+                      (v.z - 0.5f) * 2.0f * RegionFilamentVariance,
+                      (v.w - 0.5f) * 2.0f * RegionVoidVariance);
+#endif
+    }
+
+    // The warp amplitudes' own fetch. Channels x and z, not x and y: adjacent packed
+    // channels are the likeliest pair to share an archetype family, and these two are
+    // the only ones taken here so there is no reason to sit them next to each other.
+    //
+    // AMPLITUDES ONLY, NEVER THE SCALES, and this is a hard constraint of the UV
+    // construction rather than a preference. The UV is (cell & 4095 + frac) * scale,
+    // so a position-varying scale gives d(uv)/dp = scale + base * d(scale)/dp with
+    // `base` reaching 4096. Measured on the large octave at base scale 0.05 with a
+    // +-40% region field, the warp's spatial gradient multiplies by 751x at the
+    // shipped wrap -- 2x at a 16-cell wrap, 44x at 256, 751x at 4096, tracking the
+    // wrap size exactly as that second term predicts. The large octave stops being a
+    // large octave and becomes high-frequency noise.
+    //
+    // Nothing is lost. Independent large and small AMPLITUDES already deliver "this
+    // region is macro-warped, that one is micro-warped"; the mix moving is what reads
+    // as the apparent scale changing.
+    float2 RegionWarpAxes(Texture3D InTex, SamplerState InSampler,
+                          int InCellX, int InCellY, int InCellZ, float3 InFrac)
+    {
+        float3 uv = float3(
+            (float(InCellX & UNIVERSE_WARP_WRAP_MASK) + InFrac.x) * RegionWarpScale
+                + UNIVERSE_REGION_WARP_OFFSET_U,
+            (float(InCellY & UNIVERSE_WARP_WRAP_MASK) + InFrac.y) * RegionWarpScale
+                + UNIVERSE_REGION_WARP_OFFSET_V,
+            (float(InCellZ & UNIVERSE_WARP_WRAP_MASK) + InFrac.z) * RegionWarpScale
+                + UNIVERSE_REGION_WARP_OFFSET_W);
+
+        float4 v = InTex.SampleLevel(InSampler, uv, 0.0f);
+
+        return float2((v.x - 0.5f) * 2.0f * RegionWarpLargeVariance,
+                      (v.z - 0.5f) * 2.0f * RegionWarpSmallVariance);
     }
 
     // ======================================================================
@@ -498,12 +722,23 @@ struct UniverseDensityParams
         float f3 = 1e9f;
         float f4 = 1e9f;
 
+#if UNIVERSE_COST_PROBE >= 4
+        // Probe level 4: one cell, not twenty-seven. The field is meaningless here;
+        // the point is the instruction count with the unrolled search removed.
+        for (int oz = 0; oz <= 0; oz++)
+        {
+            for (int oy = 0; oy <= 0; oy++)
+            {
+                for (int ox = 0; ox <= 0; ox++)
+                {
+#else
         for (int oz = -1; oz <= 1; oz++)
         {
             for (int oy = -1; oy <= 1; oy++)
             {
                 for (int ox = -1; ox <= 1; ox++)
                 {
+#endif
                     float4 h = CellHash(InCellX + ox, InCellY + oy, InCellZ + oz);
 
                     // Node position relative to the sample, in cell units.
@@ -590,8 +825,7 @@ struct UniverseDensityParams
     // edge and face tests too. That nesting is the point. Summing the three profiles
     // makes a cluster the brightest thing in the field automatically, sitting where
     // filaments converge rather than replacing them.
-    float DensityFromWeb(float4 InF, float InNodeMul, float InWallMul,
-                         float InFilamentMul, float InInvWidthMul)
+    float DensityFromWeb(float4 InF, float3 InDensityMul, float3 InInvWidthMul)
     {
         float f1 = InF.x;
         float f2 = InF.y;
@@ -602,20 +836,20 @@ struct UniverseDensityParams
         // One reciprocal shared across all three widths, not three divides: the
         // widths are stored inverted, so widening a feature is a division and the
         // caller hands the reciprocal in already computed.
-        float xw = (f2 - f1) * InvWallWidth * InInvWidthMul;
+        float xw = (f2 - f1) * InvWallWidth * InInvWidthMul.y;
         float wall = (xw < 1.0f)
-            ? WallDensity * InWallMul * (1.0f - xw * xw) * (1.0f - xw * xw) : 0.0f;
+            ? WallDensity * InDensityMul.y * (1.0f - xw * xw) * (1.0f - xw * xw) : 0.0f;
 
         // --- FILAMENTS: three nodes equidistant, an edge ---
-        float xf = (f3 - f1) * InvFilamentWidth * InInvWidthMul;
+        float xf = (f3 - f1) * InvFilamentWidth * InInvWidthMul.z;
         float filament = (xf < 1.0f)
-            ? FilamentDensity * InFilamentMul * (1.0f - xf * xf) * (1.0f - xf * xf)
+            ? FilamentDensity * InDensityMul.z * (1.0f - xf * xf) * (1.0f - xf * xf)
             : 0.0f;
 
         // --- CLUSTERS: four nodes equidistant, a vertex ---
-        float xn = (f4 - f1) * InvNodeWidth * InInvWidthMul;
+        float xn = (f4 - f1) * InvNodeWidth * InInvWidthMul.x;
         float node = (xn < 1.0f)
-            ? NodeDensity * InNodeMul * PowSafe(1.0f - xn * xn, NodeConcentration)
+            ? NodeDensity * InDensityMul.x * PowSafe(1.0f - xn * xn, NodeConcentration)
             : 0.0f;
 
         return node + wall + filament + VoidFloor;
@@ -651,58 +885,74 @@ struct UniverseDensityParams
     // rather than held as a struct member: HLSL resource types in a struct that is
     // also constructed as a local are a portability problem, and the galaxy core
     // settled the same question the same way.
-    float2 SampleCellStep(Texture3D InWarpTex, SamplerState InWarpSampler,
-                          int InCellX, int InCellY, int InCellZ, float3 InFrac,
-                          float4 InAxes)
+    float SampleCell(Texture3D InTex, SamplerState InSampler,
+                     Texture3D InWarpTex, SamplerState InWarpSampler,
+                     int InCellX, int InCellY, int InCellZ, float3 InFrac)
     {
         int cx = InCellX;
         int cy = InCellY;
         int cz = InCellZ;
         float3 frac = InFrac;
 
-        float mNode = 1.0f, mWall = 1.0f, mFilament = 1.0f, mInvWidth = 1.0f;
-        float mSpread = 1.0f, mSkew = 1.0f, mWarp = 1.0f;
+        // THE REGIONAL FETCH IS PER SAMPLE, at the sample's own position, and it used
+        // to be hoisted to one fetch per ray taken at the ray's ENTRY POINT on the
+        // bounding sphere. That was wrong in a way the cost argument for it obscured.
+        //
+        // The defence was that a ray crosses at most a quarter of one region, so
+        // holding the axes constant along it changes little. True, and beside the
+        // point: it bounds how much the region varies ALONG a ray while saying nothing
+        // about the anchor. The entry point can be eight cells from the sample against
+        // a thirty-four cell period, so the value used was up to a quarter-period away
+        // from where it belonged -- and because the proxy is pegged to the camera, that
+        // point travels through field space as the player moves. The modulation slid
+        // across the field instead of being part of it. A property of the view, not of
+        // the universe.
+        //
+        // Sampled BEFORE the warp, so it is anchored to unwarped field space -- which
+        // is also required, since the turbulence axis modulates the warp itself.
+        float3 mDensity = float3(1.0f, 1.0f, 1.0f);
+        float3 mInvWidth = float3(1.0f, 1.0f, 1.0f);
+        float mSpread = 1.0f, mSkew = 1.0f;
+        float mWarpLarge = 1.0f, mWarpSmall = 1.0f;
 
         if (bRegionEnable > 0.5f)
         {
-            float4 a = InAxes;
+            float4 a = RegionAxes(InTex, InSampler, cx, cy, cz, frac);
 
-            // Richness lifts all three together; morphology then tilts the budget
-            // between sheets and strands in OPPOSITE directions, so it redistributes
-            // rather than adding, and a region cannot be simultaneously all-wall and
-            // all-filament the way independent channels would allow.
-            mNode = 1.0f + a.x + a.y;
-            mWall = 1.0f + a.x - a.y;
-            mFilament = 1.0f + a.x + a.y * 0.5f;
-
-            // Richer regions have thicker features as well as brighter ones. Stored
-            // inverted, so this is the reciprocal of the width multiplier.
-            mInvWidth = 1.0f / max(1.0f + a.x * 0.6f, 1e-3f);
-
-            // Turbulence drives the small warp octave's amplitude, and since the
-            // anisotropic metric came out it drives nothing else -- the axis is now
-            // exactly "how smoky is this region".
+            // ONE CHANNEL PER FEATURE. Density and width move together within a
+            // feature and independently across features, so a region can be knotty
+            // without being sheety, which the single-richness form could not express.
             //
-            // IT DOES NOT DRIVE EITHER WarpScale, and the asymmetry is not an
-            // oversight. An amount multiplies the displacement, which is bounded by
-            // the amplitude. A scale multiplies a coordinate that reaches
-            // UNIVERSE_WARP_WRAP -- 4096 -- before the mask closes it, so a regional
-            // variation of d in a scale shifts the UV by up to 4096*d. At the 32-cell
-            // regional period and RegionTurbulence 0.4, d across a single cell is
-            // about 0.025, which is a hundred texture repeats: the fetch lands
-            // somewhere unrelated and the warp field tears rather than bends.
-            // ANYTHING MULTIPLYING THE WRAPPED COORDINATE HAS TO BE UNIFORM ACROSS THE
-            // DRAW, for the same reason CellSize does -- see the note in RegionAxes.
-            //
-            // Which is what the second octave is for. A region that needs to look
-            // finer-grained rather than merely more displaced gets it from the small
-            // octave's amplitude: the frequency stays put and only the mix moves.
-            mWarp = 1.0f + a.z;
+            // THE COMPOUNDING IS REAL AND IT IS NOT 1 + a. What the march accumulates
+            // is density times VOLUME FRACTION, and a wider feature occupies more
+            // volume by a power set by its codimension: a wall is a slab and scales
+            // with w, a filament is a tube and scales with w^2, a cluster is a blob
+            // and scales with w^3. So a variance of +-V on a feature swings its
+            // integrated light by (1+V)*(1+0.6V)^k for k = 1, 2, 3. At V = 0.45 that
+            // is 4.6x end to end for walls, 8.0x for filaments and 14x for clusters.
+            // Clusters already carry most of the image, so this handle is far
+            // stronger on them than the number suggests -- lower the 0.6 width
+            // coefficient below to decouple width from density if that is too much.
+            mDensity = float3(1.0f + a.x, 1.0f + a.y, 1.0f + a.z);
+
+            // Stored inverted, so this is the reciprocal of the width multiplier: a
+            // positive variance widens the feature.
+            mInvWidth = float3(1.0f / max(1.0f + a.x * 0.6f, 1e-3f),
+                               1.0f / max(1.0f + a.y * 0.6f, 1e-3f),
+                               1.0f / max(1.0f + a.z * 0.6f, 1e-3f));
 
             mSpread = 1.0f + a.w;
             mSkew = 1.0f + a.w * 0.5f;
         }
 
+        if (bRegionWarpEnable > 0.5f)
+        {
+            float2 b = RegionWarpAxes(InTex, InSampler, cx, cy, cz, frac);
+            mWarpLarge = 1.0f + b.x;
+            mWarpSmall = 1.0f + b.y;
+        }
+
+#if UNIVERSE_COST_PROBE < 3
         if (bWarpEnable > 0.5f)
         {
             // CELL-RELATIVE base coordinate. The integer cell is MASKED and only then
@@ -717,6 +967,19 @@ struct UniverseDensityParams
             // Both addresses computed before either fetch, so the two loads issue
             // together rather than one waiting on the other. This is the whole reason
             // the small octave is sampled at the unwarped coordinate.
+            // THE SCALES ARE UNIFORM ACROSS THE DRAW and cannot be regionally
+            // modulated. The UV is (cell & 4095 + frac) * scale, so a position-varying
+            // scale gives d(uv)/dp = scale + base * d(scale)/dp with base running to
+            // 4096, and that second term is spurious frequency proportional to distance
+            // from the wrap origin. Measured at base scale 0.05 and +-40%: 4.5x the
+            // intended gradient in the first thirty cells, 25x by a hundred, 554x by
+            // three thousand. It was tried and it looked like what that describes.
+            //
+            // If a region needs to read finer or coarser rather than merely more or
+            // less displaced, blend two fetches at two FIXED scales and let the region
+            // field drive the blend -- both scales stay constant so no spurious
+            // frequency appears, and the blend's own gradient is a region-scale
+            // quantity and therefore negligible. One extra fetch per octave.
             float3 uvL = float3(bx * WarpScaleLarge + UNIVERSE_WARP_LARGE_OFFSET_X,
                                 by * WarpScaleLarge + UNIVERSE_WARP_LARGE_OFFSET_Y,
                                 bz * WarpScaleLarge + UNIVERSE_WARP_LARGE_OFFSET_Z);
@@ -728,24 +991,27 @@ struct UniverseDensityParams
             // SampleLevel, not Sample. Inside a dynamic loop the derivatives that
             // drive mip selection are undefined, and the galaxy core makes the same
             // call for the same reason.
+            // DIFFERENT TEXTURES, so the two fetches are independent in every sense --
+            // different asset, different sampler, different decode. They still issue
+            // together because neither address depends on the other's result.
             float4 vL = InWarpTex.SampleLevel(InWarpSampler, uvL, 0.0f);
-            float4 vS = InWarpTex.SampleLevel(InWarpSampler, uvS, 0.0f);
+            float4 vS = InTex.SampleLevel(InSampler, uvS, 0.0f);
 
 #if UNIVERSE_WARPTEX_SIGNED
             float3 dL = float3(vL.x, vL.y, vL.z);
-            float3 dS = float3(vS.x, vS.y, vS.z);
 #else
             float3 dL = float3(vL.x * 2.0f - 1.0f, vL.y * 2.0f - 1.0f, vL.z * 2.0f - 1.0f);
-            float3 dS = float3(vS.x * 2.0f - 1.0f, vS.y * 2.0f - 1.0f, vS.z * 2.0f - 1.0f);
 #endif
+            // NoiseTex is UNORM by construction, so this decode is unconditional.
+            float3 dS = float3(vS.x * 2.0f - 1.0f, vS.y * 2.0f - 1.0f, vS.z * 2.0f - 1.0f);
 
             // Regional turbulence rides the SMALL octave only. The large one sets the
             // overarching structure and sits nearest the fold ceiling, so letting a
             // region inflate it is the one modulation that can tear the macro shape;
             // inflating the small one reads as a region being smokier, which is what
             // the axis is for.
-            float ampL = WarpAmountLarge;
-            float ampS = WarpAmountSmall * mWarp;
+            float ampL = WarpAmountLarge * mWarpLarge;
+            float ampS = WarpAmountSmall * mWarpSmall;
 
             // Applied directly, with no centring. On a signed [-1,1] field the peak
             // displacement IS the amplitude -- where the earlier [0,1] form built
@@ -770,6 +1036,7 @@ struct UniverseDensityParams
             cz += (int) iz;
             frac = float3(wx - ix, wy - iy, wz - iz);
         }
+#endif
 
         float4 F = RankedNodeDistances(cx, cy, cz, frac, mSpread, mSkew);
 
@@ -796,64 +1063,12 @@ struct UniverseDensityParams
         // 14, and already banked for anyone running the pin at 0. The spread does not
         // enter it: it is a constant per node, so it shifts the distances without
         // changing their gradient.
-        float invBandMin = min(InvWallWidth, min(InvFilamentWidth, InvNodeWidth));
-        float widestBand = 1.0f / max(invBandMin * mInvWidth, 1e-6f);
-        float slack = (F.y - F.x) - widestBand;
-        float step = (slack > 0.0f) ? slack * InvLipschitz : 0.0f;
-
-        return float2(DensityFromWeb(F, mNode, mWall, mFilament, mInvWidth), step);
+        return DensityFromWeb(F, mDensity, mInvWidth);
     }
 
-    float SampleCell(Texture3D InWarpTex, SamplerState InWarpSampler,
-                     int InCellX, int InCellY, int InCellZ, float3 InFrac, float4 InAxes)
-    {
-        return SampleCellStep(InWarpTex, InWarpSampler, InCellX, InCellY, InCellZ,
-                              InFrac, InAxes).x;
-    }
-
-    // Entry point for a proxy pegged to the camera.
-    //
-    // The proxy does not move through the field; the FIELD MOVES UNDER THE PROXY.
-    // InNormPos stays in the proxy's own [-1,1] space and the offset carries where in
-    // the universe that proxy currently is, which is why the bounds fade below uses
-    // InNormPos alone -- the fade is a property of the finite proxy, not of the field.
-    //
-    // The offset arrives ALREADY SPLIT, an integer cell count and a fraction in
-    // [0,1), for the same reason the sampler is split: a single float3 holding the
-    // player's position stops resolving a fraction of a cell long before the
-    // magnitudes this layer reaches. Adding a float3 offset to InNormPos and flooring
-    // afterwards would throw away exactly the precision the split exists to keep.
-    //
-    // InOffsetCell holds integral values in a float3 because material parameters are
-    // float and there are no integer vectors here. A float32 holds integers exactly
-    // to 2^24, so this is good to about 16.7 million cells; past that the offset
-    // itself has to be split high and low, see the note in the Custom node body.
-    // Decomposes a proxy-local position the same way SampleAtPosition does, so the
-    // march can fetch the regional axes once before the loop.
-    float4 RegionAxesAtPosition(Texture3D InTex, SamplerState InSampler,
-                                float3 InNormPos, float3 InOffsetCell,
-                                float3 InOffsetFrac)
-    {
-        if (bRegionEnable <= 0.5f)
-        {
-            return float4(0.0f, 0.0f, 0.0f, 0.0f);
-        }
-
-        float3 cellPos = InNormPos * InvCellSize + InOffsetFrac;
-        float fx = floor(cellPos.x);
-        float fy = floor(cellPos.y);
-        float fz = floor(cellPos.z);
-
-        return RegionAxes(InTex, InSampler,
-                          (int) fx + (int) InOffsetCell.x,
-                          (int) fy + (int) InOffsetCell.y,
-                          (int) fz + (int) InOffsetCell.z,
-                          float3(cellPos.x - fx, cellPos.y - fy, cellPos.z - fz));
-    }
-
-    float2 SampleAtPositionStep(Texture3D InWarpTex, SamplerState InWarpSampler,
-                                float3 InNormPos, float3 InOffsetCell,
-                                float3 InOffsetFrac, float4 InAxes)
+    float SampleAtPosition(Texture3D InTex, SamplerState InSampler,
+                           Texture3D InWarpTex, SamplerState InWarpSampler,
+                           float3 InNormPos, float3 InOffsetCell, float3 InOffsetFrac)
     {
         float rBoundsSq = dot(InNormPos, InNormPos);
 
@@ -873,17 +1088,10 @@ struct UniverseDensityParams
         int cy = (int) fy + (int) InOffsetCell.y;
         int cz = (int) fz + (int) InOffsetCell.z;
 
-        float2 r = SampleCellStep(InWarpTex, InWarpSampler, cx, cy, cz, frac, InAxes);
-        return float2(r.x * BoundsFade(rBoundsSq), r.y);
+        return SampleCell(InTex, InSampler, InWarpTex, InWarpSampler,
+                          cx, cy, cz, frac) * BoundsFade(rBoundsSq);
     }
 
-    float SampleAtPosition(Texture3D InWarpTex, SamplerState InWarpSampler,
-                           float3 InNormPos, float3 InOffsetCell, float3 InOffsetFrac,
-                           float4 InAxes)
-    {
-        return SampleAtPositionStep(InWarpTex, InWarpSampler, InNormPos, InOffsetCell,
-                                    InOffsetFrac, InAxes).x;
-    }
 };
 
 // ==========================================================================
@@ -972,12 +1180,14 @@ UniverseDensityParams MakeUniverseDensityParams(
     float InWarpScaleLarge, // warp texture repeats per cell, large octave
     float InWarpAmountSmall, // peak displacement in cells, breaks up the geometry
     float InWarpScaleSmall, // warp texture repeats per cell, small octave
-    float InWarpTexGradient, // largest |dTex/dUV| the warp asset reaches; see below
-    float InRegionRichness, // 0.4 means densities range 0.6x to 1.4x by region
-    float InRegionMorphology, // tilts the budget between sheets and strands
-    float InRegionTurbulence, // scales the small warp octave's amplitude
-    float InRegionVoidScale, // scales void size spread and skew together
+    float InRegionNodeVariance, // cluster density and width; 0.45 is 14x end to end
+    float InRegionWallVariance, // wall density and width
+    float InRegionFilamentVariance, // filament density and width
+    float InRegionVoidVariance, // void size spread
     float InRegionScale, // region texture repeats per cell; 0.0293 is ~34 cells
+    float InRegionWarpLargeVariance, // large warp octave amplitude
+    float InRegionWarpSmallVariance, // small warp octave amplitude
+    float InRegionWarpScale, // second region fetch; keep it off a ratio with the first
 
     // --- BOUNDS --- set >= 1 to disable
     float InBoundsFadeStart,
@@ -1035,10 +1245,12 @@ UniverseDensityParams MakeUniverseDensityParams(
                    / UNIVERSE_WARP_WRAP;
     P.WarpScaleSmall = warpScaleSmall;
 
-    P.RegionRichness = InRegionRichness;
-    P.RegionMorphology = InRegionMorphology;
-    P.RegionTurbulence = InRegionTurbulence;
-    P.RegionVoidScale = InRegionVoidScale;
+    P.RegionNodeVariance = InRegionNodeVariance;
+    P.RegionWallVariance = InRegionWallVariance;
+    P.RegionFilamentVariance = InRegionFilamentVariance;
+    P.RegionVoidVariance = InRegionVoidVariance;
+    P.RegionWarpLargeVariance = InRegionWarpLargeVariance;
+    P.RegionWarpSmallVariance = InRegionWarpSmallVariance;
 
     // Quantized exactly as the warp scales are, and for the same reason.
     //
@@ -1049,6 +1261,11 @@ UniverseDensityParams MakeUniverseDensityParams(
     float regionScale = max(InRegionScale, 0.0f);
     regionScale = floor(regionScale * UNIVERSE_WARP_WRAP + 0.5f) / UNIVERSE_WARP_WRAP;
     P.RegionScale = regionScale;
+
+    float regionWarpScale = max(InRegionWarpScale, 0.0f);
+    regionWarpScale = floor(regionWarpScale * UNIVERSE_WARP_WRAP + 0.5f)
+                    / UNIVERSE_WARP_WRAP;
+    P.RegionWarpScale = regionWarpScale;
 
     // How fast F2-F1 can change per cell travelled, worst case:
     //   2               two ranked distances, each with a unit gradient
@@ -1076,20 +1293,32 @@ UniverseDensityParams MakeUniverseDensityParams(
     // singular value of the 3x3 Jacobian can reach sqrt(3) times a single row's norm.
     //
     // Only the small octave carries the regional inflation, matching SampleCellStep.
-    float shearLarge = abs(InWarpAmountLarge) * warpScaleLarge;
-    float shearSmall = abs(InWarpAmountSmall) * warpScaleSmall
-                     * (1.0f + max(InRegionTurbulence, 0.0f));
-    float warpJac = 1.0f + 1.7320508f * max(InWarpTexGradient, 0.0f)
-                  * (shearLarge + shearSmall);
-    P.InvLipschitz = 1.0f / max(2.0f * warpJac, 1e-6f);
-
-    // A uniform branch: the eight-hash warp fetch is skipped entirely when the
-    // warp is off, and every lane in a draw agrees on which way it goes.
+    // THE FOLD CEILING IS NO LONGER COMPUTED HERE. It used to fall out of the
+    // Lipschitz bound the empty-space skip needed, and the skip is gone, so the two
+    // gradient pins that fed it went with it -- they had no other consumer.
+    //
+    // The ceiling is still real and still has to be respected by hand:
+    //
+    //     AmountLarge*ScaleLarge*G_curl + AmountSmall*ScaleSmall*G_noise  <=  1
+    //
+    // where G is the largest |dTex/dUV| the filtered asset reaches. Past one the
+    // displacement folds, neighbouring samples cross over, and the web tears rather
+    // than bends. Curl noise is divergence-free so it folds only at second order and
+    // has real headroom above one -- 0.007% of samples folded at shear 1.3 against
+    // 0.102% for a generic field -- but the ceiling is where to start.
+    //
+    // Practical version, since nothing checks it any more: fix the scales, raise one
+    // amplitude until the web visibly tears, back off about thirty percent.
     P.bWarpEnable = ((InWarpAmountLarge != 0.0f) || (InWarpAmountSmall != 0.0f))
                   ? 1.0f : 0.0f;
-    P.bRegionEnable = ((InRegionRichness != 0.0f) || (InRegionMorphology != 0.0f)
-                    || (InRegionTurbulence != 0.0f) || (InRegionVoidScale != 0.0f))
-                    ? 1.0f : 0.0f;
+    P.bRegionEnable = ((InRegionNodeVariance != 0.0f) || (InRegionWallVariance != 0.0f)
+                    || (InRegionFilamentVariance != 0.0f)
+                    || (InRegionVoidVariance != 0.0f)) ? 1.0f : 0.0f;
+
+    // A separate gate, so a draw that wants feature variance but no warp variance
+    // pays for one fetch rather than two.
+    P.bRegionWarpEnable = ((InRegionWarpLargeVariance != 0.0f)
+                        || (InRegionWarpSmallVariance != 0.0f)) ? 1.0f : 0.0f;
 
     P.BoundsFadeStart = InBoundsFadeStart;
     P.BoundsFadeStartSq = InBoundsFadeStart * InBoundsFadeStart;

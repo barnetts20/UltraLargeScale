@@ -81,20 +81,23 @@ float UniverseFBm(UniverseDensityParams P, Texture3D InTex, SamplerState InSampl
 // WRAPPED to a few hundred cells: a texture coordinate has no precision left at the
 // full offset anyway, and the noise is decorrelated well within the wrap distance,
 // so the repeat is not reachable in a single view.
-// Returns x = density, y = the distance in CELL units the march may skip without
+// Returns density. The second component used to be the distance in CELL units the
+// march could skip without
 // being able to miss a feature. The noise never touches y: it is gated on the web
 // already being above the floor, so in the skippable span the density is exactly
 // VoidFloor and integrates in closed form over any step length.
-float2 UniverseSampleStep(UniverseDensityParams P, Texture3D InTex, SamplerState InSampler,
-                          Texture3D InWarpTex, SamplerState InWarpSampler,
-                          float3 NormPos, float3 OffsetCell, float3 OffsetFrac,
-                          float4 InAxes)
+float UniverseSample(UniverseDensityParams P, Texture3D InTex, SamplerState InSampler,
+                     Texture3D InWarpTex, SamplerState InWarpSampler,
+                     float3 NormPos, float3 OffsetCell, float3 OffsetFrac)
 {
-    float2 r = P.SampleAtPositionStep(InWarpTex, InWarpSampler, NormPos, OffsetCell,
-                                      OffsetFrac, InAxes);
-    float d = r.x;
+    float d = P.SampleAtPosition(InTex, InSampler, InWarpTex, InWarpSampler,
+                                 NormPos, OffsetCell, OffsetFrac);
 
+#if UNIVERSE_COST_PROBE >= 1
+    bool bNoise = false;   // probe level 1: detail fBm removed at compile time
+#else
     bool bNoise = (P.NoiseEnable > 0.5) && (P.NoiseAmount != 0.0);
+#endif
     if (bNoise && d > P.VoidFloor * 1.001)
     {
         float3 wrapped = fmod(OffsetCell, 512.0) + OffsetFrac;
@@ -107,7 +110,7 @@ float2 UniverseSampleStep(UniverseDensityParams P, Texture3D InTex, SamplerState
         d *= max(1.0 + P.NoiseAmount * n, 0.0);
     }
 
-    return float2(d, r.y);
+    return d;
 }
 
 // --- RAYMARCH: ANALYTIC SPHERE-BOUNDED DENSITY ACCUMULATION ---
@@ -121,8 +124,9 @@ float2 UniverseSampleStep(UniverseDensityParams P, Texture3D InTex, SamplerState
 // difference between a budget spent mostly where nothing is visible and one spent where
 // the pixels are.
 //
-// It composes with the empty-space skip rather than replacing it: this sets the FLOOR
-// and the skip still wins wherever it is larger. The two answer different questions --
+// It is now the ONLY thing setting step length. It used to set a floor that an
+// empty-space skip could override wherever the skip was larger; that skip has been
+// removed. The two answered different questions --
 // how much detail a step needs, and how much detail is there.
 //
 // Do not add a box bounds test on the marched position. InStartPos sits exactly on
@@ -154,7 +158,7 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
                         float3 InOffsetCell, float3 InOffsetFrac,
                         float InStepRatio, float InMinStep, float InMinSamples,
                         int InMaxSteps, float InDensityScale, float InJitter,
-                        float InNoisePower, float InStepSafety)
+                        float InNoisePower)
 {
     // Unit box [0,1] -> normalized space [-1,1]. Uniform scale, so a direction is
     // identical in both.
@@ -215,23 +219,7 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
 
     bool bShape = (InNoisePower != 1.0);
 
-    // ONE regional fetch for the whole ray, taken at the ray's ENTRY POINT. The region
-    // field is roughly 34 cells across and the proxy is 8, so a ray cannot span more
-    // than a quarter of one region cell and holding the axes constant along it changes
-    // the field by less than the dither.
-    //
-    // This used to be a cost argument -- eight hashes on every step to reproduce
-    // something that does not vary within a ray -- and it is not one any more. The
-    // regional lattice became a single texture fetch, which is affordable per sample.
-    // What is left is the compromise the hoist actually carries: the axes are sampled
-    // where the ray ENTERS rather than where the sample sits, so the field is very
-    // slightly view-dependent. Reads from NoiseTex, not WarpTex.
-    float4 axes = P.RegionAxesAtPosition(InTex, InSampler,
-                                         o + dir * t, InOffsetCell, InOffsetFrac);
-
     // Cell units to normalized units.
-    float cellToNorm = InStepSafety / max(P.InvCellSize, 1e-6);
-
     float transmittance = 1.0;
     float emission = 0.0;
 
@@ -249,56 +237,29 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
 
         // SAMPLED AT THE STEP START, not the midpoint. The galaxy march samples the
         // midpoint because growing steps otherwise weight each interval by its leading
-        // face; here the skip distance below is a bound anchored at the SAMPLED point,
-        // so moving the sample would invalidate it.
-        float2 s = UniverseSampleStep(P, InTex, InSampler, InWarpTex, InWarpSampler,
-                                      o + dir * t,
-                                      InOffsetCell, InOffsetFrac, axes);
-        float density = s.x;
+        // face. That reason is now the only one left -- the empty-space skip used to
+        // anchor a bound at the sampled point, and it is gone -- so moving to the
+        // midpoint is available if the leading-face bias ever proves worse than the
+        // half-step offset.
+        float density = UniverseSample(P, InTex, InSampler, InWarpTex, InWarpSampler,
+                                       o + dir * t, InOffsetCell, InOffsetFrac);
         if (bShape)
         {
             density = P.PowSafe(density, InNoisePower);
         }
 
-        // Empty-space skipping. s.y is a distance no feature can appear within, so
-        // the density over it is exactly the void floor and one step integrates it
-        // as accurately as a hundred would -- the exponentials multiply, so a
-        // homogeneous span is the same whether it is crossed in one step or many.
-        //
-        // InStepSafety scales that distance. At 1 the skip is provably exact. Above 1 it
-        // is a quality knob whose error budget WAS MEASURED AGAINST A UNIFORM MARCH, and
-        // that measurement no longer applies: the reference had a couple of hundred
-        // evenly spread samples for an overshoot to average against, while a geometric
-        // march has a couple of dozen in the far field. The same safety factor therefore
-        // concentrates far more error per sample out there than the 0.187% figure it was
-        // characterised at. Treat anything above 1 as unmeasured until it is measured
-        // again against this march.
         // max against zero, not just against the floor: a sample behind the camera has
         // a negative separation, and without it a wrong camera position gives negative
         // step lengths and a march that never terminates.
         float h = max(minStep, max(dCam + t, 0.0) * k);
         h = min(h, maxStep);
 
-        float skip = s.y * cellToNorm;
-        if (skip > h)
-        {
-            h = skip;
-        }
-        // DITHER LAST, AFTER THE SKIP HAS HAD ITS SAY.
+        // FIRST-STEP DITHER. Without it every ray starts at the same place and takes
+        // identical steps, so sample positions lock to the field across every pixel at
+        // once -- structured aliasing that swims as the field scrolls under the proxy.
         //
-        // Applied before it, the skip overwrites it: in void -- most of the field -- the
-        // skip is always the larger of the two, so the first step is replaced wholesale
-        // and the offset never reaches the march. Every ray then starts at the same place
-        // and takes identical skip-sized steps, so sample positions lock to the field
-        // across every pixel at once. That is structured aliasing, and it swims as the
-        // field scrolls under the proxy.
-        //
-        // Shortening a skip is always safe. The skip is a distance within which no
-        // feature can appear, so travelling less than it is strictly more conservative --
-        // the dither costs a fraction of one step and buys back the decorrelation.
-        //
-        // No path is lost either way: the clamp below pulls the last step to the exit, so
-        // every ray covers the same span whatever its offset.
+        // No path is lost: the clamp below pulls the last step to the exit, so every
+        // ray covers the same span whatever its offset.
         if (i == 0)
         {
             h *= firstScale;
