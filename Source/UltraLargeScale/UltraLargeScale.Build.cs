@@ -8,7 +8,8 @@ public class UltraLargeScale : ModuleRules
 	public UltraLargeScale(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
-        CMakeTarget.add(Target, this, "FastNoise", Path.Combine(this.ModuleDirectory, "../FastNoise2"), "-DFASTNOISE2_NOISETOOL=OFF", true);
+		CMakeTarget.add(Target, this, "FastNoise", Path.Combine(this.ModuleDirectory, "../FastNoise2"), "-DFASTNOISE2_NOISETOOL=OFF", true);
+        PublicDefinitions.Add("FASTNOISE_STATIC_LIB");
         CppStandard = CppStandardVersion.Cpp20; //Clean up mutated cpp state
 			
 		PublicDependencyModuleNames.AddRange(

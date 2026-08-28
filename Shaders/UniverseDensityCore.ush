@@ -26,21 +26,24 @@
 //   1 node closest        void       -- the interior of a cell
 //   2 nodes equidistant   wall       -- a face, the sheet between two voids
 //   3 nodes equidistant   filament   -- an edge, where three sheets meet
-//   4 nodes equidistant   cluster    -- a vertex, where four filaments converge
 //
-// So F2-F1, F3-F1 and F4-F1 measure wall-, filament- and cluster-ness, and all three
-// fall out of one neighbourhood search.
+// So F2-F1 and F3-F1 measure wall- and filament-ness, and both fall out of one
+// neighbourhood search.
 //
-// DO NOT key clusters off F1 instead of F4-F1. "One node closest is a cluster" is the
-// obvious reading and it renders as convincing blobs, but F1 is minimal exactly where
-// F2-F1 and F3-F1 are maximal: it puts every cluster at the centre of a void, floating
-// free of the strand network it is supposed to anchor.
+// CLUSTERS ARE NO LONGER ANALYTIC. A fourth rank, F4, used to be tracked here so
+// F4-F1 could measure cluster-ness the same way F2-F1 and F3-F1 measure wall- and
+// filament-ness -- the vertex where four filaments converge. That is gone: clusters
+// are now carved out of the wall/filament density by a noise mask downstream, in
+// UniverseDensity.ush, rather than ranked geometrically here. The old objection this
+// section used to warn about -- keying a cluster off F1 alone puts it at the centre
+// of a void, floating free of the strand network -- doesn't apply to the mask
+// approach, since the mask only carves where wall/filament density already exists.
 //
 // ORGANICS: an unweighted Euclidean diagram has planar faces, straight edges and one
 // void size, which is most of why a cellular field reads as manufactured. Three
 // corrections, none of which cost a hash in the 27-cell loop:
 //   - a per-node additive radius offset, so voids differ in size
-//   - two fetches from a CURL volume supplying a two-octave domain warp
+//   - two fetches from the packed noise volume supplying a two-octave domain warp
 //   - one fetch from the packed noise volume supplying the regional variance
 //
 // THE PER-NODE ANISOTROPIC METRIC IS GONE. It measured distance in each node's own
@@ -294,10 +297,8 @@
 struct UniverseDensityParams
 {
     // --- WEB GEOMETRY ---
-    // The three widths are separations between ranked distances, in CELL units.
+    // The two widths are separations between ranked distances, in CELL units.
     float InvCellSize; // cells per normalized unit; larger = finer web
-    float InvNodeWidth; // 1 / (F4-F1) band that still counts as a cluster
-    float NodeConcentration; // cluster profile exponent; >1 concentrates
     float InvWallWidth; // 1 / (F2-F1) band that still counts as a wall
     float InvFilamentWidth; // 1 / (F3-F1) band that still counts as a filament
 
@@ -305,7 +306,6 @@ struct UniverseDensityParams
     // What the march accumulates is density x volume fraction, not peak density. A
     // wall covers an order of magnitude more volume than a filament, so equal-looking
     // densities make the field read as foam. See MakeUniverseDensityParams.
-    float NodeDensity;
     float WallDensity;
     float FilamentDensity;
     float VoidFloor; // ambient everywhere; keeps voids from being empty
@@ -332,17 +332,23 @@ struct UniverseDensityParams
     // features at once and the field had one degree of freedom pretending to be four.
     // The packed asset carries a different archetype per channel, so giving each term
     // its own channel decorrelates them at bake time for no runtime cost.
-    float RegionNodeVariance; // a.x -> cluster density AND cluster width
+    //
+    // a.x IS UNCLAIMED. It drove cluster density/width until the analytic cluster
+    // path was removed; RegionAxes still reads it out of the same fetch (no cost to
+    // leave it) but nothing consumes it downstream. Left free rather than reassigned,
+    // since the channel-to-archetype mapping is baked into the asset -- see the
+    // ASSUMES THE CHANNELS ARE NORMALIZED note on RegionAxes before repurposing it.
     float RegionWallVariance; // a.y -> wall density AND wall width
     float RegionFilamentVariance; // a.z -> filament density AND filament width
     float RegionVoidVariance; // a.w -> void size spread
     float RegionScale; // region texture repeats per cell, quantized like the warp
 
-    // A SECOND FETCH, at its own scale. The four channels above are spoken for, and
-    // the warp amplitudes must not ride the same channels as the densities or a dense
-    // region is a warped region by construction. The second scale is a bonus rather
-    // than overhead: turbulence varying on a different rhythm from richness is more
-    // combinations, which is the entire point of the exercise.
+    // A SECOND FETCH, at its own scale. The three channels above are spoken for
+    // (plus the unclaimed a.x), and the warp amplitudes must not ride the same
+    // channels as the densities or a dense region is a warped region by construction.
+    // The second scale is a bonus rather than overhead: turbulence varying on a
+    // different rhythm from richness is more combinations, which is the entire point
+    // of the exercise.
     float RegionWarpLargeVariance; // b.x -> WarpAmountLarge
     float RegionWarpSmallVariance; // b.z -> WarpAmountSmall
     float RegionWarpScale;
@@ -465,8 +471,8 @@ struct UniverseDensityParams
     //
     // WHAT MAY BE MODULATED, and why the line falls where it does.
     //
-    // Anything consumed AFTER the ranking -- the three densities, the three feature
-    // widths, the concentration, the floor -- is free. It changes how the skeleton is
+    // Anything consumed AFTER the ranking -- the two densities, the two feature
+    // widths, the floor -- is free. It changes how the skeleton is
     // painted, never where the skeleton is, so a Voronoi vertex the CPU constructs is
     // still the vertex the shader draws.
     //
@@ -526,7 +532,10 @@ struct UniverseDensityParams
 
         float4 v = InTex.SampleLevel(InSampler, uv, 0.0f);
 
-        return float4((v.x - 0.5f) * 2.0f * RegionNodeVariance,
+        // x IS UNCLAIMED -- see the struct field comment above RegionWallVariance.
+        // Left at 0 rather than repurposed, so a.y/.z/.w keep the exact channel
+        // indices the asset was baked against.
+        return float4(0.0f,
                       (v.y - 0.5f) * 2.0f * RegionWallVariance,
                       (v.z - 0.5f) * 2.0f * RegionFilamentVariance,
                       (v.w - 0.5f) * 2.0f * RegionVoidVariance);
@@ -570,54 +579,51 @@ struct UniverseDensityParams
     // THE WEB
     // ======================================================================
 
-    // Ranked distances to the four nearest nodes, over the 3x3x3 neighbourhood of the
+    // Ranked distances to the three nearest nodes, over the 3x3x3 neighbourhood of the
     // cell containing InFrac.
     //
     // 27 cells is the correct radius: a node can sit anywhere in its cell, so a point
     // at a corner of its own cell can be closer to a node two cells away only if that
-    // node sits at the far corner -- which the 3x3x3 span already covers. A vertex of
-    // the skeleton is equidistant from four nodes that all surround it within about a
-    // cell, so the fourth rank needs no more reach than the third did.
+    // node sits at the far corner -- which the 3x3x3 span already covers. The third
+    // rank needs no more reach than the first did, since a skeleton edge is equidistant
+    // from three nodes that all surround it within about a cell.
     //
     // THE SPAN IS EXACT FOR F1 ONLY, and the claim that used to sit here -- exact at
-    // every rank including the fourth, zero differing samples -- does not survive
-    // measurement. Worst per-rank disagreement against a 5x5x5 search, 400k samples:
+    // every rank, zero differing samples -- does not survive measurement. Worst
+    // per-rank disagreement against a 5x5x5 search, 400k samples:
     //
-    //                        dF1      dF2      dF3      dF4    F4 wrong on
-    //   pure Euclidean     0.0000   0.0530   0.1288   0.2180     0.256%
-    //   + anisotropy 14    0.1455   0.2615   0.3452   0.4445     0.648%
-    //   + spread 0.80      0.4630   0.5902   0.5409   0.6338     8.659%
+    //                        dF1      dF2      dF3
+    //   pure Euclidean     0.0000   0.0530   0.1288
+    //   + anisotropy 14    0.1455   0.2615   0.3452
+    //   + spread 0.80      0.4630   0.5902   0.5409
     //
     // F1 is exact in the unweighted case because a node in a cell outside the span
     // sits at Euclidean distance >= 1.0 and no sample can have its nearest node that
-    // far away. Nothing above F1 gets that guarantee: F4 for a jittered grid lands
-    // near 0.9 to 1.0 cells, right against the span's reach, so the fourth rank is
-    // marginal even with every organic switched off.
+    // far away. Nothing above F1 gets that guarantee.
     //
     // THE RADIUS OFFSET IS NOW THE WHOLE PROBLEM. It is subtracted from the distance,
     // so a node just outside the span with a large offset beats nodes inside it, and
     // at the shipped 0.80 that corrupts even F1 by up to 0.46 cells -- the NEAREST
-    // NODE is misidentified, so the diagram itself is wrong there, not merely the
-    // cluster test. 8.66% of samples, not the 0.51% previously recorded; the two
-    // numbers measure different things and the one above is per-rank disagreement
-    // rather than density difference, so both are worth re-running before either is
-    // trusted.
+    // NODE is misidentified, so the diagram itself is wrong there. 8.66% of samples,
+    // not the 0.51% previously recorded; the two numbers measure different things and
+    // the one above is per-rank disagreement rather than density difference, so both
+    // are worth re-running before either is trusted.
     //
     // Scheduled: the offset comes out and ranking moves to squared distances, which
-    // takes F4 disagreement to 0.256% and the loop to -31%. What remains after that
-    // is the irreducible floor of a 3x3x3 window and needs a different fix.
+    // returns F1-F3 to the pure-Euclidean disagreement column above and takes the
+    // loop to -31%. What remains after that is the irreducible floor of a 3x3x3
+    // window and needs a different fix.
     //
-    // Returns (F1, F2, F3, F4). Packed into the return rather than an out parameter:
+    // Returns (F1, F2, F3). Packed into the return rather than an out parameter:
     // HLSL's `out` has no C++ equivalent, and a reference parameter would have to be
     // spelled differently in each language -- which is exactly the kind of divergence
     // the shared file exists to prevent.
-    float4 RankedNodeDistances(int InCellX, int InCellY, int InCellZ, float3 InFrac,
+    float3 RankedNodeDistances(int InCellX, int InCellY, int InCellZ, float3 InFrac,
                                float InSpreadScale, float InSkewScale)
     {
         float f1 = 1e9f;
         float f2 = 1e9f;
         float f3 = 1e9f;
-        float f4 = 1e9f;
 
 #if UNIVERSE_COST_PROBE >= 4
         // Probe level 4: one cell, not twenty-seven. The field is meaningless here;
@@ -680,76 +686,63 @@ struct UniverseDensityParams
                                - SkewPow(h.w, VoidSizeSkew * InSkewScale)
                                  * VoidSizeSpread * InSpreadScale;
 
-                    // Insertion into the top four. Branches rather than a sort: four
+                    // Insertion into the top three. Branches rather than a sort: three
                     // comparisons beats any general sort at this size.
                     if (dist < f1)
                     {
-                        f4 = f3;
                         f3 = f2;
                         f2 = f1;
                         f1 = dist;
                     }
                     else if (dist < f2)
                     {
-                        f4 = f3;
                         f3 = f2;
                         f2 = dist;
                     }
                     else if (dist < f3)
                     {
-                        f4 = f3;
                         f3 = dist;
-                    }
-                    else if (dist < f4)
-                    {
-                        f4 = dist;
                     }
                 }
             }
         }
 
-        return float4(f1, f2, f3, f4);
+        return float3(f1, f2, f3);
     }
 
     // Density from the ranked distances.
     //
     // Each feature is a compact profile on a normalized coordinate that reaches 1 at
     // the feature's surface -- the same shape the galaxy layers settled on, for the
-    // same reasons: exactly zero outside, no cliff at the boundary, and one exponent
-    // controlling concentration.
+    // same reasons: exactly zero outside, no cliff at the boundary.
     //
-    // The separations nest: a vertex has all four ranks close, so it satisfies the
-    // edge and face tests too. That nesting is the point. Summing the three profiles
-    // makes a cluster the brightest thing in the field automatically, sitting where
-    // filaments converge rather than replacing them.
-    float DensityFromWeb(float4 InF, float3 InDensityMul, float3 InInvWidthMul)
+    // The separations nest: a point on a filament has both F2-F1 and F3-F1 small, so
+    // it satisfies the wall test too. Summing wall and filament is what makes a
+    // filament read brighter than a bare wall automatically, without a separate term
+    // needing to fight it for brightness. Clusters no longer come from here at all --
+    // see UniverseDensity.ush, where they're carved out of this sum by a noise mask
+    // instead of ranked as a fourth nearest-node tier.
+    float DensityFromWeb(float3 InF, float2 InDensityMul, float2 InInvWidthMul)
     {
         float f1 = InF.x;
         float f2 = InF.y;
         float f3 = InF.z;
-        float f4 = InF.w;
 
         // --- WALLS: two nodes equidistant, a face ---
-        // One reciprocal shared across all three widths, not three divides: the
+        // One reciprocal shared across both widths, not two divides: the
         // widths are stored inverted, so widening a feature is a division and the
         // caller hands the reciprocal in already computed.
-        float xw = (f2 - f1) * InvWallWidth * InInvWidthMul.y;
+        float xw = (f2 - f1) * InvWallWidth * InInvWidthMul.x;
         float wall = (xw < 1.0f)
-            ? WallDensity * InDensityMul.y * (1.0f - xw * xw) * (1.0f - xw * xw) : 0.0f;
+            ? WallDensity * InDensityMul.x * (1.0f - xw * xw) * (1.0f - xw * xw) : 0.0f;
 
         // --- FILAMENTS: three nodes equidistant, an edge ---
-        float xf = (f3 - f1) * InvFilamentWidth * InInvWidthMul.z;
+        float xf = (f3 - f1) * InvFilamentWidth * InInvWidthMul.y;
         float filament = (xf < 1.0f)
-            ? FilamentDensity * InDensityMul.z * (1.0f - xf * xf) * (1.0f - xf * xf)
+            ? FilamentDensity * InDensityMul.y * (1.0f - xf * xf) * (1.0f - xf * xf)
             : 0.0f;
 
-        // --- CLUSTERS: four nodes equidistant, a vertex ---
-        float xn = (f4 - f1) * InvNodeWidth * InInvWidthMul.x;
-        float node = (xn < 1.0f)
-            ? NodeDensity * InDensityMul.x * PowSafe(1.0f - xn * xn, NodeConcentration)
-            : 0.0f;
-
-        return node + wall + filament + VoidFloor;
+        return wall + filament + VoidFloor;
     }
 
     float BoundsFade(float rBoundsSq)
@@ -806,8 +799,8 @@ struct UniverseDensityParams
         //
         // Sampled BEFORE the warp, so it is anchored to unwarped field space -- which
         // is also required, since the turbulence axis modulates the warp itself.
-        float3 mDensity = float3(1.0f, 1.0f, 1.0f);
-        float3 mInvWidth = float3(1.0f, 1.0f, 1.0f);
+        float2 mDensity = float2(1.0f, 1.0f);
+        float2 mInvWidth = float2(1.0f, 1.0f);
         float mSpread = 1.0f, mSkew = 1.0f;
         float mWarpLarge = 1.0f, mWarpSmall = 1.0f;
 
@@ -822,19 +815,16 @@ struct UniverseDensityParams
             // THE COMPOUNDING IS REAL AND IT IS NOT 1 + a. What the march accumulates
             // is density times VOLUME FRACTION, and a wider feature occupies more
             // volume by a power set by its codimension: a wall is a slab and scales
-            // with w, a filament is a tube and scales with w^2, a cluster is a blob
-            // and scales with w^3. So a variance of +-V on a feature swings its
-            // integrated light by (1+V)*(1+0.6V)^k for k = 1, 2, 3. At V = 0.45 that
-            // is 4.6x end to end for walls, 8.0x for filaments and 14x for clusters.
-            // Clusters already carry most of the image, so this handle is far
-            // stronger on them than the number suggests -- lower the 0.6 width
-            // coefficient below to decouple width from density if that is too much.
-            mDensity = float3(1.0f + a.x, 1.0f + a.y, 1.0f + a.z);
+            // with w, a filament is a tube and scales with w^2. So a variance of +-V
+            // on a feature swings its integrated light by (1+V)*(1+0.6V)^k for
+            // k = 1, 2. At V = 0.45 that is 4.6x end to end for walls, 8.0x for
+            // filaments -- lower the 0.6 width coefficient below to decouple width
+            // from density if that is too much.
+            mDensity = float2(1.0f + a.y, 1.0f + a.z);
 
             // Stored inverted, so this is the reciprocal of the width multiplier: a
             // positive variance widens the feature.
-            mInvWidth = float3(1.0f / max(1.0f + a.x * 0.6f, 1e-3f),
-                               1.0f / max(1.0f + a.y * 0.6f, 1e-3f),
+            mInvWidth = float2(1.0f / max(1.0f + a.y * 0.6f, 1e-3f),
                                1.0f / max(1.0f + a.z * 0.6f, 1e-3f));
 
             mSpread = 1.0f + a.w;
@@ -933,30 +923,22 @@ struct UniverseDensityParams
         }
 #endif
 
-        float4 F = RankedNodeDistances(cx, cy, cz, frac, mSpread, mSkew);
+        float3 F = RankedNodeDistances(cx, cy, cz, frac, mSpread, mSkew);
 
-        // The conservative distance the march may skip, in CELL units.
-        //
-        // Gated on the WIDEST of the three bands, not on the wall's.
-        //
-        // It is tempting to use the wall band on the grounds that clusters and
-        // filaments nest inside walls, and it is wrong: the bands are independent
-        // parameters, and at the shipped values ClusterWidth 0.08 exceeds WallWidth
-        // 0.07, so there is a sliver where the wall test fails and the cluster test
-        // still passes. Skipping on the wall band alone steps straight over those
-        // clusters -- measured as a 45% error on the worst ray, against a mean error
-        // of 0.2% that made it look harmless in aggregate.
-        //
-        // F2-F1 <= F3-F1 <= F4-F1, so F2-F1 exceeding the largest band is sufficient
-        // for none of the three to fire, whatever the widths are set to.
+        // NOTE: this comment predates the empty-space skip's removal (see "THE FOLD
+        // CEILING IS NO LONGER COMPUTED HERE" below, and the skip-removal note in
+        // UniverseDensity.ush) and describes a return value this function no longer
+        // produces. Left as pre-existing staleness outside this change rather than
+        // rewritten, since that isn't part of removing the cluster path. What IS
+        // updated here: the wall and filament bands are independent parameters, so
+        // gating on the wider of the two, not the wall's alone, is still the rule --
+        // F2-F1 <= F3-F1, so F2-F1 exceeding the wider band is sufficient for neither
+        // to fire, whatever the widths are set to.
         //
         // F2-F1 is Lipschitz: the gradient of each ranked distance is a unit vector
         // toward its node, so the difference cannot change faster than 2 per cell
-        // travelled, times the warp's Jacobian for the domain shear. The metric
-        // stretch term that used to multiply this is gone with the anisotropy, which
-        // makes the skip sqrt(1+aniso) longer than it was -- 4.5x at the old shipped
-        // 14, and already banked for anyone running the pin at 0. The spread does not
-        // enter it: it is a constant per node, so it shifts the distances without
+        // travelled, times the warp's Jacobian for the domain shear. The spread does
+        // not enter it: it is a constant per node, so it shifts the distances without
         // changing their gradient.
         return DensityFromWeb(F, mDensity, mInvWidth);
     }
@@ -1010,10 +992,9 @@ struct UniverseDensityParams
 //   VoidSizeSpread  larger values shorten distances and shrink the radius within
 //                   which the 27-cell search is correct, and this is now the ONLY
 //                   thing doing so. Per-rank disagreement against a 5x5x5 search at
-//                   the shipped 0.80: F4 wrong on 8.66% of samples and F1 wrong by up
-//                   to 0.46 cells, which means the nearest node is misidentified and
-//                   the diagram is wrong rather than merely the cluster test. See the
-//                   table at RankedNodeDistances.
+//                   the shipped 0.80: F1 wrong by up to 0.46 cells on 8.66% of
+//                   samples, which means the nearest node is misidentified and the
+//                   diagram is wrong there. See the table at RankedNodeDistances.
 //   WarpAmount*     peak displacement in cells, and NOT the convention the retired
 //                   lattice path used: that one centred and doubled, so any value
 //                   carried over from it must be doubled to displace the same
@@ -1048,24 +1029,19 @@ struct UniverseDensityParams
 //                   exp(-density) turns into unbounded gain rather than opacity.
 // ==========================================================================
 UniverseDensityParams MakeUniverseDensityParams(
-    // --- WEB GEOMETRY --- the three widths are separations between ranked
+    // --- WEB GEOMETRY --- the two widths are separations between ranked
     // distances, in CELL units, so they hold their meaning when CellSize changes
     float InCellSize,
-    float InClusterWidth, // F4-F1 band that still counts as a cluster
     float InWallWidth, // F2-F1 band that still counts as a wall
     float InFilamentWidth, // F3-F1 band that still counts as a filament
+    float InSeed,
 
     // --- WEB DENSITY --- what the march accumulates is density times VOLUME
     // FRACTION, and a wall covers an order of magnitude more volume than a
     // filament, so equal-looking densities make the field read as foam
-    float InNodeDensity,
     float InWallDensity,
     float InFilamentDensity,
     float InVoidFloor,
-
-    // --- WEB SHAPE ---
-    float InNodeConcentration, // cluster profile exponent; >1 concentrates
-    float InSeed,
 
     // --- ORGANICS ---
     float InVoidSizeSpread, // additive radius offset per node, cell units
@@ -1074,7 +1050,6 @@ UniverseDensityParams MakeUniverseDensityParams(
     float InWarpScaleLarge, // warp texture repeats per cell, large octave
     float InWarpAmountSmall, // peak displacement in cells, breaks up the geometry
     float InWarpScaleSmall, // warp texture repeats per cell, small octave
-    float InRegionNodeVariance, // cluster density and width; 0.45 is 14x end to end
     float InRegionWallVariance, // wall density and width
     float InRegionFilamentVariance, // filament density and width
     float InRegionVoidVariance, // void size spread
@@ -1101,17 +1076,13 @@ UniverseDensityParams MakeUniverseDensityParams(
     // Division guards, not range limits. A zero width is a division by zero, and
     // the resulting infinity propagates into every feature test at once.
     P.InvCellSize = 1.0f / max(InCellSize, 1e-6f);
-    P.InvNodeWidth = 1.0f / max(InClusterWidth, 1e-6f);
     P.InvWallWidth = 1.0f / max(InWallWidth, 1e-6f);
     P.InvFilamentWidth = 1.0f / max(InFilamentWidth, 1e-6f);
+    P.Seed = (int) InSeed;
 
-    P.NodeDensity = InNodeDensity;
     P.WallDensity = InWallDensity;
     P.FilamentDensity = InFilamentDensity;
     P.VoidFloor = InVoidFloor;
-
-    P.NodeConcentration = InNodeConcentration;
-    P.Seed = (int) InSeed;
 
     P.VoidSizeSpread = InVoidSizeSpread;
     P.VoidSizeSkew = InVoidSizeSkew;
@@ -1139,7 +1110,6 @@ UniverseDensityParams MakeUniverseDensityParams(
                    / UNIVERSE_WARP_WRAP;
     P.WarpScaleSmall = warpScaleSmall;
 
-    P.RegionNodeVariance = InRegionNodeVariance;
     P.RegionWallVariance = InRegionWallVariance;
     P.RegionFilamentVariance = InRegionFilamentVariance;
     P.RegionVoidVariance = InRegionVoidVariance;
@@ -1206,7 +1176,7 @@ UniverseDensityParams MakeUniverseDensityParams(
     // visibly tears, back off about thirty percent.
     P.bWarpEnable = ((InWarpAmountLarge != 0.0f) || (InWarpAmountSmall != 0.0f))
                   ? 1.0f : 0.0f;
-    P.bRegionEnable = ((InRegionNodeVariance != 0.0f) || (InRegionWallVariance != 0.0f)
+    P.bRegionEnable = ((InRegionWallVariance != 0.0f)
                     || (InRegionFilamentVariance != 0.0f)
                     || (InRegionVoidVariance != 0.0f)) ? 1.0f : 0.0f;
 
