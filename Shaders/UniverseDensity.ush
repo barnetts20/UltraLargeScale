@@ -23,6 +23,9 @@
 // Same stepping rule as the galaxy layer. The proxy mesh decides which pixels run; the
 // unit sphere decides where to march.
 //
+// SAMPLES SIT AT STEP MIDPOINTS, and the bounds fade is applied here rather than in the
+// core -- see both notes in the loop.
+//
 // STEP LENGTH IS SET BY THE MARCH, NOT BY THE CAMERA. The first step is
 //
 //     baseStep = chord / StepCount
@@ -177,20 +180,12 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
 
         stepsTaken += 1.0;
 
-        // SAMPLED AT THE STEP START, not the midpoint. The galaxy march samples the
-        // midpoint because growing steps otherwise weight each interval by its leading
-        // face. That reason is now the only one left -- the empty-space skip used to
-        // anchor a bound at the sampled point, and it is gone -- so moving to the
-        // midpoint is available if the leading-face bias ever proves worse than the
-        // half-step offset.
-        float density = P.SampleAtPosition(InTex, InSampler, o + dir * t);
-        if (bShape)
-        {
-            density = P.PowSafe(density, InNoisePower);
-        }
-
-        // GROWS WITH PROGRESS ALONG THE CHORD, not with distance from the camera. t01
-        // is saturated rather than trusted: tStart can be trimmed forward to the camera
+        // THE STEP IS SIZED BEFORE THE SAMPLE IS TAKEN, because the sample sits at the
+        // MIDPOINT of the step and the midpoint is not known until the length is. That
+        // ordering is the only structural difference from sampling at the step start.
+        //
+        // GROWS WITH PROGRESS ALONG THE CHORD, not with distance from the camera. t01 is
+        // saturated rather than trusted: tStart can be trimmed forward to the camera
         // above, and a wrong InCamPosN that trimmed it past tExit would otherwise drive
         // the step negative and hang the march.
         float t01 = saturate((t - tStart) * invSpan);
@@ -200,8 +195,8 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
         // identical steps, so sample positions lock to the field across every pixel at
         // once -- structured aliasing that swims as the field scrolls under the proxy.
         //
-        // No path is lost: the clamp below pulls the last step to the exit, so every
-        // ray covers the same span whatever its offset.
+        // No path is lost: the clamp below pulls the last step to the exit, so every ray
+        // covers the same span whatever its offset.
         if (i == 0)
         {
             h *= firstScale;
@@ -212,10 +207,31 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
             h = tExit - t;
         }
 
-        // The 0.5 is a bare CONSTANT here, not a unit conversion: the universe layers
-        // author raw amplitudes against a void floor and have no path-length
-        // normalisation to pair with, so it is folded into their tuning. It is not the
-        // galaxy's factor and does not move with it.
+        // SAMPLED AT THE MIDPOINT. Growing steps otherwise weight each interval by its
+        // LEADING FACE: the density found at the near edge is applied across the whole
+        // step, and since every step is longer than the one before it, the error is
+        // systematic rather than noise -- the field reads heavy in the direction of
+        // travel, and more so the faster the steps grow. The galaxy march samples the
+        // midpoint for the same reason.
+        //
+        // It costs the step length being needed first, which is why the sizing above
+        // moved ahead of the fetch.
+        float3 samplePos = o + dir * (t + h * 0.5);
+
+        float density = P.SampleAtPosition(InTex, InSampler, samplePos);
+        if (bShape)
+        {
+            density = P.PowSafe(density, InNoisePower);
+        }
+
+        // THE BOUNDS FADE IS APPLIED HERE, not inside the field. It is a property of how
+        // the field is being viewed rather than of the field, and this is the only place
+        // that knows about the sphere it fades toward -- entity generation samples the
+        // same core and must see none of it. dot(samplePos, samplePos) is the same
+        // radial term the core used to compute for itself; the marched position is
+        // already in the normalized frame the fade is defined in.
+        density *= P.BoundsFade(dot(samplePos, samplePos));
+
         float alpha = 1.0 - exp(-density * InDensityScale * h * 0.5);
 
         // Flat white emission: structure only.

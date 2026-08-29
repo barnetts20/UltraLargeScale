@@ -1307,6 +1307,15 @@ struct UniverseDensityParams
              + InResolvedVoidFloor;
     }
 
+    // NOT APPLIED BY SampleAtPosition. It used to be, and that was wrong: this is a
+    // property of how the field is BEING VIEWED, not of the field, and the only caller
+    // that has any business with it is the ray march -- which is also the only one that
+    // knows about the bounding sphere it fades toward.
+    //
+    // Entity generation samples the same field and must see none of this. A bounds fade
+    // in the placement path would make where an entity lands depend on where the player
+    // happened to be standing when the cell was generated, which is exactly the class of
+    // view-dependence the cell/frac coordinate design exists to prevent.
     float BoundsFade(float rBoundsSq)
     {
         if (rBoundsSq <= BoundsFadeStartSq)
@@ -1913,8 +1922,6 @@ struct UniverseDensityParams
 
     float SampleAtPosition(Texture3D InTex, SamplerState InSampler, float3 InNormPos)
     {
-        float rBoundsSq = dot(InNormPos, InNormPos);
-
         // The fractional offset is added BEFORE the floor, so its carry into the
         // integer cell falls out of the same floor that decomposes the position.
         float3 cellPos = InNormPos * InvCellSizeSmall + OffsetFrac;
@@ -1963,7 +1970,7 @@ struct UniverseDensityParams
 
         return SampleCell(InTex, InSampler,
                           cx, cy, cz, frac,
-                          lx, ly, lz, lfrac) * BoundsFade(rBoundsSq);
+                          lx, ly, lz, lfrac);
     }
 
 };
