@@ -504,6 +504,10 @@ struct UniverseDensityParams
     // exactly the ratio's spacing, this is where it comes from.
     float LatticeRatio; // large cell size / small, whole number, >= 1
     int LatticeRatioInt; // the same number, for the exact offset split
+    // Only the COORDINATE SPLIT uses this now. The warp deliberately does not: its
+    // amplitudes are carried into the coarse lattice as the same numbers rather than
+    // the same physical displacement, so nothing is converted there. See the warp block
+    // in SampleCell.
     float InvLatticeRatio; // 1 / LatticeRatio; converts small-cell units to large
     float LatticeLogRatioSq; // log2(ratio^2); the geometric lambda ramp's constant
     float CellSizeBias; // exponent shaping where between the two lattices a region sits
@@ -1487,17 +1491,48 @@ struct UniverseDensityParams
             float wy = frac.y + warpDelta.y;
             float wz = frac.z + warpDelta.z;
 
-            // THE SAME DISPLACEMENT REACHES BOTH LATTICES, converted rather than
-            // recomputed. warpDelta is in SMALL cell units, so the large lattice gets
-            // it divided by the ratio -- the same physical displacement, expressed in
-            // the units that lattice measures in. A second warp fetch pair at the large
-            // lattice's own scale was the alternative and is not worth four texture
-            // reads to give the two lattices unrelated warps: they are meant to be the
-            // same universe seen at two scales, and one shared displacement field is
-            // what makes them read that way through a blend.
-            float lwx = lfrac.x + warpDelta.x * InvLatticeRatio;
-            float lwy = lfrac.y + warpDelta.y * InvLatticeRatio;
-            float lwz = lfrac.z + warpDelta.z * InvLatticeRatio;
+            // THE COARSE LATTICE TAKES THE SAME NUMBERS, NOT THE SAME DISPLACEMENT, and
+            // that is the entire content of these three lines: warpDelta is added to a
+            // fraction measured in COARSE cells here and in FINE cells above, so the
+            // amplitude scales with the grid and no conversion happens at all.
+            //
+            // Dividing by the ratio was the first thing tried, on the reasoning that the
+            // two lattices should see one shared physical displacement. That is wrong for
+            // both octaves and wrong in the same way. A warp amplitude pinned to an
+            // absolute size stops doing anything visible once the cells are several times
+            // larger than it: the coarse web arrives with its straight Voronoi edges
+            // essentially intact while the fine web beside it is properly organic. Both
+            // octaves have to scale with the lattice to keep their effect.
+            //
+            // WHAT MUST NOT SCALE WITH IT IS THE WARP SCALE -- the frequency. The UV
+            // stays anchored to the SMALL lattice's cell index for both octaves, so the
+            // warp pattern keeps its absolute wavelength and only the displacement grows.
+            // Re-anchoring the UV to the coarse cell index would make the pattern itself
+            // ratio times larger, which is a different and much blunter thing: the small
+            // octave stops being grain and becomes a second large octave, and the two
+            // lattices stop sharing a displacement field at all.
+            //
+            // WHAT IT COSTS IS FOLD BUDGET, and this is the real constraint on the
+            // feature. Shear is amplitude * scale * G measured in the lattice's own
+            // units; holding the amplitude constant in coarse cells while the wavelength
+            // stays pinned to fine cells multiplies the shear by the ratio, for BOTH
+            // octaves. The ceiling the coarse lattice has to respect is therefore the
+            // fine lattice's, divided by the ratio:
+            //
+            //     (AmountLarge*ScaleLarge + AmountSmall*ScaleSmall) * G * ratio  <=  1
+            //
+            // The SMALL octave is what binds first, since it carries the larger
+            // scale * G product. Past the ceiling the coarse web tears rather than
+            // bends, and it tears ONLY in the regions the blend has handed to it -- a
+            // failure that appears in some regions and not others, which is a
+            // particularly easy one to misread as something else. If it does tear before
+            // the look is right, the remedy is one more texture read: sample the small
+            // octave a second time at a UV built from the coarse cell index, which
+            // matches its wavelength to the lattice and puts the shear back where the
+            // fine lattice has it.
+            float lwx = lfrac.x + warpDelta.x;
+            float lwy = lfrac.y + warpDelta.y;
+            float lwz = lfrac.z + warpDelta.z;
 
             float lix = floor(lwx);
             float liy = floor(lwy);
@@ -1956,6 +1991,9 @@ float QuantizeScale(float InScale)
 //                   octaves, so neither half of one of these pins means anything alone
 //                   and the fold ceiling
 //                       AmountLarge*ScaleLarge + AmountSmall*ScaleSmall <= 1/G
+//                   which the COARSE lattice tightens by a further factor of the cell
+//                   size ratio, because both amplitudes scale with the grid while the
+//                   wavelength does not -- see the warp block in SampleCell
 //                   couples all four numbers. Check it against each range's .y (max),
 //                   since that is the amount a region can actually resolve to; the
 //                   scales are fixed and enter as themselves. Raising either octave
