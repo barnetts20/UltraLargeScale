@@ -249,8 +249,87 @@ protected:
 	virtual void Tick(float DeltaTime) override;
 
 	virtual void InitializeData() override;
+	virtual void InitializeVolumetric() override;
 	virtual void InitializeNiagara() override;
 	virtual void LoadRuntimeAssets() override;
+
+#pragma endregion
+
+#pragma region Volumetric
+	/** The cosmic-web raymarcher. Evaluates UniverseDensityCore.ush directly rather than
+	 *  sampling a baked pseudovolume, so the structure it draws is the same function
+	 *  entity generation will place against -- the same paradigm the galaxy layer's
+	 *  analytic marcher already uses.
+	 *
+	 *  IT SUPERSEDES THE GAS SPRITE LAYER. SectorGasCloud rides the Large tier's positions
+	 *  and paints nebulae with a separate material; the field is both more accurate and
+	 *  better looking, and the sprites come out once this is on screen. */
+	FString VolumetricMaterialPath = FString("/UltraLargeScale/Sector/MT_UniverseRaymarchAnalytic_Inst.MT_UniverseRaymarchAnalytic_Inst");
+
+	/** Pushes the field and march parameter set onto a material instance.
+	 *
+	 *  GATED BY MaterialParams.bPushDensityParams, which is false while look development
+	 *  lives in the material instance. The offset is pushed separately and always.
+	 *
+	 *  THE GRAPH IS A PASS-THROUGH. These are the identical raw values
+	 *  FUniverseDensityParams::Pack hands MakeUniverseDensityParams, and every correlation
+	 *  between them -- the lattice ratio rounding, the four scale quantizations, the offset
+	 *  re-split, the two region-fetch enables -- is resolved inside that shared derivation.
+	 *  Scaling or combining anything here instead would desync the render from placement,
+	 *  which is what the shared field exists to prevent. */
+	void PushDensityParams(UMaterialInstanceDynamic* InMID) const;
+
+	/** THE FIELD OFFSET IS THE ONLY PER-FRAME PARAMETER, and it is why this layer needs a
+	 *  per-frame push at all where the galaxy layer does not.
+	 *
+	 *  The galaxy's proxy sits at the galaxy's own origin and the player moves through it,
+	 *  so its field never moves. This proxy is pegged to the CAMERA -- the bounds fade
+	 *  gives a soft horizon instead of a hard proxy edge, which is what lets it be a local
+	 *  window onto an unbounded field -- so the field has to scroll under it, and the
+	 *  offset is how far it has scrolled.
+	 *
+	 *  Two vector pins, split so the integer part carries magnitude and the fraction
+	 *  carries precision. Cheap enough to run unconditionally; the rest of the set is
+	 *  draw-constant and is not re-pushed. */
+	void PushFieldOffset(UMaterialInstanceDynamic* InMID) const;
+
+	/** THE SMALL CELL SIZE THE OFFSET IS MEASURED IN, which is not unconditionally the
+	 *  authored one.
+	 *
+	 *  The offset is a count of small cells, and the shader adds it to a position it
+	 *  decomposes using ITS OWN CellSizeRange.x. The two have to be the same number. While
+	 *  bPushDensityParams is false the instance owns that value, so taking it from
+	 *  FUniverseDensityParams would give the field two sources of truth for one quantity --
+	 *  and the failure is not a wrong-looking field but a field that SCROLLS at the wrong
+	 *  rate, which reads as the web sliding under the camera rather than as a scale error.
+	 *
+	 *  So this reads the live value back off the material instance and falls back to the
+	 *  authored one only when the instance has no such pin. Once bPushDensityParams is
+	 *  true the two agree by construction and this returns the same number either way. */
+	float GetEffectiveCellSizeSmall() const;
+
+	/** HALF-EXTENT OF THE PROXY, and the single number both the box scale and the offset
+	 *  normalization are derived from -- they are the same frame, and computing them from
+	 *  two expressions is how they drift apart without anything looking obviously wrong.
+	 *
+	 *  IT IS THE LARGE TIER'S NEIGHBOURHOOD, not the sector extent. The marched volume has
+	 *  to cover the same span the streaming grid has resident, or the field the player
+	 *  flies through and the sprites they fly past are describing different regions. That
+	 *  span is (2 * NeighborhoodRadius + 1) cells at the Large tier's depth, and at the
+	 *  defaults -- radius 1, depth 1, GridExtentMultiplier 4 -- the cell half-extent works
+	 *  out to exactly Extent, so the 3x3x3 neighbourhood is 3 * Extent and a proxy sized at
+	 *  Extent covers the CENTRE CELL ALONE: one twenty-seventh of the volume it should.
+	 *
+	 *  Reads UniverseParams.LargeTier rather than LargeTierConfig, because InitializeVolumetric
+	 *  runs before BuildTierConfigs has populated the latter. */
+	double GetVolumetricProxyExtent() const;
+
+	/** VirtualTraversal expressed as an exact small-cell count plus a fraction.
+	 *
+	 *  Computed in double and split by floor, because VirtualTraversal is the quantity that
+	 *  actually reaches the magnitudes this coordinate design exists for. What it is handed
+	 *  to is narrower than it is -- see the precision note on FUniverseFieldOffset. */
+	FUniverseFieldOffset ComputeFieldOffset() const;
 
 #pragma endregion
 

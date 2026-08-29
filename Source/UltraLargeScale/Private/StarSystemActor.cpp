@@ -13,6 +13,7 @@
 #include "ParallaxStaticMeshActor.h"
 #include "FTierStreamingSystem.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
+#include "ActorPoolManager.h"
 #include <DrawDebugHelpers.h>
 #include <Kismet/GameplayStatics.h>
 #include <NiagaraFunctionLibrary.h>

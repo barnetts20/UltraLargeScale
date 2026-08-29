@@ -31,7 +31,13 @@ public:
 	void Initialize();
 
 	/** Builds the sector-scale density noise graph from Params. Pure function of
-	 *  FUniverseDensityParams; needs no actor state. */
+	 *  FUniverseNoiseGraphParams; needs no actor state.
+	 *
+	 *  LEGACY, AND A DIFFERENT FIELD from Params.DensityParams. This graph is what all
+	 *  three tiers rejection-sample for cluster placement; the cosmic web the ray march
+	 *  draws is UniverseDensityCore.ush, evaluated on the GPU. Until entity generation
+	 *  moves across, the sprites and the volumetric are showing two unrelated universes.
+	 *  Comes out with DensityNoise and FUniverseParams::EncodedTree. */
 	FastNoise::SmartNode<> BuildNoise() const;
 
 	/** Samples the noise field into a CPU-side volume texture buffer, returning

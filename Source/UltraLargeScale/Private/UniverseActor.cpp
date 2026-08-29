@@ -19,6 +19,9 @@
 #include "Engine/PostProcessVolume.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "Engine/VolumeTexture.h"
+#include "Engine/StaticMesh.h"
+#include "Components/StaticMeshComponent.h"
 #include "Engine/LocalPlayer.h"
 #include "SceneView.h"
 
@@ -298,6 +301,268 @@ void AUniverseActor::InitializeData()
 		FPlatformTime::Seconds() - StartTime);
 }
 
+#pragma region Volumetric
+
+float AUniverseActor::GetEffectiveCellSizeSmall() const
+{
+	const float Authored = UniverseParams.DensityParams.Lattice.CellSizeSmall;
+
+	// Only when the instance is authoritative. Reading it back while we are the ones
+	// pushing would be a round trip through the MID for a value we just wrote, and would
+	// quietly mask a pin-name mismatch by handing us back our own number.
+	if (!UniverseParams.MaterialParams.bPushDensityParams && VolumeMaterial)
+	{
+		const FLinearColor Live = VolumeMaterial->K2_GetVectorParameterValue(TEXT("CellSizeRange"));
+
+		// An absent pin returns zero rather than failing, so the guard is the value itself.
+		if (Live.R > 0.0f)
+		{
+			return Live.R;
+		}
+	}
+
+	return FMath::Max(Authored, 1e-6f);
+}
+
+double AUniverseActor::GetVolumetricProxyExtent() const
+{
+	// (2R + 1) cells across, half-extent per cell, so this is the half-span of the
+	// resident neighbourhood. See the header for why it is not UniverseParams.Extent.
+	const int32 Radius = FMath::Max(UniverseParams.LargeTier.NeighborhoodRadius, 0);
+	const double CellHalf = GetGridCellExtent(UniverseParams.LargeTier.GridDepth);
+
+	return FMath::Max(static_cast<double>(2 * Radius + 1) * CellHalf, UE_DOUBLE_SMALL_NUMBER);
+}
+
+FUniverseFieldOffset AUniverseActor::ComputeFieldOffset() const
+{
+	// THE SCALED RELATIVE VIRTUAL POSITION, not the world position. VirtualTraversal is
+	// where the player has travelled through the field, already divided by UnitScale, and
+	// the actor's world location is a rendering convenience that gets reset to the player
+	// every frame -- pushing that would make the field track the player's absolute
+	// coordinates in the level, which is not a thing the field has any relationship to.
+	//
+	// Two divisions, in this order: into proxy-normalized space where the box spans -1 to
+	// 1, then into small cells. THE FIRST DIVISOR IS THE PROXY'S OWN HALF-EXTENT and has
+	// to stay that way -- the shader marches a position in [-1,1] and adds this offset to
+	// it, so if the two disagree the field scrolls at the wrong rate relative to the
+	// geometry it is drawn on, which reads as the web sliding under the camera rather than
+	// as a scale error.
+	//
+	// DOUBLE THROUGHOUT, and that is the whole reason this happens here rather than in the
+	// shader. VirtualTraversal is the quantity that reaches the magnitudes the cell/frac
+	// formulation exists for, so the split has to happen while the value still has
+	// fractional precision left to split.
+	const double Ext = GetVolumetricProxyExtent();
+	const double InvCell = 1.0 / FMath::Max(
+		static_cast<double>(GetEffectiveCellSizeSmall()), 1e-6);
+
+	return FUniverseFieldOffset::FromCellPosition((VirtualTraversal / Ext) * InvCell);
+}
+
+void AUniverseActor::PushFieldOffset(UMaterialInstanceDynamic* InMID) const
+{
+	if (!InMID) return;
+
+	const FUniverseFieldOffset Offset = ComputeFieldOffset();
+
+	// THE CELL COUNT NARROWS HERE, from int32 to a float pin, and the narrowing is the
+	// documented ceiling rather than a bug: exactness is lost above 2^24 cells, and the
+	// core then casts back through (int), which bounds it again at int32. Both limits sit
+	// under what the cell/frac design is built to survive -- see FUniverseFieldOffset.
+	// This is the line that becomes a high/low pair per axis when traversal gets there.
+	InMID->SetVectorParameterValue(TEXT("FieldOffsetCell"), FLinearColor(
+		static_cast<float>(Offset.Cell.X),
+		static_cast<float>(Offset.Cell.Y),
+		static_cast<float>(Offset.Cell.Z), 0.0f));
+
+	InMID->SetVectorParameterValue(TEXT("FieldOffsetFrac"), FLinearColor(
+		static_cast<float>(Offset.Frac.X),
+		static_cast<float>(Offset.Frac.Y),
+		static_cast<float>(Offset.Frac.Z), 0.0f));
+}
+
+void AUniverseActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
+{
+	if (!InMID) return;
+
+	const FUniverseMaterialParams& M = UniverseParams.MaterialParams;
+
+	// ONE PACK, and every pin below reads it. The four .w passengers -- skew, both warp
+	// scales, the large octave's lattice-follow -- are already loaded by Pack, so there is
+	// nothing to assemble here and no second place for the packing to drift.
+	const FUniverseDensityArgs A = UniverseParams.DensityParams.Pack(
+		UniverseParams.Seed, ComputeFieldOffset());
+
+	auto SetVec = [InMID](const TCHAR* InName, const FVector4f& InValue)
+		{
+			InMID->SetVectorParameterValue(InName,
+				FLinearColor(InValue.X, InValue.Y, InValue.Z, InValue.W));
+		};
+
+	// --- WEB GEOMETRY ---
+	SetVec(TEXT("CellSizeRange"), A.CellSizeRange);
+	InMID->SetScalarParameterValue(TEXT("Seed"), A.Seed);
+
+	// --- FIELD OFFSET --- NOT PUSHED HERE. It has its own path, runs unconditionally and
+	// runs every frame; folding it in would make the one parameter that must always be
+	// pushed depend on the flag that gates the ones that must not be.
+
+	// --- WEB DENSITY, WIDTH AND FALLOFF ---
+	SetVec(TEXT("WallDensityRange"), A.WallDensityRange);
+	SetVec(TEXT("WallFalloffRange"), A.WallFalloffRange);
+	SetVec(TEXT("FilamentDensityRange"), A.FilamentDensityRange);
+	SetVec(TEXT("FeatureWidthRange"), A.FeatureWidthRange);
+	SetVec(TEXT("VoidFloorRange"), A.VoidFloorRange);
+
+	// --- ORGANICS ---
+	SetVec(TEXT("VoidSizeSpreadRange"), A.VoidSizeSpreadRange);
+	SetVec(TEXT("WarpAmountLargeRange"), A.WarpAmountLargeRange);
+	SetVec(TEXT("WarpAmountSmallRange"), A.WarpAmountSmallRange);
+	SetVec(TEXT("WarpLargeWeights"), A.WarpLargeWeights);
+	SetVec(TEXT("WarpSmallWeights"), A.WarpSmallWeights);
+	SetVec(TEXT("RegionScales"), A.RegionScales);
+
+	// --- BOUNDS ---
+	// Pushed rather than left to the material's own default. The fade is applied by the
+	// march and not by the field, so this is the one parameter in the set that describes
+	// how the field is being VIEWED -- but it still travels through the same derivation,
+	// and leaving it to the asset would let the render disagree with the code about where
+	// the horizon is.
+	InMID->SetScalarParameterValue(TEXT("BoundsFadeStart"), A.BoundsFadeStart);
+
+	// --- MARCH ---
+	// ALL OF THEM, not just MaxSteps. Left on the material asset, the baseline the marcher
+	// actually runs at is invisible from the code and the step count cannot be reasoned
+	// about against it.
+	InMID->SetScalarParameterValue(TEXT("StepCount"), M.VolumeStepCount);
+	InMID->SetScalarParameterValue(TEXT("StepGrowth"), M.VolumeStepGrowth);
+	InMID->SetScalarParameterValue(TEXT("MaxSteps"), M.VolumeMaxSteps);
+	InMID->SetScalarParameterValue(TEXT("DensityScale"), M.VolumeDensityScale);
+	InMID->SetScalarParameterValue(TEXT("NoisePower"), M.VolumeNoisePower);
+	InMID->SetScalarParameterValue(TEXT("Jitter"), M.VolumeDither);
+
+	// The marcher wants a LENGTH; the property is a step CEILING. Derived here rather than
+	// authored, for the reason the galaxy layer derives its own: authoring the length hides
+	// the count.
+	InMID->SetScalarParameterValue(TEXT("MinStep"), M.GetMinStep());
+}
+
+void AUniverseActor::InitializeVolumetric()
+{
+	double StartTime = FPlatformTime::Seconds();
+
+	// The constraints the details panel cannot show: the fold ceiling, the coprimality of
+	// the four texture scales, and the region fetches a flattened group would silently turn
+	// off. Reported before anything is built, so a tearing web has a line in the log next
+	// to it rather than being diagnosed from the picture.
+	UniverseParams.DensityParams.Validate(TEXT("AUniverseActor::InitializeVolumetric"));
+
+	// The proxy span and the cell count it resolves to, logged because neither is visible
+	// anywhere else and both are the first things to check when the field scrolls at a
+	// rate that does not match the sprites.
+	UE_LOG(LogTemp, Log,
+		TEXT("AUniverseActor::InitializeVolumetric - proxy half-extent %.4g (Large tier ")
+		TEXT("depth %d, radius %d)."),
+		GetVolumetricProxyExtent(),
+		UniverseParams.LargeTier.GridDepth,
+		UniverseParams.LargeTier.NeighborhoodRadius);
+
+	TPromise<void> CompletionPromise;
+	TFuture<void> CompletionFuture = CompletionPromise.GetFuture();
+	TWeakObjectPtr<AUniverseActor> WeakThis(this);
+	AsyncTask(ENamedThreads::GameThread, [WeakThis, CompletionPromise = MoveTemp(CompletionPromise)]() mutable
+		{
+			AUniverseActor* Self = WeakThis.Get();
+			if (!Self || Self->InitializationState == ELifecycleState::Pooling)
+			{
+				CompletionPromise.SetValue();
+				return;
+			}
+
+			// Resolve every asset up front and bail loudly.
+			UStaticMesh* BoxMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/UltraLargeScale/UnitBoxInvertedNormals.UnitBoxInvertedNormals"));
+			UMaterialInterface* ParentMat = LoadObject<UMaterialInterface>(nullptr, *Self->VolumetricMaterialPath);
+			UVolumeTexture* NoiseTex = LoadObject<UVolumeTexture>(nullptr, *Self->UniverseParams.MaterialParams.VolumeNoise);
+
+			if (!BoxMesh || !ParentMat)
+			{
+				UE_LOG(LogTemp, Error, TEXT("AUniverseActor::InitializeVolumetric - ABORT, required assets unresolved. ") TEXT("mesh=%s material=%s"), BoxMesh ? TEXT("ok") : TEXT("NULL /UltraLargeScale/UnitBoxInvertedNormals"), ParentMat ? TEXT("ok") : *FString::Printf(TEXT("NULL %s"), *Self->VolumetricMaterialPath));
+				CompletionPromise.SetValue();
+				return;
+			}
+			if (!NoiseTex)
+			{
+				// LOUDER THAN THE GALAXY'S EQUIVALENT, because it means more here. Both
+				// region fetches and both warp octaves read this one asset, and with no
+				// texture they return neutral and the field collapses to the unwarped
+				// analytic web -- a change in GEOMETRY, not just in shading. What renders
+				// is a clean cellular lattice rather than a cosmic web, and it looks
+				// deliberate.
+				UE_LOG(LogTemp, Warning, TEXT("AUniverseActor::InitializeVolumetric - noise texture '%s' unresolved; ") TEXT("the field collapses to the unwarped analytic web -- no regional variance, no domain warp, straight bisectors."), *Self->UniverseParams.MaterialParams.VolumeNoise);
+			}
+
+			Self->VolumeMaterial = UMaterialInstanceDynamic::Create(ParentMat, Self);
+			if (NoiseTex) Self->VolumeMaterial->SetTextureParameterValue(FName("NoiseTex"), NoiseTex);
+
+			// THE OFFSET ALWAYS. It is runtime state with no authored counterpart on the
+			// instance, so there is nothing for it to clobber and nothing else can supply it.
+			Self->PushFieldOffset(Self->VolumeMaterial);
+
+			// THE FIELD ONLY WHEN ASKED. See bPushDensityParams -- while the instance is
+			// authoritative, pushing would overwrite tuned values with struct defaults.
+			if (Self->UniverseParams.MaterialParams.bPushDensityParams)
+			{
+				Self->PushDensityParams(Self->VolumeMaterial);
+			}
+			else
+			{
+				UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeVolumetric - field parameters left to the material instance ") TEXT("(bPushDensityParams is false). FUniverseDensityParams is not driving the render; ") TEXT("transcribe the tuned instance values into it before entity generation lands."));
+			}
+
+			Self->VolumetricComponent = NewObject<UStaticMeshComponent>(Self);
+			Self->VolumetricComponent->SetVisibility(false);
+			Self->VolumetricComponent->SetStaticMesh(BoxMesh);
+			Self->VolumetricComponent->AttachToComponent(Self->RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+			Self->VolumetricComponent->SetAbsolute(true, false, false);
+			Self->VolumetricComponent->TranslucencySortPriority = 1;
+			Self->VolumetricComponent->SetDepthPriorityGroup(SDPG_World);
+			Self->VolumetricComponent->bRenderInDepthPass = false;
+			Self->VolumetricComponent->bVisibleInSceneCaptureOnly = Self->IsVirtualSpace(); // Virtual backdrop: "Virtual Space" components get rendered to the backdrop.
+			Self->VolumetricComponent->RegisterComponent();
+			// SAME NUMBER THE OFFSET IS NORMALIZED BY. The unit box spans 0..1, so the
+			// scale is the full width -- twice the half-extent. See GetVolumetricProxyExtent.
+			Self->VolumetricComponent->SetWorldScale3D(FVector(2.0 * Self->GetVolumetricProxyExtent()));
+			Self->VolumetricComponent->SetMaterial(0, Self->VolumeMaterial);
+			Self->VolumetricComponent->SetVisibility(true);
+
+			// HOW MUCH WEB IS IN A CHORD, logged because it is the first number to reach
+			// for when the field saturates and it is not visible anywhere else. The camera
+			// sits inside this volume, so every ray marches a full diameter: at four to
+			// eight cells across, a cosmic web reads as a web, and at forty it reads as
+			// foam and drives transmittance to zero whatever the density is set to.
+			//
+			// Also the check that the offset and the shader agree. This is the resolved
+			// cell size -- read off the instance while it owns the field -- so a number
+			// here that does not match FUniverseDensityParams means the authored struct is
+			// stale rather than that anything is broken.
+			const float ResolvedCell = Self->GetEffectiveCellSizeSmall();
+			UE_LOG(LogTemp, Log,
+				TEXT("AUniverseActor::InitializeVolumetric - proxy spans %.1f small cells ")
+				TEXT("(resolved CellSizeSmall %.4f, authored %.4f)."),
+				2.0f / FMath::Max(ResolvedCell, 1e-6f),
+				ResolvedCell,
+				Self->UniverseParams.DensityParams.Lattice.CellSizeSmall);
+
+			CompletionPromise.SetValue();
+		});
+
+	CompletionFuture.Wait();
+	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeVolumetric took: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
+}
+
+#pragma endregion
+
 void AUniverseActor::InitializeNiagara()
 {
 	double StartTime = FPlatformTime::Seconds();
@@ -443,6 +708,18 @@ void AUniverseActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 	VirtualTraversal += PlayerDelta * Ratio;
 
 	SetActorLocation(InPlayerPos);
+
+	// THE PROXY IS PEGGED TO THE CAMERA, not to the field. The galaxy layer does the
+	// opposite -- its box sits at InPlayerPos - VirtualTraversal, so the player moves
+	// through a volume that stays where the galaxy is -- and the difference is that this
+	// layer has no outside. There is no universe-sized proxy to stand in; there is a window
+	// centred on the viewer, with the bounds fade giving it a soft horizon rather than a
+	// visible edge, and the field scrolls under it. Which is what the offset push is for.
+	if (VolumetricComponent)
+	{
+		VolumetricComponent->SetWorldLocation(InPlayerPos);
+		PushFieldOffset(VolumeMaterial);
+	}
 
 	// Publish EVERY frame -- even below the push threshold -- so an in-flight full
 	// push that completes this frame still composites against current VT.
