@@ -131,7 +131,15 @@ namespace GalaxyHLSL
     inline float sqrt(float X) { return ::sqrtf(X); }
     inline float rsqrt(float X) { return 1.0f / ::sqrtf(X); }
     inline float exp(float X) { return ::expf(X); }
+
+    // Base two, not a scaled exp(). Both are the hardware primitive on the GPU side,
+    // and expf(X * ln2) would introduce a rounding step the shader does not take --
+    // which is precisely the class of silent CPU/GPU divergence the shared cores exist
+    // to avoid. UniverseDensityCore's node weight is the consumer.
+    inline float exp2(float X) { return ::exp2f(X); }
+
     inline float log(float X) { return ::logf(X); }
+    inline float log2(float X) { return ::log2f(X); }
     inline float pow(float X, float Y) { return ::powf(X, Y); }
     inline float sin(float X) { return ::sinf(X); }
     inline float cos(float X) { return ::cosf(X); }
