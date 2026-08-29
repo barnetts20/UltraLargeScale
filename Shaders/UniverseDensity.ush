@@ -7,10 +7,12 @@
 // per sample. This file's job is purely the sphere-bounded march: step sizing,
 // accumulation, early-out, and calling that one function once per step.
 //
-// The texture and sampler are threaded down into the core rather than sampled here,
-// same as before. The offset arrives already split into an integer cell count and a
-// fraction and has to stay split: a float3 carrying the player's position stops
-// resolving a fraction of a cell long before the magnitudes this layer reaches.
+// The texture and sampler are threaded down into the core rather than sampled here, same
+// as before. THE FIELD OFFSET NO LONGER PASSES THROUGH THIS FUNCTION AT ALL: it is
+// constant for the draw, so it is resolved once into the params struct instead of being
+// handed to every sample. It still has to stay split into an integer cell count and a
+// fraction -- a float3 carrying the player's position stops resolving a fraction of a
+// cell long before the magnitudes this layer reaches.
 //
 // Nothing here touches Parameters or View -- those exist only inside the generated
 // material function, so the dither that needs them stays in the Custom node body.
@@ -21,17 +23,37 @@
 // Same stepping rule as the galaxy layer. The proxy mesh decides which pixels run; the
 // unit sphere decides where to march.
 //
-// STEP LENGTH IS A FRACTION OF CAMERA DISTANCE, so every step subtends about the same
-// angle and covers about the same screen area wherever it is. The recurrence
-// s -> s(1 + StepRatio) is geometric, which makes the step count LOGARITHMIC in range
-// rather than linear -- against a fixed count spread evenly along the chord, that is the
-// difference between a budget spent mostly where nothing is visible and one spent where
-// the pixels are.
+// STEP LENGTH IS SET BY THE MARCH, NOT BY THE CAMERA. The first step is
 //
-// It is now the ONLY thing setting step length. It used to set a floor that an
-// empty-space skip could override wherever the skip was larger; that skip has been
-// removed. The two answered different questions --
-// how much detail a step needs, and how much detail is there.
+//     baseStep = chord / StepCount
+//
+// and every step after it grows linearly with how far along the chord it starts:
+//
+//     h = baseStep * (1 + StepGrowth * t01)
+//
+// This replaces sizing the step as a fraction of camera distance, and the reason is the
+// near field. A camera-distance step goes to ZERO at the camera, so a viewer inside the
+// volume -- which is the normal case here, since the proxy is a sphere centred on them
+// -- got a step floored only by an absolute pin, and successive samples landed inside a
+// single cell, each paying a full fifty-four-candidate neighbourhood walk to re-derive a
+// field that had not changed between them. A first step derived from the chord cannot
+// collapse that way, because it does not know where the camera is.
+//
+// The two rules agree about the far field and disagree only at the origin, which is
+// worth knowing before tuning: with the camera at the centre of its own proxy, dCam is
+// about t, so the old rule was 2*k*t -- linear in distance, through zero -- and the new
+// one is affine in distance with a floor the plan chose. The growth term is what keeps
+// the far half from being oversampled.
+//
+// STEPCOUNT IS A BUDGET, NOT A COUNT. Growth means the steps overshoot the chord before
+// the budget is spent, so the loop finishes early: the actual count is
+// StepCount * ln(1 + growth) / growth, which is 0.69 of the budget at growth 1 and 0.46
+// at growth 3. Raising growth trades far-field detail for step count directly.
+//
+// Two floors sit under all of it. The authored MinStep, and the field's own resolution,
+// which stops the step going below the width of the narrowest wall the parameters can
+// produce. They answer different questions -- how far a step may go, and how much
+// detail is actually there to find.
 //
 // Do not add a box bounds test on the marched position. InStartPos sits exactly on
 // the proxy surface, so a component is exactly 0 or 1 before any FP error, and such a
@@ -58,8 +80,7 @@
 // looks identical to one that finished, and the far half of the volume is simply absent.
 float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState InSampler,
                         float3 InStartPos, float3 InViewVec, float3 InCamPosN,
-                        float3 InOffsetCell, float3 InOffsetFrac,
-                        float InStepRatio, float InMinStep, float InMinSamples,
+                        float InStepGrowth, float InMinStep, float InStepCount,
                         int InMaxSteps, float InDensityScale, float InJitter,
                         float InNoisePower)
 {
@@ -88,13 +109,17 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
         return float4(0.0, 0.0, 0.0, 1.0);
     }
 
-    // DISTANCE FROM THE CAMERA, which is what sets step size. The sample at t sits at
-    // o + dir*t and the camera at o - dCam*dir, so their separation is (dCam + t).
+    // DISTANCE FROM THE CAMERA. It no longer sets step size -- see the header -- and its
+    // only remaining job is trimming the chord below, so that a camera inside the volume
+    // does not march the stretch behind itself. The sample at t sits at o + dir*t and the
+    // camera at o - dCam*dir, so their separation is (dCam + t).
     float dCam = dot(o - InCamPosN, dir);
 
     // START AT THE CAMERA WHEN IT IS INSIDE THE VOLUME. The chord otherwise begins
-    // behind the viewer, and every step of that stretch runs at the floor because the
-    // separation there is zero -- the whole budget spent on geometry nobody can see.
+    // behind the viewer and the budget is spent on geometry nobody can see -- and this
+    // matters MORE under plan-relative stepping than it did under camera-relative, since
+    // the step no longer collapses over that stretch but is sized as if it were part of
+    // the visible span.
     //
     // GUARDED SO IT CAN ONLY SHORTEN. Each condition rules out a way a wrong InCamPosN
     // could empty the chord instead of trimming it; the fallback is the full chord,
@@ -105,13 +130,26 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
         tStart = -dCam;
     }
 
-    float k = max(InStepRatio, 0.0);
-    float minStep = max(InMinStep, 1e-5);
+    // THE CHORD IS WHAT SIZES THE STEP. Everything about the progression falls out of
+    // these two lines: the span the ray actually has to cover, divided by the budget.
+    float span = max(tExit - tStart, 1e-6);
+    float baseStep = span / max(InStepCount, 1.0);
 
-    // FLOOR ON SAMPLES ACROSS THE CHORD. Angular sizing says how much detail a step
-    // needs and nothing about how much the volume has; past some range one step spans
-    // the whole thing and the structure disappears rather than softening.
-    float maxStep = (tExit - tStart) / max(InMinSamples, 1.0);
+    // FLOORED BY THE FIELD'S OWN RESOLUTION as well as by the pin. P.MinFeatureStep is
+    // half the narrowest wall the field can produce, in normalized units, derived from
+    // the feature width and the small cell size together -- see
+    // UNIVERSE_MIN_STEP_FRACTION in the core. The authored pin cannot do this job alone:
+    // it is an absolute distance with no knowledge of the cell size, so it is wrong the
+    // moment CellSizeRange moves.
+    //
+    // Taking the LARGER of the two leaves the pin able to make steps coarser and stops it
+    // making them pointlessly finer. It binds only when the budget is set high enough
+    // that baseStep falls below what the field can express, which is exactly when it
+    // should.
+    float minStep = max(max(InMinStep, P.MinFeatureStep), 1e-5);
+
+    float growth = max(InStepGrowth, 0.0);
+    float invSpan = 1.0 / span;
 
     // Dither shortens the FIRST step. It costs no path length -- the loop clamps the
     // last step to the exit -- and it offsets each pixel's lattice independently.
@@ -126,8 +164,9 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
     float transmittance = 1.0;
     float emission = 0.0;
 
-    // InMaxSteps is a SAFETY BOUND, not the step count. The geometric progression sets
-    // the count; this only stops a pathological ratio from hanging the shader.
+    // InMaxSteps is a SAFETY BOUND, not the step count. StepCount and the growth rate
+    // set the count between them; this only stops a pathological combination from
+    // hanging the shader, and should sit comfortably above StepCount rather than near it.
     [loop]
     for (int i = 0; i < InMaxSteps; i++)
     {
@@ -144,18 +183,18 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
         // anchor a bound at the sampled point, and it is gone -- so moving to the
         // midpoint is available if the leading-face bias ever proves worse than the
         // half-step offset.
-        float density = P.SampleAtPosition(InTex, InSampler,
-                                           o + dir * t, InOffsetCell, InOffsetFrac);
+        float density = P.SampleAtPosition(InTex, InSampler, o + dir * t);
         if (bShape)
         {
             density = P.PowSafe(density, InNoisePower);
         }
 
-        // max against zero, not just against the floor: a sample behind the camera has
-        // a negative separation, and without it a wrong camera position gives negative
-        // step lengths and a march that never terminates.
-        float h = max(minStep, max(dCam + t, 0.0) * k);
-        h = min(h, maxStep);
+        // GROWS WITH PROGRESS ALONG THE CHORD, not with distance from the camera. t01
+        // is saturated rather than trusted: tStart can be trimmed forward to the camera
+        // above, and a wrong InCamPosN that trimmed it past tExit would otherwise drive
+        // the step negative and hang the march.
+        float t01 = saturate((t - tStart) * invSpan);
+        float h = max(baseStep * (1.0 + growth * t01), minStep);
 
         // FIRST-STEP DITHER. Without it every ray starts at the same place and takes
         // identical steps, so sample positions lock to the field across every pixel at
