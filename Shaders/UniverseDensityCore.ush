@@ -297,12 +297,9 @@
 struct UniverseDensityParams
 {
     // --- WEB GEOMETRY ---
-    // The two widths are separations between ranked distances, in CELL units.
     float InvCellSize; // cells per normalized unit; larger = finer web
-    float InvWallWidth; // 1 / (F2-F1) band that still counts as a wall
-    float InvFilamentWidth; // 1 / (F3-F1) band that still counts as a filament
 
-    // --- WEB DENSITY ---
+    // --- WEB DENSITY AND WIDTH ---
     // What the march accumulates is density x volume fraction, not peak density. A
     // wall covers an order of magnitude more volume than a filament, so equal-looking
     // densities make the field read as foam. See MakeUniverseDensityParams.
@@ -310,10 +307,28 @@ struct UniverseDensityParams
     // PACKED (min, max, bias, free) -- see VarianceRemap. There is no more single
     // default value nudged by a separate region amount: the region channel picks
     // where between the two authored extremes a given sample falls, and that IS the
-    // density, not a multiplier on one. w is UNCLAIMED, a free per-field handle
+    // value, not a multiplier on one. w is UNCLAIMED, a free per-field handle
     // reserved for whatever the next need turns out to be.
+    //
+    // WIDTH IS NOW ON THE VARIANCE PATH TOO -- it no longer rides density's
+    // bias-shaped t as a derived coupling (the "wall is a slab" compounding note used
+    // to live here). It reads the SAME channel as its paired density (x.y for wall,
+    // x.z for filament) but resolves through its OWN bias/min/max, same pattern
+    // WarpAmountLargeRange/WarpAmountSmallRange already use sharing the turbulence
+    // channel: one raw signal, independent per-field response curves. The automatic
+    // "wider feature needs less density for equal brightness" coupling is gone with
+    // it -- if that compounded look is wanted, correlate the two ranges' authored
+    // extremes by hand.
+    //
+    // NO LONGER PRECOMPUTABLE. InvWallWidth/InvFilamentWidth used to be struct
+    // fields, computed once in MakeUniverseDensityParams; now that width is a
+    // per-sample resolved value like density is, the reciprocal has to be taken
+    // per-sample in SampleCell instead. One more division per sample, guarded the
+    // same way every other division in this file is.
     float4 WallDensityRange;
+    float4 WallWidthRange; // F2-F1 band that still counts as a wall
     float4 FilamentDensityRange;
+    float4 FilamentWidthRange; // F3-F1 band that still counts as a filament
     float VoidFloor; // ambient everywhere; keeps voids from being empty; NOT ranged
 
     int Seed;
@@ -388,9 +403,22 @@ struct UniverseDensityParams
     // is already dense, not placed independently of it. Structure is unbounded above,
     // so it is normalized before the power is applied: see InvDensityNorm below.
     //
-    // NOT ON THE VARIANCE PATH, deliberately, for now -- these stay plain scalars.
+    // MOSTLY not on the variance path, deliberately, for now -- ClusterScale is the
+    // one exception. PACKED (min, max, bias, free), same convention as everything
+    // else: no more single fixed scale, two authored extremes and a bias curve.
+    // Shares channel a.x with WarpAmountLargeRange/WarpAmountSmallRange -- there is
+    // no dedicated "cluster" archetype channel in the packed asset, and a.x is
+    // already the multi-consumer channel by precedent, so this is a third consumer
+    // of the same raw turbulence signal rather than a new one. NOT QUANTIZED HERE --
+    // unlike the warp/region scales, which are fixed and quantized once in
+    // MakeUniverseDensityParams, this one is resolved per-sample in SampleCell, so
+    // the quantization that keeps the UNIVERSE_WARP_WRAP UV seamless has to happen
+    // per-sample too, after the range is resolved rather than before.
     float4 DetailWeights; // dot-product weights for the one shared detail scalar
-    float ClusterScale; // detail texture repeats per cell
+    float4 ClusterScaleRange; // detail texture repeats per cell
+    float ClusterWarpAmount; // how much of the analytic web's warp reaches the
+                             // cluster/gas sample's own position; 1 = fully shares
+                             // it, 0 = samples at the unwarped position
     float InvDensityNorm; // 1 / DensityNorm; brings structure into ~[0,1] before ^power
     float ClusterMaskPower; // >1 concentrates the mask into the densest structure only
     float ClusterMaskThreshold; // remapped [threshold,1] -> [0,1]; cuts faint clusters
@@ -781,27 +809,25 @@ struct UniverseDensityParams
     // see SampleCell below, where they're carved out of this sum by a noise mask
     // instead of ranked as a fourth nearest-node tier.
     //
-    // InResolvedDensity is (wall, filament), ALREADY PICKED off WallDensityRange and
-    // FilamentDensityRange by the caller -- there is no more struct-field density to
-    // multiply, since the range field IS the value now. InInvWidthMul is still a
-    // multiplier on the struct's InvWallWidth/InvFilamentWidth, unchanged mechanism
-    // -- see the coupling note in SampleCell.
-    float DensityFromWeb(float3 InF, float2 InResolvedDensity, float2 InInvWidthMul)
+    // InResolvedDensity is (wall, filament), InResolvedInvWidth is 1/(wall width,
+    // filament width) -- BOTH already fully resolved off their packed ranges by the
+    // caller, since neither has a struct-field default any more to be a multiplier
+    // on. There is no more InvWallWidth/InvFilamentWidth struct field at all -- width
+    // moved onto the variance path alongside density, so it can only be known
+    // per-sample now, same as density.
+    float DensityFromWeb(float3 InF, float2 InResolvedDensity, float2 InResolvedInvWidth)
     {
         float f1 = InF.x;
         float f2 = InF.y;
         float f3 = InF.z;
 
         // --- WALLS: two nodes equidistant, a face ---
-        // One reciprocal shared across both widths, not two divides: the
-        // widths are stored inverted, so widening a feature is a division and the
-        // caller hands the reciprocal in already computed.
-        float xw = (f2 - f1) * InvWallWidth * InInvWidthMul.x;
+        float xw = (f2 - f1) * InResolvedInvWidth.x;
         float wall = (xw < 1.0f)
             ? InResolvedDensity.x * (1.0f - xw * xw) * (1.0f - xw * xw) : 0.0f;
 
         // --- FILAMENTS: three nodes equidistant, an edge ---
-        float xf = (f3 - f1) * InvFilamentWidth * InInvWidthMul.y;
+        float xf = (f3 - f1) * InResolvedInvWidth.y;
         float filament = (xf < 1.0f)
             ? InResolvedDensity.y * (1.0f - xf * xf) * (1.0f - xf * xf)
             : 0.0f;
@@ -847,6 +873,19 @@ struct UniverseDensityParams
         int cz = InCellZ;
         float3 frac = InFrac;
 
+        // PRE-WARP POSITION, saved before anything displaces it. The cluster/gas
+        // detail sample gets its OWN independently-scaled displacement
+        // (ClusterWarpAmount) rather than always sharing the analytic web's full
+        // warp, so both the unwarped position and the raw displacement itself have
+        // to survive past the point the analytic path consumes and overwrites
+        // cx/cy/cz/frac. warpDelta stays zero when the warp is off, which correctly
+        // makes ClusterWarpAmount a no-op in that case regardless of its value.
+        int cx0 = cx;
+        int cy0 = cy;
+        int cz0 = cz;
+        float3 frac0 = frac;
+        float3 warpDelta = float3(0.0f, 0.0f, 0.0f);
+
         // THE REGIONAL FETCH IS PER SAMPLE, at the sample's own position, and it used
         // to be hoisted to one fetch per ray taken at the ray's ENTRY POINT on the
         // bounding sphere. That was wrong in a way the cost argument for it obscured.
@@ -873,11 +912,21 @@ struct UniverseDensityParams
         // VarianceRemap returns that same constant regardless of what t is fed in.
         float2 mDensity = float2(VarianceRemap(0.5f, WallDensityRange),
                                  VarianceRemap(0.5f, FilamentDensityRange));
-        float2 mInvWidth = float2(1.0f, 1.0f);
+        float2 mInvWidth = float2(1.0f / max(VarianceRemap(0.5f, WallWidthRange), 1e-6f),
+                                  1.0f / max(VarianceRemap(0.5f, FilamentWidthRange), 1e-6f));
         float mSpread = VarianceRemap(0.5f, VoidSizeSpreadRange);
         float mSkew = 1.0f;
         float mWarpLarge = VarianceRemap(0.5f, WarpAmountLargeRange);
         float mWarpSmall = VarianceRemap(0.5f, WarpAmountSmallRange);
+
+        // Quantized here rather than once in MakeUniverseDensityParams, since it can
+        // no longer be precomputed -- ClusterScaleRange is per-sample now, same
+        // situation width was in. floor(x*WRAP+0.5)/WRAP is the identical formula
+        // MakeUniverseDensityParams still uses for the fixed warp/region scales,
+        // just run per-sample instead of once.
+        float mClusterScale = VarianceRemap(0.5f, ClusterScaleRange);
+        mClusterScale = floor(max(mClusterScale, 0.0f) * UNIVERSE_WARP_WRAP + 0.5f)
+                       / UNIVERSE_WARP_WRAP;
 
         if (bRegionEnable > 0.5f)
         {
@@ -895,20 +944,20 @@ struct UniverseDensityParams
             mDensity = float2(VarianceRemap(wallT, WallDensityRange),
                               VarianceRemap(filamentT, FilamentDensityRange));
 
-            // THE COMPOUNDING IS REAL AND IT IS NOT 1 + a. What the march accumulates
-            // is density times VOLUME FRACTION, and a wider feature occupies more
-            // volume by a power set by its codimension: a wall is a slab and scales
-            // with w, a filament is a tube and scales with w^2. Width is NOT its own
-            // ranged field -- it isn't one of the five variance mechanisms this pass
-            // converted, and giving it one would mean InvWallWidth can no longer be
-            // precomputed once in MakeUniverseDensityParams, since it would then
-            // depend on the region sample. It still rides its paired density's
-            // bias-shaped t as a signed delta instead, same coupling coefficient as
-            // before, just re-derived from t rather than from a RegionXVariance-
-            // scaled raw channel. Stored inverted, so this is the reciprocal of the
-            // width multiplier: a positive delta widens the feature.
-            mInvWidth = float2(1.0f / max(1.0f + (wallT * 2.0f - 1.0f) * 0.6f, 1e-3f),
-                               1.0f / max(1.0f + (filamentT * 2.0f - 1.0f) * 0.6f, 1e-3f));
+            // WIDTH IS ON THE VARIANCE PATH NOW, independently -- same channel as its
+            // paired density (a.y for wall, a.z for filament), own bias, own min/max.
+            // The old automatic "wider feature needs less density for equal-looking
+            // brightness" coupling (a fixed 0.6-coefficient delta on density's own t)
+            // is gone with it; nothing derives width from density any more. If that
+            // compounded look is still wanted -- a wall is a slab and scales with w,
+            // a filament is a tube and scales with w^2, per the volume-fraction
+            // reasoning that used to live here -- correlate WallWidthRange's authored
+            // extremes with WallDensityRange's by hand.
+            float wallWidthT = VarianceT(a.y, WallWidthRange.z);
+            float filamentWidthT = VarianceT(a.z, FilamentWidthRange.z);
+
+            mInvWidth = float2(1.0f / max(VarianceRemap(wallWidthT, WallWidthRange), 1e-6f),
+                               1.0f / max(VarianceRemap(filamentWidthT, FilamentWidthRange), 1e-6f));
 
             mSpread = VarianceRemap(voidT, VoidSizeSpreadRange);
 
@@ -920,10 +969,18 @@ struct UniverseDensityParams
             // comment near RegionScale). Each octave resolves its OWN range off its
             // OWN bias against that one shared raw signal, so two octaves reading
             // the same channel can still respond to it completely differently.
+            // ClusterScaleRange rides the same channel as a third consumer, same
+            // reasoning -- quantized after resolving rather than before, since it's
+            // per-sample now.
             float warpLargeT = VarianceT(a.x, WarpAmountLargeRange.z);
             float warpSmallT = VarianceT(a.x, WarpAmountSmallRange.z);
+            float clusterScaleT = VarianceT(a.x, ClusterScaleRange.z);
             mWarpLarge = VarianceRemap(warpLargeT, WarpAmountLargeRange);
             mWarpSmall = VarianceRemap(warpSmallT, WarpAmountSmallRange);
+
+            mClusterScale = VarianceRemap(clusterScaleT, ClusterScaleRange);
+            mClusterScale = floor(max(mClusterScale, 0.0f) * UNIVERSE_WARP_WRAP + 0.5f)
+                           / UNIVERSE_WARP_WRAP;
         }
 
 #if UNIVERSE_COST_PROBE < 3
@@ -996,9 +1053,18 @@ struct UniverseDensityParams
             // from that form must be HALVED. Shear is unaffected either way: a
             // constant offset does not change a gradient, so the fold ceiling below
             // is written the same in both conventions.
-            float wx = frac.x + dL.x * ampL + dS.x * ampS;
-            float wy = frac.y + dL.y * ampL + dS.y * ampS;
-            float wz = frac.z + dL.z * ampL + dS.z * ampS;
+            //
+            // Saved as warpDelta rather than applied straight into frac, so the
+            // cluster/gas block below can re-derive its OWN, independently-scaled
+            // position from this same raw displacement rather than only ever
+            // inheriting the analytic web's full warp.
+            warpDelta = float3(dL.x * ampL + dS.x * ampS,
+                               dL.y * ampL + dS.y * ampS,
+                               dL.z * ampL + dS.z * ampS);
+
+            float wx = frac.x + warpDelta.x;
+            float wy = frac.y + warpDelta.y;
+            float wz = frac.z + warpDelta.z;
 
             // Re-normalizes the split, so the displaced sample is still an exact
             // integer cell plus a fraction in [0,1). Displacing a reconstructed
@@ -1041,17 +1107,36 @@ struct UniverseDensityParams
         // zero threshold would never fire.
         if (bClusterGasEnable > 0.5f && D > VoidFloor * 1.001f)
         {
-            // SAME WARPED cell/frac the analytic web just ranked against -- "warp of
-            // structure should affect clusters within the structure." Recycling
-            // cx/cy/cz/frac here is both cheaper than resampling the warp and the
-            // reason to do it at all.
-            float ex = float(cx & UNIVERSE_WARP_WRAP_MASK) + frac.x;
-            float ey = float(cy & UNIVERSE_WARP_WRAP_MASK) + frac.y;
-            float ez = float(cz & UNIVERSE_WARP_WRAP_MASK) + frac.z;
+            // OWN, INDEPENDENTLY-SCALED DISPLACEMENT -- ClusterWarpAmount scales the
+            // SAME raw warpDelta the analytic web used, applied fresh to the SAVED
+            // pre-warp position (cx0/cy0/cz0/frac0) rather than reusing cx/cy/cz/frac
+            // directly. 1.0 reproduces the old "fully shares the analytic warp"
+            // behaviour exactly, since that is exactly what the analytic path itself
+            // just computed above. 0.0 samples clusters at the unwarped position, so
+            // structure follows the warped web while cluster placement stays pinned
+            // to the underlying unwarped lattice -- a handle for decoupling how much
+            // the two visually drift together as warp amount changes, rather than
+            // clusters always being locked 1:1 to however much the web itself warps.
+            float ccwx = frac0.x + warpDelta.x * ClusterWarpAmount;
+            float ccwy = frac0.y + warpDelta.y * ClusterWarpAmount;
+            float ccwz = frac0.z + warpDelta.z * ClusterWarpAmount;
 
-            float3 uvC = float3(ex * ClusterScale + UNIVERSE_DETAIL_OFFSET_U,
-                                ey * ClusterScale + UNIVERSE_DETAIL_OFFSET_V,
-                                ez * ClusterScale + UNIVERSE_DETAIL_OFFSET_W);
+            float ccix = floor(ccwx);
+            float cciy = floor(ccwy);
+            float cciz = floor(ccwz);
+
+            int ccx = cx0 + (int) ccix;
+            int ccy = cy0 + (int) cciy;
+            int ccz = cz0 + (int) cciz;
+            float3 cfrac = float3(ccwx - ccix, ccwy - cciy, ccwz - cciz);
+
+            float ex = float(ccx & UNIVERSE_WARP_WRAP_MASK) + cfrac.x;
+            float ey = float(ccy & UNIVERSE_WARP_WRAP_MASK) + cfrac.y;
+            float ez = float(ccz & UNIVERSE_WARP_WRAP_MASK) + cfrac.z;
+
+            float3 uvC = float3(ex * mClusterScale + UNIVERSE_DETAIL_OFFSET_U,
+                                ey * mClusterScale + UNIVERSE_DETAIL_OFFSET_V,
+                                ez * mClusterScale + UNIVERSE_DETAIL_OFFSET_W);
 
             float4 vC = InTex.SampleLevel(InSampler, uvC, 0.0f);
             float detail = WeightedScalar(vC, DetailWeights);
@@ -1123,13 +1208,14 @@ struct UniverseDensityParams
 // shader and C++ call this, which is what keeps their fields identical rather
 // than merely intended to match.
 //
-// UNPACKED, one scalar per term, EXCEPT the five fields the variance redesign
-// packed into (min, max, bias, free): WallDensityRange, FilamentDensityRange,
-// VoidSizeSpreadRange, WarpAmountLargeRange, WarpAmountSmallRange. Those are no
+// UNPACKED, one scalar per term, EXCEPT the eight fields the variance redesign
+// packed into (min, max, bias, free): WallDensityRange, WallWidthRange,
+// FilamentDensityRange, FilamentWidthRange, VoidSizeSpreadRange,
+// WarpAmountLargeRange, WarpAmountSmallRange, ClusterScaleRange. Those are no
 // longer "a default plus a separate region amount" -- there is no default any more,
 // just two authored extremes and a bias curve for where between them a region
-// falls. This layer has twenty-seven parameters, eight of which are float4: the
-// five ranges above, one weight per warp octave's displacement axes, and one for
+// falls. This layer has twenty-eight parameters, eleven of which are float4: the
+// eight ranges above, one weight per warp octave's displacement axes, and one for
 // the shared cluster/gas detail scalar.
 //
 // NO RANGE CLAMPING. Every parameter passes through at whatever value it is
@@ -1186,21 +1272,20 @@ struct UniverseDensityParams
 //                   exp(-density) turns into unbounded gain rather than opacity.
 // ==========================================================================
 UniverseDensityParams MakeUniverseDensityParams(
-    // --- WEB GEOMETRY --- the two widths are separations between ranked
-    // distances, in CELL units, so they hold their meaning when CellSize changes.
-    // NOT on the variance path -- see the struct field comment on VoidSizeSkew for
-    // why width stays a plain scalar rather than becoming a sixth ranged field.
+    // --- WEB GEOMETRY ---
     float InCellSize,
-    float InWallWidth, // F2-F1 band that still counts as a wall
-    float InFilamentWidth, // F3-F1 band that still counts as a filament
     float InSeed,
 
-    // --- WEB DENSITY --- what the march accumulates is density times VOLUME
-    // FRACTION, and a wall covers an order of magnitude more volume than a
+    // --- WEB DENSITY AND WIDTH --- what the march accumulates is density times
+    // VOLUME FRACTION, and a wall covers an order of magnitude more volume than a
     // filament, so equal-looking densities make the field read as foam.
-    // PACKED (min, max, bias, free): see VarianceRemap.
+    // PACKED (min, max, bias, free): see VarianceRemap. Width is on the variance
+    // path now too -- no more automatic density/width coupling, see the struct
+    // field comment above WallWidthRange.
     float4 InWallDensityRange,
+    float4 InWallWidthRange, // F2-F1 band that still counts as a wall
     float4 InFilamentDensityRange,
+    float4 InFilamentWidthRange, // F3-F1 band that still counts as a filament
     float InVoidFloor, // ambient everywhere; NOT ranged
 
     // --- ORGANICS ---
@@ -1220,7 +1305,8 @@ UniverseDensityParams MakeUniverseDensityParams(
     // --- CLUSTERS AND GAS --- one fetch, shared by both layers; see the struct
     // field comments above DetailWeights. NOT on the variance path, for now.
     float4 InDetailWeights, // dot-product weights for the shared detail scalar
-    float InClusterScale, // detail texture repeats per cell
+    float4 InClusterScaleRange, // detail texture repeats per cell
+    float InClusterWarpAmount, // 1 = cluster sample fully shares the analytic warp
     float InDensityNorm, // structure divided by this before ^ClusterMaskPower
     float InClusterMaskPower, // >1 concentrates the mask into the densest structure
     float InClusterMaskThreshold, // remapped [threshold,1] -> [0,1]
@@ -1232,15 +1318,15 @@ UniverseDensityParams MakeUniverseDensityParams(
 {
     UniverseDensityParams P;
 
-    // Division guards, not range limits. A zero width is a division by zero, and
+    // Division guard, not a range limit. A zero cell size is a division by zero, and
     // the resulting infinity propagates into every feature test at once.
     P.InvCellSize = 1.0f / max(InCellSize, 1e-6f);
-    P.InvWallWidth = 1.0f / max(InWallWidth, 1e-6f);
-    P.InvFilamentWidth = 1.0f / max(InFilamentWidth, 1e-6f);
     P.Seed = (int) InSeed;
 
     P.WallDensityRange = InWallDensityRange;
+    P.WallWidthRange = InWallWidthRange;
     P.FilamentDensityRange = InFilamentDensityRange;
+    P.FilamentWidthRange = InFilamentWidthRange;
     P.VoidFloor = InVoidFloor;
 
     P.VoidSizeSpreadRange = InVoidSizeSpreadRange;
@@ -1335,16 +1421,19 @@ UniverseDensityParams MakeUniverseDensityParams(
                   || (InWarpAmountSmallRange.x != 0.0f) || (InWarpAmountSmallRange.y != 0.0f))
                   ? 1.0f : 0.0f;
 
-    // Covers the merged fetch's whole job now: any of the five packed ranges being
+    // Covers the merged fetch's whole job now: any of the seven packed ranges being
     // NON-DEGENERATE (min != max, so the region channel actually changes something)
     // is enough to pay for the one fetch. A range with min == max is a constant --
     // VarianceRemap returns it regardless of what channel or bias feeds it -- so
     // there is nothing for the fetch to buy in that case.
     P.bRegionEnable = ((InWallDensityRange.x != InWallDensityRange.y)
+                    || (InWallWidthRange.x != InWallWidthRange.y)
                     || (InFilamentDensityRange.x != InFilamentDensityRange.y)
+                    || (InFilamentWidthRange.x != InFilamentWidthRange.y)
                     || (InVoidSizeSpreadRange.x != InVoidSizeSpreadRange.y)
                     || (InWarpAmountLargeRange.x != InWarpAmountLargeRange.y)
-                    || (InWarpAmountSmallRange.x != InWarpAmountSmallRange.y))
+                    || (InWarpAmountSmallRange.x != InWarpAmountSmallRange.y)
+                    || (InClusterScaleRange.x != InClusterScaleRange.y))
                     ? 1.0f : 0.0f;
 
     P.BoundsFadeStart = InBoundsFadeStart;
@@ -1357,9 +1446,9 @@ UniverseDensityParams MakeUniverseDensityParams(
 
     // Quantized exactly as the warp/region scales are, and for the same reason: this
     // fetch reads the same wrapped, masked cell-relative UV they do.
-    float clusterScale = max(InClusterScale, 0.0f);
-    clusterScale = floor(clusterScale * UNIVERSE_WARP_WRAP + 0.5f) / UNIVERSE_WARP_WRAP;
-    P.ClusterScale = clusterScale;
+    P.ClusterScaleRange = InClusterScaleRange;
+
+    P.ClusterWarpAmount = InClusterWarpAmount;
 
     // Division guard, not a range limit: DensityNorm at 0 would divide by zero in
     // SampleCell rather than merely mistune the mask.
