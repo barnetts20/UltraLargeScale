@@ -177,60 +177,95 @@
 // returns zero, and the saturates read that as void -- which is the right answer for
 // those samples for independent reasons.
 //
-// EXP_HEADROOM bounds the exponent from ABOVE, and unlike LAMBDA_MAX it is not a clamp
-// on anything authored -- it lowers the pivot, which is a shift, which the measure is
-// invariant to. It is what makes overflow impossible for every parameter combination
-// rather than merely unlikely for sensible ones, and overflow here produces a NaN that
-// the march spreads down the whole ray. 55 caps the squared accumulator at 2^110 and
-// its twenty-seven-term sum at 2^115. See the pivot in WeightedNodeMeasure.
+// EXP_HEADROOM bounds the weight exponent from ABOVE, directly, one min per candidate.
+// It is what makes overflow impossible for every parameter combination rather than
+// merely unlikely for sensible ones, and overflow here produces a NaN that the march
+// spreads down the whole ray. 55 caps a single weight at 2^55 and the squared
+// accumulator's fifty-four-term sum at 2^116.
+//
+// It used to do this job by lowering the pivot instead, which is a shift and therefore
+// free. That does not survive two lattices: the lowest u a candidate can reach is
+// -spread * ratio^2, and at ratio 3 a pivot low enough to cover it sits so far below the
+// typical u that every weight in the field underflows to zero and the layer returns pure
+// void. The pivot has to stay where the dominant candidate is, so the bound moved onto
+// the exponent. See LatticeWeightSums.
 #define UNIVERSE_WIDTH_TO_LAMBDA 3.2f
 #define UNIVERSE_WEIGHT_PIVOT 0.31f
 #define UNIVERSE_LAMBDA_MAX 100.0f
 #define UNIVERSE_EXP_HEADROOM 55.0f
 
 // ==========================================================================
-// TWO LATTICES, ONE BLEND
+// TWO LATTICES, ONE DIAGRAM
 // ==========================================================================
 // CellSize is a packed (small, large, bias, free) now, and the layer walks TWO
-// neighbourhoods -- one on a fine lattice, one on a coarse one -- and crossfades the
-// two finished densities with the region field. This is the only sound way to make
-// void size vary spatially: a single lattice whose cell size varies with position is
-// not a lattice at all, because neighbouring samples disagree about which cell they
-// are in, the int/frac split stops being a partition, and the field tears rather than
-// bends. Two fixed lattices each keep their own exact partition and nothing tears.
+// neighbourhoods -- one fine, one coarse -- and feeds BOTH into a single pair of
+// weight accumulators. There is one tessellation, not two. This is the only sound way
+// to make void size vary spatially: a single lattice whose cell size varies with
+// position is not a lattice at all, because neighbouring samples disagree about which
+// cell they are in, the int/frac split stops being a partition, and the field tears
+// rather than bends. Two fixed lattices each keep their own exact partition, and the
+// diagram they jointly define is continuous everywhere.
 //
-// WHAT IS BLENDED IS THE DENSITY, NOT THE WEIGHT SUMS, and the difference matters
-// enough to record. Merging the two node sets into one pair of accumulators and taking
-// a single participant count off the union is the obvious move and it does not work.
-// The measure normalizes each lattice's dominant weight to about 1 by construction, so
-// at a fifty-fifty blend EVERY sample has one strong participant from each lattice, N
-// reads 2 everywhere, and saturate(N - 1) pins the wall term at full across the entire
-// field. Solid white, not a web.
+// A CROSSFADE OF TWO FINISHED DENSITIES IS NOT THIS, and was the first thing tried.
+// lerp(D_fine, D_coarse, t) puts two complete webs on top of each other at partial
+// brightness through every transition band -- a varying overlap, with fine walls
+// passing through coarse voids and neither owning the space. What is wanted is
+// STRUCTURAL variance: one web whose cells are small here and large there, with big
+// voids abutting small ones and sharing walls, the way a real cellular structure with
+// mixed cell sizes looks. That needs the two node sets competing inside one diagram,
+// which is what this does.
 //
-// The failure is not a tuning problem, it is a category error: a wall is where two
-// nodes OF THE SAME TESSELLATION are equidistant. Two nodes from different lattices
-// being equidistant means nothing at all -- there is no bisector between them, because
-// they are not competing for the same territory. So each lattice has to be measured
-// against itself and the two results combined afterwards.
+// TWO THINGS ARE REQUIRED TO MAKE ONE DIAGRAM OUT OF TWO LATTICES, and each fixes a
+// failure the other does not.
 //
-// Expressing both distances in a COMMON metric instead does not rescue it either, and
-// fails the other way: a fine lattice always has a nearer node than a coarse one, so
-// the small lattice wins everywhere and the large one never appears at any blend
-// short of exactly 1.
+//   A COMMON METRIC. Every distance is converted to SMALL-CELL units before it becomes
+//   a weight -- the coarse lattice's squared distances are multiplied by the squared
+//   ratio, and its spread with them. Without this each lattice's nearest node has a
+//   weight near 1 by construction, so every sample has one strong participant from each
+//   lattice, N reads 2 everywhere, and saturate(N - 1) pins the wall term at full
+//   across the entire field. Solid white, not a web. In a common metric only one node
+//   is genuinely nearest, and a near-tie between any two candidates -- fine, coarse, or
+//   one of each -- is a real bisector, because they are competing for the same
+//   territory in the same units.
+//
+//   A SUPPRESSION, ONE-SIDED. In a common metric a fine lattice always has a nearer
+//   node than a coarse one, so on its own the coarse lattice would never appear at all.
+//   The region field therefore adds a uniform amount to every FINE candidate's power
+//   distance, shrinking every fine node's territory together until the coarse nodes
+//   claim what is left. The coarse lattice is never scaled: it does not need to be,
+//   because it wins by default once the fine one steps back. That asymmetry is not a
+//   simplification, it is the shape of the problem.
+//
+// Removing a node by shrinking its territory is exactly the mechanism VoidSizeSkew
+// already uses on individual nodes, applied to a whole lattice at once -- which is why
+// it is continuous where a hash threshold that deleted nodes outright would pop.
+//
+// WHERE THE CROSSOVER SITS. The mean power distance to a sample's nearest node is
+// UNIVERSE_WEIGHT_PIVOT in that lattice's own units, so in shared units the fine
+// lattice sits at that and the coarse at ratio^2 times it. The gap between them is
+// therefore pivot * (ratio^2 - 1), and the suppression runs to TWICE that across the
+// blend -- which puts the crossover at the middle of the range rather than jammed
+// against one end. CellSizeBias reshapes where within the range a region lands.
+//
+// The transition is not a knife edge at that midpoint, and this is the whole point:
+// the gap between a given sample's own fine and coarse distances varies by far more
+// than the width of a wall, so at any blend near the crossover some places have a fine
+// node winning and others a coarse one. That mixture IS the mixed-scale structure.
 //
 // THE COST IS THE HONEST PART. This doubles the neighbourhood walk, which is the
 // dominant cost in the file -- 54 hashes and 54 exponentials where there were 27. Two
 // things claw most of it back. The lattices collapse to one when the two cell sizes
 // round to the same ratio, which is the single-lattice configuration and costs nothing
-// extra. And each walk is skipped per sample when its own blend weight is negligible,
-// which is most samples: the region field is smooth, so the blend sits pinned at one
-// end or the other through the interior of every region and only crosses over in the
-// transition bands between them. The branch is spatially coherent, so neighbouring
-// pixels and successive march steps take the same side of it.
+// extra. And each walk is skipped per sample when its own candidates cannot matter:
+// the coarse walk while the fine lattice is unsuppressed, the fine walk once it is
+// suppressed past the point of competing. The region field is smooth, so the blend sits
+// pinned at one end or the other through the interior of every region and crosses over
+// only in the bands between them; the branch is spatially coherent, so neighbouring
+// pixels and successive march steps take the same side.
 //
 // Neither saving shows up in a material's reported instruction count, which counts the
-// union of every path. See the COST PROBE note above for why that number cannot be
-// read as cost here.
+// union of every path. See the COST PROBE note above for why that number cannot be read
+// as cost here.
 #define UNIVERSE_LATTICE_SKIP 0.002f
 
 // The skew exponent is applied to every one of the 27 candidates, so a pow() here is
@@ -470,6 +505,7 @@ struct UniverseDensityParams
     float LatticeRatio; // large cell size / small, whole number, >= 1
     int LatticeRatioInt; // the same number, for the exact offset split
     float InvLatticeRatio; // 1 / LatticeRatio; converts small-cell units to large
+    float LatticeLogRatioSq; // log2(ratio^2); the geometric lambda ramp's constant
     float CellSizeBias; // exponent shaping where between the two lattices a region sits
     float bLatticeLarge; // 0 when the ratio is 1 and the second walk is pure waste
 
@@ -909,112 +945,110 @@ struct UniverseDensityParams
     // ======================================================================
 
     // THE EFFECTIVE PARTICIPANT COUNT, over the 3x3x3 neighbourhood of the cell
-    // containing InFrac. Returns N: one number, shared by both features.
+    // containing InFrac. This function returns one lattice's contribution to it as
+    // (sum of weights, sum of squared weights); the caller adds the two lattices'
+    // returns together and divides. Returns a pair rather than taking out parameters:
+    // HLSL's `out` has no C++ equivalent, and a reference parameter would have to be
+    // spelled differently in each language -- exactly the kind of divergence the shared
+    // file exists to prevent.
     //
-    // ONE WEIGHT SET, NOT TWO. This used to run two falloff rates in parallel so wall
-    // and filament could have independent widths, at the cost of a second exponential
-    // and a second pair of accumulators on all twenty-seven candidates. The wall no
-    // longer needs its own rate -- WallFalloffRange shapes the wall term downstream
-    // instead, which reaches the same place for one instruction rather than eighty-one
-    // -- so the second set is gone and FilamentWidthRange sets the single lambda. If
-    // independent rates are ever genuinely wanted back, this is the function to
-    // duplicate the accumulators in, and the cost is stated above.
-    //
-    // Every candidate gets a weight, the weights are normalized to sum to one, and the
-    // measure is the inverse participation ratio of that distribution:
+    // The measure the caller builds from these is
     //
     //     p_i = w_i / sum_j w_j        N = 1 / sum_i p_i^2 = (sum w)^2 / (sum w^2)
     //
-    // N is 1 when one node dominates, 2 when two share, 3 when three do, k when k tie.
-    // It answers "how many nodes are simultaneously nearest" directly rather than by
-    // sorting and differencing, and it is smooth rather than merely continuous: there
-    // is no rank swap left to kink the gradient, because there are no ranks.
+    // which is 1 where one node dominates, 2 where two tie, 3 where three do, k where k
+    // tie. It answers "how many nodes are simultaneously nearest" directly rather than
+    // by sorting and differencing, and it is smooth rather than merely continuous:
+    // there is no rank swap left to kink the gradient, because there are no ranks.
     //
-    // NORMALIZATION IS IMPLICIT AND THAT IS THE WHOLE TRICK. (sum w)^2 / (sum w^2) is
-    // invariant under scaling every weight by a common factor, so the distribution
-    // never has to be divided through and the nearest distance never has to be found
-    // to anchor it. One pass, two accumulators, no minimum, no branches, and both
-    // accumulators are plain sums -- reassociable, so the fully unrolled 27 carries no
-    // serial dependency at all. The old insertion chain carried three.
+    // BOTH LATTICES FEED ONE SUM, which is what makes this a single tessellation rather
+    // than two fields laid over each other -- see TWO LATTICES, ONE DIAGRAM. The
+    // consequence for this function is that everything reaching it must already be in
+    // the SHARED metric: InDistScale converts a lattice's own squared cell units into
+    // small-cell units, and InUBias carries the suppression that decides which lattice
+    // owns the territory. Neither is a property of a node; both are uniform over the
+    // walk, so the tessellation a sample sees is consistent across all fifty-four
+    // candidates and the field stays continuous.
     //
-    // THE WEIGHT. exp2(-lambda * u), where u is the POWER-DIAGRAM squared distance
+    // WHY THE MEASURE NEEDS NO NORMALIZATION. (sum w)^2 / (sum w^2) is invariant under
+    // scaling every weight by a common factor, so the distribution never has to be
+    // divided through and the nearest distance never has to be found to anchor it. One
+    // pass, two accumulators, no minimum, no branches, and both accumulators are plain
+    // sums -- reassociable, so the fully unrolled 27 carries no serial dependency at
+    // all. The old insertion chain carried three.
     //
-    //     u = |node - sample|^2  -  offset
+    // THE WEIGHT. exp2(lambda * (pivot - u)), where u is the POWER-DIAGRAM squared
+    // distance in SMALL-CELL units
     //
-    // and the offset is the skewed hash channel scaled by the resolved spread. Three
-    // things fall out of choosing this form together rather than one at a time:
+    //     u = ( |node - sample|^2 - offset ) * distScale  +  uBias
     //
-    //   NO ROOTS. The weight wants a squared distance, and the offset now lives in
-    //   squared space with it, so the 27 sqrt calls are gone -- the -31% the old
-    //   comment here had scheduled, collected as a side effect rather than as its own
-    //   change. exp2 replaces sqrt at the same rate, so the loop is net cheaper by the
-    //   whole insertion chain.
+    // and the offset is the skewed hash channel scaled by the resolved spread. The
+    // spread rides inside the distScale multiply deliberately: a lattice's void-size
+    // variation should be the same FRACTION of its own cells on both lattices, so the
+    // coarse one's offsets scale up with its cells rather than staying a fixed absolute
+    // size and doing almost nothing at ratio 4.
     //
-    //   BOUNDED REACH. The old offset was subtracted from the DISTANCE and had no
-    //   bound relative to the search window: at spread 0.80 a node one cell outside the
-    //   span beat every node inside it, which misidentified the nearest node on 8.66%
-    //   of samples and made the diagram itself wrong there. Subtracting from the SQUARE
+    // Three things fall out of choosing this form:
+    //
+    //   NO ROOTS. The weight wants a squared distance, and the offset lives in squared
+    //   space with it, so there are no sqrt calls in the walk at all. exp2 replaces the
+    //   root that the ranked formulation needed at the same rate, so the loop is net
+    //   cheaper by the whole insertion chain.
+    //
+    //   BOUNDED REACH. The old offset was subtracted from the DISTANCE and had no bound
+    //   relative to the search window: at spread 0.80 a node one cell outside the span
+    //   beat every node inside it, which misidentified the nearest node on 8.66% of
+    //   samples and made the diagram itself wrong there. Subtracting from the SQUARE
     //   bounds it -- a node out-reaches an unoffset one by exactly `spread` in squared
-    //   distance, full stop -- which turns the truncation exposure below from unbounded
-    //   into an inequality with numbers in it.
+    //   distance, full stop.
     //
     //   ONE EXPONENTIAL, FULL STOP. Per candidate the whole cost is a hash, three
     //   subtracts, three madds for the squared distance, the skew's two multiplies, one
-    //   exp2 and two madds for the accumulators. Against the ranked version that is a
-    //   sqrt traded for an exp2 at the same rate, with the entire three-deep insertion
-    //   chain removed and nothing serial left.
+    //   exp2 and two madds for the accumulators.
     //
-    // LAMBDA FROM WIDTH is a calibration rather than a definition, and it is chosen so
-    // the material's EXISTING width values keep meaning what they meant under the
-    // ranked formulation. The derivation and the measurement that confirms it are at
-    // UNIVERSE_WIDTH_TO_LAMBDA; the short version is lambda = 3.2 / width.
+    // LAMBDA, PIVOT AND SUPPRESSION ARE THE CALLER'S, not this function's, because both
+    // lattices have to share them for their weights to be comparable. Their derivations
+    // are at UNIVERSE_WIDTH_TO_LAMBDA and in SampleCell.
     //
     // WIDTH IS NO LONGER UNIFORM ACROSS THE FIELD, and this is the one behavioural
-    // change worth watching for rather than tuning around. Two nodes at distance d
-    // either side of a wall differ in u by 4*d*x for an offset x, so the apparent
-    // linear width is 1/(4*lambda*d) -- inversely proportional to how far apart the two
-    // nodes are. Walls bounding a large void read THINNER than walls bounding a small
-    // one at the same authored width. The old rank difference was linear in distance
-    // and had no such dependence. Whether that reads as a defect or as exactly the
-    // right "big voids have thin sheets" behaviour is a judgement to make on screen;
-    // the fix if it is a defect is to keep the root and take u in linear distance,
-    // which costs the 27 sqrt back.
+    // change from the ranked formulation worth watching for rather than tuning around.
+    // Two nodes at distance d either side of a wall differ in u by 4*d*x for an offset
+    // x, so the apparent linear width is 1/(4*lambda*d) -- inversely proportional to how
+    // far apart the two nodes are. Walls bounding a large void read THINNER than walls
+    // bounding a small one at the same authored width, and that now applies ACROSS the
+    // two lattices as well as within one: the coarse lattice's sheets are thinner
+    // relative to its voids than the fine lattice's are. Whether that reads as a defect
+    // or as exactly the right "big voids have thin sheets" behaviour is a judgement to
+    // make on screen.
     //
     // THE TAIL IS THE OTHER REAL COST, and it is not the second-nearest node -- it is
-    // the AGGREGATE of the twenty-five that are not in contention. Each contributes a
-    // weight ratio r_i and the measure reads about 1 + sum(r_i) in a void interior, so
-    // twenty-five neighbours at r = 0.02 apiece put the floor at 1.5 and half the void
-    // lights up as wall. That is what sets the useful lambda range from below, and it
-    // is why the calibration above lands where it does rather than at the much gentler
-    // rate a two-node derivation alone would suggest. Measured against the ranked
-    // field at matched authored parameters (wall 1.0/0.06, filament 3.0/0.04, spread
-    // 0.10, 400k samples): mean density 0.137 ranked against 0.146 weighted, and
-    // fraction of samples below 0.02 -- effectively empty -- 0.80 against 0.64. Same
-    // structure in the same places at the same brightness, with a quarter of the void
-    // volume no longer strictly empty. That is the tail, it is the first thing to look
-    // at if the field reads hazy, and the lever on it is width: it shrinks
-    // exponentially in lambda, so narrowing both features clears the voids much faster
-    // than lowering the densities does.
+    // the AGGREGATE of the candidates that are not in contention. Each contributes a
+    // weight ratio r_i and the measure reads about 1 + sum(r_i) in a void interior. With
+    // fifty-four candidates rather than twenty-seven there is twice as much of it in
+    // principle, but only in principle: the losing lattice is suppressed or outranged by
+    // an exponential, so through the interior of any region its whole contribution is
+    // below float resolution and only the transition bands carry both. WallFalloffRange
+    // is the lever on what remains.
     //
-    // TRUNCATION, WHICH IS THE WHOLE POINT OF THE CHANGE. Sorted order statistics of a
-    // fixed set were already continuous; the jumps came from the SET changing at a cell
-    // plane. At the instant of a transition the departing and arriving candidates both
-    // sit at squared distance >= 1.0 from the sample -- the sample is on the face of its
-    // own cell and the swapped slab starts one full cell out -- so their weight relative
-    // to the dominant one is at most
+    // TRUNCATION. Sorted order statistics of a fixed set were already continuous; the
+    // jumps came from the SET changing at a cell plane. At the instant of a transition
+    // the departing and arriving candidates both sit at squared distance >= 1.0 from the
+    // sample in that lattice's own units -- the sample is on the face of its own cell
+    // and the swapped slab starts one full cell out -- so their weight relative to the
+    // dominant one is at most
     //
-    //     2^( -lambda * (1.0 - spread - u1) )
+    //     2^( -lambda * distScale * (1.0 - spread - u1) )
     //
-    // with u1 the dominant candidate's own power distance. At a wall width of 0.06,
-    // which is lambda 53, a spread of 0.15 and a typical u1 of 0.2, that is 2^-34: the
-    // arriving and departing candidates are not merely small, they are below float
-    // resolution. The old formulation swapped a rank outright and stepped by a finite
-    // amount.
+    // with u1 the dominant candidate's own power distance in the same units. At a wall
+    // width of 0.06, which is lambda 53, a spread of 0.15 and a typical u1 of 0.2, that
+    // is 2^-34 on the fine lattice and smaller still on the coarse one, whose distScale
+    // multiplies the exponent. The old formulation swapped a rank outright and stepped
+    // by a finite amount.
     //
-    // Measured rather than argued. Density difference across a cell plane against the
-    // same difference taken mid-cell, same step, 12k straddling pairs per configuration
-    // -- so the interior column is the ordinary local slope and anything above it at
-    // the plane is truncation:
+    // Measured, on the single-lattice configuration. Density difference across a cell
+    // plane against the same difference taken mid-cell, same step, 12k straddling pairs
+    // -- so the interior column is the ordinary local slope and anything above it at the
+    // plane is truncation:
     //
     //                        AT A CELL PLANE                  MID-CELL
     //                     p99      p99.9      max          p99       max
@@ -1034,61 +1068,26 @@ struct UniverseDensityParams
     // is indistinguishable from mid-cell out to p99 at every spread tested. It is not
     // perfect: the tail at 0.80 still reaches a full-amplitude step on a handful of
     // crossings, because a spread that large genuinely does put the true nearest node
-    // outside the window and no reweighting invents data that was never fetched. The
-    // difference is that it is now a rare tail rather than a percent of every plane.
+    // outside the window and no reweighting invents data that was never fetched.
     //
     // The inequality is the thing to keep an eye on, not the numbers: it degrades with
-    // WIDE features (small lambda) and with LARGE spread, and both are pins someone will
-    // reach for. A wall widened to 0.25 cells drops lambda to 12.8 and the bound to
-    // 2^-8, still negligible; it is spread that runs out first, and past about 0.8 the
-    // honest fix is a wider search rather than a smaller number here.
-    //
-    // Returns a float2 rather than using out parameters: HLSL's `out` has no C++
-    // equivalent, and a reference parameter would have to be spelled differently in
-    // each language -- exactly the kind of divergence the shared file exists to
-    // prevent.
-    //
-    // InResolvedSpread and InResolvedInvWidth are FULLY RESOLVED scalars, already
-    // picked off their packed ranges by the caller -- there are no struct-field
-    // defaults left for them to be multipliers on. InSkewScale is still a multiplier
-    // on the struct's VoidSizeSkew, unchanged mechanism -- see the coupling note in
-    // SampleCell.
-    float WeightedNodeMeasure(int InCellX, int InCellY, int InCellZ, float3 InFrac,
-                              float InResolvedSpread, float InSkewScale,
-                              float InResolvedInvWidth)
+    // WIDE features (small lambda) and with LARGE spread. A wall widened to 0.25 cells
+    // drops lambda to 12.8 and the bound to 2^-8, still negligible; it is spread that
+    // runs out first, and past about 0.8 the honest fix is a wider search rather than a
+    // smaller number here.
+    float2 LatticeWeightSums(int InCellX, int InCellY, int InCellZ, float3 InFrac,
+                             float InLambda, float InPivot,
+                             float InResolvedSpread, float InSkewScale,
+                             float InDistScale, float InUBias)
     {
-        // Authored width to falloff rate, and the clamp that keeps the doubled
-        // exponent inside float32. Both constants are derived and measured at their
-        // definitions above.
-        float lam = min(UNIVERSE_WIDTH_TO_LAMBDA * InResolvedInvWidth,
-                        UNIVERSE_LAMBDA_MAX);
-
-        // Recentres the exponent so the dominant weight lands near 1. Free -- the
-        // measure is invariant under a common scaling of the weights, so this is a
-        // constant subtracted from every u. See UNIVERSE_WEIGHT_PIVOT.
-        //
-        // The second term is the OVERFLOW BOUND, and it is a shift rather than a clamp,
-        // so it distorts nothing. u is never below -spread, so the largest exponent any
-        // candidate can reach is lambda * (pivot + spread); holding that under
-        // UNIVERSE_EXP_HEADROOM caps the squared accumulator at 2^110 and its sum over
-        // twenty-seven candidates at 2^115, both inside float32 for ANY authored spread
-        // and width. Without it a large spread overflows the squared sum to infinity and
-        // the measure returns infinity/infinity -- a NaN, which the march then smears
-        // across the whole ray rather than merely mis-shading a sample. Reached only at
-        // a spread near 0.9 and above, far outside where the truncation bound already
-        // says the window is sound, and past that point it trades top headroom for
-        // bottom: more of the field underflows to void rather than misbehaving.
-        float pivot = min(UNIVERSE_WEIGHT_PIVOT - 0.5f * InResolvedSpread,
-                          UNIVERSE_EXP_HEADROOM / max(lam, 1e-6f) - InResolvedSpread);
-
         float sumW = 0.0f;
         float sumSqW = 0.0f;
 
 #if UNIVERSE_COST_PROBE >= 4
         // Probe level 4: one cell, not twenty-seven. The field is not merely
-        // meaningless here, it is EMPTY -- a single candidate gives N = 1 identically
-        // and both features read as void. The point is the instruction count with the
-        // unrolled search removed.
+        // meaningless here, it is EMPTY -- a single candidate per lattice gives N = 1
+        // identically once the two sums are combined, and both features read as void.
+        // The point is the instruction count with the unrolled search removed.
         for (int oz = 0; oz <= 0; oz++)
         {
             for (int oy = 0; oy <= 0; oy++)
@@ -1105,36 +1104,55 @@ struct UniverseDensityParams
 #endif
                     float4 h = CellHash(InCellX + ox, InCellY + oy, InCellZ + oz);
 
-                    // Node position relative to the sample, in cell units.
+                    // Node position relative to the sample, in this lattice's cell
+                    // units.
                     float dx = float(ox) + h.x - InFrac.x;
                     float dy = float(oy) + h.y - InFrac.y;
                     float dz = float(oz) + h.z - InFrac.z;
 
-                    // POWER-DIAGRAM OFFSET: subtracted from the square, so a node with
-                    // a larger offset claims more space and voids differ in size. This
-                    // is the form the old comment here said was worth revisiting the
-                    // next time the offset was touched -- see the reach argument above
-                    // for why it is not merely cheaper but better bounded.
+                    // POWER-DIAGRAM OFFSET: subtracted from the square, so a node with a
+                    // larger offset claims more space and voids differ in size.
                     //
                     // The skew is what mixes SCALES rather than merely jittering one
                     // scale. A uniform offset distribution gives every void a size near
-                    // the mean; the exponent makes a large offset rare, and a node
-                    // whose offset far exceeds its neighbours' swallows their territory
+                    // the mean; the exponent makes a large offset rare, and a node whose
+                    // offset far exceeds its neighbours' swallows their territory
                     // outright, leaving one wide void where several small ones would
                     // have been. Removing a node by geometry this way is continuous,
-                    // unlike a hash threshold that deletes it.
+                    // unlike a hash threshold that deletes it -- which is the same
+                    // mechanism the lattice suppression below uses, at the scale of a
+                    // whole lattice rather than one node.
                     //
-                    // Not re-centred on zero, and now for a stronger reason than
-                    // before: the measure is invariant under a common scaling of every
-                    // weight, and a constant added to every u is exactly such a scaling.
-                    // Centring would cost a subtract to change nothing at all.
-                    float u = dx * dx + dy * dy + dz * dz
-                            - SkewPow(h.w, VoidSizeSkew * InSkewScale)
-                              * InResolvedSpread;
+                    // Not re-centred on zero: the measure is invariant under a common
+                    // scaling of every weight, and a constant added to every u is
+                    // exactly such a scaling, so centring would cost a subtract to
+                    // change nothing at all.
+                    float u = (dx * dx + dy * dy + dz * dz
+                             - SkewPow(h.w, VoidSizeSkew * InSkewScale)
+                               * InResolvedSpread) * InDistScale
+                            + InUBias;
 
                     // exp2 rather than exp: it is the hardware primitive on both sides,
                     // and folding ln(2) into lambda would only move the multiply.
-                    float w = exp2(lam * (pivot - u));
+                    //
+                    // THE CLAMP IS AN OVERFLOW GUARD and belongs here rather than in the
+                    // pivot. Bounding the exponent by lowering the pivot was tried and
+                    // does not survive two lattices: the lowest u a candidate can reach
+                    // is -spread * ratio^2, and at ratio 3 that sits so far below the
+                    // TYPICAL u that a pivot able to cover both underflows every weight
+                    // in the field to zero and returns pure void. Clamping the exponent
+                    // instead leaves the pivot free to track where the dominant
+                    // candidate actually is, which is the only place it can usefully be.
+                    //
+                    // It caps a single weight at 2^55 and the squared accumulator's
+                    // fifty-four-term sum at 2^116, so overflow is impossible for any
+                    // parameter combination -- and overflow here produces a NaN the
+                    // march spreads down the whole ray. It bites only for a candidate
+                    // already dominating by more than sixteen orders of magnitude,
+                    // which needs a node with the full offset sitting essentially on top
+                    // of the sample.
+                    float w = exp2(min(InLambda * (InPivot - u),
+                                       UNIVERSE_EXP_HEADROOM));
 
                     sumW += w;
                     sumSqW += w * w;
@@ -1142,12 +1160,7 @@ struct UniverseDensityParams
             }
         }
 
-        // Division guard. Every weight is strictly positive so the denominators cannot
-        // be zero mathematically, but they are the squares of already-small numbers and
-        // UNIVERSE_LAMBDA_MAX only bounds how small. On underflow the measure returns
-        // zero, which the saturates in DensityFromWeb read as void -- a collapse to the
-        // floor rather than a NaN spreading through the march.
-        return (sumW * sumW) / max(sumSqW, 1e-30f);
+        return float2(sumW, sumSqW);
     }
 
     // Density from the participant count.
@@ -1510,61 +1523,182 @@ struct UniverseDensityParams
         }
 #endif
 
-        // WIDTH IS CONSUMED HERE, not in DensityFromWeb. It sets how fast a
-        // candidate's weight falls off with distance, which is upstream of the measure
-        // rather than downstream of it, so the reciprocal resolved above is handed to
-        // the neighbourhood walk instead of to the composition. Wall falloff and the
-        // floor go the other way, into the composition, since neither touches where the
-        // nodes are. See the lambda derivation at WeightedNodeMeasure.
+        // ==================================================================
+        // THE DIAGRAM
+        // ==================================================================
+        // WIDTH IS CONSUMED HERE, not in DensityFromWeb. It sets how fast a candidate's
+        // weight falls off with distance, which is upstream of the measure rather than
+        // downstream of it. Wall falloff and the floor go the other way, into the
+        // composition, since neither touches where the nodes are.
         //
-        // The block that used to sit here derived a Lipschitz bound on F2-F1 for the
-        // empty-space skip, and was already stale twice over: the skip is gone, and so
-        // now is F2-F1. Removed rather than rewritten -- there is no consumer left for
-        // a bound, and the measure is not a distance difference any more, so the old
-        // "gradient of a ranked distance is a unit vector toward its node" argument
-        // does not carry across even in spirit. If a skip is ever wanted back, the
-        // bound has to be derived afresh from the weight exponential.
+        // LAMBDA, PIVOT AND SUPPRESSION ARE RESOLVED HERE rather than inside the walk
+        // because BOTH LATTICES MUST SHARE THEM. Their weights land in one pair of
+        // accumulators, so a per-lattice lambda or pivot would make the two sets
+        // incomparable and the participant count meaningless. See TWO LATTICES, ONE
+        // DIAGRAM.
         // A ratio of one means the two lattices ARE the same lattice: identical cell
-        // indices, identical hashes, identical nodes, so the blend would interpolate a
-        // value with itself at twice the price. Pinned to the small lattice instead,
-        // which is exactly the single-lattice field this layer had before.
+        // indices, identical hashes, identical nodes. Pinned to the fine lattice alone,
+        // which is exactly the single-lattice field this layer had before, at no extra
+        // cost.
         float tLattice = (bLatticeLarge > 0.5f) ? mLatticeBlend : 0.0f;
 
-        // TWO WALKS, EACH MEASURED AGAINST ITSELF, and the densities crossfaded -- see
-        // TWO LATTICES, ONE BLEND for why the node sets are not merged instead.
+        // The coarse lattice's squared distances are ratio^2 times the fine lattice's
+        // for the same physical separation. This is the conversion that puts both node
+        // sets in one metric, and it multiplies the spread with them so void-size
+        // variation stays the same FRACTION of a cell on both.
+        float ratioSq = LatticeRatio * LatticeRatio;
+
+        // SUPPRESSION, added to every FINE candidate's power distance and to none of the
+        // coarse ones. The mean power distance to a nearest node is
+        // UNIVERSE_WEIGHT_PIVOT in a lattice's own units, so in shared units the gap
+        // between the two lattices averages pivot * (ratio^2 - 1); running the
+        // suppression to twice that across the blend puts the crossover in the middle
+        // of the range instead of jammed against one end.
+        float latticeGap = UNIVERSE_WEIGHT_PIVOT * (ratioSq - 1.0f);
+
+        // THE RAMP IS THE ODDS RATIO, t/(1-t), and a linear one is wrong in a way that
+        // is invisible until you look for it. Linear reaches twice the gap at the end of
+        // the blend, which beats the coarse lattice's TYPICAL node and not its far ones
+        // -- so inside the coarse lattice's larger voids, where its nearest node is
+        // unusually distant, the still-present fine lattice wins and fills the void in
+        // with fine structure. Measured at ratio 3: 5.5% of samples differed by more
+        // than half the feature amplitude between a blend of 0.993 and one of 1.0, and
+        // the mean density sat three times too high across the whole top of the range.
+        // Big voids that are not empty are the one thing this feature exists to avoid.
         //
-        // Each walk is skipped when its own share of the blend is negligible, which is
-        // most samples: the region field is smooth, so the blend sits pinned at one end
-        // or the other through the interior of every region and crosses over only in
-        // the bands between them. Both branches are spatially coherent, so neighbouring
-        // pixels and successive march steps take the same side. The error a skip admits
-        // is at most UNIVERSE_LATTICE_SKIP times that lattice's density, and it is
-        // bounded rather than merely small -- the term being dropped is already
-        // multiplied by the weight that triggered the skip.
-        float dSmall = 0.0f;
-        float dLarge = 0.0f;
+        // t/(1-t) is zero at zero, exactly the gap at the midpoint -- so the crossover
+        // still lands where the pivot expects it -- and diverges at one, which
+        // extinguishes the fine lattice outright rather than merely outvoting it. The
+        // guard on the denominator caps it at ten thousand times the gap, which is
+        // already far past the point every fine weight has underflowed to zero.
+        float odds = tLattice / max(1.0f - tLattice, 1e-4f);
+        float suppress = latticeGap * odds;
+
+        // How far along the fine-to-coarse crossover this sample sits, 1 to ratio^2,
+        // saturating at the midpoint because past there the coarse lattice is what is
+        // being measured and its distances do not move any further. It tracks the
+        // SUPPRESSED fine lattice below the midpoint and the coarse lattice above it,
+        // which is exactly where the dominant candidate is in each case.
+        float effRatio = 1.0f + (ratioSq - 1.0f) * min(odds, 1.0f);
+
+        // LAMBDA FOLLOWS THE RAMP, and this is what makes the two ends of the blend
+        // exact rather than merely similar. Apparent wall thickness is 1/(4*lambda*d)
+        // with d in shared units, and the coarse lattice's separations are `ratio` times
+        // larger there, so a fixed lambda gives its sheets the same ABSOLUTE thickness
+        // as the fine lattice's -- which is a ratio^2 smaller fraction of its own much
+        // bigger cells. At ratio 12 that is a web of hairlines around enormous voids.
+        //
+        // Dividing by effRatio cancels it exactly. It is one scalar shared by BOTH
+        // lattices at a given sample, so nothing about comparability changes -- and at
+        // either end of the blend the exponent reduces to lambda * (pivot - u) in that
+        // lattice's OWN cell units, which is to say the field becomes precisely the
+        // single-lattice field at that cell size. Verified: pinning the blend to either
+        // end reproduces the corresponding single-lattice configuration's statistics.
+        //
+        // IT USES ITS OWN RAMP, GEOMETRIC, and not the pivot's. The pivot's ramp
+        // saturates at the middle of the blend because the dominant candidate's DISTANCE
+        // stops moving there -- both lattices sit at the same u by construction, which is
+        // what a crossover is. Feature SCALE does not stop there: the two lattices still
+        // have separations a full ratio^2 apart, and a shared lambda has to sit between
+        // them rather than jumping to one end. Reusing the pivot's ramp gives the coarse
+        // lattice's width to the fine lattice's structure through the whole second half
+        // of the blend, and the field turns to mush -- measured, at ratio 12, as a mean
+        // density of 1.89 against 0.06 at either end.
+        //
+        // Geometric rather than linear because a scale interpolates that way: halfway
+        // between a lattice and one three times coarser is a factor of three, not two.
+        // exp2(log2(ratio^2) * t) is one exp2 against a precomputed constant, and it is
+        // exactly 1 and exactly ratio^2 at the two ends, so both limits stay exact.
+        //
+        // The clamp is applied before the division, so it stays a bound on the steepest
+        // lambda the walk can ever see.
+        // The exponent is a SMOOTHSTEP CENTRED ON THE CROSSOVER, not t itself, because
+        // which lattice is dominant is a near-step function of t and not a gradual
+        // slide: the fine and coarse dominant weights differ by lambda * latticeGap *
+        // (1 - odds) in the exponent, and lambda * latticeGap runs to about 200, so the
+        // handover happens within a couple of percent of the midpoint. Ramping lambda
+        // linearly in t across the whole range instead leaves the coarse lattice being
+        // measured with a lambda still several times too steep through the upper half
+        // of the blend -- measured at ratio 4 as a mean density of 0.020 at t = 0.73
+        // against 0.059 at both ends, a dip to a third of the field it sits between.
+        //
+        // The band is +-0.15 in t, which is wide enough to stay smooth and narrow
+        // enough to have handed over before the coarse lattice is on its own. A region
+        // boundary is a fairly sharp thing here rather than a long morph, which is what
+        // the structure being described actually looks like: a patch of small voids, a
+        // patch of large ones, and an edge between them.
+        float lamT = saturate((tLattice - 0.35f) * (1.0f / 0.3f));
+        lamT = lamT * lamT * (3.0f - 2.0f * lamT);
+        float lamRatio = exp2(LatticeLogRatioSq * lamT);
+        float lam = min(UNIVERSE_WIDTH_TO_LAMBDA * mInvWidth, UNIVERSE_LAMBDA_MAX)
+                  / lamRatio;
+
+        // THE PIVOT TRACKS THE CROSSOVER. It only recentres the exponent -- the measure
+        // is invariant under a common scaling of the weights -- but it has to land near
+        // whatever the DOMINANT candidate's u actually is, and that is no longer a
+        // constant: it walks from the fine lattice's typical distance up to the coarse
+        // lattice's as the suppression takes hold, then stops, because past the
+        // crossover the coarse lattice is what is being measured and it does not move.
+        // Leaving the pivot at the fine lattice's value underflows every weight to zero
+        // at ratio 3 and returns pure void.
+        // Lambda's ramp is in t rather than in the odds, deliberately: the odds diverge
+        // and would take lambda to zero.
+        float uTypical = UNIVERSE_WEIGHT_PIVOT * effRatio;
+
+        // The spread term tracks the pivot down as the power-diagram offset pulls u
+        // negative. Nothing bounds the pivot from above any more: the exponent's
+        // overflow guard moved into the walk, where it costs one min per candidate and
+        // does not distort the one number that has to stay where the dominant candidate
+        // is. See the clamp in LatticeWeightSums.
+        // THE SPREAD TERM SCALES TOO, and with LAMBDA'S ramp rather than the pivot's.
+        // The coarse lattice's offsets are multiplied by ratio^2 along with its
+        // distances, so at ratio 3 an authored spread of 0.1 moves a coarse candidate's
+        // u by up to 0.9 -- seventy-two in the exponent at a typical lambda -- and a
+        // pivot subtracting the unscaled spread leaves the whole coarse lattice riding
+        // the overflow clamp instead of resolving. But it is the DOMINANT lattice's
+        // offsets that need centring, and which lattice that is is lambda's question,
+        // not the pivot's: using effRatio here subtracts a coarse-sized allowance while
+        // the fine lattice is still in charge, which pushes the far candidates into
+        // underflow early and costs about a sixth of the density through the lower half
+        // of the blend.
+        float pivot = uTypical - 0.5f * mSpread * lamRatio;
+
+        // BOTH WALKS FEED ONE PAIR OF SUMS. Each is skipped when its candidates cannot
+        // matter: the coarse walk while the fine lattice is unsuppressed and outranges
+        // it by 2^(-lambda * latticeGap), the fine walk once the suppression has pushed
+        // it past competing. Skipping is what makes the common case cost one walk rather
+        // than two, and the branch is spatially coherent because the region field is.
+        float sumW = 0.0f;
+        float sumSqW = 0.0f;
 
         if (tLattice < 1.0f - UNIVERSE_LATTICE_SKIP)
         {
-            float mSmall = WeightedNodeMeasure(cx, cy, cz, frac,
-                                               mSpread, mSkew, mInvWidth);
-            dSmall = DensityFromWeb(mSmall, mDensity, mWallFalloff, mVoidFloor);
+            float2 fine = LatticeWeightSums(cx, cy, cz, frac, lam, pivot,
+                                            mSpread, mSkew, 1.0f, suppress);
+            sumW += fine.x;
+            sumSqW += fine.y;
         }
 
         if (tLattice > UNIVERSE_LATTICE_SKIP)
         {
-            // SAME spread, skew and width numbers, applied in the LARGE lattice's own
-            // cell units. That is what makes the two lattices the same field at two
-            // scales rather than two unrelated fields: a wall is the same fraction of a
-            // void across on both, so a region that switches lattice switches the scale
-            // of the whole structure instead of growing its voids and leaving the
-            // sheets between them at the old thickness.
-            float mLarge = WeightedNodeMeasure(lx, ly, lz, lfrac,
-                                               mSpread, mSkew, mInvWidth);
-            dLarge = DensityFromWeb(mLarge, mDensity, mWallFalloff, mVoidFloor);
+            // Same spread, skew and width NUMBERS, converted into shared units by
+            // ratioSq rather than re-authored. That is what makes the two lattices one
+            // field at two scales instead of two unrelated fields: a void's size
+            // variation is the same fraction of its own cell on both.
+            float2 coarse = LatticeWeightSums(lx, ly, lz, lfrac, lam, pivot,
+                                              mSpread, mSkew, ratioSq, 0.0f);
+            sumW += coarse.x;
+            sumSqW += coarse.y;
         }
 
-        float D = lerp(dSmall, dLarge, tLattice);
+        // Division guard. Every weight is strictly positive so the denominator cannot be
+        // zero mathematically, but it is the square of an already-small number and the
+        // pivot only bounds how small. On underflow the measure returns zero, which the
+        // saturates in DensityFromWeb read as void -- a collapse to the floor rather
+        // than a NaN spreading through the march.
+        float measure = (sumW * sumW) / max(sumSqW, 1e-30f);
+
+        float D = DensityFromWeb(measure, mDensity, mWallFalloff, mVoidFloor);
 
         // --- CLUSTERS AND GAS ---
         // Gated the same way the old detail modulation was: skip the fetch for most
@@ -1909,6 +2043,12 @@ UniverseDensityParams MakeUniverseDensityParams(
     P.LatticeRatio = ratio;
     P.LatticeRatioInt = (int) ratio;
     P.InvLatticeRatio = 1.0f / ratio;
+
+    // log2 rather than a repeated multiply: the consumer wants exp2 of a fraction of
+    // this, which is a scale interpolation, and doing it in the log domain is both the
+    // correct interpolation and one instruction. Guarded only by the floor at 1 above,
+    // which already keeps the argument at or above zero.
+    P.LatticeLogRatioSq = 2.0f * log2(ratio);
     P.CellSizeBias = InCellSizeRange.z;
     P.bLatticeLarge = (ratio > 1.5f) ? 1.0f : 0.0f;
 
