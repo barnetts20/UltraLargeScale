@@ -268,6 +268,27 @@ void AGalaxyActor::InitializeVolumetric()
 			Self->VolumetricComponent->SetMaterial(0, Self->VolumeMaterial);
 			Self->VolumetricComponent->SetVisibility(true);
 
+			// WHAT THE MARCH ACTUALLY COSTS, which is now a property of the parameters
+			// alone rather than of where the camera is -- so it can be logged once at init
+			// and stay true. The budget and the count it resolves to differ by
+			// ln(1+g)/g and the gap is wide enough to surprise: at growth 2 a budget of
+			// 192 buys about 105 steps.
+			//
+			// The base step is here beside them because it is what MinFeatureStep is
+			// compared against: when half the narrowest layer thickness exceeds this
+			// number, the field's own floor binds and further budget buys nothing. The
+			// floor itself is NOT logged here -- it is derived inside
+			// MakeGalaxyDensityParams, which this translation unit does not compile, and
+			// recomputing it locally would be exactly the second home for one value that
+			// every alignment bug so far has turned out to be.
+			const FGalaxyMaterialParams& MP = Self->Params.Config.MaterialParams;
+			UE_LOG(LogTemp, Log,
+				TEXT("AGalaxyActor::InitializeVolumetric - march budget %.0f at growth ")
+				TEXT("%.2f resolves to ~%.0f actual steps; base step through the centre ")
+				TEXT("%.5f."),
+				MP.VolumeStepBudget, MP.VolumeStepGrowth, MP.GetEffectiveStepCount(),
+				2.0f / FMath::Max(MP.VolumeStepBudget, 1.0f));
+
 			CompletionPromise.SetValue();
 		});
 
@@ -373,18 +394,19 @@ void AGalaxyActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
 	// --- RENDER ---
 	InMID->SetScalarParameterValue(TEXT("MasterDensityScale"), D.Master.MasterDensityScale);
 	InMID->SetScalarParameterValue(TEXT("MasterDensityPower"), D.Master.MasterDensityPower);
-	// ALL FOUR MARCH CONTROLS, not just MaxSteps. Three of them used to live only on the
-	// material asset, so the baseline the marcher actually ran at was invisible from the
-	// code and the step count could not be reasoned about against it.
+	// TWO, AND ONLY TWO, where there were four. The iteration bound is derived in the
+	// Custom node from StepBudget and the step floor comes from the field's own
+	// MinFeatureStep, so neither is a value this side has any business supplying; StepRatio
+	// and MinSamples describe a stepping rule the marcher no longer uses. See the notes on
+	// FGalaxyMaterialParams.
+	//
+	// A MID SILENTLY IGNORES A NAME THE MATERIAL DOES NOT HAVE, so the two names below are
+	// load-bearing: until the material's pins are renamed to match, these push nothing and
+	// the marcher runs on whatever the instance carries, with no warning anywhere.
 	const FGalaxyMaterialParams& M = Params.Config.MaterialParams;
 
-	InMID->SetScalarParameterValue(TEXT("StepRatio"), M.VolumeStepRatio);
-	InMID->SetScalarParameterValue(TEXT("MinSamples"), M.VolumeMinSamples);
-	InMID->SetScalarParameterValue(TEXT("MaxSteps"), M.VolumeMaxSteps);
-
-	// The marcher wants a LENGTH; the property is a step BUDGET. Derived here rather
-	// than authored, because the two differ by the chord and nobody authors the chord.
-	InMID->SetScalarParameterValue(TEXT("MinStep"), M.GetMinStep());
+	InMID->SetScalarParameterValue(TEXT("StepBudget"), M.VolumeStepBudget);
+	InMID->SetScalarParameterValue(TEXT("StepGrowth"), M.VolumeStepGrowth);
 
 	// NOT PUSHED: EnableNoise. It is a StaticSwitchParameter, resolved at material
 	// compile time -- a MID cannot change one, and setting it silently does nothing.

@@ -4,17 +4,20 @@
 
 #include "CoreMinimal.h"
 #include "DataTypes.h"
-#include "FastNoise/FastNoise.h"
 #include "ProceduralSpaceActor.h"
 #include "FVolumeTextureUtils.h"
 #include "FNiagaraParticleBuffer.h"
 #include "UniverseParams.h"
 #include "UniverseEntityGen.h"
 
-/** Generates the data that populates a universe sector: owns all noise
- *  composition and particle generation logic. The sector actor wires tier
- *  callbacks that delegate here; this class has no knowledge of actors, Niagara,
- *  octrees, or the streaming pipeline. */
+/** Generates the data that populates a universe sector: owns tier geometry, calibration
+ *  and the GPU entity dispatch. The sector actor wires tier callbacks that delegate here;
+ *  this class has no knowledge of actors, Niagara, octrees, or the streaming pipeline.
+ *
+ *  IT NO LONGER EVALUATES A FIELD ANYWHERE. Everything that did was FastNoise, and the
+ *  field this layer places against is UniverseDensityCore.ush -- which the C++ shim
+ *  cannot stand in for, since its geometry depends on texture fetches the shim stubs to
+ *  a neutral 0.5. */
 class ULTRALARGESCALE_API UniverseDataGenerator {
 public:
 	UniverseDataGenerator() {};
@@ -23,88 +26,20 @@ public:
 	};
 
 	FUniverseParams Params;
-	FastNoise::SmartNode<> DensityNoise;
 	TArray<FPointData> GeneratedData;
 
-#pragma region Noise Composition
-
-	/** Builds and stores DensityNoise from the current Params. */
-	void Initialize();
-
-	/** Builds the sector-scale density noise graph from Params. Pure function of
-	 *  FUniverseNoiseGraphParams; needs no actor state.
-	 *
-	 *  LEGACY, AND A DIFFERENT FIELD from Params.DensityParams. This graph is what all
-	 *  three tiers rejection-sample for cluster placement; the cosmic web the ray march
-	 *  draws is UniverseDensityCore.ush, evaluated on the GPU. Until entity generation
-	 *  moves across, the sprites and the volumetric are showing two unrelated universes.
-	 *  Comes out with DensityNoise and FUniverseParams::EncodedTree. */
-	FastNoise::SmartNode<> BuildNoise() const;
-
-	/** Samples the noise field into a CPU-side volume texture buffer, returning
-	 *  raw BGRA8 data suitable for FDensityVolume or GPU upload. */
-	TArray<uint8> SampleNoiseVolume(
-		int InNoiseResolution,
-		const FIntVector& InCellCoord) const;
-
-#pragma endregion
-
-#pragma region Tier Generation Callbacks -- LEGACY, NO LONGER CALLED
-
-	/** NOTHING REFERENCES THE THREE FUNCTIONS BELOW ANY MORE. All three tiers now bind
-	 *  GenerateBatchCallback and dispatch to the GPU; these are the FastNoise rejection
-	 *  samplers they replaced.
-	 *
-	 *  KEPT FOR ONE PASS, deliberately, so the swap can be reverted by rebinding three
-	 *  callbacks rather than by restoring deleted code. Once entity generation is proven,
-	 *  the whole FastNoise stack comes out in one go -- these three, BuildNoise,
-	 *  DensityNoise, FUniverseParams::EncodedTree and FUniverseNoiseGraphParams -- because
-	 *  they are each other's only remaining consumers.
-	 *
-	 *  THEY ARE NOT A FALLBACK. They sample a DIFFERENT FIELD from the one the raymarch
-	 *  draws, so falling back to them would place entities against a universe nobody is
-	 *  looking at. The GPU path fails closed for that reason. */
-
-	 /** Self-contained generation functions that write directly into particle
-	  *  buffers; the sector actor's tier system calls them via
-	  *  FParticleTierConfig::GenerateCallback lambdas. Grid geometry (NodeCenter,
-	  *  CellExtent) is passed in rather than computed internally so the generator
-	  *  stays decoupled from the actor's tree extent multiplier and grid-depth
-	  *  conventions. */
-
-	  /** Large tier: generates cluster particles using batched noise. OutSlotCount
-	   *  receives the number of accepted particles.
-	   *
-	   *  ONE BUFFER. The gas companion buffer is gone -- the universe raymarch replaced
-	   *  that sprite layer -- so this tier is now shaped like Mid and Small. */
-	void GenerateLargeTierNode(
-		const FIntVector& InCoord,
-		int32 InSlotIndex,
-		FNiagaraParticleBuffer& InClusterBuffer,
-		const FVector& InNodeCenter,
-		int32& OutSlotCount) const;
-
-	/** Mid tier: generates cluster particles at mid-grid scale. OutSlotCount
-	 *  receives the number of accepted particles. */
-	void GenerateMidTierNode(
-		const FIntVector& InCoord,
-		int32 InSlotIndex,
-		FNiagaraParticleBuffer& InBuffer,
-		const FVector& InNodeCenter,
-		double InCellExtent,
-		int32& OutSlotCount) const;
-
-	/** Small tier: generates galaxy-scale particles. OutSlotCount receives the
-	 *  number of accepted particles. */
-	void GenerateSmallTierNode(
-		const FIntVector& InCoord,
-		int32 InSlotIndex,
-		FNiagaraParticleBuffer& InBuffer,
-		const FVector& InNodeCenter,
-		double InCellExtent,
-		int32& OutSlotCount) const;
-
-#pragma endregion
+	// THE FASTNOISE STACK IS GONE, entire. What stood here was Initialize, BuildNoise,
+	// SampleNoiseVolume and the three per-tier rejection samplers -- GenerateLargeTierNode,
+	// GenerateMidTierNode and GenerateSmallTierNode -- kept for one pass after the GPU swap
+	// so that reverting it meant rebinding three callbacks rather than restoring deleted
+	// code. That pass is over: all three tiers bind GenerateBatchCallback and dispatch.
+	//
+	// THEY WERE NEVER A FALLBACK. They sampled a DIFFERENT FIELD from the one the ray march
+	// draws, so falling back to them would have placed entities against a universe nobody is
+	// looking at. The GPU path fails closed for that reason and still does.
+	//
+	// FUniverseParams::EncodedTree and FUniverseNoiseGraphParams came out with them; they
+	// were each other's only remaining consumers.
 
 #pragma region GPU Entity Generation
 

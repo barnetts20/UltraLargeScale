@@ -139,14 +139,6 @@ void GalaxyDataGenerator::Initialize()
 	// Derived once. MakeGalaxyDensityParams runs 16 arm hashes, a tan and every
 	// reciprocal; per-candidate it would dominate generation.
 	Derived = MakeUnique<GalaxyDensityParams>(Params.Procedural.ToDerived());
-
-	// Kept for a future FastNoise swap-in; unused on the active path.
-	DensityNoise = BuildNoise();
-}
-
-FastNoise::SmartNode<> GalaxyDataGenerator::BuildNoise() const
-{
-	return FastNoise::NewFromEncodedNodeTree(Params.EncodedTree);
 }
 
 #pragma endregion

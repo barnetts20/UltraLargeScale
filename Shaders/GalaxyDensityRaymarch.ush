@@ -11,33 +11,83 @@
 // produce it, a signed-t special case because an INVERTED-NORMAL proxy shades the FAR
 // face so the chord lay at negative t, and a dCam correction to recover camera distance
 // from a surface-relative parameter. The march never needed the surface -- it needed a
-// ray, and the camera position plus the view direction already are one. Parameterising
-// from the camera makes t the distance from the camera by construction, which is the
-// quantity step size is built on.
+// ray, and the camera position plus the view direction already are one.
 //
 // InViewVec is the LOCAL camera vector, SURFACE TOWARD CAMERA -- unchanged, still
 // CameraVector through TransformVector [World -> Local]. Direction only; normalized or
 // not makes no difference.
 //
 // InCamPosN is the camera in NORMALIZED space, the box spanning -1 to 1. NO REMAP IS
-// APPLIED TO IT HERE. It is now the ray ORIGIN rather than only a distance reference, so
-// a wrong value no longer merely biases step sizes -- it moves the ray. That is a
-// promotion in consequence: the old failure was a plausible image at the wrong cost, the
-// new one is visibly wrong geometry, which is the better way round.
+// APPLIED TO IT HERE. It is the ray ORIGIN rather than only a distance reference, so a
+// wrong value does not merely bias step sizes -- it moves the ray. That is a promotion
+// in consequence: the old failure was a plausible image at the wrong cost, the new one
+// is visibly wrong geometry, which is the better way round.
 //
 // RETURNS (emission, steps taken, 0, transmittance).
 //
 // The step count rides in G because cost has no other observer: a march that truncates
 // looks identical to one that finished, except that the far half of the volume is not
 // there. RAW COUNT, not normalized -- the material divides by whatever range it wants,
-// and normalizing here would be one more number to keep in agreement with MaxSteps.
+// and normalizing here would be one more number to keep in agreement with the loop bound.
+//
+// ==========================================================================
+// THE STEPPING RULE IS THE UNIVERSE LAYER'S. THE INTERSECTION IS STILL THE GALAXY'S.
+// ==========================================================================
+// Everything below -- b, c, disc, tEnter, tExit, the behind-camera early out, the
+// camera-inside case falling out of max(tEnter, 0) -- is unchanged and was never in
+// question. Only the STEP SIZING moved:
+//
+//     baseStep = span / StepBudget
+//     h        = baseStep * (1 + StepGrowth * t01)
+//
+// where t01 is progress along the marched span, not distance from the camera.
+//
+// WHAT WAS GIVEN UP, stated plainly, because it was a real property: sizing each step as
+// a fraction of camera distance keeps every step the same size ON SCREEN, which is
+// genuinely better for a proxy viewed from outside, and the old comments were right that
+// the two bounds rather than the ratio dominated the cost.
+//
+// WHAT WAS BOUGHT: a cost that can be SET rather than DISCOVERED. Under the old rule the
+// step count depended on where the camera was, collapsing toward chord/MinStep on close
+// approach -- at the shipped defaults the floor took over just outside the volume, so
+// every close pass ran the ceiling budget. With four marchers able to be on screen at
+// once, per-layer cost has to be a number chosen up front. This rule makes the count
+// StepBudget * ln(1+g)/g whatever the viewer is doing.
+//
+// The two rules still agree about the far field. They disagree near the entry face,
+// where the camera-relative step went toward zero and this one does not.
+//
+// STEPBUDGET IS A BUDGET, NOT A COUNT. Growth means the steps overshoot the span before
+// the budget is spent, so the loop finishes early: the actual count is
+// StepBudget * ln(1 + growth) / growth -- the budget itself at growth 0, 0.69 of it at
+// growth 1, 0.55 at growth 2. See FGalaxyMaterialParams::GetEffectiveStepCount, which is
+// the same expression on the C++ side.
+//
+// THE FLOOR IS THE FIELD'S, NOT AN AUTHORED PIN. P.MinFeatureStep is half the narrowest
+// thing the parameters can produce -- see GALAXY_MIN_STEP_FRACTION in the core. The
+// authored MinStep it replaced was an absolute distance derived from a NearSteps budget,
+// so it knew the chord but not the field, and could not be right for a thin disc and a
+// thick one at once. A floor can only ever LENGTHEN a step, so this is a pure cost
+// saving: it binds when the budget is set fine enough to resolve detail the field does
+// not contain, which is exactly when it should.
+//
+// NO MINSAMPLES, and nothing replaces it. It capped the step at span/MinSamples so a
+// distant galaxy could not resolve to a handful of samples; the first step is now
+// span/StepBudget by construction and growth only ever lengthens from there, so coverage
+// of the chord is structural rather than clamped.
+//
+// ARGUMENT ORDER CHANGED. The Custom node calls this positionally and a Custom node fails
+// at SHADER compile rather than at build, so the node's pins must be rebuilt: StepRatio,
+// MinStep and MinSamples are gone, StepBudget and StepGrowth are new, and MaxSteps is now
+// derived in the node body as int(StepBudget) + 8 rather than pushed.
 float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler,
                       float3 InViewVec, float3 InCamPosN,
-                      float InStepRatio, float InMinStep, float InMinSamples, int InMaxSteps,
+                      float InStepBudget, float InStepGrowth, int InMaxSteps,
                       float InDensityScale, float InJitter, float InNoisePower)
 {
-    // THE CAMERA IS THE ORIGIN, so t IS the distance from the camera and every step-size
-    // term below reads directly off it.
+    // THE CAMERA IS THE ORIGIN, so t IS the distance from the camera. Nothing downstream
+    // reads that any more -- the step no longer does -- but the parameterisation is still
+    // what makes the near clamp below a clamp rather than a reconstruction.
     float3 o = InCamPosN;
     float3 dir = normalize(-InViewVec);
 
@@ -67,34 +117,32 @@ float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSam
     // branch: tEnter is negative there, so starting at zero starts at the camera. That
     // replaces the guarded dCam trim, which existed only to reconstruct this from a
     // surface-anchored parameterisation and could fail open to the full chord.
+    //
+    // IT MATTERS MORE UNDER THIS RULE THAN THE OLD ONE. A camera-relative step collapsed
+    // to nothing over the stretch behind the viewer, so marching it was merely wasteful;
+    // a span-relative step sizes that stretch as if it were part of the visible one, so
+    // failing to trim it would spend budget on geometry nobody can see AND coarsen
+    // everything that is visible.
     float tStart = max(tEnter, 0.0);
     if (tExit <= tStart)
     {
         return float4(0.0, 0.0, 0.0, 1.0);
     }
 
-    // CONSTANT ANGULAR STEP SIZE, bounded at both ends.
-    //
-    // A step twice as far away covers twice the distance for the same apparent size, so
-    // stepping by a fixed fraction of camera distance keeps every step the same size ON
-    // SCREEN. The recurrence s -> s(1 + k) is geometric, making the step count
-    // LOGARITHMIC in range rather than linear.
-    //
-    // InStepRatio is that fraction, authored directly. It is already an angle in the
-    // small-angle sense -- a step of k times the distance subtends about k radians -- so
-    // nothing here needs the field of view, the viewport size or the View uniform buffer.
-    //
-    // THE TWO BOUNDS DOMINATE THE COST, not the ratio. Within
-    // InMinStep / InStepRatio of the camera the march is uniform at InMinStep and takes
-    // chord/InMinStep steps whatever the ratio is; past the range where one step spans
-    // the volume it is uniform at maxStep and takes InMinSamples. The ratio decides where
-    // between those the transition happens, not how expensive either end is. A step count
-    // that will not respond to InStepRatio is one of these bounds.
-    //
-    // InMinStep is also the only thing stopping a zero ratio from stalling the loop.
-    float k = max(InStepRatio, 0.0);
-    float minStep = max(InMinStep, 1e-5);
-    float maxStep = (tExit - tStart) / max(InMinSamples, 1.0);
+    // THE SPAN IS WHAT SIZES THE STEP. The whole progression falls out of these two
+    // lines: the distance the ray actually has to cover, divided by the budget. Note it
+    // is the TRIMMED span, so a camera inside the volume budgets across what remains
+    // ahead of it rather than across the full chord.
+    float span = max(tExit - tStart, 1e-6);
+    float baseStep = span / max(InStepBudget, 1.0);
+
+    // See GALAXY_MIN_STEP_FRACTION. The 1e-5 is a loop-safety floor and nothing else:
+    // MinFeatureStep is derived from clamped inputs and cannot reach zero, but a params
+    // struct assembled by hand could.
+    float minStep = max(P.MinFeatureStep, 1e-5);
+
+    float growth = max(InStepGrowth, 0.0);
+    float invSpan = 1.0 / span;
 
     // Jitter shortens the FIRST step only, offsetting each pixel's lattice independently
     // and breaking up the concentric banding a fixed lattice produces. It costs no energy:
@@ -108,8 +156,11 @@ float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSam
     float t = tStart;
     float stepsTaken = 0.0;
 
-    // InMaxSteps is a SAFETY BOUND, not the step count. The bounds above set the count;
-    // this only stops a pathological ratio from hanging the shader.
+    // InMaxSteps is a SAFETY BOUND, not the step count. StepBudget and the growth rate
+    // set the count between them; this only stops a pathological combination from
+    // hanging the shader, and should sit just above StepBudget rather than well above it
+    // -- a bound far from the budget can never be reached, and a bound below it truncates
+    // silently.
     [loop]
     for (int i = 0; i < InMaxSteps; i++)
     {
@@ -119,12 +170,15 @@ float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSam
             break;
         }
 
-        // t IS the camera distance now, so no dCam term and no max against zero: the ray
-        // starts at the camera or ahead of it, so t is never negative. The old form
-        // needed both because a surface-anchored t could run behind the viewer, and a
-        // negative step length there made the march non-terminating.
-        float stepLen = max(minStep, t * k);
-        stepLen = min(stepLen, maxStep);
+        // THE STEP IS SIZED BEFORE THE SAMPLE IS TAKEN, because the sample sits at the
+        // MIDPOINT and the midpoint is not known until the length is.
+        //
+        // GROWS WITH PROGRESS ALONG THE SPAN, not with distance from the camera. t01 is
+        // saturated rather than trusted: tStart is clamped forward to the camera above,
+        // and any arrangement that put it past tExit would otherwise drive the step
+        // negative and hang the march.
+        float t01 = saturate((t - tStart) * invSpan);
+        float stepLen = max(baseStep * (1.0 + growth * t01), minStep);
         if (i == 0)
         {
             stepLen *= firstScale;
@@ -136,7 +190,8 @@ float4 GalaxyRayMarch(GalaxyDensityParams P, Texture3D InTex, SamplerState InSam
         // Sampled at the step MIDPOINT. With uniform steps the choice only shifts the
         // result half a step; with steps that grow along the ray, sampling at the near
         // edge weights every interval by its own leading face and biases the whole
-        // integral toward the camera.
+        // integral toward the camera -- systematically, and more so the faster the steps
+        // grow, which is faster now than it was.
         //
         // DO NOT ADD A BOUNDS TEST HERE. The sphere chord already bounds the march, and
         // the field is zero outside the unit sphere anyway. A redundant test on the first

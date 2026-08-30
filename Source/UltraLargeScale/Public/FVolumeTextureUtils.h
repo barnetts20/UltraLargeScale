@@ -10,7 +10,6 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "ContentBrowserModule.h"
 #include "IContentBrowserSingleton.h"
-#include "FastNoise/FastNoise.h"
 #include "FOctree.h"
 #include "DataTypes.h"
 
@@ -182,44 +181,14 @@ class ULTRALARGESCALE_API FVolumeTextureUtils
 public:
 
 #pragma region Noise Sampling
-	/** Samples a noise function into a volume grid at the given resolution,
-	 *  optionally writing into an octree at InOctreeDepth in the same pass (chunked
-	 *  in parallel at depth-5 boundaries, each chunk's sub-nodes serial). With no
-	 *  octree, produces a standalone volume buffer.
-	 *
-	 *  InWorldOffset is added to noise sample coordinates after normalization (so
-	 *  in normalized noise-space units, not world units). For a tiled grid of
-	 *  volumes continuous across boundaries, pass (2 * CellCoord) so adjacent cells
-	 *  sample contiguous regions of the same field; zero matches single-volume. */
-	static TArray<uint8> SampleNoiseToVolume(
-		FastNoise::SmartNode<> InNoise,
-		int InSeed,
-		int InResolution,
-		double InExtent,
-		TSharedPtr<FOctree> InOctree = nullptr,
-		int InOctreeDepth = -1,
-		float InNoisePower = 2.0f,
-		int InChannel = 3,
-		FVector InWorldOffset = FVector::ZeroVector);
-
-	/** Samples a noise function into a voxel sub-region [InVoxelMin, InVoxelMax)
-	 *  of an existing volume buffer. InExtent is the volume half-size in world
-	 *  space (where each voxel sits); InNoiseNormExtent is the half-size used to
-	 *  normalize positions into noise space, typically Params.Extent (one cell) so
-	 *  noise coordinates match the particle generators. InWorldOffset is added
-	 *  after normalization for seamless cross-cell tiling. */
-	static void SampleNoiseToSubRegion(
-		TArray<uint8>& InOutVolumeData,
-		int InResolution,
-		double InExtent,
-		double InNoiseNormExtent,
-		FastNoise::SmartNode<> InNoise,
-		int InSeed,
-		FIntVector InVoxelMin,
-		FIntVector InVoxelMax,
-		float InNoisePower = 2.0f,
-		int InChannel = 3,
-		FVector InWorldOffset = FVector::ZeroVector);
+	// SampleNoiseToVolume AND SampleNoiseToSubRegion REMOVED with the rest of the
+	// FastNoise stack. Both took a FastNoise::SmartNode<> by value, so both emitted the
+	// node's destructor and both therefore pulled SmartNodeManager::DecReference into
+	// this module -- which is why they had to come out for the module to link without
+	// the library at all, rather than merely being unused.
+	//
+	// Their one caller was UniverseDataGenerator::SampleNoiseVolume, which sampled the
+	// legacy graph into a CPU volume for a field nothing draws any more.
 
 	/** Zeroes all voxels in a sub-region of a volume buffer. Clears exiting cells
 	 *  before sampling entering cells into the same buffer. */

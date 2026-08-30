@@ -665,74 +665,75 @@ struct ULTRALARGESCALE_API FGalaxyMaterialParams
 {
 	GENERATED_BODY()
 
-	/** THE MARCH CONTROLS. All four reach the material, so the baseline lives here
+	/** THE MARCH CONTROLS. BOTH of them reach the material, so the baseline lives here
 	 *  rather than only on the material asset.
 	 *
-	 *  Step length is max(MinStep, StepRatio x cameraDistance), capped so the chord
-	 *  always takes at least MinSamples steps. THREE OF THE FOUR ARE STEP BUDGETS, in
-	 *  steps, because that is what an author is actually choosing:
+	 *  THE STEPPING RULE IS THE UNIVERSE LAYER'S, and this set replaced four properties
+	 *  that described the old one -- NearSteps, MinSamples, StepRatio and MaxSteps. Step
+	 *  length is now
 	 *
-	 *    NearSteps    the ceiling, reached on close approach
-	 *    MinSamples   the floor, reached in the far field
-	 *    MaxSteps     the safety stop, which should never be reached
+	 *      baseStep = span / StepBudget
+	 *      h        = baseStep * (1 + StepGrowth * t01)
 	 *
-	 *  StepRatio is the remaining shape control: it decides WHERE between those two
-	 *  ends the cost sits, not how high either end is.
+	 *  with t01 the progress along the marched span rather than the distance from the
+	 *  camera. The old rule kept a step a constant size ON SCREEN, which is a genuine
+	 *  property and worth remembering was given up deliberately. What it could not do is
+	 *  give a PREDICTABLE COST: the count depended on where the camera was and collapsed
+	 *  toward chord/MinStep on close approach, and with four density marchers able to be
+	 *  on screen at once, per-layer cost has to be something set rather than discovered.
 	 *
 	 *  These are PERFORMANCE controls rather than look controls: because LayerDensity is
-	 *  an optical depth normalised by path length, changing any of them does not require
+	 *  an optical depth normalised by path length, changing either does not require
 	 *  retuning a density. They are candidates for the game's quality settings. */
 
-	 /** Steps across the chord on closest approach -- the CEILING on march cost.
+	 /** A CEILING ON THE STEP COUNT, NOT A FLOOR, which is what the old MinSamples name
+	  *  had backwards. Growth only ever lengthens steps, so every step is at least
+	  *  span / StepBudget and the actual count is StepBudget * ln(1+g)/g -- equal to the
+	  *  budget only at growth 0, 0.69 of it at growth 1, 0.55 at growth 2. See
+	  *  GetEffectiveStepCount.
 	  *
-	  *  MinStep is derived from this, as 2 / NearSteps, because the galaxy spans two
-	  *  units in normalized space and a march floored at MinStep takes chord/MinStep
-	  *  steps. Authoring the length instead hid that: 0.005 units reads as a small
-	  *  number and means four hundred steps.
-	  *
-	  *  STEPRATIO CANNOT REDUCE THIS. The ratio only controls how close the camera has
-	  *  to get before the floor takes over; once it does, the march is uniform at
-	  *  MinStep and the adaptive term is irrelevant. A step count that will not respond
-	  *  to StepRatio is this budget, not a bug. */
+	  *  THE DEFAULT IS NOT THE OLD NEAR-FIELD BUDGET. NearSteps was 256 and MinSamples 32,
+	  *  and the floor took over just outside the volume, so a close pass ran 256 uniform
+	  *  steps and a distant galaxy ran 32. 192 at growth 2 resolves to about 105 steps and
+	  *  pays that whatever the viewer does. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
 		meta = (ClampMin = "8.0", ClampMax = "1024.0"))
-	float VolumeNearSteps = 256.0f;
+	float VolumeStepBudget = 192.0f;
 
-	/** Fewest steps across the chord, which caps step length at chord/MinSamples -- the
-	 *  FLOOR on march cost, and what stops a distant galaxy resolving to a handful of
-	 *  samples. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
-		meta = (ClampMin = "1.0", ClampMax = "512.0"))
-	float VolumeMinSamples = 32.0f;
-
-	/** Hard bound on iterations. A SAFETY STOP, not the step count -- the march should
-	 *  reach NearSteps and stop there, so hitting this means the budget above is not
-	 *  being respected, and raising it hides that. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
-		meta = (ClampMin = "1.0", ClampMax = "2048.0"))
-	float VolumeMaxSteps = 512.0f;
-
-	/** Fraction of camera distance a step spans, before the two budgets clamp it.
+	/** How fast steps lengthen along the span; 0 is uniform stepping. The cheapest quality
+	 *  lever here, since it trades far-side detail for step count directly.
 	 *
-	 *  The SHAPE of the cost curve between them. The floor takes over within
-	 *  D* = 2 / (NearSteps x StepRatio) galaxy radii of the centre, so lowering the
-	 *  ratio widens the expensive band outward rather than making the peak cheaper. At
-	 *  the defaults that distance is 1.6 radii -- just outside the volume. */
+	 *  LOWER THAN THE UNIVERSE'S 4, and for a structural reason rather than a tuning one.
+	 *  That layer's proxy is centred on the camera, so its span always begins AT the
+	 *  viewer and growth along it tracks perspective exactly. This proxy is usually viewed
+	 *  from OUTSIDE, where the whole chord sits at roughly one distance and the far side
+	 *  is barely more forgiving than the near one -- so aggressive growth coarsens the back
+	 *  half for no perceptual return. It earns its keep again on approach and from
+	 *  inside. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
-		meta = (ClampMin = "0.0001", ClampMax = "0.5"))
-	float VolumeStepRatio = 0.005f;
+		meta = (ClampMin = "0.0", ClampMax = "8.0"))
+	float VolumeStepGrowth = 2.0f;
 
-	/** Shortest step, in normalized space where the galaxy spans -1 to 1. */
-	float GetMinStep() const
-	{
-		return 2.0f / FMath::Max(VolumeNearSteps, 1.0f);
-	}
+	// NO STEP FLOOR AND NO ITERATION BOUND HERE, and both were removed rather than
+	// forgotten. The march's step floor is P.MinFeatureStep -- half the narrowest of the
+	// arm cross-section and the disc scale height, derived in the core where both live --
+	// and an authored absolute cannot compete with a floor that knows the field's own
+	// thicknesses. The loop bound is derived in the Custom node as int(StepBudget) + 8,
+	// because the budget already bounds the count and an authored bound could therefore
+	// only truncate: a truncated march looks identical to one that finished, minus the far
+	// half of the volume.
 
-	/** Camera distance, in galaxy radii from the centre, inside which the march runs at
-	 *  MinStep and costs NearSteps. Diagnostic rather than plumbed anywhere. */
-	float GetFloorDistance() const
+	/** Steps the march will actually take, as opposed to the budget it was given. The two
+	 *  diverge fast: at growth 4 a budget of 32 resolves to about 13. Diagnostic rather
+	 *  than plumbed anywhere, but it is the number that describes the cost. */
+	float GetEffectiveStepCount() const
 	{
-		return GetMinStep() / FMath::Max(VolumeStepRatio, 1e-6f);
+		const float G = FMath::Max(VolumeStepGrowth, 0.0f);
+		if (G < UE_SMALL_NUMBER)
+		{
+			return VolumeStepBudget;
+		}
+		return VolumeStepBudget * FMath::Loge(1.0f + G) / G;
 	}
 
 	// VolumeNoise REMOVED. It named the material's noise texture by path while the
@@ -859,9 +860,6 @@ struct ULTRALARGESCALE_API FGalaxyParams : public FBaseParams
 	/** Copied wholesale from FGalaxySpawnConfig::Config. Never rolled. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Galaxy")
 	FGalaxyConfigParams Config;
-
-	/** Serialized FastNoise graph, kept for a future FastNoise swap-in. */
-	static constexpr const char* EncodedTree = "DQAFAAAAAAAAQAgAAAAAAD8AAAAAAA==";
 
 	FGalaxyParams()
 	{

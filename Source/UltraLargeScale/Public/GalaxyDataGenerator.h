@@ -12,7 +12,6 @@
 #include "CoreMinimal.h"
 #include "HAL/CriticalSection.h"
 #include "DataTypes.h"
-#include "FastNoise/FastNoise.h"
 #include "ProceduralSpaceActor.h"
 #include "GalaxyParams.h"
 #include "FTierStreamingSystem.h"
@@ -44,7 +43,6 @@ public:
 	GalaxyDataGenerator& operator=(const GalaxyDataGenerator&) = delete;
 
 	FGalaxyParams Params;
-	FastNoise::SmartNode<> DensityNoise;
 
 	/** Clamped, pre-inverted fields plus the 16 per-arm records, derived once in
 	 *  Initialize(). Rebuilding it per sample would repeat 16 hashes, a tan and every
@@ -67,12 +65,14 @@ public:
 
 #pragma region Initialization
 
-	/** Derive the density parameters and build the encoded noise graph. MUST run
-	 *  before any sampling; SampleDensity returns zero until it does. */
+	/** Derive the density parameters. MUST run before any sampling; SampleDensity
+	 *  returns zero until it does. */
 	void Initialize();
 
-	/** Build noise from encoded tree. Kept for a future FastNoise swap-in. */
-	FastNoise::SmartNode<> BuildNoise() const;
+	// BuildNoise AND DensityNoise REMOVED. They built the legacy FastNoise graph from
+	// FGalaxyParams::EncodedTree and nothing ever sampled the result -- the field this
+	// layer places against is GalaxyDensityCore.ush, evaluated through Derived above.
+	// They were the module's last reference to NewFromEncodedNodeTree.
 
 #pragma endregion
 

@@ -312,7 +312,9 @@ void AUniverseActor::InitializeData()
 	UniverseGenerator.FieldExtent = GetVolumetricProxyExtent();
 	UniverseGenerator.NoiseTexture = FieldNoiseTexture;
 
-	UniverseGenerator.Initialize();
+	// NO GENERATOR INITIALIZE. It built the legacy FastNoise graph and did nothing
+	// else; the generator's remaining state is FieldExtent and NoiseTexture, both set
+	// immediately above, and the field itself lives in the shader.
 	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeData took: %.3f seconds"),
 		FPlatformTime::Seconds() - StartTime);
 }

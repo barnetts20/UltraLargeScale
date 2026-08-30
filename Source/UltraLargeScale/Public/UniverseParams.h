@@ -20,55 +20,12 @@ namespace UniverseSeed
 }
 
 
-/** LEGACY. The FastNoise graph that predates the cosmic-web field.
- *
- *  RENAMED, not retired. UniverseDataGenerator::BuildNoise() still builds this graph and
- *  all three tiers still rejection-sample it for cluster placement, so it cannot come out
- *  until entity generation lands on the web field. The rename exists because
- *  FUniverseDensityParams now names the field the shader actually draws, and having two
- *  unrelated things called "the density params" is how the render and placement quietly
- *  end up reading different fields.
- *
- *  Nothing here feeds UniverseDensityCore.ush. When the web field takes over placement,
- *  this struct, BuildNoise, EncodedTree and DensityNoise come out together. */
-USTRUCT(BlueprintType)
-struct ULTRALARGESCALE_API FUniverseNoiseGraphParams
-{
-	GENERATED_BODY()
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float MasterScale = 1.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float ClusterFalloff = 32.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float ClusterScale = 3.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float ClusterMulti = 50.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float ClusterRemapMax = 1.001f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float ClusterRemapMin = 0.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float WebFalloff = 3.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float WebRemapMin = -0.1f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float WebRemapMax = 1.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float WarpAmp = 0.25f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float WarpFreq = 1.0f;
-};
+// FUniverseNoiseGraphParams REMOVED. It authored the legacy FastNoise graph that the
+// three tiers rejection-sampled for cluster placement, which the cosmic-web field
+// replaced -- and it named a second, unrelated "density params" alongside
+// FUniverseDensityParams, which is exactly the arrangement that lets the render and
+// placement quietly read different fields. It came out with EncodedTree, BuildNoise and
+// DensityNoise; they were each other's only consumers.
 
 
 // =============================================================================
@@ -958,8 +915,10 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 
 
 /** Universe-layer generation parameters: the cosmic-web density field, the march that
- *  draws it, the legacy noise graph that still drives cluster placement, per-tier
- *  streaming configs, and scale derivation.
+ *  draws it, per-tier streaming configs, and scale derivation.
+ *
+ *  ONE FIELD, ONE PLACE. The legacy noise graph that used to sit beside DensityParams is
+ *  gone; there is no longer a second set of parameters describing a second universe.
  *
  *  THE GAS LAYER IS GONE. GasExtentMinMultiplier and GasExtentMaxMultiplier sized a
  *  nebula sprite that shared the Large tier's positions; the raymarch replaced it. */
@@ -980,18 +939,6 @@ struct ULTRALARGESCALE_API FUniverseParams : public FBaseParams {
 	 *  Entity generation samples the same field with none of this. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
 	FUniverseMaterialParams MaterialParams;
-
-#pragma endregion
-
-#pragma region Noise
-
-	/** LEGACY, and a DIFFERENT FIELD from DensityParams above.
-	 *  UniverseDataGenerator::BuildNoise() builds this graph and all three tiers
-	 *  rejection-sample it for cluster placement, so until placement moves across, the
-	 *  sprites and the ray march are showing two unrelated universes. Comes out with
-	 *  BuildNoise and EncodedTree. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	FUniverseNoiseGraphParams NoiseGraphParams;
 
 #pragma endregion
 
@@ -1045,9 +992,6 @@ struct ULTRALARGESCALE_API FUniverseParams : public FBaseParams {
 #pragma endregion
 
 #pragma region Defaults & Derivation
-
-	/** Serialized FastNoise graph (base64) for the legacy universe density field. */
-	static constexpr const char* EncodedTree = "EAAAAIA/GQAbABsAEwAAAEBAJAAgAAAAFwAAAAAAAACAP8UggD8AAAAADQADAAAAAAAAQAsAAQAAAAAAAAABAAAAAAAAAAAAAIA/AAAAAD8AAAAAAAEXAAAAAAAAAIA/zcxMvQAAgD8kAAIAAAD//wEAAAAASEIB//8GAAAAAIA+";
 
 	/** Derives MinScale/MaxScale for each tier from MaxEntityScale and the depth
 	 *  sequence. Delegates to FTierParams::DeriveTierScaleRanges. */

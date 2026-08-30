@@ -49,6 +49,46 @@
 // correlate. Arbitrary; only needs to be large against feature size.
 #define GALAXY_HALO_DOMAIN float3(53.7f, 29.1f, 71.3f)
 
+// ==========================================================================
+// THE STEP FLOOR THE FIELD ITSELF IMPLIES
+// ==========================================================================
+// The march sizes its first step as span/StepBudget, so a budget set high enough puts
+// successive samples inside one wall of the field -- re-evaluating four analytic layers
+// and up to two texture fetches for a density that has not changed between them. The
+// authored MinStep pin this replaced was an absolute distance in normalized units,
+// derived from a step budget across the chord, so it knew how far the ray had to go and
+// nothing whatever about how fine the field it was crossing is.
+//
+// The field's own geometry is what should set the floor. The finest things it can express
+// are the two THIN ones:
+//
+//   the arm cross-section   ArmWidth is a perpendicular half-width, and the vertical
+//                           ratio squashes it further whenever it is below 1
+//   the disc scale height   DiscRadius * DiscHeightRatio at the centre; flare only ever
+//                           thickens it outward, so the centre is the minimum
+//
+// The bulge and background are spheroids of layer-scale radius and never bind. Both terms
+// are HALF-thicknesses already, which is why the fraction below multiplies rather than
+// divides.
+//
+// HALF, not a quarter or a tenth, because the accumulation is exact for constant density
+// over a step -- the exponential is integrated analytically, not approximated -- so
+// oversampling a smooth stretch buys nothing at all. What it protects is the crossing of
+// a thin feature, and half a half-thickness puts at least two samples inside every arm.
+//
+// THE NOISE IS DELIBERATELY NOT IN THIS. Ridged modulation imprints structure finer than
+// any analytic layer, but its scale is not visible from the parameters: NoiseScale gives
+// the period, while the features inside one period belong to the baked texture, whose
+// resolution and cell count are not inputs here. Since a floor built from a period would
+// be an ORDER coarser than the analytic terms and would therefore be the binding one, a
+// wrong guess would step over arms as well as over noise. The analytic minimum is both
+// knowable and smaller, so it is what is used, and the floor makes no claim to resolve
+// texture detail.
+//
+// THIS ONLY EVER LENGTHENS A STEP, so it can only make the march cheaper. It binds when
+// the budget is set finer than the field, which is exactly when it should.
+#define GALAXY_MIN_STEP_FRACTION 0.5f
+
 // Per-tier placement rules. Separate from GalaxyDensityParams because these change per
 // tier while the field does not.
 //
@@ -143,6 +183,12 @@ struct GalaxyDensityParams
     float BoundsFadeStart;
     float BoundsFadeStartSq;
     float InvBoundsFadeSpan;
+
+    // --- MARCH ---
+    // Not read anywhere in this file. It is derived here because this is where the layer
+    // thicknesses live, and handed to GalaxyRayMarch as its step floor. See
+    // GALAXY_MIN_STEP_FRACTION.
+    float MinFeatureStep; // normalized units; the step below which sampling is wasted
 
     // --- BULGE ---
     float BulgeInvRadiusSq; // 1 / r^2 at which the layer reaches exactly zero
@@ -1065,6 +1111,21 @@ GalaxyDensityParams MakeGalaxyDensityParams(
     P.DiscRadius = max(InLateralScale.y, 1e-6f);
     P.InvDiscRadius = 1.0f / P.DiscRadius;
     P.ArmWidth = max(InLateralScale.x * P.DiscHeightRatio, 1e-6f);
+
+    // See GALAXY_MIN_STEP_FRACTION. The arm's narrowest axis is its half-width times the
+    // vertical ratio whenever that ratio is below 1, and unsquashed otherwise -- min
+    // against 1 rather than the raw ratio, since a ratio above 1 makes the arm a vertical
+    // ribbon whose WIDTH is then the thin axis. The vertical ratio is clamped to the same
+    // 1e-4 InvArmVerticalRatio uses below, so the two agree about a degenerate input.
+    //
+    // Both inputs are already floored away from zero, so this cannot come out negative
+    // and cannot come out enormous either: it is bounded above by the disc's own scale
+    // height, which is a fraction of a normalized radius.
+    {
+        float armThin = P.ArmWidth * min(1.0f, max(InVerticalScale.x, 1e-4f));
+        float discHalfHeight = P.DiscRadius * P.DiscHeightRatio;
+        P.MinFeatureStep = GALAXY_MIN_STEP_FRACTION * min(armThin, discHalfHeight);
+    }
 
     float bulgeR = max(InLateralScale.z * P.DiscRadius, 1e-6f);
     float bgR = max(InLateralScale.w, 1e-6f);
