@@ -296,6 +296,19 @@ void AUniverseActor::InitializeData()
 {
 	double StartTime = FPlatformTime::Seconds();
 	UniverseGenerator.Params = UniverseParams;
+
+	// THE TWO THINGS THE GENERATOR CANNOT DERIVE, both supplied rather than inferred.
+	//
+	// FieldExtent is the RAY MARCH PROXY'S half extent -- the Large tier's neighbourhood
+	// span, not UniverseParams.Extent -- and it is what converts caller units into the
+	// frame the field is defined in. A second derivation of it inside the generator is
+	// exactly how placement and render would end up sampling two different scalings.
+	//
+	// The texture is the same object the material instance is given, not a second one
+	// authored to match.
+	UniverseGenerator.FieldExtent = GetVolumetricProxyExtent();
+	UniverseGenerator.NoiseTexture = FieldNoiseTexture;
+
 	UniverseGenerator.Initialize();
 	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeData took: %.3f seconds"),
 		FPlatformTime::Seconds() - StartTime);
@@ -604,6 +617,76 @@ void AUniverseActor::LoadRuntimeAssets()
 	if (!SectorLargeCloud) SectorLargeCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorLarge.NG_SectorLarge"));
 	if (!SectorMidCloud)   SectorMidCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorMid.NG_SectorMid"));
 	if (!SectorSmallCloud) SectorSmallCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorSmall.NG_SectorSmall"));
+
+	// THE FIELD'S NOISE VOLUME, resolved once from the one authored path so the material
+	// and the entity-gen dispatch cannot end up on different assets. Game thread, because
+	// LoadObject is not thread safe and the dispatch path runs on a worker.
+	if (!FieldNoiseTexture)
+	{
+		FieldNoiseTexture = LoadObject<UVolumeTexture>(
+			nullptr, *UniverseParams.MaterialParams.VolumeNoise);
+
+		if (!FieldNoiseTexture)
+		{
+			// Not a warning that can be deferred. Without this the material renders the
+			// unwarped analytic web -- a different field -- and entity generation refuses
+			// to run at all rather than place against one.
+			UE_LOG(LogTemp, Error,
+				TEXT("AUniverseActor::LoadRuntimeAssets - noise volume '%s' unresolved. ")
+				TEXT("The render will lose its warp and regional variance, and entity ")
+				TEXT("generation will place nothing."),
+				*UniverseParams.MaterialParams.VolumeNoise);
+		}
+	}
+}
+
+/** The batch callback all three tiers share.
+ *
+ *  ONE FACTORY RATHER THAN THREE LAMBDAS, because the three tiers now differ only in which
+ *  config, state and params they name. The galaxy layer writes its two out separately and
+ *  they have already drifted in whitespace; a factory makes a fourth tier a call rather
+ *  than a copy.
+ *
+ *  THE SEED OFFSET IS THE TIER INDEX and it must be stable for the life of the sector: it
+ *  keys both the placement hash and the calibrated constant's cache, so renumbering the
+ *  tiers reseeds every entity in the universe.
+ *
+ *  Captures `this` and holds references into the actor. Safe because the tier configs do
+ *  not outlive it -- FTierStreamingSystem calls these from generation, which is torn down
+ *  in EndPlay before the actor goes. */
+TFunction<bool(const TArray<TPair<FIntVector, int32>>&, TArray<int32>&)>
+AUniverseActor::MakeTierBatchCallback(
+	FParticleTierConfig& InConfig,
+	FParticleTierState& InState,
+	const FTierParams& InTierParams,
+	int32 InSeedOffset)
+{
+	return [this, &InConfig, &InState, &InTierParams, InSeedOffset](
+		const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts) -> bool
+		{
+			// GEOMETRY ONLY. The centre comes from the grid the ACTOR owns; a generator
+			// inferring it from a buffer's contents would put every candidate somewhere
+			// else entirely, and the batch would come back with nothing accepted.
+			const double CellExt = GetGridCellExtent(InConfig.GridDepth);
+
+			TArray<UniverseDataGenerator::FTierBatchCell> Cells;
+			Cells.Reserve(Slots.Num());
+
+			for (const TPair<FIntVector, int32>& Slot : Slots)
+			{
+				UniverseDataGenerator::FTierBatchCell Cell;
+				Cell.Coord = Slot.Key;
+				Cell.SlotIndex = Slot.Value;
+				Cell.Centre = GridCoordToCenter(Slot.Key, InConfig.GridDepth);
+				Cell.HalfExtent = CellExt;
+				Cells.Add(Cell);
+			}
+
+			// Buffer 0: every tier is single-buffer now that the gas layer is gone.
+			return UniverseGenerator.GenerateTierBatchGPU(
+				Cells, InState.Buffers[0], InTierParams, InSeedOffset,
+				InConfig.GridDepth, OutCounts);
+		};
 }
 
 void AUniverseActor::BuildTierConfigs()
@@ -635,10 +718,16 @@ void AUniverseActor::BuildTierConfigs()
 	LargeTierConfig.NiagaraAssets = { SectorLargeCloud };
 	LargeTierConfig.bWantRotations = { true };
 	LargeTierConfig.OctreeInsertBufferIndex = 0;
-	LargeTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
-		const FVector NodeCenter = GridCoordToCenter(Coord, LargeTierConfig.GridDepth);
-		UniverseGenerator.GenerateLargeTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter, LargeTierState.SlotCounts[SlotIndex]);
-		};
+
+	// ALL THREE TIERS ARE NOW THE SAME SHAPE, and identical to the galaxy layer's lower
+	// two: one cell per queued slot, one dispatch for the batch, and the tier's placement
+	// constant calibrated against the largest single streamed cell.
+	//
+	// There is no universe equivalent of the galaxy's Large tier, which funnels a whole
+	// subdivided grid into one slot and therefore calibrates against the TOTAL mass. Every
+	// tier here streams a neighbourhood, so every slot holds one cell's worth.
+	LargeTierConfig.GenerateBatchCallback = MakeTierBatchCallback(
+		LargeTierConfig, LargeTierState, UniverseParams.LargeTier, 0);
 
 	// Mid tier
 	MidTierConfig.TierName = TEXT("Mid");
@@ -649,11 +738,8 @@ void AUniverseActor::BuildTierConfigs()
 	MidTierConfig.NiagaraAssets = { SectorMidCloud };
 	MidTierConfig.bWantRotations = { true };
 	MidTierConfig.OctreeInsertBufferIndex = 0;
-	MidTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
-		const FVector NodeCenter = GridCoordToCenter(Coord, MidTierConfig.GridDepth);
-		const double CellExt = GetGridCellExtent(MidTierConfig.GridDepth);
-		UniverseGenerator.GenerateMidTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter, CellExt, MidTierState.SlotCounts[SlotIndex]);
-		};
+	MidTierConfig.GenerateBatchCallback = MakeTierBatchCallback(
+		MidTierConfig, MidTierState, UniverseParams.MidTier, 1);
 
 	// Small tier
 	SmallTierConfig.TierName = TEXT("Small");
@@ -664,11 +750,8 @@ void AUniverseActor::BuildTierConfigs()
 	SmallTierConfig.NiagaraAssets = { SectorSmallCloud };
 	SmallTierConfig.bWantRotations = { true };
 	SmallTierConfig.OctreeInsertBufferIndex = 0;
-	SmallTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
-		const FVector NodeCenter = GridCoordToCenter(Coord, SmallTierConfig.GridDepth);
-		const double CellExt = GetGridCellExtent(SmallTierConfig.GridDepth);
-		UniverseGenerator.GenerateSmallTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter, CellExt, SmallTierState.SlotCounts[SlotIndex]);
-		};
+	SmallTierConfig.GenerateBatchCallback = MakeTierBatchCallback(
+		SmallTierConfig, SmallTierState, UniverseParams.SmallTier, 2);
 
 	// Applied to each tier after its GridDepth/NeighborhoodRadius are set.
 	// Captures Config by ref - safe since Config outlives all lambda calls.

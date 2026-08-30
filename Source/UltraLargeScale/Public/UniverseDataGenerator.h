@@ -9,6 +9,7 @@
 #include "FVolumeTextureUtils.h"
 #include "FNiagaraParticleBuffer.h"
 #include "UniverseParams.h"
+#include "UniverseEntityGen.h"
 
 /** Generates the data that populates a universe sector: owns all noise
  *  composition and particle generation logic. The sector actor wires tier
@@ -48,19 +49,34 @@ public:
 
 #pragma endregion
 
-#pragma region Tier Generation Callbacks
-	/** Self-contained generation functions that write directly into particle
-	 *  buffers; the sector actor's tier system calls them via
-	 *  FParticleTierConfig::GenerateCallback lambdas. Grid geometry (NodeCenter,
-	 *  CellExtent) is passed in rather than computed internally so the generator
-	 *  stays decoupled from the actor's tree extent multiplier and grid-depth
-	 *  conventions. */
+#pragma region Tier Generation Callbacks -- LEGACY, NO LONGER CALLED
 
-	 /** Large tier: generates cluster particles using batched noise. OutSlotCount
-	  *  receives the number of accepted particles.
-	  *
-	  *  ONE BUFFER. The gas companion buffer is gone -- the universe raymarch replaced
-	  *  that sprite layer -- so this tier is now shaped like Mid and Small. */
+	/** NOTHING REFERENCES THE THREE FUNCTIONS BELOW ANY MORE. All three tiers now bind
+	 *  GenerateBatchCallback and dispatch to the GPU; these are the FastNoise rejection
+	 *  samplers they replaced.
+	 *
+	 *  KEPT FOR ONE PASS, deliberately, so the swap can be reverted by rebinding three
+	 *  callbacks rather than by restoring deleted code. Once entity generation is proven,
+	 *  the whole FastNoise stack comes out in one go -- these three, BuildNoise,
+	 *  DensityNoise, FUniverseParams::EncodedTree and FUniverseNoiseGraphParams -- because
+	 *  they are each other's only remaining consumers.
+	 *
+	 *  THEY ARE NOT A FALLBACK. They sample a DIFFERENT FIELD from the one the raymarch
+	 *  draws, so falling back to them would place entities against a universe nobody is
+	 *  looking at. The GPU path fails closed for that reason. */
+
+	 /** Self-contained generation functions that write directly into particle
+	  *  buffers; the sector actor's tier system calls them via
+	  *  FParticleTierConfig::GenerateCallback lambdas. Grid geometry (NodeCenter,
+	  *  CellExtent) is passed in rather than computed internally so the generator
+	  *  stays decoupled from the actor's tree extent multiplier and grid-depth
+	  *  conventions. */
+
+	  /** Large tier: generates cluster particles using batched noise. OutSlotCount
+	   *  receives the number of accepted particles.
+	   *
+	   *  ONE BUFFER. The gas companion buffer is gone -- the universe raymarch replaced
+	   *  that sprite layer -- so this tier is now shaped like Mid and Small. */
 	void GenerateLargeTierNode(
 		const FIntVector& InCoord,
 		int32 InSlotIndex,
@@ -87,6 +103,152 @@ public:
 		const FVector& InNodeCenter,
 		double InCellExtent,
 		int32& OutSlotCount) const;
+
+#pragma endregion
+
+#pragma region GPU Entity Generation
+
+	/** The field's normalized frame, as a HALF EXTENT in caller units.
+	 *
+	 *  The ray march proxy's half extent, which is the Large tier's neighbourhood span --
+	 *  NOT UniverseParams.Extent. Supplied by the actor rather than derived here, because
+	 *  the actor owns the proxy and a second derivation of the same number is how the
+	 *  render and placement end up sampling two different scalings of one field.
+	 *
+	 *  Zero until the actor sets it, which every GPU path below treats as unconfigured. */
+	double FieldExtent = 0.0;
+
+	/** The packed noise volume, resolved.
+	 *
+	 *  THE SAME OBJECT THE MATERIAL SAMPLES, guaranteed rather than asked for: the actor
+	 *  loads it once from MaterialParams.VolumeNoise and hands the pointer to both. The
+	 *  galaxy layer keeps a separate NoiseTexture property that must be set to match its
+	 *  material's, which is a correspondence nothing checks -- placement and render can
+	 *  silently sample different assets and the only symptom is entities off the
+	 *  structure. Resolving from the one path removes the question.
+	 *
+	 *  Held raw rather than as a UPROPERTY because this class is not a UObject; the actor
+	 *  owns the reference that keeps it alive. */
+	UTexture* NoiseTexture = nullptr;
+
+	/** One cell of a tier's generation grid.
+	 *
+	 *  THE CENTRE IS SUPPLIED, not derived. Grid-coord-to-centre lives on the actor, which
+	 *  owns the grid; a generator inferring it from a buffer's slot centres puts every
+	 *  candidate somewhere else entirely. It is also what lets a streamed neighbourhood and
+	 *  a calibration block be the same dispatch with different contents. */
+	struct FTierBatchCell
+	{
+		FIntVector Coord = FIntVector::ZeroValue;
+		int32 SlotIndex = 0;
+
+		/** Index into the array this cell was subdivided FROM, or its own index when
+		 *  nothing was subdivided. Calibration needs it and generation does not: a tier
+		 *  with one cell per slot is calibrated against the largest STREAMED cell, which
+		 *  after subdivision is the largest sum over one parent's children. */
+		int32 ParentIndex = 0;
+
+		FVector Centre = FVector::ZeroVector;
+		double HalfExtent = 0.0;
+	};
+
+	/** Split each cell into 8^Levels children, in place of it.
+	 *
+	 *  Child coords are ParentCoord * 2^Levels + an offset, so they are unique across
+	 *  parents and depend on nothing but the parent -- the placement key and the probe
+	 *  jitter both read them, and a child whose coord shifted with the batch would
+	 *  regenerate differently.
+	 *
+	 *  NO BOUNDS CULL, and that is the one substantive difference from the galaxy's
+	 *  version. That field is zero outside its unit sphere, so a child past the boundary
+	 *  can be dropped for one dot product instead of sixty-four field evaluations. THIS
+	 *  FIELD IS UNBOUNDED: there is no outside, every child can hold structure, and a cull
+	 *  here would be deleting cells that belong. What replaces it is the probe pass's own
+	 *  envelope test, which culls void children at the cost of their probes. */
+	static void SubdivideCells(const TArray<FTierBatchCell>& InCells, int32 InLevels,
+		TArray<FTierBatchCell>& OutCells);
+
+	/** A representative block of the field, for calibration.
+	 *
+	 *  THE GALAXY ENUMERATES ITS WHOLE GRID AND THIS CANNOT. That grid is bounded by the
+	 *  galaxy volume, so "every cell the tier will ever generate" is a finite list. This
+	 *  field is unbounded and the tier grid is a streaming window that moves with the
+	 *  player -- there is no whole grid to measure, and the set of cells that will ever be
+	 *  generated is infinite.
+	 *
+	 *  What makes a sample sufficient instead is HOMOGENEITY. One parameter set describes
+	 *  the field everywhere, and its variation is bounded by the authored ranges rather
+	 *  than by position, so a block of cells anywhere is statistically the same as a block
+	 *  anywhere else. This builds one at a FIXED coord -- not the current neighbourhood --
+	 *  so the answer is deterministic and cacheable rather than depending on where the
+	 *  player happened to be when a tier first streamed.
+	 *
+	 *  THE ASSUMPTION IS CHECKABLE and worth checking: the lattice crossover band runs
+	 *  about five times the mean density of either end, so if a block lands entirely inside
+	 *  or outside it the constant will be off by that factor. Widening the block trades
+	 *  calibration cost for a better average. */
+	void BuildCalibrationGrid(const FTierParams& InTierParams, int32 InGridDepth,
+		double InCellHalfExtent, TArray<FTierBatchCell>& OutCells) const;
+
+	/** The tier's placement constant: accepted count per cell is this times cell mass.
+	 *
+	 *  Measured ONCE per tier, lazily, and cached against the tier's seed offset. Returns 0
+	 *  if calibration could not run, which the caller treats as a failed batch rather than
+	 *  generating with a meaningless constant. */
+	float GetTierBudgetScale(const FTierParams& InTierParams, int32 InSeedOffset,
+		int32 InGridDepth, double InCellHalfExtent) const;
+
+	/** GPU generation for a whole batch of tier slots, in one dispatch.
+	 *
+	 *  ONE GROUP PER CELL. The group probes its cell for a rejection envelope, derives its
+	 *  own candidate budget from it, and spends itself on that cell's candidates. Nothing
+	 *  on this side evaluates the field -- and for this layer that is structural rather
+	 *  than a preference, since the C++ shim stubs texture fetches to a neutral 0.5 and
+	 *  this field's GEOMETRY depends on them.
+	 *
+	 *  BACKGROUND THREAD ONLY; it blocks on a GPU readback. Safe because tier generation
+	 *  already runs on AnyBackgroundHiPriTask, so the wait costs a worker, not a frame.
+	 *
+	 *  FAILS CLOSED. There is no CPU path behind it, so a failure blanks the affected slots
+	 *  and zeroes their counts before returning. A slot is reused as the player crosses
+	 *  boundaries, so "nothing written" is not an empty slot -- it is the previous
+	 *  occupant's entities still sitting there at a coord they no longer belong to, which
+	 *  reads as a placement bug rather than a generation failure. */
+	bool GenerateTierBatchGPU(
+		const TArray<FTierBatchCell>& InQueuedCells,
+		FNiagaraParticleBuffer& InBuffer,
+		const FTierParams& InTierParams,
+		int32 InSeedOffset,
+		int32 InGridDepth,
+		TArray<int32>& OutSlotCounts) const;
+
+private:
+	/** The GPU placement key seed for one tier. THE ONE PLACE that maps a tier index to a
+	 *  seed, because CalibrateBlocking and GenerateBatchBlocking must be handed the
+	 *  identical value or a tier calibrates against a field it will not generate.
+	 *
+	 *  The tier index rides MixSeed's index argument rather than being added to the seed:
+	 *  additive offsets alias across sectors whose seeds land within the offset range of
+	 *  each other, and offset 0 would hand the large tier the unmixed sector seed, which is
+	 *  also whatever else reaches for it. */
+	int32 TierKeySeed(int32 InSeedOffset) const
+	{
+		return ProcSeed::MixSeed(Params.Seed, UniverseSeed::Placement, InSeedOffset);
+	}
+
+	/** Calibrated placement constants, keyed by tier seed offset.
+	 *
+	 *  Mutable and lock-guarded because tier generation runs on background workers and two
+	 *  tiers can enter this concurrently. The measurement is deterministic, so a duplicated
+	 *  one is wasteful rather than wrong -- the lock is held across it anyway because a GPU
+	 *  probe of a calibration block is not something to run twice. */
+	mutable TMap<int32, float> TierBudgetScales;
+
+	/** Held by pointer because FCriticalSection is neither copyable nor movable, and a
+	 *  defaulted move over a mutex member fails to compile. A moved-from generator has a
+	 *  null lock, which GetTierBudgetScale treats as unconfigured rather than dereferencing. */
+	mutable TUniquePtr<FCriticalSection> TierBudgetScaleLock =
+		MakeUnique<FCriticalSection>();
 
 #pragma endregion
 };

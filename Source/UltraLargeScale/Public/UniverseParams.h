@@ -7,6 +7,18 @@
 #include "FTierStreamingSystem.h"
 #include "UniverseParams.generated.h"
 
+/** Seed channels for the universe layer, mirroring GalaxySeed.
+ *
+ *  ADD, NEVER REUSE. A channel is free; sharing one between two consumers reintroduces
+ *  exactly the aliasing ProcSeed exists to prevent. */
+namespace UniverseSeed
+{
+	/** The GPU placement key. One channel for all three tiers -- the tier index enters
+	 *  through MixSeed's index argument, so the streams stay distinct without a channel
+	 *  each, and adding a fourth tier needs no new constant. */
+	inline constexpr uint32 Placement = ProcSeed::ChannelId("Universe.Placement");
+}
+
 
 /** LEGACY. The FastNoise graph that predates the cosmic-web field.
  *
@@ -995,14 +1007,17 @@ struct ULTRALARGESCALE_API FUniverseParams : public FBaseParams {
 
 		// Tier streaming params: depths evenly spaced by 2 (ratio 4 per tier).
 		LargeTier.GridDepth = 1;
+		LargeTier.GenerationSubdivision = 1;
 		LargeTier.NeighborhoodRadius = 1;
 		LargeTier.SlotCapacity = 1000;
 
 		MidTier.GridDepth = 3;
+		MidTier.GenerationSubdivision = 1;
 		MidTier.NeighborhoodRadius = 1;
 		MidTier.SlotCapacity = 500;
 
 		SmallTier.GridDepth = 5;
+		SmallTier.GenerationSubdivision = 1;
 		SmallTier.NeighborhoodRadius = 1;
 		SmallTier.SlotCapacity = 500;
 

@@ -402,3 +402,573 @@ void UniverseDataGenerator::GenerateSmallTierNode(
 	OutSlotCount = ActualCount;
 }
 #pragma endregion
+#pragma region GPU Entity Generation
+
+void UniverseDataGenerator::SubdivideCells(
+	const TArray<FTierBatchCell>& InCells,
+	int32 InLevels,
+	TArray<FTierBatchCell>& OutCells)
+{
+	OutCells.Reset();
+
+	if (InLevels <= 0)
+	{
+		OutCells = InCells;
+
+		// Every cell is its own parent, so a caller that groups by ParentIndex gets the
+		// same answer whether or not the tier subdivides.
+		for (int32 i = 0; i < OutCells.Num(); ++i)
+		{
+			OutCells[i].ParentIndex = i;
+		}
+
+		return;
+	}
+
+	const int32 Side = 1 << InLevels;
+	const int32 PerCell = Side * Side * Side;
+
+	OutCells.Reserve(InCells.Num() * PerCell);
+
+	for (int32 ParentIndex = 0; ParentIndex < InCells.Num(); ++ParentIndex)
+	{
+		const FTierBatchCell& Parent = InCells[ParentIndex];
+
+		const double SubHalf = Parent.HalfExtent / static_cast<double>(Side);
+		const double SubFull = SubHalf * 2.0;
+
+		// Children tile the parent exactly, which is what keeps the sum of their masses
+		// equal to 8^Levels times the parent's -- the relation the tier's calibrated
+		// constant is scaled by.
+		const double Origin = -(static_cast<double>(Side) - 1.0) * 0.5;
+
+		for (int32 iz = 0; iz < Side; ++iz)
+		{
+			for (int32 iy = 0; iy < Side; ++iy)
+			{
+				for (int32 ix = 0; ix < Side; ++ix)
+				{
+					FTierBatchCell Child;
+
+					Child.Centre = Parent.Centre + FVector(
+						(Origin + static_cast<double>(ix)) * SubFull,
+						(Origin + static_cast<double>(iy)) * SubFull,
+						(Origin + static_cast<double>(iz)) * SubFull);
+
+					Child.HalfExtent = SubHalf;
+
+					// UNIQUE ACROSS PARENTS and a pure function of the parent, so a child
+					// regenerates identically however the batch was assembled. These do NOT
+					// correspond to positions on the streaming grid at the deeper level, and
+					// nothing requires them to -- they are placement keys, not grid coords.
+					Child.Coord = FIntVector(
+						Parent.Coord.X * Side + ix,
+						Parent.Coord.Y * Side + iy,
+						Parent.Coord.Z * Side + iz);
+
+					// EVERY CHILD KEEPS ITS PARENT'S SLOT. The buffer still holds one region
+					// per streamed cell; only the generation grid got finer.
+					Child.SlotIndex = Parent.SlotIndex;
+					Child.ParentIndex = ParentIndex;
+
+					// NO BOUNDS CULL. See the header: this field has no outside, so a child
+					// past any boundary is still a child that can hold structure.
+					OutCells.Add(Child);
+				}
+			}
+		}
+	}
+}
+
+void UniverseDataGenerator::BuildCalibrationGrid(
+	const FTierParams& InTierParams,
+	int32 InGridDepth,
+	double InCellHalfExtent,
+	TArray<FTierBatchCell>& OutCells) const
+{
+	OutCells.Reset();
+
+	// THE SAME SHAPE AS A STREAMED NEIGHBOURHOOD, so a calibration cell and a generation
+	// cell are the same size and a mass measured here means what it means there. A cell's
+	// mass is the mean over its own volume, so measuring a different volume answers a
+	// different question -- and the error is BIAS in one direction, growing with the size
+	// mismatch, not noise that averages out.
+	const int32 Radius = FMath::Max(InTierParams.NeighborhoodRadius, 0);
+	const int32 Side = 2 * Radius + 1;
+
+	const double FullCell = InCellHalfExtent * 2.0;
+
+	// ANCHORED AT THE ORIGIN, not at the player. The result is cached for the session, so
+	// it has to be a property of the field rather than of where someone happened to be
+	// standing the first time a tier streamed -- otherwise two runs of the same seed
+	// calibrate differently and the population density changes between them.
+	const double Origin = -(static_cast<double>(Side) - 1.0) * 0.5;
+
+	TArray<FTierBatchCell> Parents;
+	Parents.Reserve(Side * Side * Side);
+
+	for (int32 iz = 0; iz < Side; ++iz)
+	{
+		for (int32 iy = 0; iy < Side; ++iy)
+		{
+			for (int32 ix = 0; ix < Side; ++ix)
+			{
+				FTierBatchCell Cell;
+
+				Cell.Coord = FIntVector(ix - Radius, iy - Radius, iz - Radius);
+				Cell.Centre = FVector(
+					(Origin + static_cast<double>(ix)) * FullCell,
+					(Origin + static_cast<double>(iy)) * FullCell,
+					(Origin + static_cast<double>(iz)) * FullCell);
+				Cell.HalfExtent = InCellHalfExtent;
+				Cell.SlotIndex = 0;
+
+				Parents.Add(Cell);
+			}
+		}
+	}
+
+	// SUBDIVIDED EXACTLY AS GENERATION WILL SUBDIVIDE, for the same reason the block is
+	// sized like a neighbourhood: the mass is an estimate of a mean over a volume, and
+	// probing an undivided parent reports a mean that is too low by a factor growing with
+	// the subdivision depth. That comes back as a constant that is too high and a tier
+	// that over-delivers.
+	SubdivideCells(Parents,
+		FMath::Clamp(InTierParams.GenerationSubdivision, 0,
+			FTierParams::MaxGenerationSubdivision),
+		OutCells);
+}
+
+float UniverseDataGenerator::GetTierBudgetScale(
+	const FTierParams& InTierParams,
+	int32 InSeedOffset,
+	int32 InGridDepth,
+	double InCellHalfExtent) const
+{
+	if (!TierBudgetScaleLock.IsValid())
+	{
+		// Moved-from. Return zero rather than dereference; the caller treats it as a failed
+		// batch, which is the honest answer.
+		return 0.0f;
+	}
+
+	FScopeLock Lock(TierBudgetScaleLock.Get());
+
+	if (const float* Cached = TierBudgetScales.Find(InSeedOffset))
+	{
+		return *Cached;
+	}
+
+	if (NoiseTexture == nullptr || FieldExtent <= 0.0)
+	{
+		return 0.0f;
+	}
+
+	TArray<FTierBatchCell> AllCells;
+	BuildCalibrationGrid(InTierParams, InGridDepth, InCellHalfExtent, AllCells);
+
+	if (AllCells.Num() == 0)
+	{
+		return 0.0f;
+	}
+
+	TArray<FUniverseGenCell> Cells;
+	Cells.Reserve(AllCells.Num());
+
+	for (const FTierBatchCell& In : AllCells)
+	{
+		FUniverseGenCell Cell;
+		Cell.Centre = FVector3f(
+			static_cast<float>(In.Centre.X),
+			static_cast<float>(In.Centre.Y),
+			static_cast<float>(In.Centre.Z));
+		Cell.HalfExtent = static_cast<float>(In.HalfExtent);
+		Cell.Coord = FIntVector3(In.Coord.X, In.Coord.Y, In.Coord.Z);
+		Cells.Add(Cell);
+	}
+
+	const float InvFieldExtent =
+		static_cast<float>(1.0 / FMath::Max(FieldExtent, 1e-9));
+
+	TArray<float> CellMass;
+
+	const double CalibrationStart = FPlatformTime::Seconds();
+
+	float Scale = 0.0f;
+
+	if (UniverseEntityGen::CalibrateBlocking(
+		Params, InTierParams, Cells, TierKeySeed(InSeedOffset),
+		InvFieldExtent, NoiseTexture, CellMass)
+		&& CellMass.Num() == AllCells.Num())
+	{
+		// REDUCED HERE, NOT ON THE GPU, and in double.
+		//
+		// A slot receives the sum of what its cells produce, and for this layer every
+		// streamed cell owns its own slot -- there is no tier that funnels a whole grid
+		// into one. So the divisor is the LARGEST PER-PARENT SUM: the densest streamed
+		// cell fills its slot exactly and every other is proportionally less.
+		//
+		// A global maximum over children would be wrong by the child count, and a mean
+		// would let the densest cell overflow while the rest ran empty.
+		TMap<int32, double> ParentSums;
+
+		double TotalMass = 0.0;
+		double MaxCellMass = 0.0;
+
+		for (int32 i = 0; i < AllCells.Num(); ++i)
+		{
+			const double M = static_cast<double>(CellMass[i]);
+
+			TotalMass += M;
+			MaxCellMass = FMath::Max(MaxCellMass, M);
+
+			double& Sum = ParentSums.FindOrAdd(AllCells[i].ParentIndex);
+			Sum += M;
+		}
+
+		double Divisor = 0.0;
+		for (const TPair<int32, double>& Pair : ParentSums)
+		{
+			Divisor = FMath::Max(Divisor, Pair.Value);
+		}
+
+		if (Divisor > 0.0)
+		{
+			Scale = static_cast<float>(
+				static_cast<double>(InTierParams.SlotCapacity) / Divisor);
+		}
+
+		// THE HOMOGENEITY CHECK, and the reason it is logged rather than asserted.
+		//
+		// This layer calibrates against a SAMPLE of an unbounded field rather than an
+		// exhaustive grid, which is only sound while the field is statistically the same
+		// everywhere. The spread across parents is the direct measure of that: a ratio near
+		// 1 means one block is as good as any other and the constant generalises, while a
+		// large one means the block landed somewhere unrepresentative -- most likely inside
+		// or outside the lattice crossover band, which runs about five times the mean
+		// density of either end.
+		//
+		// If this reads much above 5, widen the calibration block or reconsider whether a
+		// single constant can describe the whole field.
+		const double MeanParent = (ParentSums.Num() > 0)
+			? (TotalMass / static_cast<double>(ParentSums.Num()))
+			: 0.0;
+
+		const double Spread = (MeanParent > 0.0) ? (Divisor / MeanParent) : 0.0;
+
+		UE_LOG(LogTemp, Log,
+			TEXT("UniverseEntityGen: tier offset %d calibrated in %.3fs over %d cells ")
+			TEXT("(%d parents); BudgetScale %.4f, max parent mass %.5f, mean %.5f, ")
+			TEXT("spread %.2fx, largest single cell %.5f."),
+			InSeedOffset, FPlatformTime::Seconds() - CalibrationStart,
+			AllCells.Num(), ParentSums.Num(),
+			Scale, Divisor, MeanParent, Spread, MaxCellMass);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("UniverseEntityGen: calibration FAILED for tier offset %d over %d cells. ")
+			TEXT("This tier will generate nothing until it succeeds."),
+			InSeedOffset, AllCells.Num());
+	}
+
+	// CACHED EVEN AT ZERO IS WRONG, so it is not. A failed calibration is usually transient
+	// -- the render thread was busy, the texture had not streamed -- and caching the
+	// failure would leave the tier permanently empty for the session with nothing to
+	// retry it.
+	if (Scale > 0.0f)
+	{
+		TierBudgetScales.Add(InSeedOffset, Scale);
+	}
+
+	return Scale;
+}
+
+bool UniverseDataGenerator::GenerateTierBatchGPU(
+	const TArray<FTierBatchCell>& InQueuedCells,
+	FNiagaraParticleBuffer& InBuffer,
+	const FTierParams& InTierParams,
+	int32 InSeedOffset,
+	int32 InGridDepth,
+	TArray<int32>& OutSlotCounts) const
+{
+	// FAIL CLOSED, VISIBLY. There is no CPU path behind this, so a failure means these
+	// slots get nothing -- and a slot is REUSED as the player crosses boundaries, so
+	// "nothing written" is not an empty slot, it is the previous occupant's entities still
+	// sitting there at a coord they no longer belong to.
+	auto FailBatch = [&InQueuedCells, &InBuffer, &OutSlotCounts]() -> bool
+		{
+			OutSlotCounts.SetNumZeroed(InBuffer.SlotCoord.Num());
+
+			// The QUEUED cells, not the subdivided ones: blanking is per slot, and the
+			// children of a cell all share its slot.
+			for (const FTierBatchCell& Cell : InQueuedCells)
+			{
+				if (OutSlotCounts.IsValidIndex(Cell.SlotIndex))
+				{
+					InBuffer.PadSlotDead(Cell.SlotIndex, 0);
+					OutSlotCounts[Cell.SlotIndex] = 0;
+				}
+			}
+
+			return false;
+		};
+
+	if (InQueuedCells.Num() == 0)
+	{
+		return true;
+	}
+
+	// LOUD ONCE, then quiet. ensure fires on its first hit per call site per session, which
+	// is right for a setup error: it stops the developer and lands in the log without
+	// spamming on every boundary cross. A misconfiguration would otherwise surface only as
+	// a tier that never populates, which reads as a streaming problem rather than a setup
+	// one.
+	if (NoiseTexture == nullptr)
+	{
+		ensureMsgf(false,
+			TEXT("UniverseEntityGen: NoiseTexture is unresolved, so the sector will place ")
+			TEXT("NOTHING -- placement is GPU-only and the dispatch samples it. It is ")
+			TEXT("loaded from MaterialParams.VolumeNoise; check that path and that the ")
+			TEXT("asset has NEVER STREAM set."));
+		return FailBatch();
+	}
+
+	if (FieldExtent <= 0.0)
+	{
+		ensureMsgf(false,
+			TEXT("UniverseEntityGen: FieldExtent is unset. The actor must hand the ")
+			TEXT("generator the ray march proxy's half extent before generation runs, or ")
+			TEXT("placement and render sample different scalings of the field."));
+		return FailBatch();
+	}
+
+	// Descend inside each queued cell. Children clear of the structure are culled by the
+	// probe pass and draw no candidates, and the ones that survive have a peak much closer
+	// to their own mean -- which is what keeps the accepted fraction high enough that the
+	// candidate budget is not mostly waste.
+	TArray<FTierBatchCell> Subdivided;
+	SubdivideCells(InQueuedCells,
+		FMath::Clamp(InTierParams.GenerationSubdivision, 0,
+			FTierParams::MaxGenerationSubdivision),
+		Subdivided);
+
+	if (Subdivided.Num() == 0)
+	{
+		return true;
+	}
+
+	const double CellHalfExtent = InQueuedCells[0].HalfExtent;
+
+	const float BudgetScale =
+		GetTierBudgetScale(InTierParams, InSeedOffset, InGridDepth, CellHalfExtent);
+
+	if (!(BudgetScale > 0.0f))
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("UniverseEntityGen: tier offset %d has no placement constant; blanking ")
+			TEXT("%d slots."), InSeedOffset, InQueuedCells.Num());
+		return FailBatch();
+	}
+
+	TArray<FUniverseGenCell> Cells;
+	Cells.Reserve(Subdivided.Num());
+
+	for (const FTierBatchCell& In : Subdivided)
+	{
+		FUniverseGenCell Cell;
+		Cell.Centre = FVector3f(
+			static_cast<float>(In.Centre.X),
+			static_cast<float>(In.Centre.Y),
+			static_cast<float>(In.Centre.Z));
+		Cell.HalfExtent = static_cast<float>(In.HalfExtent);
+		Cell.Coord = FIntVector3(In.Coord.X, In.Coord.Y, In.Coord.Z);
+		Cells.Add(Cell);
+	}
+
+	// ONE SHARED BUFFER, sized on what the SLOTS can hold rather than on cells times a
+	// worst case. Every queued cell owns one slot, so this is exactly what the batch can
+	// possibly keep.
+	const int32 EntityCapacity = InQueuedCells.Num() * InBuffer.SlotCapacity;
+
+	const float InvFieldExtent =
+		static_cast<float>(1.0 / FMath::Max(FieldExtent, 1e-9));
+
+	TArray<FUniverseEntityOut> Entities;
+	TArray<uint32> Counts;
+
+	if (!UniverseEntityGen::GenerateBatchBlocking(
+		Params, InTierParams, Cells, EntityCapacity,
+		TierKeySeed(InSeedOffset), InvFieldExtent, NoiseTexture,
+		BudgetScale, Entities, Counts))
+	{
+		return FailBatch();
+	}
+
+	// --- scatter ---
+	//
+	// STORAGE ORDER SAYS NOTHING. The dispatch compacts with a global atomic, so an
+	// entity's position in the readback is scheduling dependent; its CellIndex is what
+	// says which cell -- and therefore which slot -- it belongs to. Keying off position
+	// would shuffle a region's entities between visits.
+	OutSlotCounts.SetNumZeroed(InBuffer.SlotCoord.Num());
+
+	// Per-slot write cursors. The buffer reserves SlotCapacity per slot and the dispatch
+	// does not know about that partition, so the overflow is caught here.
+	TArray<int32> SlotCursors;
+	SlotCursors.SetNumZeroed(InBuffer.SlotCoord.Num());
+
+	// THE TRUE TOTAL, which deliberately over-counts past capacity: the shader increments
+	// the global cursor even when the buffer is full, so this is what the batch WANTED to
+	// place rather than what fitted. Clamping it in the shader would make an overflowing
+	// dispatch report exactly full and hide the thinning.
+	const uint32 TotalAccepted =
+		Counts.IsValidIndex(UniverseEntityGen::GlobalCursorIndex(Cells.Num()))
+		? Counts[UniverseEntityGen::GlobalCursorIndex(Cells.Num())]
+		: 0u;
+
+	// THE CURSOR BOUNDS THE LOOP, NOT THE ARRAY LENGTH, and the difference is not cosmetic.
+	//
+	// The readback copies the WHOLE entity buffer -- capacity records -- because the copy
+	// size has to be known before the dispatch runs. The shader only appends up to the
+	// global cursor, so everything past it is untouched: whatever RDG's pool handed back,
+	// which is a previous dispatch's entities or uninitialised device memory.
+	//
+	// Walking the full array therefore scatters garbage. Read as a record it gives NaN
+	// positions and arbitrary CellIndex values, and a CellIndex that lands in range by
+	// chance passes every bounds test here and writes a NaN position into the buffer. That
+	// is two bugs at once: the octree's child-index arithmetic on a NaN goes out of bounds
+	// and crashes releasing a garbage TSharedPtr, and the entities that do survive bear no
+	// relation to the density field, because they were never placed against it.
+	const int32 Written = FMath::Min(
+		static_cast<int32>(FMath::Min<uint32>(TotalAccepted, static_cast<uint32>(INT32_MAX))),
+		EntityCapacity);
+
+	int32 Dropped = 0;
+	int32 Rejected = 0;
+
+	for (int32 i = 0; i < Written; ++i)
+	{
+		const FUniverseEntityOut& E = Entities[i];
+
+		if (!Cells.IsValidIndex(static_cast<int32>(E.CellIndex)))
+		{
+			continue;
+		}
+
+		const FTierBatchCell& SourceCell = Subdivided[static_cast<int32>(E.CellIndex)];
+		const int32 SlotIndex = SourceCell.SlotIndex;
+
+		if (!SlotCursors.IsValidIndex(SlotIndex))
+		{
+			continue;
+		}
+
+		int32& Cursor = SlotCursors[SlotIndex];
+
+		if (Cursor >= InBuffer.SlotCapacity)
+		{
+			++Dropped;
+			continue;
+		}
+
+		const int32 Idx = SlotIndex * InBuffer.SlotCapacity + Cursor;
+
+		if (!InBuffer.Positions.IsValidIndex(Idx))
+		{
+			continue;
+		}
+
+		const FVector Pos(E.Pos.X, E.Pos.Y, E.Pos.Z);
+
+		// BELT AND BRACES, and it should never fire now that the cursor bounds the loop.
+		// It stays because the consumer is the octree, whose child-index arithmetic on a
+		// non-finite coordinate walks out of its Children array and crashes releasing a
+		// garbage shared pointer -- a failure whose stack points at the octree and says
+		// nothing about where the bad value came from. One comparison is cheap insurance
+		// against ever debugging that again; if Rejected is non-zero, the entity buffer is
+		// being read past what the shader wrote.
+		if (Pos.ContainsNaN() || !FMath::IsFinite(E.Extent))
+		{
+			++Rejected;
+			continue;
+		}
+
+		InBuffer.Positions[Idx] = Pos;
+		InBuffer.Extents[Idx] = E.Extent;
+
+		// The decoratives are three decorrelated uniforms; the colour convention matches
+		// what the CPU path wrote, so the Niagara systems need no change.
+		const FVector3f Decor = E.DecodeDecor();
+		InBuffer.Colors[Idx] = FLinearColor(Decor.X, Decor.Y, Decor.Z, 1.0f);
+
+		if (InBuffer.Rotations.IsValidIndex(Idx))
+		{
+			// A unit vector from the decoratives rather than a fourth hash: the three are
+			// already decorrelated from position and from each other, and a face normal only
+			// has to be stable per entity.
+			const FVector Dir(
+				static_cast<double>(Decor.X) * 2.0 - 1.0,
+				static_cast<double>(Decor.Y) * 2.0 - 1.0,
+				static_cast<double>(Decor.Z) * 2.0 - 1.0);
+
+			InBuffer.Rotations[Idx] = Dir.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
+		}
+
+		++Cursor;
+	}
+
+	// PAD EVERY QUEUED SLOT, including the ones that received nothing. A slot left
+	// untouched still holds its previous occupant.
+	for (const FTierBatchCell& Cell : InQueuedCells)
+	{
+		if (SlotCursors.IsValidIndex(Cell.SlotIndex))
+		{
+			const int32 Count = SlotCursors[Cell.SlotIndex];
+
+			InBuffer.PadSlotDead(Cell.SlotIndex, Count);
+			OutSlotCounts[Cell.SlotIndex] = Count;
+		}
+	}
+
+	// THE DIAGNOSTIC THAT DECIDES SUBDIVISION. Probes and candidates are both field
+	// evaluations, and a universe field evaluation is a fifty-four candidate walk plus five
+	// texture fetches -- so the ratio between them is the whole cost argument. Below about
+	// 1 the probes have overtaken placement and the tier wants one subdivision level fewer;
+	// above about 9 it wants one more.
+	uint32 CandidatesEvaluated = 0;
+	for (int32 c = 0; c < Cells.Num(); ++c)
+	{
+		const int32 Base = c * UniverseEntityGen::CountersPerCell;
+		if (Counts.IsValidIndex(Base + 1))
+		{
+			CandidatesEvaluated += Counts[Base + 1];
+		}
+	}
+
+	const double Probes =
+		static_cast<double>(Cells.Num()) * FUniverseEntityGenCS::ProbesPerCell;
+
+	UE_LOG(LogTemp, Verbose,
+		TEXT("UniverseEntityGen: tier offset %d placed %d/%u accepted into %d slots over ")
+		TEXT("%d cells; C/P %.2f, dropped %d over capacity, rejected %d non-finite."),
+		InSeedOffset, Written, TotalAccepted, InQueuedCells.Num(), Cells.Num(),
+		(Probes > 0.0) ? (static_cast<double>(CandidatesEvaluated) / Probes) : 0.0,
+		Dropped, Rejected);
+
+	// A NON-FINITE RECORD IS NOT A TUNING PROBLEM. It means the scatter read past what the
+	// dispatch wrote, which is a plumbing fault rather than a field one, and it is worth
+	// saying loudly because the crash it causes surfaces inside the octree.
+	if (Rejected > 0)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("UniverseEntityGen: tier offset %d rejected %d non-finite entity records ")
+			TEXT("out of %d read against a cursor of %u. The scatter is reading beyond the ")
+			TEXT("shader's global append cursor."),
+			InSeedOffset, Rejected, Written, TotalAccepted);
+	}
+
+	return true;
+}
+
+#pragma endregion

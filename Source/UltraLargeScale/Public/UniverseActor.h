@@ -23,6 +23,7 @@ class UTextureRenderTarget2D;
 class APostProcessVolume;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
+class UVolumeTexture;
 
 
 #pragma region AUniverseActor
@@ -427,6 +428,21 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
 	UNiagaraSystem* SectorSmallCloud;
 
+	/** The packed noise volume the density field fetches, resolved from
+	 *  MaterialParams.VolumeNoise.
+	 *
+	 *  ONE ASSET, TWO CONSUMERS, RESOLVED ONCE. The material instance samples it and the
+	 *  entity-gen dispatch samples it, and they are not merely required to match -- they
+	 *  are handed the same pointer. The galaxy layer keeps a separate NoiseTexture property
+	 *  that must be set to agree with its material's, which nothing checks; placement and
+	 *  render can silently sample different assets there, and the only symptom is entities
+	 *  sitting off the structure.
+	 *
+	 *  Loaded in LoadRuntimeAssets, on the game thread, because LoadObject is not thread
+	 *  safe and the generator's dispatch path may run on a worker. */
+	UPROPERTY()
+	UVolumeTexture* FieldNoiseTexture = nullptr;
+
 #pragma endregion
 
 #pragma region Tier System - Config / State
@@ -462,6 +478,16 @@ protected:
 	 * shared ComputeBounds lambda. Called once at the start of InitializeNiagara.
 	 */
 	void BuildTierConfigs();
+
+	/** Builds the GPU batch callback for one tier. See the definition for why this is a
+	 *  factory rather than three written-out lambdas, and why InSeedOffset must never be
+	 *  renumbered. */
+	TFunction<bool(const TArray<TPair<FIntVector, int32>>&, TArray<int32>&)>
+		MakeTierBatchCallback(
+			FParticleTierConfig& InConfig,
+			FParticleTierState& InState,
+			const FTierParams& InTierParams,
+			int32 InSeedOffset);
 
 	/**
 	 * Builds a FTierStreamingContext snapshot for the current frame.

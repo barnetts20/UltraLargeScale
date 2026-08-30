@@ -1,0 +1,404 @@
+#pragma once
+
+// UniversePlacement.ush
+// Entity placement for the universe layer: how a cell decides how many candidates to
+// draw, where each one lands, and whether it survives. Nothing here reads a texture and
+// nothing here evaluates the field.
+//
+// A SEPARATE FILE FROM THE FIELD, deliberately. The galaxy layer keeps the equivalent
+// inside GalaxyDensityCore.ush, which is how it grew rather than a decision -- and that
+// core is now large enough that the placement half is hard to find in it. The two have
+// no coupling worth preserving: placement takes a density value and never asks where it
+// came from, which is the same split MakeCandidate/FinishEntity enforces at the function
+// level. Anything that samples the field includes both files; anything that only needs
+// keys and draws includes this one.
+//
+// PARITY RULES, the same ones the field is written under -- this file is compiled by the
+// shader today and by C++ the moment a debug probe wants it:
+//   - Suffix every float literal (0.5f, not 0.5). C++ types an unsuffixed literal as
+//     double, which promotes whole expressions and rounds differently from the GPU.
+//   - Guard every pow() base away from zero.
+//   - No swizzles beyond .x/.y/.z/.w, no integer vectors, no HLSL-only intrinsics.
+//
+// THE CONTRACT, which the galaxy layer established and this one copies exactly:
+//
+//   MakeUniverseCandidate   everything decided by the candidate's own key -- position,
+//                           the acceptance draw, the extent draw, the decoratives. No
+//                           field access.
+//   FinishUniverseEntity    everything that needs the density value, which the caller
+//                           supplies from whatever source it holds.
+//
+// The split is the whole point. A single "sample and place" function would have to name
+// its own density source, and naming it hardcodes one -- which is what puts the textured
+// path permanently out of reach of placement. The universe field is MORE texture
+// dependent than the galaxy's, not less: two region fetches and three warp fetches, and
+// turning them neutral changes the geometry rather than the shading. Placement that
+// cannot reach the volume texture is not placement against this field.
+
+#include "/UltraLargeScale/UniverseDensityCore.ush"
+
+// ==========================================================================
+// THE KEY LATTICE
+// ==========================================================================
+// Every key a cell derives is CellSeed + UNIVERSE_SLOT_STRIDE * n for some integer n:
+// candidates take n >= 0 and envelope probes take n < 0, so the two families cannot
+// collide however large a cell's candidate budget grows.
+//
+// THE INVARIANT IS NOT THE OBVIOUS ONE. Two keys collide only when the stride times a
+// slot difference equals the difference between two seed offsets, and the offsets below
+// are far smaller than the stride -- so growing the budget slides the whole lattice and
+// introduces nothing. What breaks it is an offset reaching the stride, or a new offset
+// landing on an existing residue modulo it.
+//
+// Residues modulo 977: candidates 0, decor 889, rounding 945. A fourth family has to
+// pick a residue distinct from all three and from their differences.
+#define UNIVERSE_SLOT_STRIDE 977
+#define UNIVERSE_DECOR_OFFSET 24337
+#define UNIVERSE_ROUND_OFFSET 51749
+
+// A four-input hash, which the field's own CellHash cannot provide: that one is keyed on
+// the cell alone and folds the seed in from the params struct, because the field wants
+// one node per cell. Placement wants many draws per cell, so the slot has to be a real
+// input rather than a perturbation of the cell coordinate.
+//
+// SAME MIXING AS THE FIELD'S HASH, and the same reasoning behind it: cast to uint BEFORE
+// multiplying, because signed overflow is undefined behaviour in C++ rather than merely
+// implementation-defined, and a compiler that can prove it happens may fold the whole
+// expression to a constant. Observed on the field's version under gcc -O2. Unsigned
+// overflow wraps by definition in both languages and matches the GPU's two's-complement
+// result bit for bit, which is the entire reason placement can be reasoned about at all.
+//
+// Suffix every multiplier with u so HLSL cannot type one as int.
+float4 UniverseKeyHash4(int InA, int InB, int InC, int InD)
+{
+    uint ua = (uint) InA;
+    uint ub = (uint) InB;
+    uint uc = (uint) InC;
+    uint ud = (uint) InD;
+
+    uint n = (ua * 73856093u) ^ (ub * 19349663u) ^ (uc * 83492791u) ^ (ud * 2654435761u);
+
+    // Two LCG rounds per component rather than a bit-mask decode. The field's fast path
+    // slices one word into four bytes, which is fine for a node offset that only has to
+    // look random; an acceptance draw compared against a probability wants more than 256
+    // levels, or the accepted fraction quantises and sparse regions round to nothing.
+    uint a = n * 1664525u + 1013904223u;
+    uint b = a * 1664525u + 1013904223u;
+    uint c = b * 1664525u + 1013904223u;
+    uint d = c * 1664525u + 1013904223u;
+
+    const float Inv = 1.0f / 4294967296.0f;
+
+    return float4((float) a * Inv, (float) b * Inv, (float) c * Inv, (float) d * Inv);
+}
+
+// Free-function form of the field's PowSafe, which is a member of UniverseDensityParams
+// and therefore needs an instance the placement path has no reason to hold. Identical
+// behaviour and the identical epsilon: guards the BASE only, because pow(0, p) is
+// undefined for p <= 0 and the compilers disagree about what it returns. The exponent
+// stays unguarded on purpose, so a negative spawn or extent exponent blows up visibly
+// rather than being silently absorbed.
+float UniversePowSafe(float x, float p)
+{
+    return (x > UNIVERSE_POW_EPSILON) ? pow(x, p) : 0.0f;
+}
+
+// ==========================================================================
+// PLACEMENT SETTINGS
+// ==========================================================================
+// PER DISPATCH, not per field. None of this describes the universe; it describes how
+// densely we choose to populate it and how big the things we put there are. That is why
+// it is a separate struct from UniverseDensityParams rather than more members on it --
+// two tiers place different entities against the identical field.
+struct UniversePlacement
+{
+    // The density that reads as a certain spawn, held inverted.
+    //
+    // PER CELL, not per dispatch, and that is what makes rejection efficient. Each cell
+    // rejects against ITS OWN probed peak, so the ratio runs order-1 across the cell
+    // instead of order-1e-3, most candidates land, and the cell cancels out of the
+    // accepted count exactly -- see the budget derivation in the compute shader.
+    float InvDensityReference;
+
+    float SpawnExponent; // 1 is the raw response; below 1 spawns more in faint regions
+    float ExtentMin;
+    float ExtentMax;
+    float ExtentExponent; // below 1 biases small, above 1 biases large
+};
+
+UniversePlacement MakeUniversePlacement(
+    float InDensityReference, // the density that reads as a certain spawn
+    float InSpawnExponent,
+    float InExtentMin, // FINAL units: divide by UnitScale before calling
+    float InExtentMax,
+    float InExtentExponent)
+{
+    UniversePlacement Q;
+
+    // Division guard, not a range limit: a reference of zero is a divide by zero, and the
+    // resulting infinity accepts every candidate in the dispatch at once.
+    Q.InvDensityReference = 1.0f / max(InDensityReference, 1e-3f);
+    Q.SpawnExponent = max(InSpawnExponent, 1e-3f);
+    Q.ExtentMin = InExtentMin;
+    Q.ExtentMax = InExtentMax;
+    Q.ExtentExponent = max(InExtentExponent, 1e-3f);
+
+    return Q;
+}
+
+// A candidate before the field has been consulted.
+struct UniverseCandidate
+{
+    float3 Pos; // caller's units
+    float3 Norm; // the same point in the field's normalized frame
+    float AcceptDraw; // uniform in [0,1), compared against the spawn probability
+    float ExtentDraw; // uniform in [0,1), decorrelated from AcceptDraw
+    float3 Decor;
+};
+
+struct UniverseEntity
+{
+    float3 Pos; // caller's units, the same frame as the cell centre passed in
+    float Extent;
+    float Density; // raw field value at Pos, before any spawn shaping
+    float3 Decor; // three decorrelated uniforms in [0,1) for colour, rotation, type
+    float bValid; // 0 = rejected; the caller skips it
+};
+
+// ==========================================================================
+// THE ANALYTIC CEILING
+// ==========================================================================
+// The largest value the field can return anywhere, for any region, from its authored
+// ranges alone -- something the galaxy layer has no equivalent of, because its density is
+// a sum of profiles with no bound short of evaluating them.
+//
+// The composition is InResolvedDensity.x * wall + InResolvedDensity.y * filament + floor,
+// with the wall term saturate(N-1) raised to a positive exponent and the filament term
+// saturate(N-2). Both saturates cap at 1 and the exponent cannot raise 1 above itself, so
+// the sum is bounded by the three resolved maxima -- and each of those is bounded by its
+// range's larger end, whatever the region channel resolves to.
+//
+// NOT A REPLACEMENT FOR PROBING. It is loose: the filament term only approaches 1 where
+// three nodes are near-exactly equidistant, which is a measure-zero set that a cell's
+// probes will not sit on, so a cell's real peak runs well below this. Rejecting against
+// it would cost several times the candidates for the same accepted count.
+//
+// IT IS A CORRECTNESS CHECK. A probed envelope above this bound cannot happen if the
+// derivation is intact, so it separates "the probes found a peak" from "something is
+// wrong upstream of the probes" -- which are otherwise the same symptom, a cell that
+// accepts far too many candidates.
+float UniverseAnalyticCeiling(UniverseDensityParams P)
+{
+    float wallMax = max(P.WallDensityRange.x, P.WallDensityRange.y);
+    float filamentMax = max(P.FilamentDensityRange.x, P.FilamentDensityRange.y);
+    float floorMax = max(P.VoidFloorRange.x, P.VoidFloorRange.y);
+
+    return max(wallMax, 0.0f) + max(filamentMax, 0.0f) + max(floorMax, 0.0f);
+}
+
+// ==========================================================================
+// PROBES
+// ==========================================================================
+// A sample point inside a cell, for estimating that cell's density ENVELOPE before any
+// candidate is drawn. The caller evaluates the field at the returned point with whatever
+// source it holds -- the same split the candidate path uses.
+//
+// EIGHT CORNERS, THEN JITTER. Corners alone miss a filament passing through the middle of
+// a cell without reaching any vertex, which both discards live cells and under-estimates
+// the envelope of the ones it keeps. Jitter alone misses a peak sitting exactly at a
+// vertex. Both happen in a cellular field -- its features ARE the surfaces between nodes,
+// and a node sits at no particular place relative to the generation grid -- so the probe
+// set does both.
+//
+// The jitter key runs DOWNWARD from the cell's seed while candidates run upward, so a
+// probe can never draw the same key as a candidate in the same cell.
+float3 MakeUniverseProbe(float3 InCellCentre, float InCellExtent,
+                         int InCellX, int InCellY, int InCellZ,
+                         int InKeySeed, uint InProbeIndex)
+{
+    if (InProbeIndex < 8u)
+    {
+        return float3(
+            InCellCentre.x + ((InProbeIndex & 1u) != 0u ? InCellExtent : -InCellExtent),
+            InCellCentre.y + ((InProbeIndex & 2u) != 0u ? InCellExtent : -InCellExtent),
+            InCellCentre.z + ((InProbeIndex & 4u) != 0u ? InCellExtent : -InCellExtent));
+    }
+
+    float4 h = UniverseKeyHash4(InCellX, InCellY, InCellZ,
+                                InKeySeed - (int) (InProbeIndex + 1u) * UNIVERSE_SLOT_STRIDE);
+
+    // Componentwise, no swizzle, and identical arithmetic to the candidate path below --
+    // which is the point: a probe and a candidate have to place a point in the cell the
+    // same way, or the envelope describes a slightly different distribution from the one
+    // being rejected against.
+    return float3(
+        InCellCentre.x + (h.x * 2.0f - 1.0f) * InCellExtent,
+        InCellCentre.y + (h.y * 2.0f - 1.0f) * InCellExtent,
+        InCellCentre.z + (h.z * 2.0f - 1.0f) * InCellExtent);
+}
+
+// ==========================================================================
+// DECORATIVE PACKING
+// ==========================================================================
+// Three decorrelated uniforms in [0,1) folded into one 32-bit word, ten bits each.
+//
+// Halves the entity record, which is readback traffic on every boundary cross. Ten bits
+// is 1024 levels per channel against the eight a colour target carries, so nothing
+// downstream can see the quantisation.
+//
+// THE WORD IS STORED IN AN INTEGER BUFFER AND MUST STAY IN ONE. Smuggling a packed
+// payload through a float channel looks equivalent and is not: an arbitrary bit pattern
+// read as a float can land on a denormal, which hardware may flush to zero, or on the
+// all-ones exponent, which is a NaN. Neither survives a round trip reliably, and both
+// fail silently on a subset of values.
+//
+// SCALAR ONLY, in both directions, so the C++ shim can compile it: the shim has no uint3
+// and no vector saturate. A vector form here fails on the C++ side alone, which is a
+// build the shader compiler will never catch.
+uint PackUniverseDecor(float3 InDecor)
+{
+    uint qx = (uint) (saturate(InDecor.x) * 1023.0f + 0.5f);
+    uint qy = (uint) (saturate(InDecor.y) * 1023.0f + 0.5f);
+    uint qz = (uint) (saturate(InDecor.z) * 1023.0f + 0.5f);
+
+    return qx | (qy << 10u) | (qz << 20u);
+}
+
+float3 UnpackUniverseDecor(uint InPacked)
+{
+    const float Inv = 1.0f / 1023.0f;
+
+    return float3(
+        (float) (InPacked & 1023u) * Inv,
+        (float) ((InPacked >> 10u) & 1023u) * Inv,
+        (float) ((InPacked >> 20u) & 1023u) * Inv);
+}
+
+// ==========================================================================
+// THE BUDGET
+// ==========================================================================
+// How many candidates a cell draws, from a real-valued budget.
+//
+// STOCHASTIC, NOT ROUNDED OR FLOORED. A cell's budget is BudgetScale x mass, and most of
+// a cosmic web is void, so across the interiors that number is a small fraction. Any
+// deterministic rounding destroys the distribution at the bottom end: a floor of 1 makes
+// every void cell draw the same count whatever it holds, so void population tracks CELL
+// COUNT rather than density, and plain rounding empties everything below half a candidate
+// instead. Both are visible as a cubic lattice, because the generation grid is cubic.
+//
+// Rounding down and adding one with probability frac() has expectation exactly InRaw, so
+// the population is right in aggregate at every density while each cell holds a whole
+// number.
+//
+// WAVE-UNIFORM BY CONSTRUCTION: the draw is keyed on the cell alone, so every lane in the
+// group computes the same count and the strided candidate loop cannot diverge. Do not key
+// it on the slot or the lane.
+uint UniverseStochasticCount(float InRaw, int InCellX, int InCellY, int InCellZ,
+                             int InKeySeed, float InCeiling)
+{
+    float r = min(max(InRaw, 0.0f), InCeiling);
+
+    // NOT named `frac`. That is an HLSL intrinsic, and shadowing one with a local is
+    // accepted by some compilers and rejected by others -- the same family of trap as
+    // naming a float `linear`.
+    float whole = floor(r);
+    float fracPart = r - whole;
+
+    float4 h = UniverseKeyHash4(InCellX, InCellY, InCellZ, InKeySeed + UNIVERSE_ROUND_OFFSET);
+
+    return (uint) whole + ((h.x < fracPart) ? 1u : 0u);
+}
+
+// ==========================================================================
+// ACCEPTANCE
+// ==========================================================================
+// The probability a candidate at this density survives, against the cell's own envelope.
+//
+// The ratio is order-1 across a cell because the reference IS that cell's probed peak,
+// which is what keeps the accepted fraction high enough that the candidate budget is not
+// mostly waste. The exponent shapes it: below 1 lifts faint regions, above 1 concentrates
+// into the peaks.
+float UniverseSpawnProbability(float InDensity, UniversePlacement InPlace)
+{
+    float ratio = saturate(max(InDensity, 0.0f) * InPlace.InvDensityReference);
+
+    return saturate(UniversePowSafe(ratio, max(InPlace.SpawnExponent, 1e-3f)));
+}
+
+// ==========================================================================
+// CANDIDATES
+// ==========================================================================
+// One candidate, decided entirely by its own key. Everything that does not need the
+// field.
+//
+// InCellCentre and InCellExtent describe the cell in the caller's units; InInvFieldExtent
+// converts into the normalized frame the field is defined in. The caller already holds
+// that reciprocal, and passing it beats storing a second extent here that could disagree
+// with the one the proxy uses.
+//
+// NOTE WHAT IS ABSENT: the field offset. The proxy is pegged to the camera and the offset
+// is how far the field has scrolled under it, which is a property of the VIEW. The field
+// itself is static in the caller's space, so placement needs no offset at all and the
+// magnitudes here stay small -- see the note in the compute shader.
+UniverseCandidate MakeUniverseCandidate(float3 InCellCentre, float InCellExtent,
+                                        float InInvFieldExtent, int InCellX, int InCellY,
+                                        int InCellZ, int InSlot)
+{
+    UniverseCandidate C;
+
+    float4 h = UniverseKeyHash4(InCellX, InCellY, InCellZ, InSlot);
+
+    C.Pos = float3(
+        InCellCentre.x + (h.x * 2.0f - 1.0f) * InCellExtent,
+        InCellCentre.y + (h.y * 2.0f - 1.0f) * InCellExtent,
+        InCellCentre.z + (h.z * 2.0f - 1.0f) * InCellExtent);
+
+    C.Norm = float3(C.Pos.x * InInvFieldExtent,
+                    C.Pos.y * InInvFieldExtent,
+                    C.Pos.z * InInvFieldExtent);
+
+    C.AcceptDraw = h.w;
+
+    // MUST NOT REUSE AcceptDraw, or share a hash component with it. Acceptance keeps only
+    // candidates whose draw fell below p, so among survivors that value is biased low --
+    // and in a void, where p is small, only the very lowest draws survive at all. Sharing
+    // it correlates extent with local density and leaves the voids holding systematically
+    // tiny entities, which is the opposite of what a cosmic web should look like: the
+    // isolated field galaxies would all be dwarfs. A scrambled recombination of the other
+    // three costs four ops against a second hash.
+    float e = h.x * 7.31f + h.y * 3.17f + h.z * 11.71f;
+    C.ExtentDraw = e - floor(e);
+
+    // A second key for the decorative values, so colour is stable for a given entity
+    // without being tied to where it landed.
+    float4 g = UniverseKeyHash4(InCellX, InCellY, InCellZ, InSlot + UNIVERSE_DECOR_OFFSET);
+    C.Decor = float3(g.x, g.y, g.z);
+
+    return C;
+}
+
+// Everything that does need the field. InDensity is the RAW value at C.Norm, obtained
+// however the caller obtained it -- and for this layer that means through the compute
+// harness, which samples the same volume texture the material does.
+//
+// IT MUST BE THE UNFADED VALUE. UniverseRayMarch multiplies by BoundsFade after sampling;
+// SampleAtPosition does not. Passing a faded density here would make where an entity
+// lands depend on where the player was standing when the cell was generated, which is
+// exactly the class of view-dependence the cell/frac coordinate design exists to prevent.
+UniverseEntity FinishUniverseEntity(UniversePlacement InPlace, UniverseCandidate InC,
+                                    float InDensity)
+{
+    UniverseEntity E;
+
+    E.Pos = InC.Pos;
+    E.Density = InDensity;
+    E.Decor = InC.Decor;
+    E.bValid = (InC.AcceptDraw < UniverseSpawnProbability(InDensity, InPlace))
+        ? 1.0f : 0.0f;
+
+    E.Extent = InPlace.ExtentMin
+        + (InPlace.ExtentMax - InPlace.ExtentMin)
+          * UniversePowSafe(InC.ExtentDraw, max(InPlace.ExtentExponent, 1e-3f));
+
+    return E;
+}
