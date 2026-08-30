@@ -158,7 +158,7 @@ struct ULTRALARGESCALE_API FUniverseLatticeParams
 
 	/** Small cell size in normalized units. Larger values give a coarser web. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lattice", meta = (ClampMin = "0.000001"))
-	float CellSizeSmall = 0.4f;
+	float CellSizeSmall = 0.3f;
 
 	/** Large cell size. QUANTIZED BY THE DERIVATION to a whole multiple of CellSizeSmall,
 	 *  and that is precision rather than convenience. The field offset arrives as an exact
@@ -181,7 +181,7 @@ struct ULTRALARGESCALE_API FUniverseLatticeParams
 	 *  At or below CellSizeSmall this collapses to a single lattice and skips the second
 	 *  neighbourhood walk entirely, which is roughly half the cost of a sample. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lattice", meta = (ClampMin = "0.0"))
-	float CellSizeLarge = 1.2f;
+	float CellSizeLarge = .9f;
 
 	/** Exponent shaping where between the two lattices a region sits. NOT a range: the two
 	 *  extremes it interpolates are the lattices themselves, so it has no min/max of its
@@ -1007,19 +1007,19 @@ struct ULTRALARGESCALE_API FUniverseParams : public FBaseParams {
 
 		// Tier streaming params: depths evenly spaced by 2 (ratio 4 per tier).
 		LargeTier.GridDepth = 1;
-		LargeTier.GenerationSubdivision = 1;
+		LargeTier.GenerationSubdivision = 2;
 		LargeTier.NeighborhoodRadius = 1;
-		LargeTier.SlotCapacity = 1000;
+		LargeTier.SlotCapacity = 500;
 
 		MidTier.GridDepth = 3;
-		MidTier.GenerationSubdivision = 1;
+		MidTier.GenerationSubdivision = 2;
 		MidTier.NeighborhoodRadius = 1;
-		MidTier.SlotCapacity = 500;
+		MidTier.SlotCapacity = 200;
 
 		SmallTier.GridDepth = 5;
-		SmallTier.GenerationSubdivision = 1;
+		SmallTier.GenerationSubdivision = 2;
 		SmallTier.NeighborhoodRadius = 1;
-		SmallTier.SlotCapacity = 500;
+		SmallTier.SlotCapacity = 200;
 
 		// Scale ranges derived from MaxEntityScale (1e22) + depth spacing (2).
 		// 2^2 = 4, so each tier covers two octaves of scale (64x total spread):
