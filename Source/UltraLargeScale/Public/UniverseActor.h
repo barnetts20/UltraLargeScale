@@ -261,9 +261,11 @@ protected:
 	 *  entity generation will place against -- the same paradigm the galaxy layer's
 	 *  analytic marcher already uses.
 	 *
-	 *  IT SUPERSEDES THE GAS SPRITE LAYER. SectorGasCloud rides the Large tier's positions
-	 *  and paints nebulae with a separate material; the field is both more accurate and
-	 *  better looking, and the sprites come out once this is on screen. */
+	 *  IT REPLACED THE GAS SPRITE LAYER. SectorGasCloud rode the Large tier's positions and
+	 *  painted nebulae with a separate material at a much larger extent; it is gone. The
+	 *  field is more accurate and better looking, and it costs neither the second set of
+	 *  per-frame and per-transition buffer writes nor a screenful of very large
+	 *  translucent quads. */
 	FString VolumetricMaterialPath = FString("/UltraLargeScale/Sector/MT_UniverseRaymarchAnalytic_Inst.MT_UniverseRaymarchAnalytic_Inst");
 
 	/** Pushes the field and march parameter set onto a material instance.
@@ -278,6 +280,17 @@ protected:
 	 *  Scaling or combining anything here instead would desync the render from placement,
 	 *  which is what the shared field exists to prevent. */
 	void PushDensityParams(UMaterialInstanceDynamic* InMID) const;
+
+	/** THE MARCH CONTROLS, pushed UNCONDITIONALLY and separately from the field.
+	 *
+	 *  They were briefly folded into PushDensityParams and gated with it, which was wrong:
+	 *  none of them reaches MakeUniverseDensityParams, so the reason to leave the field to
+	 *  the instance -- that the instance carries tuned values the struct's defaults would
+	 *  clobber -- does not apply to them. They are performance controls, they are the
+	 *  first thing reached for when the march chugs, and leaving them on the asset makes
+	 *  the baseline the marcher actually runs at invisible from the code. The galaxy layer
+	 *  pushes all four of its own for the same reason. */
+	void PushMarchParams(UMaterialInstanceDynamic* InMID) const;
 
 	/** THE FIELD OFFSET IS THE ONLY PER-FRAME PARAMETER, and it is why this layer needs a
 	 *  per-frame push at all where the galaxy layer does not.
@@ -414,16 +427,11 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
 	UNiagaraSystem* SectorSmallCloud;
 
-	/** Gas cloud sprite system. Paired with the Large tier; shares positions
-	 *  but uses a separate material and extent range for nebula rendering. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
-	UNiagaraSystem* SectorGasCloud;
-
 #pragma endregion
 
 #pragma region Tier System - Config / State
 
-	/** Large-tier config (cluster + gas). Depth/radius/capacity come from
+	/** Large-tier config. Depth/radius/capacity come from
 	 *  UniverseParams.LargeTier (defaults: GridDepth 1, NeighborhoodRadius 1). */
 	FParticleTierConfig LargeTierConfig;
 	FParticleTierState  LargeTierState;

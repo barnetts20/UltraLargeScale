@@ -56,13 +56,15 @@ public:
 	 *  stays decoupled from the actor's tree extent multiplier and grid-depth
 	 *  conventions. */
 
-	 /** Large tier: generates cluster + gas particles using batched noise.
-	  *  OutSlotCount receives the number of accepted particles. */
+	 /** Large tier: generates cluster particles using batched noise. OutSlotCount
+	  *  receives the number of accepted particles.
+	  *
+	  *  ONE BUFFER. The gas companion buffer is gone -- the universe raymarch replaced
+	  *  that sprite layer -- so this tier is now shaped like Mid and Small. */
 	void GenerateLargeTierNode(
 		const FIntVector& InCoord,
 		int32 InSlotIndex,
 		FNiagaraParticleBuffer& InClusterBuffer,
-		FNiagaraParticleBuffer& InGasBuffer,
 		const FVector& InNodeCenter,
 		int32& OutSlotCount) const;
 

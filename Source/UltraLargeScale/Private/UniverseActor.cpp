@@ -371,12 +371,12 @@ void AUniverseActor::PushFieldOffset(UMaterialInstanceDynamic* InMID) const
 	// core then casts back through (int), which bounds it again at int32. Both limits sit
 	// under what the cell/frac design is built to survive -- see FUniverseFieldOffset.
 	// This is the line that becomes a high/low pair per axis when traversal gets there.
-	InMID->SetVectorParameterValue(TEXT("FieldOffsetCell"), FLinearColor(
+	InMID->SetVectorParameterValue(TEXT("OffsetCell"), FLinearColor(
 		static_cast<float>(Offset.Cell.X),
 		static_cast<float>(Offset.Cell.Y),
 		static_cast<float>(Offset.Cell.Z), 0.0f));
 
-	InMID->SetVectorParameterValue(TEXT("FieldOffsetFrac"), FLinearColor(
+	InMID->SetVectorParameterValue(TEXT("OffsetFrac"), FLinearColor(
 		static_cast<float>(Offset.Frac.X),
 		static_cast<float>(Offset.Frac.Y),
 		static_cast<float>(Offset.Frac.Z), 0.0f));
@@ -416,9 +416,9 @@ void AUniverseActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
 	SetVec(TEXT("VoidFloorRange"), A.VoidFloorRange);
 
 	// --- ORGANICS ---
-	SetVec(TEXT("VoidSizeSpreadRange"), A.VoidSizeSpreadRange);
-	SetVec(TEXT("WarpAmountLargeRange"), A.WarpAmountLargeRange);
-	SetVec(TEXT("WarpAmountSmallRange"), A.WarpAmountSmallRange);
+	SetVec(TEXT("VoidSpreadRange"), A.VoidSizeSpreadRange);
+	SetVec(TEXT("WarpLargeRange"), A.WarpAmountLargeRange);
+	SetVec(TEXT("WarpSmallRange"), A.WarpAmountSmallRange);
 	SetVec(TEXT("WarpLargeWeights"), A.WarpLargeWeights);
 	SetVec(TEXT("WarpSmallWeights"), A.WarpSmallWeights);
 	SetVec(TEXT("RegionScales"), A.RegionScales);
@@ -429,23 +429,30 @@ void AUniverseActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
 	// how the field is being VIEWED -- but it still travels through the same derivation,
 	// and leaving it to the asset would let the render disagree with the code about where
 	// the horizon is.
+	// A REAL PARAMETER NOW. The march applies the fade rather than the field, so this is
+	// the one value in the set that describes how the field is being VIEWED -- but it
+	// travels through the same derivation, and leaving it to the asset would let the render
+	// disagree with the code about where the horizon is.
 	InMID->SetScalarParameterValue(TEXT("BoundsFadeStart"), A.BoundsFadeStart);
 
-	// --- MARCH ---
-	// ALL OF THEM, not just MaxSteps. Left on the material asset, the baseline the marcher
-	// actually runs at is invisible from the code and the step count cannot be reasoned
-	// about against it.
-	InMID->SetScalarParameterValue(TEXT("StepCount"), M.VolumeStepCount);
+	// --- MARCH --- NOT PUSHED HERE. See PushMarchParams; it runs unconditionally.
+}
+
+void AUniverseActor::PushMarchParams(UMaterialInstanceDynamic* InMID) const
+{
+	if (!InMID) return;
+
+	const FUniverseMaterialParams& M = UniverseParams.MaterialParams;
+
+	// FOUR, AND ONLY FOUR. The iteration bound is derived in the Custom node from
+	// StepBudget, the step floor comes from the field's own MinFeatureStep, and the dither
+	// is computed per pixel in the node -- so none of those three is a value this side has
+	// any business supplying. Each was a pin once and each was removed for a stated reason;
+	// see the notes on FUniverseMaterialParams.
+	InMID->SetScalarParameterValue(TEXT("StepBudget"), M.VolumeStepBudget);
 	InMID->SetScalarParameterValue(TEXT("StepGrowth"), M.VolumeStepGrowth);
-	InMID->SetScalarParameterValue(TEXT("MaxSteps"), M.VolumeMaxSteps);
 	InMID->SetScalarParameterValue(TEXT("DensityScale"), M.VolumeDensityScale);
 	InMID->SetScalarParameterValue(TEXT("NoisePower"), M.VolumeNoisePower);
-	InMID->SetScalarParameterValue(TEXT("Jitter"), M.VolumeDither);
-
-	// The marcher wants a LENGTH; the property is a step CEILING. Derived here rather than
-	// authored, for the reason the galaxy layer derives its own: authoring the length hides
-	// the count.
-	InMID->SetScalarParameterValue(TEXT("MinStep"), M.GetMinStep());
 }
 
 void AUniverseActor::InitializeVolumetric()
@@ -509,6 +516,10 @@ void AUniverseActor::InitializeVolumetric()
 			// instance, so there is nothing for it to clobber and nothing else can supply it.
 			Self->PushFieldOffset(Self->VolumeMaterial);
 
+			// THE MARCH ALWAYS. Performance controls, not look controls; nothing on the
+			// instance is worth protecting from them.
+			Self->PushMarchParams(Self->VolumeMaterial);
+
 			// THE FIELD ONLY WHEN ASKED. See bPushDensityParams -- while the instance is
 			// authoritative, pushing would overwrite tuned values with struct defaults.
 			if (Self->UniverseParams.MaterialParams.bPushDensityParams)
@@ -547,12 +558,16 @@ void AUniverseActor::InitializeVolumetric()
 			// here that does not match FUniverseDensityParams means the authored struct is
 			// stale rather than that anything is broken.
 			const float ResolvedCell = Self->GetEffectiveCellSizeSmall();
+			const FUniverseMaterialParams& MP = Self->UniverseParams.MaterialParams;
 			UE_LOG(LogTemp, Log,
 				TEXT("AUniverseActor::InitializeVolumetric - proxy spans %.1f small cells ")
-				TEXT("(resolved CellSizeSmall %.4f, authored %.4f)."),
+				TEXT("(resolved CellSizeSmall %.4f, authored %.4f); march budget %.0f at ")
+				TEXT("growth %.2f resolves to ~%.0f actual steps."),
 				2.0f / FMath::Max(ResolvedCell, 1e-6f),
 				ResolvedCell,
-				Self->UniverseParams.DensityParams.Lattice.CellSizeSmall);
+				Self->UniverseParams.DensityParams.Lattice.CellSizeSmall,
+				MP.VolumeStepBudget, MP.VolumeStepGrowth,
+				MP.GetEffectiveStepCount());
 
 			CompletionPromise.SetValue();
 		});
@@ -584,7 +599,6 @@ void AUniverseActor::LoadRuntimeAssets()
 	if (!SectorLargeCloud) SectorLargeCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorLarge.NG_SectorLarge"));
 	if (!SectorMidCloud)   SectorMidCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorMid.NG_SectorMid"));
 	if (!SectorSmallCloud) SectorSmallCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorSmall.NG_SectorSmall"));
-	if (!SectorGasCloud)   SectorGasCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorGas.NG_SectorGas"));
 }
 
 void AUniverseActor::BuildTierConfigs()
@@ -609,12 +623,16 @@ void AUniverseActor::BuildTierConfigs()
 	LargeTierConfig.GridDepth = UniverseParams.LargeTier.GridDepth;
 	LargeTierConfig.NeighborhoodRadius = UniverseParams.LargeTier.NeighborhoodRadius;
 	LargeTierConfig.SlotCapacity = UniverseParams.LargeTier.SlotCapacity;
-	LargeTierConfig.NiagaraAssets = { SectorLargeCloud, SectorGasCloud };
-	LargeTierConfig.bWantRotations = { true, false };
+	// ONE ASSET, as Mid and Small have. The second entry was NG_SectorGas, a nebula
+	// sprite layer sharing the cluster positions at a much larger extent; the universe
+	// raymarch supersedes it. FParticleTierConfig's multi-buffer support stays -- it is
+	// generic, and this tier simply no longer uses it.
+	LargeTierConfig.NiagaraAssets = { SectorLargeCloud };
+	LargeTierConfig.bWantRotations = { true };
 	LargeTierConfig.OctreeInsertBufferIndex = 0;
 	LargeTierConfig.GenerateCallback = [this](const FIntVector& Coord, int32 SlotIndex, TArray<FNiagaraParticleBuffer*>& Buffers) {
 		const FVector NodeCenter = GridCoordToCenter(Coord, LargeTierConfig.GridDepth);
-		UniverseGenerator.GenerateLargeTierNode(Coord, SlotIndex, *Buffers[0], *Buffers[1], NodeCenter, LargeTierState.SlotCounts[SlotIndex]);
+		UniverseGenerator.GenerateLargeTierNode(Coord, SlotIndex, *Buffers[0], NodeCenter, LargeTierState.SlotCounts[SlotIndex]);
 		};
 
 	// Mid tier

@@ -146,7 +146,7 @@ struct ULTRALARGESCALE_API FUniverseLatticeParams
 
 	/** Small cell size in normalized units. Larger values give a coarser web. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lattice", meta = (ClampMin = "0.000001"))
-	float CellSizeSmall = 0.05f;
+	float CellSizeSmall = 0.4f;
 
 	/** Large cell size. QUANTIZED BY THE DERIVATION to a whole multiple of CellSizeSmall,
 	 *  and that is precision rather than convenience. The field offset arrives as an exact
@@ -160,7 +160,7 @@ struct ULTRALARGESCALE_API FUniverseLatticeParams
 	 *  At or below CellSizeSmall this collapses to a single lattice and skips the second
 	 *  neighbourhood walk entirely, which is roughly half the cost of a sample. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lattice", meta = (ClampMin = "0.0"))
-	float CellSizeLarge = 0.2f;
+	float CellSizeLarge = 1.4f;
 
 	/** Exponent shaping where between the two lattices a region sits. NOT a range: the two
 	 *  extremes it interpolates are the lattices themselves, so it has no min/max of its
@@ -189,7 +189,7 @@ struct ULTRALARGESCALE_API FUniverseWallParams
 	 *  at similar numbers is what makes the field read as foam; the filament wants to be
 	 *  several times this. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wall")
-	FUniverseVarianceRange Density = FUniverseVarianceRange(0.6f, 1.8f);
+	FUniverseVarianceRange Density = FUniverseVarianceRange(0.0f, 1.0f, 6.0f);
 
 	/** Exponent on the wall term, saturate(N - 1). 1 is the bare saturate; up is the
 	 *  direction that clears voids.
@@ -209,7 +209,7 @@ struct ULTRALARGESCALE_API FUniverseWallParams
 	 *  Below zero is a division-by-zero shape that lights the void up rather than clearing
 	 *  it; exactly 0 makes every non-zero base read as 1 and floods the field. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wall")
-	FUniverseVarianceRange Falloff = FUniverseVarianceRange(2.0f, 5.0f);
+	FUniverseVarianceRange Falloff = FUniverseVarianceRange(2.0f, 12.0f, 1.0f);
 };
 
 
@@ -226,7 +226,7 @@ struct ULTRALARGESCALE_API FUniverseFilamentParams
 	 *  saturate(N - 2), and its threshold sits above the aggregate tail rather than inside
 	 *  it, so it never needed the correction the wall term does. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Filament")
-	FUniverseVarianceRange Density = FUniverseVarianceRange(2.5f, 7.0f);
+	FUniverseVarianceRange Density = FUniverseVarianceRange(0.5f, 1.5f, 0.5f);
 };
 
 
@@ -245,7 +245,7 @@ struct ULTRALARGESCALE_API FUniverseVoidParams
 	 *  range spanning zero puts the negative end somewhere, and a noise channel decides
 	 *  where. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Void")
-	FUniverseVarianceRange Floor = FUniverseVarianceRange(0.0f, 0.04f);
+	FUniverseVarianceRange Floor = FUniverseVarianceRange(0.0f, 0.5f, 8.0f);
 
 	/** Per-node power-diagram offset, so voids differ in size rather than tiling at one
 	 *  scale.
@@ -263,7 +263,7 @@ struct ULTRALARGESCALE_API FUniverseVoidParams
 	 *  against a form with no bound at all is very likely too large here -- start an order
 	 *  lower and come up. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Void")
-	FUniverseVarianceRange SizeSpread = FUniverseVarianceRange(0.02f, 0.08f);
+	FUniverseVarianceRange SizeSpread = FUniverseVarianceRange(0.0f, 0.5f, 2.0f);
 
 	/** Rides SizeSpread's own .w. Above 1 makes large voids rare and small ones common.
 	 *
@@ -278,7 +278,7 @@ struct ULTRALARGESCALE_API FUniverseVoidParams
 	 *  result. Restoring the general path costs 54 pow calls per sample, which is a bad
 	 *  trade; the cheap version is a lerp between the fixed exponents 2 and 4. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Void", meta = (ClampMin = "0.0"))
-	float SizeSkew = 4.0f;
+	float SizeSkew = 1.0f;
 };
 
 
@@ -295,7 +295,7 @@ struct ULTRALARGESCALE_API FUniverseWarpOctaveParams
 	 *  NOT THE CONVENTION THE RETIRED LATTICE PATH USED -- that one centred and doubled,
 	 *  so a value carried over from it must be doubled to displace the same distance. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Warp")
-	FUniverseVarianceRange Amount = FUniverseVarianceRange(0.15f, 0.45f);
+	FUniverseVarianceRange Amount = FUniverseVarianceRange(0.333f, 0.666f, 1.0f);
 
 	/** Texture repeats per small cell, riding Amount's .w.
 	 *
@@ -311,7 +311,7 @@ struct ULTRALARGESCALE_API FUniverseWarpOctaveParams
 	 *
 	 *  FIXED ACROSS THE DRAW, not ranged. That was tried and rolled back. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Warp", meta = (ClampMin = "0.0"))
-	float Scale = 0.050049f;
+	float Scale = 0.099854f;
 
 	/** Per-axis gain on the decoded displacement. Elementwise, not a dot product -- a warp
 	 *  needs all three axes, unlike a scalar site's weights. 0 flattens the warp along
@@ -350,19 +350,30 @@ struct ULTRALARGESCALE_API FUniverseRegionParams
 	/** Repeats per small cell for the STRUCTURE field, the coarser of the two. Drives the
 	 *  lattice blend, void size spread and skew, feature width, and the large warp octave
 	 *  -- everything that decides what SHAPE the web has, which changes over provinces
-	 *  rather than patches. Default 53/4096, about 77 cells. */
+	 *  rather than patches.
+	 *
+	 *  Default 21/4096, and THAT IS A NUDGE OFF THE AUTHORED 0.005, which quantizes to
+	 *  20/4096 and shares a factor of 10 with the large warp octave's 410 -- the two
+	 *  re-align every 409 cells, and the proxy is five cells across, so that repeat is
+	 *  eighty proxy widths and entirely reachable in one session. 21 is odd and coprime to
+	 *  everything else in the set. The visual difference between 0.005 and 0.005127 is
+	 *  nothing; the difference between a repeating field and a non-repeating one is not. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Region", meta = (ClampMin = "0.0"))
-	float ScaleStructure = 0.012939f;
+	float ScaleStructure = 0.005127f;
 
 	/** Repeats per small cell for the APPEARANCE field. Drives wall density and falloff,
-	 *  filament density, void floor, and the small warp octave. Default 119/4096, about 34
-	 *  cells.
+	 *  filament density, void floor, and the small warp octave.
+	 *
+	 *  Default 41/4096, which is what the authored 0.010 already quantizes to, and odd, so
+	 *  it stays. Note the pairing it was in: 41 against the large warp octave's 410 is a
+	 *  shared factor of 41, re-aligning every NINETY-NINE CELLS -- twenty proxy widths, the
+	 *  worst repeat in the set, and the reason that warp scale moved to 409/4096.
 	 *
 	 *  IT CURRENTLY REUSES THE STRUCTURE FIELD'S FOUR ARCHETYPES at a different frequency.
 	 *  A second asset with four different ones would remove the last correlation the
 	 *  channel reallocation could not. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Region", meta = (ClampMin = "0.0"))
-	float ScaleAppearance = 0.029053f;
+	float ScaleAppearance = 0.010010f;
 };
 
 
@@ -534,7 +545,7 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 	 *  the parameters can produce, derived from this and the small cell size together.
 	 *  Widening it makes the march cheaper as well as softer. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density")
-	FUniverseVarianceRange FeatureWidth = FUniverseVarianceRange(0.18f, 0.35f);
+	FUniverseVarianceRange FeatureWidth = FUniverseVarianceRange(0.1f, 0.333f, 2.0f);
 
 	/** The octave that BENDS the web. Large scale with small amplitude is grain rather
 	 *  than curvature; small scale with large amplitude translates whole regions rigidly
@@ -586,8 +597,8 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 		// rather than left to FUniverseWarpOctaveParams's own. Amplitude two orders lower
 		// and a scale ten times higher: fine grain against coarse bend. See the fold
 		// ceiling note on the member.
-		WarpSmall.Amount = FUniverseVarianceRange(0.008f, 0.020f);
-		WarpSmall.Scale = 0.5f;
+		WarpSmall.Amount = FUniverseVarianceRange(0.04f, 0.06f, 2.0f);
+		WarpSmall.Scale = 0.75f;
 		WarpSmall.LatticeFollow = 0.0f; // ignored; the small octave is pinned at full follow
 	}
 
@@ -783,49 +794,37 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 {
 	GENERATED_BODY()
 
-	/** A STEP BUDGET, NOT A STEP COUNT. Growth means the steps overshoot the chord before
-	 *  the budget is spent and the loop finishes early: the actual count is
-	 *  StepCount * ln(1 + growth) / growth, which is 0.69 of the budget at growth 1 and
-	 *  0.46 at growth 3. See GetEffectiveStepCount. */
+	/** A CEILING ON THE STEP COUNT, NOT A FLOOR, which is what the material's old
+	 *  MinSamples name had backwards. Growth only ever lengthens steps, so every step is
+	 *  at least span / StepBudget and the actual count is StepBudget * ln(1+g)/g -- equal
+	 *  to the budget only at growth 0, 0.69 of it at growth 1, 0.46 at growth 3. See
+	 *  GetEffectiveStepCount. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
 		meta = (ClampMin = "8.0", ClampMax = "1024.0"))
-	float VolumeStepCount = 192.0f;
+	float VolumeStepBudget = 32.0f;
 
 	/** How fast steps lengthen along the chord; 0 is uniform stepping. The cheapest quality
 	 *  lever here, since it trades far-field detail for step count directly and the far
 	 *  field is where the bounds fade is taking the field out anyway. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
 		meta = (ClampMin = "0.0", ClampMax = "8.0"))
-	float VolumeStepGrowth = 1.0f;
+	float VolumeStepGrowth = 0.1f;
 
-	/** Steps across the chord at the finest the march may run -- the CEILING on cost, and
-	 *  what MinStep is derived from, as 2 / this. Authoring the length directly hides the
-	 *  count: 0.005 units reads as a small number and means four hundred steps.
-	 *
-	 *  THE FIELD CAN RAISE THIS FLOOR BUT NOT LOWER IT. The march takes the larger of this
-	 *  and MinFeatureStep, half the narrowest wall the parameters can produce, derived from
-	 *  FeatureWidth and CellSizeSmall together. An absolute pin cannot do that job alone --
-	 *  it has no knowledge of the cell size and is wrong the moment the cell size moves --
-	 *  so this binds only where the budget asks for more detail than the field can
-	 *  express. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
-		meta = (ClampMin = "8.0", ClampMax = "2048.0"))
-	float VolumeStepCeiling = 384.0f;
-
-	/** Hard bound on iterations. A SAFETY STOP, not the step count -- StepCount and the
-	 *  growth rate set the count between them, so this should sit comfortably above the
-	 *  budget rather than near it. Reaching it means the budget is not being respected,
-	 *  and raising it hides that. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
-		meta = (ClampMin = "1.0", ClampMax = "2048.0"))
-	float VolumeMaxSteps = 512.0f;
+	// NO STEP CEILING AND NO ITERATION BOUND HERE, and both were removed rather than
+	// forgotten. The march's step floor is P.MinFeatureStep -- half the narrowest wall the
+	// parameters can produce, derived in the core from FeatureWidth and CellSizeSmall
+	// together -- and an authored absolute cannot compete with a floor that knows the cell
+	// size. The loop bound is derived in the Custom node from StepBudget, because the
+	// budget already bounds the count and an authored bound could therefore only truncate:
+	// a truncated march looks identical to one that finished, minus the far half of the
+	// volume.
 
 	/** Multiplier on density before the march's exp(-density * scale * h). The one genuine
 	 *  look control here: the field's own densities set the RATIO between walls, filaments
 	 *  and the floor, and this sets how opaque the result is. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
 		meta = (ClampMin = "0.0"))
-	float VolumeDensityScale = 1.0f;
+	float VolumeDensityScale = 4.0f;
 
 	/** Exponent applied to each sample before accumulation. Exactly 1 skips the pow -- the
 	 *  march tests for it. Above 1 deepens voids and thins sheets; below 1 flattens toward
@@ -835,16 +834,11 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 		meta = (ClampMin = "0.0"))
 	float VolumeNoisePower = 1.0f;
 
-	/** Shortens the FIRST step only, per pixel, clamped to [0.05, 1] by the march.
-	 *
-	 *  WITHOUT IT EVERY RAY STARTS AT THE SAME PLACE and takes identical steps, so sample
-	 *  positions lock to the field across every pixel at once -- structured aliasing that
-	 *  swims as the field scrolls under the proxy, which reads as the field boiling rather
-	 *  than as a static artifact. It costs no path length: the loop clamps the last step to
-	 *  the exit, so every ray covers the same span whatever its offset. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
-		meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float VolumeDither = 1.0f;
+	// NO DITHER PIN. It is computed per pixel inside the Custom node, from SvPosition and
+	// the frame index, because Parameters and View exist only inside the generated material
+	// function -- and there is no case for disabling it in a shipped material. A debug
+	// toggle would be lerp(1, jitter, k) in the node with a new pin, not a value pushed
+	// from here.
 
 	/** WHO OWNS THE FIELD PARAMETERS: FUniverseDensityParams, or the material instance.
 	 *
@@ -866,7 +860,7 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 	 *  and it surfaces as a parameter that keeps its authored value with no warning
 	 *  anywhere. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	bool bPushDensityParams = false;
+	bool bPushDensityParams = true;
 
 	/** The packed noise volume the field fetches for both region variances and both warp
 	 *  octaves.
@@ -881,30 +875,27 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
 	FString VolumeNoise = "/UltraLargeScale/VolumeTextures/VT_PerlinWorley_Balanced";
 
-	/** Shortest step, in normalized space where the proxy spans -1 to 1. */
-	float GetMinStep() const
-	{
-		return 2.0f / FMath::Max(VolumeStepCeiling, 1.0f);
-	}
-
-	/** Steps the march will actually take, as opposed to the budget it was given.
-	 *  Diagnostic rather than plumbed anywhere -- but it is the number to compare against
-	 *  VolumeMaxSteps, since the budget alone looks like it fits when it does not. */
+	/** Steps the march will actually take, as opposed to the budget it was given. The two
+	 *  diverge fast: at growth 4 a budget of 32 resolves to about 13. Diagnostic rather
+	 *  than plumbed anywhere, but it is the number that describes the cost. */
 	float GetEffectiveStepCount() const
 	{
 		const float G = FMath::Max(VolumeStepGrowth, 0.0f);
 		if (G < UE_SMALL_NUMBER)
 		{
-			return VolumeStepCount;
+			return VolumeStepBudget;
 		}
-		return VolumeStepCount * FMath::Loge(1.0f + G) / G;
+		return VolumeStepBudget * FMath::Loge(1.0f + G) / G;
 	}
 };
 
 
 /** Universe-layer generation parameters: the cosmic-web density field, the march that
  *  draws it, the legacy noise graph that still drives cluster placement, per-tier
- *  streaming configs, gas layer, and scale derivation. */
+ *  streaming configs, and scale derivation.
+ *
+ *  THE GAS LAYER IS GONE. GasExtentMinMultiplier and GasExtentMaxMultiplier sized a
+ *  nebula sprite that shared the Large tier's positions; the raymarch replaced it. */
 USTRUCT(BlueprintType)
 struct ULTRALARGESCALE_API FUniverseParams : public FBaseParams {
 	GENERATED_BODY()
@@ -960,22 +951,6 @@ struct ULTRALARGESCALE_API FUniverseParams : public FBaseParams {
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Small")
 	FTierParams SmallTier;
-
-#pragma endregion
-
-#pragma region Gas Layer Params
-
-	/** Gas sprite extent as a multiplier of the per-particle cluster extent:
-	 *  GasExtent = ClusterExtent * Lerp(GasExtentMinMultiplier,
-	 *  GasExtentMaxMultiplier, Density). Keeps gas in the same coordinate space
-	 *  as cluster sprites.
-	 *
-	 *  SUPERSEDED BY THE RAY MARCH. These come out with SectorGasCloud. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gas")
-	float GasExtentMinMultiplier = 2000.0;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gas")
-	float GasExtentMaxMultiplier = 20000.0;
 
 #pragma endregion
 

@@ -77,15 +77,17 @@ TArray<uint8> UniverseDataGenerator::SampleNoiseVolume(int InNoiseResolution, co
 
 #pragma region Tier Generation Callbacks
 
-void UniverseDataGenerator::GenerateLargeTierNode(const FIntVector& InCoord, int32 InSlotIndex, FNiagaraParticleBuffer& InClusterBuffer, FNiagaraParticleBuffer& InGasBuffer, const FVector& InNodeCenter, int32& OutSlotCount) const {
+void UniverseDataGenerator::GenerateLargeTierNode(const FIntVector& InCoord, int32 InSlotIndex, FNiagaraParticleBuffer& InClusterBuffer, const FVector& InNodeCenter, int32& OutSlotCount) const {
 	// Batched noise sampling, three phases:
 	//   1. Generate candidate positions + normalized noise coords.
 	//   2. One GenPositionArray3D call covering all candidates.
 	//   3. Walk results, rejection-gate, write accepted to slot buffers.
 	//
-	// Cluster and gas share 1:1 positions and slot indexing; accepted points
-	// write a cluster entry and a gas entry at the same slot index.
-	// Gas extent is lerped by the same density value used for rejection.
+	// ONE BUFFER NOW. This used to write a second, gas entry at the same slot index --
+	// same position, a much larger extent lerped by the same density -- for a nebula
+	// sprite layer. The universe raymarch supersedes it: the density field is both more
+	// accurate and better looking, and the sprites cost a second full set of per-frame
+	// and per-transition buffer writes plus a screenful of very large translucent quads.
 
 	const int32 BufferStart = InSlotIndex * InClusterBuffer.SlotCapacity;
 
@@ -169,8 +171,6 @@ void UniverseDataGenerator::GenerateLargeTierNode(const FIntVector& InCoord, int
 
 		const FVector CompVec = Stream.GetUnitVector();
 		const FVector NodeRotation = Stream.GetUnitVector();
-		const float GasMultiplier = FMath::Lerp(Params.GasExtentMinMultiplier, Params.GasExtentMaxMultiplier, RawDensity);
-		const float GasExtent = ClusterExtent * GasMultiplier;
 		const FVector LocalPos = CandidatePositions[i] + InNodeCenter;
 
 		const int32 Idx = BufferStart + ActualCount;
@@ -179,15 +179,10 @@ void UniverseDataGenerator::GenerateLargeTierNode(const FIntVector& InCoord, int
 		InClusterBuffer.Extents[Idx] = ClusterExtent;
 		InClusterBuffer.Colors[Idx] = FLinearColor(FMath::Abs(CompVec.X), FMath::Abs(CompVec.Y), FMath::Abs(CompVec.Z));
 
-		InGasBuffer.Positions[Idx] = LocalPos;
-		InGasBuffer.Extents[Idx] = GasExtent;
-		InGasBuffer.Colors[Idx] = FLinearColor(1.0f, 1.0f, 1.0f, 1.0);
-
 		ActualCount++;
 	}
 
 	InClusterBuffer.PadSlotDead(InSlotIndex, ActualCount);
-	InGasBuffer.PadSlotDead(InSlotIndex, ActualCount);
 
 	OutSlotCount = ActualCount;
 }
