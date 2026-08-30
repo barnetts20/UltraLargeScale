@@ -421,7 +421,12 @@ void AUniverseActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
 	SetVec(TEXT("WarpSmallRange"), A.WarpAmountSmallRange);
 	SetVec(TEXT("WarpLargeWeights"), A.WarpLargeWeights);
 	SetVec(TEXT("WarpSmallWeights"), A.WarpSmallWeights);
-	SetVec(TEXT("RegionScales"), A.RegionScales);
+	// THE ONE PARAMETER WHOSE NAME DID NOT MAKE THE RENAME. The node's input is
+	// RegionScales; the VectorParameter behind it is still RegionScale, and a MID
+	// addresses the parameter. Pushing the plural was a silent no-op, which left the two
+	// region scales on their authored values -- the pair with the 99-cell repeat.
+	// Rename the parameter and this line together, or neither.
+	SetVec(TEXT("RegionScale"), A.RegionScales);
 
 	// --- BOUNDS ---
 	// Pushed rather than left to the material's own default. The fade is applied by the

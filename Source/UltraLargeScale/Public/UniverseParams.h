@@ -157,10 +157,19 @@ struct ULTRALARGESCALE_API FUniverseLatticeParams
 	 *  coarse lattice shift bodily and discontinuously as the player moves. A tear, not a
 	 *  drift.
 	 *
+	 *  KEEP THE RATIO OFF A HALF. 1.4 against a small cell of 0.4 is exactly 3.5, sitting
+	 *  precisely on the rounding boundary the derivation quantizes across -- and HLSL rounds
+	 *  halves away from zero while the C++ shim's round defers to nearbyint, which rounds to
+	 *  even. Both happen to land on 4 today, but the value is one ulp of tuning away from
+	 *  the two sides disagreeing, and the failure is the coarse lattice coming out a
+	 *  different size in the render than in placement. 1.2 gives an unambiguous ratio of 3,
+	 *  and buys about 20% of the fold-shear budget back as well, since the small octave's
+	 *  shear term scales WITH the ratio on the coarse lattice.
+	 *
 	 *  At or below CellSizeSmall this collapses to a single lattice and skips the second
 	 *  neighbourhood walk entirely, which is roughly half the cost of a sample. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lattice", meta = (ClampMin = "0.0"))
-	float CellSizeLarge = 1.4f;
+	float CellSizeLarge = 1.2f;
 
 	/** Exponent shaping where between the two lattices a region sits. NOT a range: the two
 	 *  extremes it interpolates are the lattices themselves, so it has no min/max of its
@@ -329,7 +338,7 @@ struct ULTRALARGESCALE_API FUniverseWarpOctaveParams
 	 *  follow -- that is what "scales its amount" means for it -- so this is ignored
 	 *  there. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Warp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float LatticeFollow = 0.0f;
+	float LatticeFollow = 1.0f;
 };
 
 
@@ -352,14 +361,17 @@ struct ULTRALARGESCALE_API FUniverseRegionParams
 	 *  -- everything that decides what SHAPE the web has, which changes over provinces
 	 *  rather than patches.
 	 *
-	 *  Default 21/4096, and THAT IS A NUDGE OFF THE AUTHORED 0.005, which quantizes to
-	 *  20/4096 and shares a factor of 10 with the large warp octave's 410 -- the two
-	 *  re-align every 409 cells, and the proxy is five cells across, so that repeat is
-	 *  eighty proxy widths and entirely reachable in one session. 21 is odd and coprime to
-	 *  everything else in the set. The visual difference between 0.005 and 0.005127 is
-	 *  nothing; the difference between a repeating field and a non-repeating one is not. */
+	 *  Default 19/4096, nudged off the authored 0.005 which quantizes to 20 and shares a
+	 *  factor of 10 with the large warp octave's 410 -- those two re-align every 409 cells,
+	 *  and at five cells per proxy that is eighty proxy widths, reachable in one session.
+	 *
+	 *  ODD IS NOT SUFFICIENT, which is what 21 got wrong: 21 is 3x7 and the small warp
+	 *  octave's 3072 is 2^10x3, so they still share a 3 and repeat every 1365 cells. 19 is
+	 *  prime and divides none of the others. The visual difference between 0.005 and
+	 *  0.004639 is nothing; the difference between a repeating field and one that does not
+	 *  repeat is not. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Region", meta = (ClampMin = "0.0"))
-	float ScaleStructure = 0.005127f;
+	float ScaleStructure = 0.004639f;
 
 	/** Repeats per small cell for the APPEARANCE field. Drives wall density and falloff,
 	 *  filament density, void floor, and the small warp octave.
@@ -545,7 +557,7 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 	 *  the parameters can produce, derived from this and the small cell size together.
 	 *  Widening it makes the march cheaper as well as softer. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density")
-	FUniverseVarianceRange FeatureWidth = FUniverseVarianceRange(0.1f, 0.333f, 2.0f);
+	FUniverseVarianceRange FeatureWidth = FUniverseVarianceRange(0.1f, 0.4f, 2.0f);
 
 	/** The octave that BENDS the web. Large scale with small amplitude is grain rather
 	 *  than curvature; small scale with large amplitude translates whole regions rigidly
@@ -575,9 +587,17 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 	 *  and UniverseRayMarch applies the fade after sampling, which is what makes the entity
 	 *  path viable: a fade in placement would make where an entity lands depend on where the
 	 *  player was standing when the cell was generated. It still travels through this
-	 *  derivation because the march reads it off the params struct. */
+	 *  derivation because the march reads it off the params struct.
+	 *
+	 *  ZERO IS NOT "NO FADE" -- it is the MOST fade. The span is 1 - start, so at 0 the
+	 *  attenuation runs across the whole volume and the field is a soft ball centred on the
+	 *  camera rather than a window with a horizon. That is what the instance was tuned at
+	 *  and it is very likely part of why the march is not saturating: it is thinning
+	 *  everything past the near field. Kept as the default so the tuned look survives the
+	 *  push, but it is a look decision standing in for a bounds control, and raising it
+	 *  will make the distance dense again. 1 and above is the disable. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bounds", meta = (ClampMin = "0.0"))
-	float BoundsFadeStart = 0.75f;
+	float BoundsFadeStart = 0.0f;
 
 	/** The largest |dTex/dUV| the filtered noise volume reaches. A property of the ASSET,
 	 *  measured rather than chosen, and NOT one of the sixteen derivation inputs -- it is
@@ -801,14 +821,14 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 	 *  GetEffectiveStepCount. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
 		meta = (ClampMin = "8.0", ClampMax = "1024.0"))
-	float VolumeStepBudget = 32.0f;
+	float VolumeStepBudget = 128.0f;
 
 	/** How fast steps lengthen along the chord; 0 is uniform stepping. The cheapest quality
 	 *  lever here, since it trades far-field detail for step count directly and the far
 	 *  field is where the bounds fade is taking the field out anyway. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
 		meta = (ClampMin = "0.0", ClampMax = "8.0"))
-	float VolumeStepGrowth = 0.1f;
+	float VolumeStepGrowth = 4.0f;
 
 	// NO STEP CEILING AND NO ITERATION BOUND HERE, and both were removed rather than
 	// forgotten. The march's step floor is P.MinFeatureStep -- half the narrowest wall the
@@ -860,7 +880,7 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 	 *  and it surfaces as a parameter that keeps its authored value with no warning
 	 *  anywhere. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	bool bPushDensityParams = true;
+	bool bPushDensityParams = false;
 
 	/** The packed noise volume the field fetches for both region variances and both warp
 	 *  octaves.
