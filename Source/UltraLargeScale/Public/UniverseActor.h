@@ -98,10 +98,16 @@ public:
 
 #pragma region Editor Parameters
 
-	FUniverseParams UniverseParams;
-
+	/** THE authored configuration for this sector: the density field, the march, the tier
+	 *  streaming setup and the legacy noise graph.
+	 *
+	 *  A UPROPERTY NOW, AND THE ONLY ONE. It used to be a plain member copied in the
+	 *  constructor from UniverseParamBounds.Max, which meant it could not be edited, the
+	 *  thing that could be edited was one indirection away, and the copy happened at
+	 *  construction rather than at spawn -- so an edit to a placed actor did nothing until
+	 *  the level was reloaded. See the note where FUniverseParamBounds used to be. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Properties")
-	FUniverseParamBounds UniverseParamBounds;
+	FUniverseParams UniverseParams;
 
 	/** THE authored configuration for every galaxy this universe spawns: the archetype
 	 *  array, the default-mode toggle, and the shared config block.

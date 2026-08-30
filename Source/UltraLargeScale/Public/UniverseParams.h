@@ -169,19 +169,18 @@ struct ULTRALARGESCALE_API FUniverseLatticeParams
 	 *  coarse lattice shift bodily and discontinuously as the player moves. A tear, not a
 	 *  drift.
 	 *
-	 *  KEEP THE RATIO OFF A HALF. 1.4 against a small cell of 0.4 is exactly 3.5, sitting
+	 *  KEEP THE RATIO OFF A HALF. 1.4 against a small cell of 0.4 was exactly 3.5, sitting
 	 *  precisely on the rounding boundary the derivation quantizes across -- and HLSL rounds
 	 *  halves away from zero while the C++ shim's round defers to nearbyint, which rounds to
 	 *  even. Both happen to land on 4 today, but the value is one ulp of tuning away from
 	 *  the two sides disagreeing, and the failure is the coarse lattice coming out a
-	 *  different size in the render than in placement. 1.2 gives an unambiguous ratio of 3,
-	 *  and buys about 20% of the fold-shear budget back as well, since the small octave's
-	 *  shear term scales WITH the ratio on the coarse lattice.
+	 *  different size in the render than in placement. 0.9 against 0.3 gives an unambiguous
+	 *  ratio of 3, with the nearest half boundary a long way off in either direction.
 	 *
 	 *  At or below CellSizeSmall this collapses to a single lattice and skips the second
 	 *  neighbourhood walk entirely, which is roughly half the cost of a sample. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lattice", meta = (ClampMin = "0.0"))
-	float CellSizeLarge = .9f;
+	float CellSizeLarge = 0.9f;
 
 	/** Exponent shaping where between the two lattices a region sits. NOT a range: the two
 	 *  extremes it interpolates are the lattices themselves, so it has no min/max of its
@@ -484,11 +483,11 @@ struct FUniverseDensityArgs
 	FVector3f OffsetFrac = FVector3f::ZeroVector;
 
 	// --- WEB DENSITY, WIDTH AND FALLOFF --- (min, max, bias, free)
-	FVector4f WallDensityRange = FVector4f(0.0f, 0.0f, 1.0f, 0.0f);
-	FVector4f WallFalloffRange = FVector4f(1.0f, 1.0f, 1.0f, 0.0f);
-	FVector4f FilamentDensityRange = FVector4f(0.0f, 0.0f, 1.0f, 0.0f);
-	FVector4f FeatureWidthRange = FVector4f(0.0f, 0.0f, 1.0f, 0.0f);
-	FVector4f VoidFloorRange = FVector4f(0.0f, 0.0f, 1.0f, 0.0f);
+	FVector4f WallDensityRange = FVector4f(0.0f, 0.1f, 1.0f, 0.0f);
+	FVector4f WallFalloffRange = FVector4f(2.0f, 12.0f, 1.0f, 0.0f);
+	FVector4f FilamentDensityRange = FVector4f(0.25f, 1.25f, 1.0f, 0.0f);
+	FVector4f FeatureWidthRange = FVector4f(0.05f, 0.4f, 2.0f, 0.0f);
+	FVector4f VoidFloorRange = FVector4f(0.0f, 0.05f, 3.0f, 0.0f);
 
 	// --- ORGANICS --- .w carries a passenger on all but the small octave's weights
 	FVector4f VoidSizeSpreadRange = FVector4f(0.0f, 0.0f, 1.0f, 1.0f);
@@ -851,12 +850,25 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 	// a truncated march looks identical to one that finished, minus the far half of the
 	// volume.
 
-	/** Multiplier on density before the march's exp(-density * scale * h). The one genuine
-	 *  look control here: the field's own densities set the RATIO between walls, filaments
-	 *  and the floor, and this sets how opaque the result is. */
+	/** Multiplier on density before the march's exp(-density * scale * h) -- how opaque the
+	 *  result is, and nothing else. The field's own densities set the RATIO between walls,
+	 *  filaments and the floor.
+	 *
+	 *  KEEP IT AT 1 UNLESS THERE IS A REASON. It is tempting as a brightness control,
+	 *  because it is the last multiplier before the accumulation, but driving the look from
+	 *  here scales the apparent field several times over its authored range -- and then
+	 *  every judgement made against the picture is made against a field that does not exist.
+	 *  The exponents stop reading as falloff curves because the values they shape are off
+	 *  their intended scale, and the void floor stops looking like a floor.
+	 *
+	 *  Output brightness belongs after the march, on the material's own intensity
+	 *  multiplier, where it cannot be mistaken for a property of the field. Note that this
+	 *  never reached placement either way: acceptance normalises against each cell's own
+	 *  probed envelope, so nothing here has ever changed where an entity lands -- only what
+	 *  the field looked like while it was being tuned. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
 		meta = (ClampMin = "0.0"))
-	float VolumeDensityScale = 4.0f;
+	float VolumeDensityScale = 1.0f;
 
 	/** Exponent applied to each sample before accumulation. Exactly 1 skips the pow -- the
 	 *  march tests for it. Above 1 deepens voids and thins sheets; below 1 flattens toward
@@ -892,7 +904,30 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 	 *  and it surfaces as a parameter that keeps its authored value with no warning
 	 *  anywhere. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	bool bPushDensityParams = false;
+	bool bPushDensityParams = true;
+
+	/** DEBUG: write each entity's SAMPLED DENSITY into its colour instead of its decoratives.
+	 *
+	 *  THE ONE MEASUREMENT THAT SEPARATES THE TWO FAILURES. Entities landing in the wrong
+	 *  place can mean the placement path sampled the field correctly and the population was
+	 *  distributed badly, or it can mean the two paths disagree about WHERE a given point of
+	 *  the field is. Those look identical from outside and have nothing in common as fixes.
+	 *
+	 *  Each entity carries the density the dispatch actually read at its own position. Paint
+	 *  that and compare against the raymarch:
+	 *
+	 *    bright entities in bright nebula, dark in dark   the paths agree; the fault is in
+	 *                                                     the budget or the distribution
+	 *    bright entities sitting in dark nebula           the paths disagree about position:
+	 *                                                     one of them samples a shifted or
+	 *                                                     differently scaled field
+	 *    entities uniformly mid-grey                      the dispatch is not reading the
+	 *                                                     texture at all
+	 *
+	 *  Normalised by the analytic ceiling -- the sum of the three resolved maxima -- so the
+	 *  scale is comparable between tiers and does not move when the ranges are retuned. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material|Debug")
+	bool bDebugColorByDensity = false;
 
 	/** The packed noise volume the field fetches for both region variances and both warp
 	 *  octaves.
@@ -973,6 +1008,29 @@ struct ULTRALARGESCALE_API FUniverseParams : public FBaseParams {
 
 #pragma endregion
 
+#pragma region Tier Debug
+
+	/** DEBUG: which tiers stream at all.
+	 *
+	 *  FOR ISOLATING ONE TIER AGAINST THE RENDER, which is otherwise hard to do by eye:
+	 *  the three tiers reach very different distances -- Large spans the whole marched
+	 *  proxy, Mid a quarter of it and Small a sixteenth -- so what you see at any given
+	 *  depth is a different mixture, and a placement fault in one reads as a fault
+	 *  everywhere.
+	 *
+	 *  A tier switched off here is never initialized and never updated, so it costs nothing
+	 *  rather than being generated and hidden. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Debug")
+	bool bEnableLargeTier = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Debug")
+	bool bEnableMidTier = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Debug")
+	bool bEnableSmallTier = true;
+
+#pragma endregion
+
 #pragma region Per-Tier Streaming Configs
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tier|Large")
@@ -1007,19 +1065,34 @@ struct ULTRALARGESCALE_API FUniverseParams : public FBaseParams {
 
 		// Tier streaming params: depths evenly spaced by 2 (ratio 4 per tier).
 		LargeTier.GridDepth = 1;
-		LargeTier.GenerationSubdivision = 2;
 		LargeTier.NeighborhoodRadius = 1;
-		LargeTier.SlotCapacity = 500;
+		LargeTier.SlotCapacity = 1000;
 
 		MidTier.GridDepth = 3;
-		MidTier.GenerationSubdivision = 2;
 		MidTier.NeighborhoodRadius = 1;
-		MidTier.SlotCapacity = 200;
+		MidTier.SlotCapacity = 500;
 
 		SmallTier.GridDepth = 5;
-		SmallTier.GenerationSubdivision = 2;
 		SmallTier.NeighborhoodRadius = 1;
-		SmallTier.SlotCapacity = 200;
+		SmallTier.SlotCapacity = 500;
+
+		// GENERATION SUBDIVISION, sized against the FIELD'S cell rather than left at the
+		// zero default -- which gave nine thread groups per transition batch and left the
+		// GPU essentially idle.
+		//
+		// A field cell is ProxyExtent * CellSizeSmall = 0.9 sector extents at the shipped
+		// values, and a tier cell at depth d is 4/2^d of one. So the Large tier's cell spans
+		// about 2.2 field cells undivided, which is far too coarse for its probes to
+		// describe; two levels bring it to 0.56. Mid and Small are already at or below that
+		// undivided, so they take one level for OCCUPANCY rather than for resolution --
+		// nine groups is not a dispatch.
+		//
+		// These are a starting point, not a tuning. Read the C/P ratio in the batch log:
+		// below about 1 the probes have overtaken placement and a tier wants one level
+		// fewer, above about 9 it wants one more.
+		LargeTier.GenerationSubdivision = 2;
+		MidTier.GenerationSubdivision = 1;
+		SmallTier.GenerationSubdivision = 1;
 
 		// Scale ranges derived from MaxEntityScale (1e22) + depth spacing (2).
 		// 2^2 = 4, so each tier covers two octaves of scale (64x total spread):
@@ -1032,33 +1105,27 @@ struct ULTRALARGESCALE_API FUniverseParams : public FBaseParams {
 #pragma endregion
 };
 
-/** Min/max bounds for randomized universe params; Generate() samples a value
- *  between them for a given seed.
- *
- *  VESTIGIAL, and the galaxy layer already made this call: FGalaxySpawnConfig replaced
- *  FGalaxyParamBounds because Min/Max were whole param structs and so carried a config
- *  block of their own, leaving two config sources in one panel with one of them doing
- *  nothing. The same is true here and more so -- Generate() is called once with a fixed
- *  seed and its stub returns Bounds.Max, so the authored data lives at
- *  UniverseParamBounds.Max and Min silently absorbs anything typed into it.
- *
- *  With no archetypes and nothing rolled per instance, the whole layer is the config side,
- *  so the end state is a direct FUniverseParams UPROPERTY and no bounds at all. Not done
- *  here because it would orphan whatever the level currently has authored in Max. */
-USTRUCT(BlueprintType)
-struct ULTRALARGESCALE_API FUniverseParamBounds {
-	GENERATED_BODY()
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Param Bounds")
-	FUniverseParams Min;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Universe Param Bounds")
-	FUniverseParams Max;
-
-	static FUniverseParams Generate(const FUniverseParamBounds& Bounds, int64 Seed) {
-		//TODO [E]: real Min..Max interpolation from Seed. Stub = uniform Max.
-		return Bounds.Max;
-	}
-	static FUniverseParams Minimal(const FUniverseParamBounds& Bounds) { return Bounds.Min; }
-	static FUniverseParams Maximal(const FUniverseParamBounds& Bounds) { return Bounds.Max; }
-};
+// FUniverseParamBounds IS GONE, and its removal is the point rather than a tidy-up.
+//
+// It held a Min and a Max, both whole FUniverseParams, and AUniverseActor's CONSTRUCTOR
+// assigned UniverseParams = Generate(Bounds, 666) -- whose stub returned Bounds.Max. So the
+// authored data lived at UniverseParamBounds.Max, the struct it fed was not itself a
+// UPROPERTY and therefore not editable, and the copy happened at construction rather than
+// at spawn.
+//
+// EVERY PART OF THAT WAS A TRAP. Editing Bounds.Min did nothing. Editing Bounds.Max on a
+// placed instance did nothing until the actor was constructed again. And nothing anywhere
+// said so -- the symptom was a parameter that appeared to have no effect, which reads as a
+// broken parameter rather than a value that never arrived. It cost two rounds of debugging
+// here: GenerationSubdivision read 0 after being set to 2, and SpawnExponent showed no
+// difference between 0.01 and 16 because both were the default.
+//
+// THE GALAXY LAYER ALREADY MADE THIS CALL, retiring FGalaxyParamBounds for the same reason
+// its own comment gives: Min and Max were whole param structs and so carried a config block
+// each, leaving two config sources in one panel with one of them doing nothing.
+//
+// A RANDOMISED UNIVERSE NEEDS NO BOUNDS PAIR ANYWAY. There is one universe per sector and
+// its variation is regional rather than per-instance -- the two region fetches ARE the
+// archetype system, resolving per sample. If per-sector variation is ever wanted, it wants
+// the shape UGalaxyArchetype uses -- a named parameter, a range and a bias, rolled from the
+// sector seed -- not a second copy of every field.

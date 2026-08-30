@@ -98,7 +98,16 @@ struct FUniverseGenCell
 	FVector3f Centre = FVector3f::ZeroVector;
 	float HalfExtent = 0.0f;
 	FIntVector3 Coord = FIntVector3(0, 0, 0);
-	uint32 Pad[5] = { 0, 0, 0, 0, 0 };
+
+	/** Which slot region of the particle buffer this cell's entities belong to. Every child
+	 *  of a subdivided streamed cell carries its parent's.
+	 *
+	 *  THE SHADER NEEDS IT, not just the CPU. Without it the dispatch can only compact
+	 *  globally, and a batch that accepts more than it can hold then keeps whichever
+	 *  entities arrived first -- scheduling order, not field order. */
+	uint32 SlotIndex = 0;
+
+	uint32 Pad[4] = { 0, 0, 0, 0 };
 };
 static_assert(sizeof(FUniverseGenCell) == 48, "FUniverseGenCell must match the .usf layout");
 
@@ -115,6 +124,8 @@ public:
 
 		SHADER_PARAMETER(uint32, NumCells)
 		SHADER_PARAMETER(uint32, EntityCapacity)
+		SHADER_PARAMETER(uint32, NumSlots)
+		SHADER_PARAMETER(uint32, SlotCapacity)
 		SHADER_PARAMETER(uint32, DispatchGroupsX)
 		SHADER_PARAMETER(float, BudgetScale)
 		SHADER_PARAMETER(int32, KeySeed)
@@ -186,14 +197,24 @@ public:
 	static constexpr int32 PassProbe = 0;
 	static constexpr int32 PassGenerate = 1;
 
-	/** Probes per cell: one per lane, one round. Also the divisor the CPU uses to turn the
-	 *  evaluated-candidate counter into the candidates-per-probe ratio.
+	/** Probes per cell: sixty-four lanes over four rounds. MUST equal
+	 *  UNIVERSE_ENTITYGEN_PROBES in the .usf, which has no way to share this.
+	 *
+	 *  TWO ROUNDS RATHER THAN ONE because this field's peaks are thin filaments in a
+	 *  mostly-empty volume and a single round misses them at any cell size -- measured, not
+	 *  assumed: cells a seventh of a field cell across were still under-estimating their
+	 *  peak by an order of magnitude. Four rounds drove clipping down to about one cell in a
+	 *  hundred but left ninety percent of the dispatch probing, which is the wrong balance;
+	 *  two is the current compromise and the C/P ratio is how to judge it.
+	 *
+	 *  Also the divisor the CPU uses to turn the evaluated-candidate counter into the
+	 *  candidates-per-probe ratio.
 	 *
 	 *  THE RATIO MATTERS MORE HERE THAN IN THE GALAXY. Probes and candidates are both
 	 *  field evaluations, and a universe field evaluation is expensive enough that the
 	 *  subdivision crossover sits a level or two below the galaxy's. Watch it from the
 	 *  first run. */
-	static constexpr int32 ProbesPerCell = 64;
+	static constexpr int32 ProbesPerCell = 128;
 };
 
 /** One in-flight dispatch. Owns its readback fence and its result.
@@ -213,6 +234,7 @@ public:
 	 *  NumCells * 5 + 1 elements; the extra is the global entity append cursor. */
 	int32 EntityCapacity = 0;
 	int32 NumCells = 0;
+	int32 NumSlots = 0;
 
 	/** True once there is something to consume, or once we know there never will be.
 	 *
@@ -289,6 +311,11 @@ namespace UniverseEntityGen
 	 *  UniverseEntityGen.usf indexes the same layout with literals and cannot share these.
 	 *  Change one and change the other. */
 	inline constexpr int32 CountersPerCell = 5;
+
+	/** The global entity append cursor, then one accepted-count per SLOT.
+	 *
+	 *  The per-slot counters are the shader's own ceiling as well as a diagnostic, so their
+	 *  number is part of the buffer layout rather than optional instrumentation. */
 	inline constexpr int32 CountGlobals = 1;
 
 	/** The density the mass integral is expressed against: mass_i is the cell's mean of
@@ -306,15 +333,59 @@ namespace UniverseEntityGen
 	 *  toward denormals. One keeps the masses near unity, which is all the anchor is for. */
 	inline constexpr float kBudgetAnchor = 1.0f;
 
-	inline constexpr int32 CountElementsFor(int32 InNumCells)
+	/** How the calibration sample is drawn. All three are about the SAMPLE, not the field.
+	 *
+	 *  A CONTIGUOUS BLOCK SIZED IN TIER CELLS DOES NOT WORK HERE, which is the mistake these
+	 *  replace. A neighbourhood-shaped block spans (2R+1) tier cells, and a tier cell shrinks
+	 *  by four per grid depth -- so the Large tier's block covered nearly seven field cells
+	 *  while the Small tier's covered four tenths of ONE. That tier was calibrating against a
+	 *  single point of the web and treating it as the whole universe, which is why it
+	 *  over-delivered by two orders of magnitude while the coarser tiers were fine.
+	 *
+	 *  SCATTERED, NOT CONTIGUOUS. What calibration needs is the DISTRIBUTION of cell masses,
+	 *  not a picture of one region, so cells drawn at random across several field cells beat
+	 *  a solid block of the same count -- and the cost stays fixed per tier instead of
+	 *  exploding for the fine ones. */
+	inline constexpr int32 kCalibrationParents = 96;
+
+	/** How wide the scatter is, in FIELD cells -- the unit the field's structure is actually
+	 *  expressed in. Wide enough to cross several walls and voids; every extra cell of span
+	 *  is free, since the sample count is fixed. */
+	inline constexpr float kCalibrationSpanFieldCells = 8.0f;
+
+	/** Which point of the sorted per-parent masses the constant divides by.
+	 *
+	 *  NOT THE MAXIMUM, and this is a judgement rather than an optimisation. The field's
+	 *  dynamic range is far wider than a slot can represent: a filament threading a fine
+	 *  tier's cell is genuinely hundreds of times denser than a void, and no single constant
+	 *  gives that cell room without leaving the voids at zero. Something has to clip.
+	 *
+	 *  Dividing by the max puts the knee above everything, so nothing clips and nothing but
+	 *  the densest cells has a visible population. Dividing by a high percentile puts it just
+	 *  below the tail: the top couple of percent of cells pin at capacity, and every other
+	 *  cell tracks density honestly. The second is the better picture, and it is a deliberate
+	 *  choice rather than a failure to reach the first. */
+	inline constexpr float kCalibrationPercentile = 0.98f;
+
+	inline constexpr int32 CountElementsFor(int32 InNumCells, int32 InNumSlots)
 	{
-		return InNumCells * CountersPerCell + CountGlobals;
+		return InNumCells * CountersPerCell + CountGlobals + InNumSlots;
 	}
 
-	/** Total accepted, including anything the entity buffer had no room for. */
+	/** Entities actually WRITTEN. Bounded by capacity now that the shader caps per slot, so
+	 *  it is the count to read the entity array against. */
 	inline constexpr int32 GlobalCursorIndex(int32 InNumCells)
 	{
 		return InNumCells * CountersPerCell;
+	}
+
+	/** One slot's TRUE demand, which deliberately over-counts past SlotCapacity. The ratio
+	 *  against capacity is how far the tier's calibrated constant is out, and it is the only
+	 *  observer of that -- a slot that is merely full looks identical whether it wanted one
+	 *  more entity or twenty times more. */
+	inline constexpr int32 SlotCursorIndex(int32 InNumCells, int32 InSlot)
+	{
+		return InNumCells * CountersPerCell + CountGlobals + InSlot;
 	}
 
 	/** Weigh every cell of a tier's grid, so its placement constant can be solved.
@@ -366,6 +437,8 @@ namespace UniverseEntityGen
 		const FTierParams& InTierParams,
 		const TArray<FUniverseGenCell>& InCells,
 		int32 InEntityCapacity,
+		int32 InNumSlots,
+		int32 InSlotCapacity,
 		int32 InKeySeed,
 		float InInvFieldExtent,
 		UTexture* InNoiseTexture,
@@ -383,6 +456,8 @@ namespace UniverseEntityGen
 		const FTierParams& InTierParams,
 		TArray<FUniverseGenCell> InCells,
 		int32 InEntityCapacity,
+		int32 InNumSlots,
+		int32 InSlotCapacity,
 		int32 InKeySeed,
 		float InInvFieldExtent,
 		UTexture* InNoiseTexture,

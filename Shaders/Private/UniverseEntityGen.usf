@@ -59,7 +59,12 @@ RWBuffer<uint4> OutEntities;
 //   [3] the largest density any CANDIDATE saw, as asuint
 //   [4] the cell's MASS -- mean of (density/anchor)^exponent over its probes, as asuint
 //
-//   [NumCells*5 + 0] the global entity append cursor
+//   [NumCells*5 + 0]       the global entity append cursor
+//   [NumCells*5 + 1 + s]   per-slot accepted count, s in [0, NumSlots)
+//
+// The per-slot counters are the ceiling AND the demand figure: they keep counting past
+// SlotCapacity so the CPU can see how far over a slot ran, which is what says whether the
+// tier's calibrated constant is in the right place.
 //
 // [4] is not a diagnostic. It is how the candidate budget stops being an authored number:
 // accepted_i works out to BudgetScale x mass_i exactly, so one per-tier constant sets every
@@ -103,7 +108,7 @@ struct FUniverseGenCell
     float3 Centre; // caller's units
     float HalfExtent;
     int3 Coord; // the placement key; NOT the dispatch index
-    uint Pad0;
+    uint SlotIndex; // which buffer region this cell's entities belong to
     uint4 Pad1; // 48 bytes total, matching the C++ mirror without packing rules
 };
 
@@ -111,6 +116,25 @@ StructuredBuffer<FUniverseGenCell> InCells;
 
 uint NumCells;
 uint EntityCapacity; // records in OutEntities
+
+// SLOTS, AND THE PER-SLOT CEILING. Many cells feed one slot -- every child of a subdivided
+// streamed cell shares its parent's -- and the buffer reserves SlotCapacity records for
+// each.
+//
+// WITHOUT A PER-SLOT BOUND THE GLOBAL CURSOR DECIDES SPATIALLY. The dispatch routinely
+// accepts five to twenty times what the batch can hold, and a single global append cursor
+// then keeps whichever entities ARRIVED FIRST -- which is thread group scheduling order,
+// roughly dispatch order, roughly one face of the neighbourhood. Slots whose groups ran
+// early fill completely and slots whose groups ran late get nothing, so the surviving
+// population is a function of the GPU's scheduler rather than of the field. That reads as
+// entities in voids and emptiness in filaments, with a plausible-looking internal pattern,
+// because the pattern is real and its placement is not.
+//
+// Capping per slot makes each slot's share depend on that slot alone. Arrival order still
+// decides WHICH of a slot's candidates survive when it overflows, but that is one cell's
+// worth of spatial bias rather than the whole batch's.
+uint NumSlots;
+uint SlotCapacity;
 
 // Width of the WRAPPED group grid, in groups. One group per cell, and a subdivided grid
 // runs past the 65535-per-dimension dispatch limit -- which RDG catches as an ensure and
@@ -199,6 +223,27 @@ float InBoundsFadeStart;
 // and both reductions iterate to it; there is deliberately no second constant.
 #define UNIVERSE_ENTITYGEN_GROUP 64u
 
+// PROBES PER LANE. The envelope is a MAX over the cell, and this field's features are thin
+// bright filaments in a mostly-empty volume -- the participation count only approaches 3
+// on a near-exact three-way tie, so the structure occupies a small fraction of any cell at
+// any subdivision. One probe per lane misses them at every cell size, which the clipping
+// counter showed directly: cells a seventh of a field cell across still under-estimated
+// their peak by an order of magnitude.
+//
+// SUBDIVISION IS NOT THE LEVER FOR THIS. Shrinking cells raises the probe DENSITY but also
+// multiplies the group count, so total probe cost rises the same way while occupancy and
+// scheduling get worse. Adding rounds raises density at constant group count, which is the
+// cheaper axis when the group count is already adequate.
+//
+// TWO ROUNDS, 128 PROBES, and the count was measured down from four rather than guessed.
+// At four rounds the clipping it exists to prevent had fallen to about one cell in a
+// hundred, while the C/P ratio sat near 0.1 -- ninety percent of the dispatch was probing.
+// Probes and candidates are both field evaluations, so that ratio is the whole cost
+// argument: read it after changing this, and move the count until clipping and C/P are
+// both tolerable rather than optimising either alone.
+#define UNIVERSE_ENTITYGEN_PROBE_ROUNDS 2u
+#define UNIVERSE_ENTITYGEN_PROBES (UNIVERSE_ENTITYGEN_GROUP * UNIVERSE_ENTITYGEN_PROBE_ROUNDS)
+
 // The probed peak, reduced across the group. asuint is monotonic for non-negative floats, so
 // InterlockedMax over the bit pattern orders exactly as the float does -- groupshared memory
 // has no float atomics.
@@ -271,8 +316,12 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     float LocalPeak = 0.0f;
     float LocalMass = 0.0f;
 
+    // STRIDED, so lane n takes probes n, n+64, n+128, ... Consecutive lanes hold
+    // consecutive probe indices within a round, which keeps their hash inputs adjacent in
+    // a wave; the corner cases all land in round 0 and stay wave-uniform.
+    for (uint Round = 0u; Round < UNIVERSE_ENTITYGEN_PROBE_ROUNDS; ++Round)
     {
-        const uint ProbeIndex = GroupIndex;
+        const uint ProbeIndex = Round * UNIVERSE_ENTITYGEN_GROUP + GroupIndex;
 
         const float3 ProbePos = MakeUniverseProbe(
             Cell.Centre, Cell.HalfExtent,
@@ -337,7 +386,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
         OutCounts[CellIndex * 5u + 2u] = asuint(max(Envelope, 0.0f));
 
         // Every probe except the eight corners.
-        const float MassSamples = float(UNIVERSE_ENTITYGEN_GROUP - 8u);
+        const float MassSamples = float(UNIVERSE_ENTITYGEN_PROBES - 8u);
 
         OutCounts[CellIndex * 5u + 4u] = asuint(Sum / MassSamples);
     }
@@ -416,12 +465,24 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
         // Per-cell tally, for the CPU's diagnostics. It bounds nothing.
         InterlockedAdd(OutCounts[CellIndex * 5u], 1u);
 
-        // The GLOBAL claim. One counter for the dispatch, past the per-cell region so it
-        // clears and reads back with everything else.
+        // THE PER-SLOT CLAIM, taken BEFORE the global one so a slot that is already full
+        // costs nothing further and cannot consume another slot's room.
         //
-        // Incremented even when the buffer is full, deliberately: the final value is the TRUE
-        // total accepted, which is what the CPU thins against. Clamping would make an
-        // overflowing dispatch report exactly full and the thinning would be silently wrong.
+        // It keeps incrementing past the ceiling on purpose: the final value is that slot's
+        // TRUE demand, which is what says how far the tier's constant is out. Clamping it
+        // would make every overflowing slot report exactly full and hide the error.
+        uint SlotPrev;
+        InterlockedAdd(OutCounts[NumCells * 5u + 1u + Cell.SlotIndex], 1u, SlotPrev);
+
+        if (SlotPrev >= SlotCapacity)
+        {
+            continue;
+        }
+
+        // The GLOBAL claim, which is now a formality: the per-slot ceilings sum to exactly
+        // EntityCapacity, so this cannot overflow unless the two disagree. Kept as the
+        // bounds test on the write, because a UAV write past the end is undefined rather
+        // than clamped.
         uint Global;
         InterlockedAdd(OutCounts[NumCells * 5u], 1u, Global);
 

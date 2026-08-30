@@ -187,7 +187,7 @@ public:
 	 *  about five times the mean density of either end, so if a block lands entirely inside
 	 *  or outside it the constant will be off by that factor. Widening the block trades
 	 *  calibration cost for a better average. */
-	void BuildCalibrationGrid(const FTierParams& InTierParams, int32 InGridDepth,
+	void BuildCalibrationGrid(const FTierParams& InTierParams,
 		double InCellHalfExtent, TArray<FTierBatchCell>& OutCells) const;
 
 	/** The tier's placement constant: accepted count per cell is this times cell mass.

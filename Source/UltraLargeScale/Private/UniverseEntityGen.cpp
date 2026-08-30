@@ -23,6 +23,8 @@ namespace UniverseEntityGen
 		const FTierParams& InTierParams,
 		TArray<FUniverseGenCell> InCells,
 		int32 InEntityCapacity,
+		int32 InNumSlots,
+		int32 InSlotCapacity,
 		int32 InKeySeed,
 		float InInvFieldExtent,
 		UTexture* InNoiseTexture,
@@ -37,6 +39,7 @@ namespace UniverseEntityGen
 		}
 
 		OutRequest->NumCells = NumCells;
+		OutRequest->NumSlots = InNumSlots;
 		OutRequest->EntityCapacity = InEntityCapacity;
 
 		// Snapshot everything the render thread will need. Nothing below may touch
@@ -71,7 +74,18 @@ namespace UniverseEntityGen
 		// the generation grid, so a thin filament crossing a cell can fall between all
 		// fifty-six jittered probes. Counter [3] against [2] says how often it does.
 		const float BudgetAnchor = kBudgetAnchor;
-		constexpr float EnvelopePad = 1.15f;
+
+		// THE ERROR IS ASYMMETRIC, so the pad leans generous. Over-estimating an envelope
+		// costs candidates and nothing else -- the budget scales as envelope^g and
+		// acceptance as (d/envelope)^g, so the two cancel and the accepted count is
+		// unchanged. Under-estimating does not cancel: everything above the envelope
+		// saturates at probability 1, the cell over-delivers against its budget, and the
+		// surplus is then clipped by slot capacity rather than by the field.
+		//
+		// It cannot simply be raised until clipping stops, because the candidate cost is
+		// exponential in the spawn exponent -- at g = 8 a pad of 2 is 256 times the
+		// candidates. Probe count is the cheaper axis; see UNIVERSE_ENTITYGEN_PROBE_ROUNDS.
+		constexpr float EnvelopePad = 1.25f;
 
 		// The UObject is captured, NOT dereferenced here.
 		//
@@ -123,6 +137,8 @@ namespace UniverseEntityGen
 			FUniverseDensityParams Density;
 			TWeakObjectPtr<UTexture> Noise;
 			int32 EntityCapacity = 0;
+			int32 NumSlots = 0;
+			int32 SlotCapacity = 0;
 			int32 KeySeed = 0;
 			int32 Seed = 0;
 			float BudgetScale = 0.0f;
@@ -143,6 +159,8 @@ namespace UniverseEntityGen
 		Payload->Density = D;
 		Payload->Noise = WeakNoise;
 		Payload->EntityCapacity = InEntityCapacity;
+		Payload->NumSlots = InNumSlots;
+		Payload->SlotCapacity = InSlotCapacity;
 		Payload->KeySeed = InKeySeed;
 		Payload->Seed = InParams.Seed;
 		Payload->BudgetScale = BudgetScale;
@@ -234,7 +252,8 @@ namespace UniverseEntityGen
 						// Zeroed before the dispatch. Not cleared and the atomics accumulate
 						// across frames, which reads as cells that fill once and are empty
 						// ever after.
-						const int32 CountElements = CountElementsFor(Cells.Num());
+						const int32 CountElements =
+							CountElementsFor(Cells.Num(), Payload->NumSlots);
 
 						FRDGBufferDesc CountDesc =
 							FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), CountElements);
@@ -280,6 +299,8 @@ namespace UniverseEntityGen
 						Common.BudgetAnchor = Payload->BudgetAnchor;
 						Common.EnvelopePad = Payload->EnvelopePad;
 						Common.EntityCapacity = static_cast<uint32>(Total);
+						Common.NumSlots = static_cast<uint32>(Payload->NumSlots);
+						Common.SlotCapacity = static_cast<uint32>(Payload->SlotCapacity);
 						Common.KeySeed = InKeySeed;
 						Common.InvFieldExtent = Payload->InvFieldExtent;
 
@@ -434,6 +455,7 @@ namespace UniverseEntityGen
 		TSharedRef<FUniverseEntityGenRequest> Request,
 		int32 InTotal,
 		int32 InNumCells,
+		int32 InNumSlots,
 		TArray<FUniverseEntityOut>& OutEntities,
 		TArray<uint32>& OutCounts)
 	{
@@ -459,15 +481,15 @@ namespace UniverseEntityGen
 
 		TSharedRef<FUniverseEntityGenRequest> Req = Request;
 
-		auto EnqueueCopy = [Req, InTotal, InNumCells]() mutable
+		auto EnqueueCopy = [Req, InTotal, InNumCells, InNumSlots]() mutable
 			{
 				ENQUEUE_RENDER_COMMAND(UniverseEntityGenCopy)(
-					[Req, InTotal, InNumCells](FRHICommandListImmediate&) mutable
+					[Req, InTotal, InNumCells, InNumSlots](FRHICommandListImmediate&) mutable
 					{
 						const uint32 Bytes =
 							static_cast<uint32>(InTotal) * sizeof(FUniverseEntityOut);
-						const uint32 CountBytes =
-							static_cast<uint32>(CountElementsFor(InNumCells)) * sizeof(uint32);
+						const uint32 CountBytes = static_cast<uint32>(
+							CountElementsFor(InNumCells, InNumSlots)) * sizeof(uint32);
 
 						const FUniverseEntityOut* Src =
 							static_cast<const FUniverseEntityOut*>(Req->Readback->Lock(Bytes));
@@ -484,7 +506,8 @@ namespace UniverseEntityGen
 
 						if (CountSrc)
 						{
-							Req->Counts.SetNumUninitialized(CountElementsFor(InNumCells));
+							Req->Counts.SetNumUninitialized(
+								CountElementsFor(InNumCells, InNumSlots));
 							FMemory::Memcpy(Req->Counts.GetData(), CountSrc, CountBytes);
 						}
 						Req->CountReadback->Unlock();
@@ -518,7 +541,7 @@ namespace UniverseEntityGen
 		}
 
 		if (Request->Entities.Num() != InTotal
-			|| Request->Counts.Num() != CountElementsFor(InNumCells))
+			|| Request->Counts.Num() != CountElementsFor(InNumCells, InNumSlots))
 		{
 			return false;
 		}
@@ -560,8 +583,9 @@ namespace UniverseEntityGen
 		// but RDG still needs a bound, non-empty UAV, and the readback still copies it.
 		constexpr int32 TokenCapacity = 64;
 
-		Dispatch(InParams, InTierParams, InCells, TokenCapacity, InKeySeed,
-			InInvFieldExtent, InNoiseTexture, 0.0f, true, Request);
+		// One token slot: the generate pass never runs, so nothing claims one.
+		Dispatch(InParams, InTierParams, InCells, TokenCapacity, 1, TokenCapacity,
+			InKeySeed, InInvFieldExtent, InNoiseTexture, 0.0f, true, Request);
 
 		if (!Request->Readback.IsValid())
 		{
@@ -571,7 +595,7 @@ namespace UniverseEntityGen
 		TArray<FUniverseEntityOut> Entities;
 		TArray<uint32> Counts;
 
-		if (!AwaitReadback(Request, TokenCapacity, InCells.Num(), Entities, Counts))
+		if (!AwaitReadback(Request, TokenCapacity, InCells.Num(), 1, Entities, Counts))
 		{
 			return false;
 		}
@@ -603,6 +627,8 @@ namespace UniverseEntityGen
 		const FTierParams& InTierParams,
 		const TArray<FUniverseGenCell>& InCells,
 		int32 InEntityCapacity,
+		int32 InNumSlots,
+		int32 InSlotCapacity,
 		int32 InKeySeed,
 		float InInvFieldExtent,
 		UTexture* InNoiseTexture,
@@ -626,25 +652,25 @@ namespace UniverseEntityGen
 
 		TSharedRef<FUniverseEntityGenRequest> Request = MakeShared<FUniverseEntityGenRequest>();
 
-		Dispatch(InParams, InTierParams, InCells, InEntityCapacity, InKeySeed,
-			InInvFieldExtent, InNoiseTexture, InBudgetScale, false, Request);
+		Dispatch(InParams, InTierParams, InCells, InEntityCapacity, InNumSlots,
+			InSlotCapacity, InKeySeed, InInvFieldExtent, InNoiseTexture,
+			InBudgetScale, false, Request);
 
 		if (!Request->Readback.IsValid())
 		{
 			return false;
 		}
 
-		if (!AwaitReadback(Request, InEntityCapacity, InCells.Num(), OutEntities, OutCounts))
+		if (!AwaitReadback(Request, InEntityCapacity, InCells.Num(), InNumSlots,
+			OutEntities, OutCounts))
 		{
 			return false;
 		}
 
-		// NOTHING IS CLAMPED HERE. With a shared buffer no cell owns a run, so the per-cell
-		// accepted counts are pure diagnostics.
-		//
-		// The global cursor deliberately over-counts past capacity -- it is the true total
-		// accepted, which is what the caller thins against. Clamping it would make an
-		// overflowing dispatch report exactly full.
+		// NOTHING IS CLAMPED HERE. The shader caps each slot at SlotCapacity, so the global
+		// cursor is now the number of records actually WRITTEN and the per-slot counters
+		// carry the true demand. The caller reads the entity array against the former and
+		// judges the calibration against the latter.
 		return true;
 	}
 

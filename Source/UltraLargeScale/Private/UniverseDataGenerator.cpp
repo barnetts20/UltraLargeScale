@@ -482,57 +482,72 @@ void UniverseDataGenerator::SubdivideCells(
 
 void UniverseDataGenerator::BuildCalibrationGrid(
 	const FTierParams& InTierParams,
-	int32 InGridDepth,
 	double InCellHalfExtent,
 	TArray<FTierBatchCell>& OutCells) const
 {
 	OutCells.Reset();
 
-	// THE SAME SHAPE AS A STREAMED NEIGHBOURHOOD, so a calibration cell and a generation
-	// cell are the same size and a mass measured here means what it means there. A cell's
-	// mass is the mean over its own volume, so measuring a different volume answers a
-	// different question -- and the error is BIAS in one direction, growing with the size
-	// mismatch, not noise that averages out.
-	const int32 Radius = FMath::Max(InTierParams.NeighborhoodRadius, 0);
-	const int32 Side = 2 * Radius + 1;
+	const double CellFull = InCellHalfExtent * 2.0;
 
-	const double FullCell = InCellHalfExtent * 2.0;
-
-	// ANCHORED AT THE ORIGIN, not at the player. The result is cached for the session, so
-	// it has to be a property of the field rather than of where someone happened to be
-	// standing the first time a tier streamed -- otherwise two runs of the same seed
-	// calibrate differently and the population density changes between them.
-	const double Origin = -(static_cast<double>(Side) - 1.0) * 0.5;
-
-	TArray<FTierBatchCell> Parents;
-	Parents.Reserve(Side * Side * Side);
-
-	for (int32 iz = 0; iz < Side; ++iz)
+	if (CellFull <= 0.0 || FieldExtent <= 0.0)
 	{
-		for (int32 iy = 0; iy < Side; ++iy)
-		{
-			for (int32 ix = 0; ix < Side; ++ix)
-			{
-				FTierBatchCell Cell;
-
-				Cell.Coord = FIntVector(ix - Radius, iy - Radius, iz - Radius);
-				Cell.Centre = FVector(
-					(Origin + static_cast<double>(ix)) * FullCell,
-					(Origin + static_cast<double>(iy)) * FullCell,
-					(Origin + static_cast<double>(iz)) * FullCell);
-				Cell.HalfExtent = InCellHalfExtent;
-				Cell.SlotIndex = 0;
-
-				Parents.Add(Cell);
-			}
-		}
+		return;
 	}
 
-	// SUBDIVIDED EXACTLY AS GENERATION WILL SUBDIVIDE, for the same reason the block is
-	// sized like a neighbourhood: the mass is an estimate of a mean over a volume, and
-	// probing an undivided parent reports a mean that is too low by a factor growing with
-	// the subdivision depth. That comes back as a constant that is too high and a tier
-	// that over-delivers.
+	// THE SPAN IS MEASURED IN FIELD CELLS, NOT TIER CELLS, and that is the whole correction.
+	//
+	// A field cell is FieldExtent * CellSizeSmall in caller units, and it is the scale the
+	// web's structure actually lives at. A tier cell is unrelated to it and shrinks by four
+	// per grid depth, so sizing the sample in tier cells made the fine tiers sample a
+	// vanishing fraction of the field -- the Small tier was measuring four tenths of one
+	// field cell and calibrating the whole universe against it.
+	const double FieldCell = FieldExtent
+		* FMath::Max(static_cast<double>(Params.DensityParams.Lattice.CellSizeSmall), 1e-6);
+
+	const double Span = FieldCell * UniverseEntityGen::kCalibrationSpanFieldCells;
+
+	// How many tier cells fit across that span. The scatter picks coords in this range, so
+	// a fine tier draws its sample from a much wider coord range than a coarse one -- which
+	// is exactly the point, since their cells differ in size but the field does not.
+	const int32 HalfRange = FMath::Max(
+		FMath::RoundToInt(Span / (2.0 * CellFull)), 1);
+
+	// SCATTERED, AND DETERMINISTIC. A fixed stream, so the sample is a property of the tier
+	// rather than of when it first streamed -- the result is cached for the session and two
+	// runs of the same seed must calibrate identically.
+	//
+	// Drawn on the tier's own coord lattice rather than at arbitrary positions, because the
+	// coord is a placement key: MakeUniverseProbe hashes it, so a cell at a coord the grid
+	// could never produce would be probed with jitter no real cell ever sees.
+	FRandomStream Stream(ProcSeed::MixSeed(
+		Params.Seed, UniverseSeed::Placement, InTierParams.GridDepth));
+
+	TArray<FTierBatchCell> Parents;
+	Parents.Reserve(UniverseEntityGen::kCalibrationParents);
+
+	for (int32 i = 0; i < UniverseEntityGen::kCalibrationParents; ++i)
+	{
+		const FIntVector Coord(
+			Stream.RandRange(-HalfRange, HalfRange),
+			Stream.RandRange(-HalfRange, HalfRange),
+			Stream.RandRange(-HalfRange, HalfRange));
+
+		FTierBatchCell Cell;
+		Cell.Coord = Coord;
+		Cell.Centre = FVector(
+			static_cast<double>(Coord.X) * CellFull,
+			static_cast<double>(Coord.Y) * CellFull,
+			static_cast<double>(Coord.Z) * CellFull);
+		Cell.HalfExtent = InCellHalfExtent;
+		Cell.SlotIndex = 0;
+
+		Parents.Add(Cell);
+	}
+
+	// SUBDIVIDED EXACTLY AS GENERATION WILL SUBDIVIDE. A cell's mass is the mean over its own
+	// volume, so probing an undivided parent reports a mean that is too low by a factor
+	// growing with the subdivision depth -- which comes back as a constant that is too high
+	// and a tier that over-delivers.
 	SubdivideCells(Parents,
 		FMath::Clamp(InTierParams.GenerationSubdivision, 0,
 			FTierParams::MaxGenerationSubdivision),
@@ -564,8 +579,29 @@ float UniverseDataGenerator::GetTierBudgetScale(
 		return 0.0f;
 	}
 
+	// THE PARAMETERS THIS TIER IS ACTUALLY RUNNING WITH, logged before anything is measured
+	// against them.
+	//
+	// NOT INSTRUMENTATION FOR ITS OWN SAKE. A tier parameter that fails to arrive looks
+	// exactly like a tier parameter that has no effect, and this layer has already lost two
+	// debugging rounds to that: GenerationSubdivision read 0 after being set to 2, and
+	// SpawnExponent showed no difference between 0.01 and 16, both because the edit was
+	// landing on a copy nothing read. The indirection responsible is gone -- see the note
+	// where FUniverseParamBounds used to be -- but the class of failure is not, since a
+	// generator holds a COPY of the params taken at InitializeData.
+	//
+	// Read these before concluding anything about a parameter's effect.
+	UE_LOG(LogTemp, Log,
+		TEXT("UniverseEntityGen: tier offset %d effective params -- GridDepth %d, ")
+		TEXT("NeighborhoodRadius %d, SlotCapacity %d, GenerationSubdivision %d, ")
+		TEXT("SpawnExponent %.4f, ExtentExponent %.4f, MinScale %.4g, MaxScale %.4g."),
+		InSeedOffset, InTierParams.GridDepth, InTierParams.NeighborhoodRadius,
+		InTierParams.SlotCapacity, InTierParams.GenerationSubdivision,
+		InTierParams.SpawnExponent, InTierParams.ExtentExponent,
+		InTierParams.MinScale, InTierParams.MaxScale);
+
 	TArray<FTierBatchCell> AllCells;
-	BuildCalibrationGrid(InTierParams, InGridDepth, InCellHalfExtent, AllCells);
+	BuildCalibrationGrid(InTierParams, InCellHalfExtent, AllCells);
 
 	if (AllCells.Num() == 0)
 	{
@@ -584,6 +620,7 @@ float UniverseDataGenerator::GetTierBudgetScale(
 			static_cast<float>(In.Centre.Z));
 		Cell.HalfExtent = static_cast<float>(In.HalfExtent);
 		Cell.Coord = FIntVector3(In.Coord.X, In.Coord.Y, In.Coord.Z);
+		Cell.SlotIndex = 0; // one token slot; the generate pass never runs here
 		Cells.Add(Cell);
 	}
 
@@ -604,32 +641,50 @@ float UniverseDataGenerator::GetTierBudgetScale(
 		// REDUCED HERE, NOT ON THE GPU, and in double.
 		//
 		// A slot receives the sum of what its cells produce, and for this layer every
-		// streamed cell owns its own slot -- there is no tier that funnels a whole grid
-		// into one. So the divisor is the LARGEST PER-PARENT SUM: the densest streamed
-		// cell fills its slot exactly and every other is proportionally less.
-		//
-		// A global maximum over children would be wrong by the child count, and a mean
-		// would let the densest cell overflow while the rest ran empty.
+		// streamed cell owns its own slot, so the divisor is a per-parent SUM rather than a
+		// per-cell value. A global maximum over children would be wrong by the child count,
+		// and a mean would let dense cells overflow while the rest ran empty.
 		TMap<int32, double> ParentSums;
 
 		double TotalMass = 0.0;
-		double MaxCellMass = 0.0;
 
 		for (int32 i = 0; i < AllCells.Num(); ++i)
 		{
 			const double M = static_cast<double>(CellMass[i]);
 
 			TotalMass += M;
-			MaxCellMass = FMath::Max(MaxCellMass, M);
 
 			double& Sum = ParentSums.FindOrAdd(AllCells[i].ParentIndex);
 			Sum += M;
 		}
 
-		double Divisor = 0.0;
+		TArray<double> Sums;
+		Sums.Reserve(ParentSums.Num());
 		for (const TPair<int32, double>& Pair : ParentSums)
 		{
-			Divisor = FMath::Max(Divisor, Pair.Value);
+			Sums.Add(Pair.Value);
+		}
+		Sums.Sort();
+
+		// A PERCENTILE, NOT THE MAXIMUM. See kCalibrationPercentile: this field's dynamic
+		// range is wider than a slot can represent, so the choice is not whether to clip but
+		// where to put the knee. Dividing by the max leaves everything but the densest cells
+		// invisible; dividing just below the tail lets the top couple of percent pin at
+		// capacity while every other cell tracks density.
+		double Divisor = 0.0;
+		double MedianSum = 0.0;
+		double MaxSum = 0.0;
+
+		if (Sums.Num() > 0)
+		{
+			const int32 PercentileIdx = FMath::Clamp(
+				FMath::RoundToInt(UniverseEntityGen::kCalibrationPercentile
+					* static_cast<float>(Sums.Num() - 1)),
+				0, Sums.Num() - 1);
+
+			Divisor = Sums[PercentileIdx];
+			MedianSum = Sums[Sums.Num() / 2];
+			MaxSum = Sums.Last();
 		}
 
 		if (Divisor > 0.0)
@@ -638,31 +693,20 @@ float UniverseDataGenerator::GetTierBudgetScale(
 				static_cast<double>(InTierParams.SlotCapacity) / Divisor);
 		}
 
-		// THE HOMOGENEITY CHECK, and the reason it is logged rather than asserted.
-		//
-		// This layer calibrates against a SAMPLE of an unbounded field rather than an
-		// exhaustive grid, which is only sound while the field is statistically the same
-		// everywhere. The spread across parents is the direct measure of that: a ratio near
-		// 1 means one block is as good as any other and the constant generalises, while a
-		// large one means the block landed somewhere unrepresentative -- most likely inside
-		// or outside the lattice crossover band, which runs about five times the mean
-		// density of either end.
-		//
-		// If this reads much above 5, widen the calibration block or reconsider whether a
-		// single constant can describe the whole field.
-		const double MeanParent = (ParentSums.Num() > 0)
-			? (TotalMass / static_cast<double>(ParentSums.Num()))
-			: 0.0;
-
-		const double Spread = (MeanParent > 0.0) ? (Divisor / MeanParent) : 0.0;
+		// THE SHAPE OF THE DISTRIBUTION, which is what says whether one constant can serve
+		// the whole field. The max-over-median ratio is the field's dynamic range as this
+		// tier's cells see it: a few times over means a constant works well, orders of
+		// magnitude means the tail will always clip and the percentile is doing real work.
+		const double Range = (MedianSum > 0.0) ? (MaxSum / MedianSum) : 0.0;
 
 		UE_LOG(LogTemp, Log,
 			TEXT("UniverseEntityGen: tier offset %d calibrated in %.3fs over %d cells ")
-			TEXT("(%d parents); BudgetScale %.4f, max parent mass %.5f, mean %.5f, ")
-			TEXT("spread %.2fx, largest single cell %.5f."),
+			TEXT("(%d scattered parents); BudgetScale %.6f from the %.0fth percentile ")
+			TEXT("mass %.5f; median %.5f, max %.5f, range %.1fx."),
 			InSeedOffset, FPlatformTime::Seconds() - CalibrationStart,
-			AllCells.Num(), ParentSums.Num(),
-			Scale, Divisor, MeanParent, Spread, MaxCellMass);
+			AllCells.Num(), ParentSums.Num(), Scale,
+			UniverseEntityGen::kCalibrationPercentile * 100.0f,
+			Divisor, MedianSum, MaxSum, Range);
 	}
 	else
 	{
@@ -783,6 +827,11 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 			static_cast<float>(In.Centre.Z));
 		Cell.HalfExtent = static_cast<float>(In.HalfExtent);
 		Cell.Coord = FIntVector3(In.Coord.X, In.Coord.Y, In.Coord.Z);
+
+		// THE SHADER CAPS PER SLOT, so it needs to know which one. Every child of a
+		// subdivided streamed cell carries its parent's.
+		Cell.SlotIndex = static_cast<uint32>(In.SlotIndex);
+
 		Cells.Add(Cell);
 	}
 
@@ -799,6 +848,7 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 
 	if (!UniverseEntityGen::GenerateBatchBlocking(
 		Params, InTierParams, Cells, EntityCapacity,
+		InBuffer.SlotCoord.Num(), InBuffer.SlotCapacity,
 		TierKeySeed(InSeedOffset), InvFieldExtent, NoiseTexture,
 		BudgetScale, Entities, Counts))
 	{
@@ -818,10 +868,9 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 	TArray<int32> SlotCursors;
 	SlotCursors.SetNumZeroed(InBuffer.SlotCoord.Num());
 
-	// THE TRUE TOTAL, which deliberately over-counts past capacity: the shader increments
-	// the global cursor even when the buffer is full, so this is what the batch WANTED to
-	// place rather than what fitted. Clamping it in the shader would make an overflowing
-	// dispatch report exactly full and hide the thinning.
+	// RECORDS ACTUALLY WRITTEN. The shader now caps each slot at SlotCapacity before it
+	// claims a global index, so this is bounded by capacity rather than being the raw
+	// accepted count -- the demand figure moved to the per-slot counters below.
 	const uint32 TotalAccepted =
 		Counts.IsValidIndex(UniverseEntityGen::GlobalCursorIndex(Cells.Num()))
 		? Counts[UniverseEntityGen::GlobalCursorIndex(Cells.Num())]
@@ -846,6 +895,16 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 
 	int32 Dropped = 0;
 	int32 Rejected = 0;
+
+	// THE SAMPLED DENSITY OF WHAT WAS ACTUALLY PLACED, which answers the alignment question
+	// numerically rather than by eye. Every accepted entity passed a test against its cell's
+	// envelope, so if the dispatch is reading the field it means to read, these values sit
+	// well up the field's range. A mean hovering near the void floor means the dispatch is
+	// sampling somewhere the render is not.
+	double DensitySum = 0.0;
+	float DensityMin = TNumericLimits<float>::Max();
+	float DensityMax = 0.0f;
+	int32 DensityCount = 0;
 
 	for (int32 i = 0; i < Written; ++i)
 	{
@@ -897,10 +956,38 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 		InBuffer.Positions[Idx] = Pos;
 		InBuffer.Extents[Idx] = E.Extent;
 
+		DensitySum += static_cast<double>(E.Density);
+		DensityMin = FMath::Min(DensityMin, E.Density);
+		DensityMax = FMath::Max(DensityMax, E.Density);
+		++DensityCount;
+
 		// The decoratives are three decorrelated uniforms; the colour convention matches
 		// what the CPU path wrote, so the Niagara systems need no change.
 		const FVector3f Decor = E.DecodeDecor();
-		InBuffer.Colors[Idx] = FLinearColor(Decor.X, Decor.Y, Decor.Z, 1.0f);
+
+		if (Params.MaterialParams.bDebugColorByDensity)
+		{
+			// THE DENSITY THE DISPATCH ACTUALLY READ at this entity's own position, painted
+			// so it can be compared against the raymarch drawing the same field. See
+			// bDebugColorByDensity for how to read the three outcomes.
+			//
+			// Normalised by the analytic ceiling rather than by anything measured, so the
+			// scale means the same thing between tiers and survives a retune of the ranges.
+			const FUniverseDensityParams& DP = Params.DensityParams;
+
+			const float Ceiling =
+				FMath::Max(DP.Wall.Density.Min, DP.Wall.Density.Max)
+				+ FMath::Max(DP.Filament.Density.Min, DP.Filament.Density.Max)
+				+ FMath::Max(DP.Void.Floor.Min, DP.Void.Floor.Max);
+
+			const float T = FMath::Clamp(E.Density / FMath::Max(Ceiling, 1e-6f), 0.0f, 1.0f);
+
+			InBuffer.Colors[Idx] = FLinearColor(T, T * T, 1.0f - T, 1.0f);
+		}
+		else
+		{
+			InBuffer.Colors[Idx] = FLinearColor(Decor.X, Decor.Y, Decor.Z, 1.0f);
+		}
 
 		if (InBuffer.Rotations.IsValidIndex(Idx))
 		{
@@ -931,18 +1018,91 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 		}
 	}
 
+	// HOW FAR THE CALIBRATED CONSTANT IS OUT, which is the only observer of that: a slot
+	// that is merely full looks identical whether it wanted one more entity or twenty times
+	// more, and the per-slot counters keep counting past the ceiling so the difference is
+	// visible.
+	//
+	// THIS IS THE NUMBER THAT SAYS WHETHER CALIBRATION GENERALISES. It is measured once at
+	// the origin against a field that is only statistically homogeneous, so a demand ratio
+	// that stays near 1 means the sample was representative and a ratio in the tens means
+	// it was not -- the constant is describing a part of the field the player is not in.
+	uint32 SlotDemand = 0;
+	uint32 WorstSlotDemand = 0;
+
+	for (int32 sIdx = 0; sIdx < InBuffer.SlotCoord.Num(); ++sIdx)
+	{
+		const int32 CountIdx = UniverseEntityGen::SlotCursorIndex(Cells.Num(), sIdx);
+
+		if (Counts.IsValidIndex(CountIdx))
+		{
+			SlotDemand += Counts[CountIdx];
+			WorstSlotDemand = FMath::Max(WorstSlotDemand, Counts[CountIdx]);
+		}
+	}
+
+	const double DemandRatio = (InBuffer.SlotCapacity > 0)
+		? (static_cast<double>(WorstSlotDemand) / static_cast<double>(InBuffer.SlotCapacity))
+		: 0.0;
+
 	// THE DIAGNOSTIC THAT DECIDES SUBDIVISION. Probes and candidates are both field
 	// evaluations, and a universe field evaluation is a fifty-four candidate walk plus five
 	// texture fetches -- so the ratio between them is the whole cost argument. Below about
 	// 1 the probes have overtaken placement and the tier wants one subdivision level fewer;
 	// above about 9 it wants one more.
 	uint32 CandidatesEvaluated = 0;
+
+	// THE ENVELOPE CHECK, and it is the first thing to read when placement has the right
+	// SHAPE but the wrong GRADIENT.
+	//
+	// Acceptance is saturate(d / envelope)^g, so everything above the envelope accepts with
+	// probability 1. WHAT THAT COSTS IS THE COUNT, NOT THE SHAPE, and the distinction is
+	// worth keeping straight: the clipped region is the cell's brightest part, so entities
+	// landing in it are still on the structure. What breaks is the relation the whole budget
+	// rests on -- accepted_i = BudgetScale x mass_i holds only while nothing saturates.
+	//
+	// A clipping cell therefore OVER-DELIVERS against its budget, and the surplus is then
+	// cut by slot capacity rather than by the field. That is what reads as a loose fit at
+	// the large scale: bright cells all pin at capacity and become indistinguishable from
+	// each other, while faint cells under-fill. Check `dropped over capacity` alongside
+	// this; the two move together.
+	//
+	// THE SPAWN EXPONENT MAKES THIS SHARPER IN BOTH DIRECTIONS. At g = 8 a candidate at
+	// 90% of the envelope accepts at 0.43 while one at 100% accepts at 1, so the fraction
+	// sitting in the clipped region dominates the result. A high exponent is only
+	// meaningful once the envelope is known to be tight.
+	//
+	// This field is worse for it than the galaxy's: its features are the SURFACES between
+	// nodes, which sit at no particular place relative to the generation grid, so a thin
+	// wall crossing a cell can fall between all fifty-six jittered probes.
+	int32 CellsClipped = 0;
+	double WorstOvershoot = 0.0;
+
 	for (int32 c = 0; c < Cells.Num(); ++c)
 	{
 		const int32 Base = c * UniverseEntityGen::CountersPerCell;
 		if (Counts.IsValidIndex(Base + 1))
 		{
 			CandidatesEvaluated += Counts[Base + 1];
+		}
+
+		if (!Counts.IsValidIndex(Base + 3))
+		{
+			continue;
+		}
+
+		// Both written as asuint by the shader.
+		const uint32 EnvBits = Counts[Base + 2];
+		const uint32 PeakBits = Counts[Base + 3];
+
+		const float Envelope = *reinterpret_cast<const float*>(&EnvBits);
+		const float Peak = *reinterpret_cast<const float*>(&PeakBits);
+
+		if (Envelope > 0.0f && Peak > Envelope)
+		{
+			++CellsClipped;
+			WorstOvershoot = FMath::Max(WorstOvershoot,
+				static_cast<double>(Peak) / static_cast<double>(Envelope));
 		}
 	}
 
@@ -951,10 +1111,48 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 
 	UE_LOG(LogTemp, Verbose,
 		TEXT("UniverseEntityGen: tier offset %d placed %d/%u accepted into %d slots over ")
-		TEXT("%d cells; C/P %.2f, dropped %d over capacity, rejected %d non-finite."),
+		TEXT("%d cells; C/P %.2f, dropped %d, rejected %d non-finite, ")
+		TEXT("%d/%d cells clipped (worst %.2fx), worst slot demand %.1fx capacity; ")
+		TEXT("placed density min %.4f mean %.4f max %.4f; slots %.1f%% full."),
 		InSeedOffset, Written, TotalAccepted, InQueuedCells.Num(), Cells.Num(),
 		(Probes > 0.0) ? (static_cast<double>(CandidatesEvaluated) / Probes) : 0.0,
-		Dropped, Rejected);
+		Dropped, Rejected, CellsClipped, Cells.Num(), WorstOvershoot, DemandRatio,
+		(DensityCount > 0) ? DensityMin : 0.0f,
+		(DensityCount > 0) ? (DensitySum / DensityCount) : 0.0,
+		DensityMax,
+		(EntityCapacity > 0)
+		? (100.0 * static_cast<double>(Written) / static_cast<double>(EntityCapacity))
+		: 0.0);
+
+	// FOUR TIMES CAPACITY IS THE POINT AT WHICH THE SLOT STOPS DESCRIBING THE FIELD. Below
+	// that a full slot is a genuinely dense region; far above it, every dense region is
+	// equally full and the population no longer varies with density at all.
+	if (DemandRatio > 4.0)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("UniverseEntityGen: tier offset %d wants %.1fx its slot capacity in the ")
+			TEXT("worst slot. The calibrated constant was measured at the origin and does ")
+			TEXT("not describe the field here; dense slots are all pinning at capacity and ")
+			TEXT("the population has stopped tracking density."),
+			InSeedOffset, DemandRatio);
+	}
+
+	// A FEW PERCENT IS NORMAL -- sixty-four probes cannot find every peak, which is what
+	// EnvelopePad exists to absorb. A large fraction means acceptance is saturating across
+	// the batch and the placement gradient is being flattened cell by cell, which is a
+	// SAMPLING problem rather than a tuning one: raise EnvelopePad, or lower the spawn
+	// exponent until the envelope is trustworthy. Raising the candidate budget does not
+	// help, because every extra candidate is drawn against the same short envelope.
+	if (Cells.Num() > 0 && CellsClipped * 4 > Cells.Num())
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("UniverseEntityGen: tier offset %d clipped in %d of %d cells, worst %.2fx ")
+			TEXT("over envelope. Those cells over-deliver against their budget and get cut ")
+			TEXT("by slot capacity instead, which flattens the population across bright ")
+			TEXT("cells. Raise the probe rounds before EnvelopePad -- the pad costs ")
+			TEXT("candidates exponentially in SpawnExponent."),
+			InSeedOffset, CellsClipped, Cells.Num(), WorstOvershoot);
+	}
 
 	// A NON-FINITE RECORD IS NOT A TUNING PROBLEM. It means the scatter read past what the
 	// dispatch wrote, which is a plumbing fault rather than a field one, and it is worth

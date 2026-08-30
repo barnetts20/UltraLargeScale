@@ -29,7 +29,10 @@
 AUniverseActor::AUniverseActor()
 {
 	bAutoInitializeOnBeginPlay = true;
-	this->UniverseParams = FUniverseParamBounds::Generate(UniverseParamBounds, 666);
+	// NO PARAMS ASSIGNMENT HERE ANY MORE. UniverseParams is a UPROPERTY with its own
+	// defaults, so the authored value arrives through serialization like any other property
+	// -- and, unlike the constructor copy this replaces, an edit on a placed actor takes
+	// effect without the level being reloaded.
 	// Niagara cloud systems load lazily in BuildTierConfigs() (runtime), NOT here:
 	// loading assets during CDO construction runs before Niagara is ready and crashes.
 	GalaxyActorClass = AGalaxyActor::StaticClass();
@@ -601,9 +604,20 @@ void AUniverseActor::InitializeNiagara()
 	double StartTime = FPlatformTime::Seconds();
 	BuildTierConfigs();
 	const FTierStreamingContext Ctx = BuildStreamingContext();
-	FTierStreamingSystem::InitializeTier(Ctx, LargeTierConfig, LargeTierState, TierNiagaraComponents);
-	FTierStreamingSystem::InitializeTier(Ctx, MidTierConfig, MidTierState, TierNiagaraComponents);
-	FTierStreamingSystem::InitializeTier(Ctx, SmallTierConfig, SmallTierState, TierNiagaraComponents);
+	// GATED FOR ISOLATION. A tier that is off is never initialized, so UpdateTier below
+	// must skip it too -- it has no buffers and no components to update.
+	if (UniverseParams.bEnableLargeTier)
+	{
+		FTierStreamingSystem::InitializeTier(Ctx, LargeTierConfig, LargeTierState, TierNiagaraComponents);
+	}
+	if (UniverseParams.bEnableMidTier)
+	{
+		FTierStreamingSystem::InitializeTier(Ctx, MidTierConfig, MidTierState, TierNiagaraComponents);
+	}
+	if (UniverseParams.bEnableSmallTier)
+	{
+		FTierStreamingSystem::InitializeTier(Ctx, SmallTierConfig, SmallTierState, TierNiagaraComponents);
+	}
 	UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeNiagara total duration: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
 }
 #pragma endregion
@@ -911,9 +925,20 @@ void AUniverseActor::Tick(float DeltaTime)
 	}
 
 	const FTierStreamingContext Ctx = BuildStreamingContext();
-	FTierStreamingSystem::UpdateTier(Ctx, LargeTierConfig, LargeTierState);
-	FTierStreamingSystem::UpdateTier(Ctx, MidTierConfig, MidTierState);
-	FTierStreamingSystem::UpdateTier(Ctx, SmallTierConfig, SmallTierState);
+	// Must mirror the gates in InitializeNiagara exactly: an uninitialized tier has no
+	// buffers, and UpdateTier assumes it does.
+	if (UniverseParams.bEnableLargeTier)
+	{
+		FTierStreamingSystem::UpdateTier(Ctx, LargeTierConfig, LargeTierState);
+	}
+	if (UniverseParams.bEnableMidTier)
+	{
+		FTierStreamingSystem::UpdateTier(Ctx, MidTierConfig, MidTierState);
+	}
+	if (UniverseParams.bEnableSmallTier)
+	{
+		FTierStreamingSystem::UpdateTier(Ctx, SmallTierConfig, SmallTierState);
+	}
 
 	CheckOctreeBounds();
 
