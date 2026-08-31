@@ -20,12 +20,55 @@ namespace UniverseSeed
 }
 
 
-// FUniverseNoiseGraphParams REMOVED. It authored the legacy FastNoise graph that the
-// three tiers rejection-sampled for cluster placement, which the cosmic-web field
-// replaced -- and it named a second, unrelated "density params" alongside
-// FUniverseDensityParams, which is exactly the arrangement that lets the render and
-// placement quietly read different fields. It came out with EncodedTree, BuildNoise and
-// DensityNoise; they were each other's only consumers.
+/** LEGACY. The FastNoise graph that predates the cosmic-web field.
+ *
+ *  RENAMED, not retired. UniverseDataGenerator::BuildNoise() still builds this graph and
+ *  all three tiers still rejection-sample it for cluster placement, so it cannot come out
+ *  until entity generation lands on the web field. The rename exists because
+ *  FUniverseDensityParams now names the field the shader actually draws, and having two
+ *  unrelated things called "the density params" is how the render and placement quietly
+ *  end up reading different fields.
+ *
+ *  Nothing here feeds UniverseDensityCore.ush. When the web field takes over placement,
+ *  this struct, BuildNoise, EncodedTree and DensityNoise come out together. */
+USTRUCT(BlueprintType)
+struct ULTRALARGESCALE_API FUniverseNoiseGraphParams
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float MasterScale = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float ClusterFalloff = 32.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float ClusterScale = 3.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float ClusterMulti = 50.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float ClusterRemapMax = 1.001f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float ClusterRemapMin = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float WebFalloff = 3.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float WebRemapMin = -0.1f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float WebRemapMax = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float WarpAmp = 0.25f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	float WarpFreq = 1.0f;
+};
 
 
 // =============================================================================
@@ -270,9 +313,17 @@ struct ULTRALARGESCALE_API FUniverseWarpOctaveParams
 	/** Peak displacement in SMALL cells.
 	 *
 	 *  NOT THE CONVENTION THE RETIRED LATTICE PATH USED -- that one centred and doubled,
-	 *  so a value carried over from it must be doubled to displace the same distance. */
+	 *  so a value carried over from it must be doubled to displace the same distance.
+	 *
+	 *  IT IS DENOMINATED IN THE ASSET'S VALUE SCALE, not in an absolute one, which is what
+	 *  makes it move whenever MaterialParams.VolumeNoise is swapped. The core decodes a
+	 *  displacement from the fetched channels and multiplies by this; a volume whose
+	 *  channels swing half as far needs twice the amount for the same bend. The defaults
+	 *  here are tuned against VT_Multi_S4 and mean nothing against a different bake --
+	 *  re-tune the pair (this and WarpTexGradient) together when the asset changes, and
+	 *  read PredictedFoldShear rather than the picture while doing it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Warp")
-	FUniverseVarianceRange Amount = FUniverseVarianceRange(0.333f, 0.666f, 1.0f);
+	FUniverseVarianceRange Amount = FUniverseVarianceRange(0.5f, 2.5f, 1.0f);
 
 	/** Texture repeats per small cell, riding Amount's .w.
 	 *
@@ -286,7 +337,14 @@ struct ULTRALARGESCALE_API FUniverseWarpOctaveParams
 	 *  whole number. Otherwise there is a hard seam every 4096 cells that no amount of
 	 *  amplitude tuning will hide.
 	 *
-	 *  FIXED ACROSS THE DRAW, not ranged. That was tried and rolled back. */
+	 *  FIXED ACROSS THE DRAW, not ranged. That was tried and rolled back.
+	 *
+	 *  409/4096 RATHER THAN A ROUND 0.1, and the difference is 0.15% of the value and the
+	 *  whole of the repeat behaviour. 0.1 quantizes to 410, which shares a factor of 41
+	 *  with Region.ScaleAppearance's 41 and re-aligns every ninety-nine cells -- twenty
+	 *  proxy widths, the worst pairing in the set. That is what this value was moved off
+	 *  410 to avoid; see the note on Region.ScaleAppearance. Author 0.1 in the details
+	 *  panel and the grid comes back. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Warp", meta = (ClampMin = "0.0"))
 	float Scale = 0.099854f;
 
@@ -572,20 +630,34 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 	 *  used only to predict the fold ceiling. A 64^3 three-octave smooth volume measures
 	 *  14.09.
 	 *
+	 *  STALE, AND KNOWINGLY SO. 14.09 was measured on VT_PerlinWorley_Balanced and the
+	 *  field now fetches VT_Multi_S4, whose value scale is different enough that the warp
+	 *  amounts had to move with it. Until this is re-measured on the new bake,
+	 *  PredictedFoldShear and everything Validate() says about the fold ceiling are
+	 *  arithmetic on the wrong constant -- so treat a ceiling warning as unproven rather
+	 *  than as a reading, in either direction.
+	 *
 	 *  WRONG IN BOTH DIRECTIONS. If the amplitudes look right but the predicted shear is
 	 *  far above one, this is the number that disagrees, and the ratio between where the
 	 *  web actually tears and the prediction is the factor to correct it by. Becomes 1 and
-	 *  drops out entirely once volumes are gradient-normalized at bake time. */
+	 *  drops out entirely once volumes are gradient-normalized at bake time -- which the
+	 *  authoring tool can now do, and doing it retires this pin. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Asset", meta = (ClampMin = "0.0"))
 	float WarpTexGradient = 14.09f;
 
 	FUniverseDensityParams()
 	{
 		// THE SMALL OCTAVE IS NOT A COPY OF THE LARGE ONE, so its defaults are set here
-		// rather than left to FUniverseWarpOctaveParams's own. Amplitude two orders lower
-		// and a scale ten times higher: fine grain against coarse bend. See the fold
-		// ceiling note on the member.
-		WarpSmall.Amount = FUniverseVarianceRange(0.04f, 0.06f, 2.0f);
+		// rather than left to FUniverseWarpOctaveParams's own. Lower amplitude and a scale
+		// seven times higher: fine grain against coarse bend. See the fold ceiling note on
+		// the member.
+		//
+		// TUNED AGAINST VT_Multi_S4 like the large octave's, and for the same reason -- the
+		// amount is denominated in the asset's value scale. The spread is wide (0.05..0.3,
+		// biased to the low end) because this octave is the one the appearance fetch varies
+		// most visibly: it is the difference between a province of clean sheets and one of
+		// broken filament.
+		WarpSmall.Amount = FUniverseVarianceRange(0.05f, 0.3f, 2.0f);
 		WarpSmall.Scale = 0.75f;
 		WarpSmall.LatticeFollow = 0.0f; // ignored; the small octave is pinned at full follow
 	}
@@ -889,15 +961,29 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 	/** The packed noise volume the field fetches for both region variances and both warp
 	 *  octaves.
 	 *
-	 *  ITS REQUIREMENTS, for when the bake utility lands: periodic, so repeat addressing
-	 *  closes the 4096-cell wrap; per-channel normalized to 0.5 with comparable spread; a
-	 *  distinct archetype per channel. Ideally gradient-normalized too, which makes
-	 *  WarpTexGradient 1 and drops it out of the fold ceiling entirely.
+	 *  ITS REQUIREMENTS: periodic, so repeat addressing closes the 4096-cell wrap;
+	 *  per-channel normalized to 0.5 with comparable spread; a distinct archetype per
+	 *  channel. Ideally gradient-normalized too, which makes WarpTexGradient 1 and drops it
+	 *  out of the fold ceiling entirely.
 	 *
 	 *  THE SAME ASSET MUST REACH THE COMPUTE PATH. Placement and render sample one texture
-	 *  or they are not one field. */
+	 *  or they are not one field. Both sides resolve this one string -- the material's
+	 *  NoiseTex in InitializeVolumetric and FieldNoiseTexture in LoadRuntimeAssets -- so
+	 *  there is nothing else to change when it moves.
+	 *
+	 *  IT NOW LIVES IN ANOTHER PLUGIN'S CONTENT, /VolumeNoiseLib rather than
+	 *  /UltraLargeScale, and that carries two conditions this string cannot enforce.
+	 *  VolumeNoiseLib must be ENABLED, or the mount point does not exist and LoadObject
+	 *  returns null -- which surfaces as the unwarped analytic web, a plausible-looking
+	 *  field rather than an error. And because the reference is a STRING rather than a hard
+	 *  TObjectPtr, the cooker has no edge to follow: the asset needs to be reachable from a
+	 *  cooked reference or listed in the project's additional asset directories, or a
+	 *  packaged build loses the warp while the editor keeps it.
+	 *
+	 *  THE WARP AMOUNTS AND WarpTexGradient BELONG TO WHATEVER THIS NAMES. Changing the
+	 *  asset without re-tuning those three is a silent retune of the field's geometry. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	FString VolumeNoise = "/UltraLargeScale/VolumeTextures/VT_PerlinWorley_Balanced";
+	FString VolumeNoise = "/VolumeNoiseLib/Noise/Multi-Noise/Base/VT_Multi_S4";
 
 	/** Steps the march will actually take, as opposed to the budget it was given. The two
 	 *  diverge fast: at growth 4 a budget of 32 resolves to about 13. Diagnostic rather
@@ -915,10 +1001,8 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 
 
 /** Universe-layer generation parameters: the cosmic-web density field, the march that
- *  draws it, per-tier streaming configs, and scale derivation.
- *
- *  ONE FIELD, ONE PLACE. The legacy noise graph that used to sit beside DensityParams is
- *  gone; there is no longer a second set of parameters describing a second universe.
+ *  draws it, the legacy noise graph that still drives cluster placement, per-tier
+ *  streaming configs, and scale derivation.
  *
  *  THE GAS LAYER IS GONE. GasExtentMinMultiplier and GasExtentMaxMultiplier sized a
  *  nebula sprite that shared the Large tier's positions; the raymarch replaced it. */
@@ -939,6 +1023,18 @@ struct ULTRALARGESCALE_API FUniverseParams : public FBaseParams {
 	 *  Entity generation samples the same field with none of this. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
 	FUniverseMaterialParams MaterialParams;
+
+#pragma endregion
+
+#pragma region Noise
+
+	/** LEGACY, and a DIFFERENT FIELD from DensityParams above.
+	 *  UniverseDataGenerator::BuildNoise() builds this graph and all three tiers
+	 *  rejection-sample it for cluster placement, so until placement moves across, the
+	 *  sprites and the ray march are showing two unrelated universes. Comes out with
+	 *  BuildNoise and EncodedTree. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	FUniverseNoiseGraphParams NoiseGraphParams;
 
 #pragma endregion
 
@@ -1048,28 +1144,3 @@ struct ULTRALARGESCALE_API FUniverseParams : public FBaseParams {
 
 #pragma endregion
 };
-
-// FUniverseParamBounds IS GONE, and its removal is the point rather than a tidy-up.
-//
-// It held a Min and a Max, both whole FUniverseParams, and AUniverseActor's CONSTRUCTOR
-// assigned UniverseParams = Generate(Bounds, 666) -- whose stub returned Bounds.Max. So the
-// authored data lived at UniverseParamBounds.Max, the struct it fed was not itself a
-// UPROPERTY and therefore not editable, and the copy happened at construction rather than
-// at spawn.
-//
-// EVERY PART OF THAT WAS A TRAP. Editing Bounds.Min did nothing. Editing Bounds.Max on a
-// placed instance did nothing until the actor was constructed again. And nothing anywhere
-// said so -- the symptom was a parameter that appeared to have no effect, which reads as a
-// broken parameter rather than a value that never arrived. It cost two rounds of debugging
-// here: GenerationSubdivision read 0 after being set to 2, and SpawnExponent showed no
-// difference between 0.01 and 16 because both were the default.
-//
-// THE GALAXY LAYER ALREADY MADE THIS CALL, retiring FGalaxyParamBounds for the same reason
-// its own comment gives: Min and Max were whole param structs and so carried a config block
-// each, leaving two config sources in one panel with one of them doing nothing.
-//
-// A RANDOMISED UNIVERSE NEEDS NO BOUNDS PAIR ANYWAY. There is one universe per sector and
-// its variation is regional rather than per-instance -- the two region fetches ARE the
-// archetype system, resolving per sample. If per-sector variation is ever wanted, it wants
-// the shape UGalaxyArchetype uses -- a named parameter, a range and a bias, rolled from the
-// sector seed -- not a second copy of every field.
