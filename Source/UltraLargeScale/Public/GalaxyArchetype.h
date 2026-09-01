@@ -125,14 +125,43 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rolls")
 	TArray<FGalaxyParamRange> Ranges;
 
-	/** Candidate placement noise textures, one drawn per galaxy.
+	/** Candidate field textures, one drawn per galaxy from each bag.
 	 *
-	 *  A BAG, NOT A RANGE. NoiseTexture is categorical: it is chosen from a set, and a
-	 *  Min/Max pair for it means nothing. EMPTY is the normal state -- the exemplar's
-	 *  own NoiseTexture is kept, and AGalaxyActor::InitializeData substitutes the
-	 *  default asset if that is unset too. */
+	 *  BAGS, NOT RANGES. A texture is categorical: it is chosen from a set, and a Min/Max
+	 *  pair for it means nothing. EMPTY is the normal state for all four -- the exemplar's
+	 *  own choice is kept, and AGalaxyActor::InitializeData substitutes its default asset
+	 *  if that is unset too.
+	 *
+	 *  FOUR BAGS, ROLLED INDEPENDENTLY, replacing the single NoiseTextures bag. The field
+	 *  now reads four textures rather than one -- see FGalaxyProceduralParams -- and each
+	 *  wants its own candidates, because the four are not interchangeable: the warp pair
+	 *  must be SIGNED vector volumes and the modulation pair UNORM multinoise. Putting a
+	 *  multinoise volume in a warp bag translates the family instead of displacing it.
+	 *
+	 *  INDEPENDENT ROLLS ARE THE POINT, not an implementation detail. A single shared index
+	 *  would lock the four choices together, so the bags would produce only as many
+	 *  distinct galaxies as the SHORTEST bag has entries; separate streams give the full
+	 *  product. Three ridged gas volumes and two halo volumes is six combinations, not two.
+	 *
+	 *  THIS IS WHERE RIDGING LIVES NOW. NoiseRidged was a uniform folding every channel at
+	 *  sample time, one value shared by gas and halo, which is why it shipped at 0 -- no
+	 *  setting suited both families. Fill NoiseGasTextures with ridged bakes and
+	 *  NoiseHaloTextures with smooth ones and each family gets what it wants for free.
+	 *
+	 *  WIRED BUT UNCURATED. All four default empty, which reproduces the previous behaviour
+	 *  exactly: no roll happens and every galaxy takes the actor's defaults. Filling them
+	 *  is the next step, not part of the texture split. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rolls")
-	TArray<TObjectPtr<UVolumeTexture>> NoiseTextures;
+	TArray<TObjectPtr<UVolumeTexture>> WarpGasTextures;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rolls")
+	TArray<TObjectPtr<UVolumeTexture>> WarpHaloTextures;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rolls")
+	TArray<TObjectPtr<UVolumeTexture>> NoiseGasTextures;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rolls")
+	TArray<TObjectPtr<UVolumeTexture>> NoiseHaloTextures;
 
 	/** THE PIPELINE, in order:
 	 *

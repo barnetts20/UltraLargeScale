@@ -109,8 +109,17 @@ public:
 		SHADER_PARAMETER(float, PlaceExtentMax)
 		SHADER_PARAMETER(float, PlaceExtentExponent)
 
-		SHADER_PARAMETER_TEXTURE(Texture3D, NoiseTex)
-		SHADER_PARAMETER_SAMPLER(SamplerState, NoiseTexSampler)
+		// THE FOUR FIELD VOLUMES, matching the .usf declarations and the material's Custom
+		// node pin for pin. Two signed vector volumes for the warp fetches, two UNORM
+		// multinoise volumes for the modulation fetches.
+		SHADER_PARAMETER_TEXTURE(Texture3D, WarpTexGas)
+		SHADER_PARAMETER_SAMPLER(SamplerState, WarpTexGasSampler)
+		SHADER_PARAMETER_TEXTURE(Texture3D, WarpTexHalo)
+		SHADER_PARAMETER_SAMPLER(SamplerState, WarpTexHaloSampler)
+		SHADER_PARAMETER_TEXTURE(Texture3D, NoiseTexGas)
+		SHADER_PARAMETER_SAMPLER(SamplerState, NoiseTexGasSampler)
+		SHADER_PARAMETER_TEXTURE(Texture3D, NoiseTexHalo)
+		SHADER_PARAMETER_SAMPLER(SamplerState, NoiseTexHaloSampler)
 
 		// Raw field inputs, in MakeGalaxyDensityParams order. Deriving in the shader
 		// rather than uploading a packed GalaxyDensityParams: a derived struct in a
@@ -145,7 +154,6 @@ public:
 		SHADER_PARAMETER(float, InArmHostFalloff)
 		SHADER_PARAMETER(float, InBulgeConcentration)
 		SHADER_PARAMETER(float, InBackgroundConcentration)
-		SHADER_PARAMETER(float, InNoiseRidged)
 		SHADER_PARAMETER(float, InNoiseEnable)
 		SHADER_PARAMETER(FVector4f, InFieldOrientation)
 		END_SHADER_PARAMETER_STRUCT()
@@ -289,7 +297,7 @@ namespace GalaxyEntityGen
 		const FTierParams& InTierParams,
 		const TArray<FGalaxyGenCell>& InCells,
 		int32 InKeySeed,
-		UTexture* InNoiseTexture,
+		const FGalaxyFieldTextures& InFieldTextures,
 		TArray<float>& OutCellMass);
 
 	/** Dispatch, wait, and return the placed entities.
@@ -312,7 +320,7 @@ namespace GalaxyEntityGen
 		const TArray<FGalaxyGenCell>& InCells,
 		int32 InEntityCapacity,
 		int32 InKeySeed,
-		UTexture* InNoiseTexture,
+		const FGalaxyFieldTextures& InFieldTextures,
 		float InBudgetScale,
 		TArray<FGalaxyEntityOut>& OutEntities,
 		TArray<uint32>& OutCounts);
@@ -369,7 +377,7 @@ namespace GalaxyEntityGen
 		TArray<FGalaxyGenCell> InCells,
 		int32 InEntityCapacity,
 		int32 InKeySeed,
-		UTexture* InNoiseTexture,
+		const FGalaxyFieldTextures& InFieldTextures,
 		float InBudgetScale,
 		bool bInCalibrateOnly,
 		TSharedRef<FGalaxyEntityGenRequest> OutRequest);

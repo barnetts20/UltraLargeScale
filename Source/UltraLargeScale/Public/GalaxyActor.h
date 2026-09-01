@@ -49,26 +49,45 @@ public:
 	 *  to be acquired there; keeping it also means the asset is cooked rather than
 	 *  hoping a runtime LoadObject finds it. */
 	UPROPERTY(Transient)
-	TObjectPtr<UVolumeTexture> DefaultNoiseTexture = nullptr;
+	TObjectPtr<UVolumeTexture> DefaultWarpTexGas = nullptr;
 
-	/** THE noise texture this galaxy uses, on BOTH paths. Rolled value if the archetype
-	 *  set one, otherwise the fallback.
+	UPROPERTY(Transient)
+	TObjectPtr<UVolumeTexture> DefaultWarpTexHalo = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UVolumeTexture> DefaultNoiseTexGas = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UVolumeTexture> DefaultNoiseTexHalo = nullptr;
+
+	/** THE four field textures this galaxy uses, on BOTH paths. Rolled value where the
+	 *  archetype set one, otherwise the fallback, decided per texture.
 	 *
 	 *  ONE SOURCE, ORDER-INDEPENDENT. The compute path and the material must sample the
-	 *  IDENTICAL asset or placement and render disagree -- the texture drives positional
-	 *  warp, so a mismatch shows up as stars sitting beside the field they were placed
-	 *  in rather than as anything that looks like an error. This used to hold by luck,
-	 *  because the material loaded FGalaxyMaterialParams::VolumeNoise by path and both
-	 *  happened to name the same asset. Once NoiseTexture became procedural and
-	 *  rollable that stopped being true, so VolumeNoise is gone and both paths call
-	 *  this.
+	 *  IDENTICAL assets or placement and render disagree -- the warp pair drives positional
+	 *  displacement, so a mismatch shows up as stars sitting beside the field they were
+	 *  placed in rather than as anything that looks like an error. This used to hold by
+	 *  luck, because the material loaded FGalaxyMaterialParams::VolumeNoise by path and both
+	 *  happened to name the same asset. Once the texture became procedural and rollable that
+	 *  stopped being true, so VolumeNoise went and both paths call this.
 	 *
-	 *  A function rather than a fixup in one Initialize phase because
-	 *  InitializeVolumetric and InitializeData do not have a guaranteed order between
-	 *  them. */
-	UVolumeTexture* ResolveNoiseTexture() const
+	 *  PER TEXTURE, NOT ALL OR NOTHING. Each falls back independently, so an archetype that
+	 *  curates only its gas bags still gets working halo textures from the defaults.
+	 *
+	 *  A function rather than a fixup in one Initialize phase because InitializeVolumetric
+	 *  and InitializeData do not have a guaranteed order between them. */
+	FGalaxyFieldTextures ResolveFieldTextures() const
 	{
-		return Params.Procedural.NoiseTexture ? Params.Procedural.NoiseTexture.Get() : DefaultNoiseTexture.Get();
+		FGalaxyFieldTextures Out;
+		Out.WarpGas = Params.Procedural.WarpTexGas
+			? Params.Procedural.WarpTexGas.Get() : DefaultWarpTexGas.Get();
+		Out.WarpHalo = Params.Procedural.WarpTexHalo
+			? Params.Procedural.WarpTexHalo.Get() : DefaultWarpTexHalo.Get();
+		Out.NoiseGas = Params.Procedural.NoiseTexGas
+			? Params.Procedural.NoiseTexGas.Get() : DefaultNoiseTexGas.Get();
+		Out.NoiseHalo = Params.Procedural.NoiseTexHalo
+			? Params.Procedural.NoiseTexHalo.Get() : DefaultNoiseTexHalo.Get();
+		return Out;
 	}
 
 	virtual void BeginPlay() override;

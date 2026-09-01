@@ -79,7 +79,6 @@ GalaxyHLSL::GalaxyDensityParams FGalaxyProceduralParams::ToDerived() const
 		Arms.ArmHostFalloff,
 		Bulge.BulgeConcentration,
 		Background.BackgroundConcentration,
-		Noise.NoiseRidged,
 		// The shim's Texture3D returns the neutral 0.5, so every noise term is zero
 		// and this field reduces to the analytic one whatever is passed here. Kept at
 		// 1 to match the compute path rather than describing a mode nothing uses.
@@ -293,7 +292,7 @@ float GalaxyDataGenerator::GetTierBudgetScale(
 
 	float Scale = 0.0f;
 
-	if (AllCells.Num() > 0 && Params.Procedural.NoiseTexture != nullptr)
+	if (AllCells.Num() > 0 && Params.Procedural.GetFieldTextures().IsComplete())
 	{
 		TArray<FGalaxyGenCell> Cells;
 		Cells.Reserve(AllCells.Num());
@@ -316,7 +315,7 @@ float GalaxyDataGenerator::GetTierBudgetScale(
 
 		if (GalaxyEntityGen::CalibrateBlocking(
 			Params, InTierParams, Cells,
-			TierKeySeed(InSeedOffset), Params.Procedural.NoiseTexture, CellMass)
+			TierKeySeed(InSeedOffset), Params.Procedural.GetFieldTextures(), CellMass)
 			&& CellMass.Num() == AllCells.Num())
 		{
 			// REDUCED HERE, NOT ON THE GPU, and in double.
@@ -533,13 +532,16 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	// log, and it does not then spam a warning on every boundary cross for the rest of
 	// the run. A misconfiguration would otherwise surface only as a tier that never
 	// populates, which reads as a streaming problem rather than a setup one.
-	if (Params.Procedural.NoiseTexture == nullptr)
+	if (!Params.Procedural.GetFieldTextures().IsComplete())
 	{
+		// NAMES THE MISSING ONES. With four assets "the texture is unset" sends the reader to
+		// check four bags and four defaults, and the common case is three fine and one not.
 		ensureMsgf(false,
-			TEXT("GalaxyEntityGen: NoiseTexture is unset, so the galaxy will generate ")
-			TEXT("NOTHING -- placement is GPU-only and the dispatch samples it. Set it to ")
-			TEXT("the same volume texture the material samples, with NEVER STREAM on the ")
-			TEXT("asset."));
+			TEXT("GalaxyEntityGen: field textures unset (%s), so the galaxy will generate ")
+			TEXT("NOTHING -- placement is GPU-only and the dispatch samples all four. They ")
+			TEXT("must be the same assets the material samples, with NEVER STREAM set on ")
+			TEXT("each."),
+			*Params.Procedural.GetFieldTextures().DescribeMissing());
 		return FailBatch();
 	}
 
@@ -637,7 +639,7 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	const bool bOk = GalaxyEntityGen::GenerateBatchBlocking(
 		Params, InTierParams, Cells, EntityCapacity,
 		TierKeySeed(InSeedOffset),
-		Params.Procedural.NoiseTexture,
+		Params.Procedural.GetFieldTextures(),
 		BudgetScale,
 		Entities, Counts);
 

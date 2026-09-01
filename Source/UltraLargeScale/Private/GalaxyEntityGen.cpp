@@ -24,7 +24,7 @@ namespace GalaxyEntityGen
 		TArray<FGalaxyGenCell> InCells,
 		int32 InEntityCapacity,
 		int32 InKeySeed,
-		UTexture* InNoiseTexture,
+		const FGalaxyFieldTextures& InFieldTextures,
 		float InBudgetScale,
 		bool bInCalibrateOnly,
 		TSharedRef<FGalaxyEntityGenRequest> OutRequest)
@@ -78,7 +78,14 @@ namespace GalaxyEntityGen
 		// A weak pointer, so a galaxy torn down while a batch is in flight resolves to
 		// null and the dispatch bails, rather than the marshalled lambda keeping a
 		// destroyed texture alive or dereferencing one.
-		TWeakObjectPtr<UTexture> WeakNoise(InNoiseTexture);
+		// FOUR WEAK POINTERS, each checked on the game thread below. They do not expire as a
+		// group -- four separate objects can be collected independently -- so "the set was
+		// complete when Dispatch was called" says nothing about the moment the marshalled
+		// lambda runs.
+		TWeakObjectPtr<UTexture> WeakWarpGas(InFieldTextures.WarpGas);
+		TWeakObjectPtr<UTexture> WeakWarpHalo(InFieldTextures.WarpHalo);
+		TWeakObjectPtr<UTexture> WeakNoiseGas(InFieldTextures.NoiseGas);
+		TWeakObjectPtr<UTexture> WeakNoiseHalo(InFieldTextures.NoiseHalo);
 
 		// Allocated HERE, on the calling thread, not inside the render command.
 		//
@@ -116,7 +123,10 @@ namespace GalaxyEntityGen
 		{
 			TArray<FGalaxyGenCell> Cells;
 			FGalaxyProceduralParams Density;
-			TWeakObjectPtr<UTexture> Noise;
+			TWeakObjectPtr<UTexture> WarpGas;
+			TWeakObjectPtr<UTexture> WarpHalo;
+			TWeakObjectPtr<UTexture> NoiseGas;
+			TWeakObjectPtr<UTexture> NoiseHalo;
 			int32 EntityCapacity = 0;
 			int32 KeySeed = 0;
 			float BudgetScale = 0.0f;
@@ -135,7 +145,10 @@ namespace GalaxyEntityGen
 
 		Payload->Cells = MoveTemp(InCells);
 		Payload->Density = D;
-		Payload->Noise = WeakNoise;
+		Payload->WarpGas = WeakWarpGas;
+		Payload->WarpHalo = WeakWarpHalo;
+		Payload->NoiseGas = WeakNoiseGas;
+		Payload->NoiseHalo = WeakNoiseHalo;
 		Payload->EntityCapacity = InEntityCapacity;
 		Payload->KeySeed = InKeySeed;
 		Payload->BudgetScale = BudgetScale;
@@ -150,20 +163,43 @@ namespace GalaxyEntityGen
 
 		auto EnqueueOnRenderThread = [Payload, OutRequest, EntityReadback, CountReadbackPtr]() mutable
 			{
-				// On the game thread now: safe to touch the UObject.
-				UTexture* NoiseTexture = Payload->Noise.Get();
-				FTextureResource* NoiseResource = NoiseTexture ? NoiseTexture->GetResource() : nullptr;
+				// On the game thread now: safe to touch the UObjects. Resolved as a SET, and
+				// the set is all-or-nothing -- each GetResource() is a UObject access that is
+				// only legal here, and each can independently come back null.
+				UTexture* WarpGasTex = Payload->WarpGas.Get();
+				UTexture* WarpHaloTex = Payload->WarpHalo.Get();
+				UTexture* NoiseGasTex = Payload->NoiseGas.Get();
+				UTexture* NoiseHaloTex = Payload->NoiseHalo.Get();
 
-				if (!NoiseResource)
+				FTextureResource* WarpGasRes = WarpGasTex ? WarpGasTex->GetResource() : nullptr;
+				FTextureResource* WarpHaloRes = WarpHaloTex ? WarpHaloTex->GetResource() : nullptr;
+				FTextureResource* NoiseGasRes = NoiseGasTex ? NoiseGasTex->GetResource() : nullptr;
+				FTextureResource* NoiseHaloRes = NoiseHaloTex ? NoiseHaloTex->GetResource() : nullptr;
+
+				if (!WarpGasRes || !WarpHaloRes || !NoiseGasRes || !NoiseHaloRes)
 				{
 					// Nothing will ever land. Say so, or the worker waits out the whole
 					// timeout for a copy that was never enqueued.
+					//
+					// NO PARTIAL BIND. Binding the three that resolved and leaving the fourth
+					// null is the worst available outcome: it is the case that most looks
+					// like it worked.
+					UE_LOG(LogTemp, Warning,
+						TEXT("GalaxyEntityGen: aborting dispatch -- field textures unresolved ")
+						TEXT("(WarpGas %s, WarpHalo %s, NoiseGas %s, NoiseHalo %s). Placement ")
+						TEXT("is GPU-only and samples all four; nothing will be placed."),
+						WarpGasRes ? TEXT("ok") : TEXT("NULL"),
+						WarpHaloRes ? TEXT("ok") : TEXT("NULL"),
+						NoiseGasRes ? TEXT("ok") : TEXT("NULL"),
+						NoiseHaloRes ? TEXT("ok") : TEXT("NULL"));
+
 					OutRequest->bAborted = true;
 					return;
 				}
 
 				ENQUEUE_RENDER_COMMAND(GalaxyEntityGenDispatch)(
-					[Payload, OutRequest, EntityReadback, CountReadbackPtr, NoiseResource]
+					[Payload, OutRequest, EntityReadback, CountReadbackPtr,
+					WarpGasRes, WarpHaloRes, NoiseGasRes, NoiseHaloRes]
 					(FRHICommandListImmediate& RHICmdList) mutable
 					{
 						// Named explicitly rather than reached through a capture chain.
@@ -171,7 +207,10 @@ namespace GalaxyEntityGen
 						const int32 Total = Payload->EntityCapacity;
 
 						const int32 InKeySeed = Payload->KeySeed;
-						if (!NoiseResource->TextureRHI)
+						// EVERY RHI HANDLE. A resource can exist with a null TextureRHI while
+						// its mips stream in, and the four assets stream independently.
+						if (!WarpGasRes->TextureRHI || !WarpHaloRes->TextureRHI
+							|| !NoiseGasRes->TextureRHI || !NoiseHaloRes->TextureRHI)
 						{
 							OutRequest->bAborted = true;
 							return;
@@ -276,8 +315,28 @@ namespace GalaxyEntityGen
 						Common.PlaceExtentMax = Payload->PlaceExtentMax;
 						Common.PlaceExtentExponent = Payload->PlaceExtentExponent;
 
-						Common.NoiseTex = NoiseResource->TextureRHI;
-						Common.NoiseTexSampler = TStaticSamplerState<
+						Common.WarpTexGas = WarpGasRes->TextureRHI;
+						Common.WarpTexHalo = WarpHaloRes->TextureRHI;
+						Common.NoiseTexGas = NoiseGasRes->TextureRHI;
+						Common.NoiseTexHalo = NoiseHaloRes->TextureRHI;
+
+						// THE SAME STATE FOR ALL FOUR, written out rather than hoisted.
+						// TStaticSamplerState::GetRHI returns one cached object per template
+						// argument set, so this is four reads of one pointer, and keeping the
+						// arguments visible per texture makes it a one-line edit when one of
+						// them wants different addressing.
+						//
+						// MUST MATCH THE MATERIAL. The material's Custom node pins carry
+						// whatever addressing each ASSET is saved with, so an asset saved with
+						// clamp gives the render a different field from the one this dispatch
+						// places against.
+						Common.WarpTexGasSampler = TStaticSamplerState<
+							SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
+						Common.WarpTexHaloSampler = TStaticSamplerState<
+							SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
+						Common.NoiseTexGasSampler = TStaticSamplerState<
+							SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
+						Common.NoiseTexHaloSampler = TStaticSamplerState<
 							SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
 
 						// The field inputs, exactly as the material's Custom node passes them.
@@ -517,7 +576,7 @@ namespace GalaxyEntityGen
 		const FTierParams& InTierParams,
 		const TArray<FGalaxyGenCell>& InCells,
 		int32 InKeySeed,
-		UTexture* InNoiseTexture,
+		const FGalaxyFieldTextures& InFieldTextures,
 		TArray<float>& OutCellMass)
 	{
 		OutCellMass.Reset();
@@ -528,7 +587,10 @@ namespace GalaxyEntityGen
 			return false;
 		}
 
-		if (InCells.Num() == 0 || InNoiseTexture == nullptr)
+		// ALL FOUR OR NONE -- see FGalaxyFieldTextures. Calibrating against a partial set
+		// fits budgets to a field the material does not draw, and those budgets are cached
+		// per tier and reused.
+		if (InCells.Num() == 0 || !InFieldTextures.IsComplete())
 		{
 			return false;
 		}
@@ -540,7 +602,7 @@ namespace GalaxyEntityGen
 		constexpr int32 TokenCapacity = 64;
 
 		Dispatch(InParams, InTierParams, InCells, TokenCapacity, InKeySeed,
-			InNoiseTexture, 0.0f, true, Request);
+			InFieldTextures, 0.0f, true, Request);
 
 		if (!Request->Readback.IsValid())
 		{
@@ -584,7 +646,7 @@ namespace GalaxyEntityGen
 		const TArray<FGalaxyGenCell>& InCells,
 		int32 InEntityCapacity,
 		int32 InKeySeed,
-		UTexture* InNoiseTexture,
+		const FGalaxyFieldTextures& InFieldTextures,
 		float InBudgetScale,
 		TArray<FGalaxyEntityOut>& OutEntities,
 		TArray<uint32>& OutCounts)
@@ -598,7 +660,7 @@ namespace GalaxyEntityGen
 			return false;
 		}
 
-		if (InCells.Num() == 0 || InEntityCapacity <= 0 || InNoiseTexture == nullptr)
+		if (InCells.Num() == 0 || InEntityCapacity <= 0 || !InFieldTextures.IsComplete())
 		{
 			return false;
 		}
@@ -606,7 +668,7 @@ namespace GalaxyEntityGen
 		TSharedRef<FGalaxyEntityGenRequest> Request = MakeShared<FGalaxyEntityGenRequest>();
 
 		Dispatch(InParams, InTierParams, InCells, InEntityCapacity, InKeySeed,
-			InNoiseTexture, InBudgetScale, false, Request);
+			InFieldTextures, InBudgetScale, false, Request);
 
 		if (!Request->Readback.IsValid())
 		{

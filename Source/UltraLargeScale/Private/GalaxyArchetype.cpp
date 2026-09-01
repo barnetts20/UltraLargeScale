@@ -217,15 +217,36 @@ FGalaxyProceduralParams UGalaxyArchetype::Resolve(int32 InSeed, bool bInDefaults
 		*Address = RollRange(Range, InSeed);
 	}
 
-	if (NoiseTextures.Num() > 0)
-	{
-		FRandomStream Stream = ProcSeed::Stream(InSeed, GalaxySeed::NoiseTexture);
-		const int32 Index = Stream.RandRange(0, NoiseTextures.Num() - 1);
-		if (NoiseTextures[Index])
+	// FOUR BAGS, FOUR STREAMS, FOUR INDEPENDENT DRAWS. An empty bag leaves the exemplar's
+	// own choice alone, which is what makes all four defaulting empty reproduce the
+	// pre-split behaviour exactly. A null entry is skipped rather than assigned, so a bag
+	// with a hole in it degrades to the exemplar rather than to an empty galaxy.
+	//
+	// SEPARATE STREAMS, not one index reused, so the four choices are uncorrelated -- see
+	// the channel declarations in GalaxySeed for why sharing one would collapse the
+	// combinations to the shortest bag's length.
+	auto RollTextureBag = [&InSeed](
+		const TArray<TObjectPtr<UVolumeTexture>>& InBag,
+		uint32 InChannel,
+		TObjectPtr<UVolumeTexture>& OutTexture)
 		{
-			Out.NoiseTexture = NoiseTextures[Index];
-		}
-	}
+			if (InBag.Num() == 0)
+			{
+				return;
+			}
+
+			FRandomStream Stream = ProcSeed::Stream(InSeed, InChannel);
+			const int32 Index = Stream.RandRange(0, InBag.Num() - 1);
+			if (InBag[Index])
+			{
+				OutTexture = InBag[Index];
+			}
+		};
+
+	RollTextureBag(WarpGasTextures, GalaxySeed::WarpTexGas, Out.WarpTexGas);
+	RollTextureBag(WarpHaloTextures, GalaxySeed::WarpTexHalo, Out.WarpTexHalo);
+	RollTextureBag(NoiseGasTextures, GalaxySeed::NoiseTexGas, Out.NoiseTexGas);
+	RollTextureBag(NoiseHaloTextures, GalaxySeed::NoiseTexHalo, Out.NoiseTexHalo);
 
 	// LAST, so it can read every rolled value and derive, correlate or override from
 	// it. Empty on the base class.
@@ -264,8 +285,9 @@ bool UGalaxyArchetype::Validate() const
 				TEXT("rollable parameter. Names are dotted PATHS now that the members are ")
 				TEXT("grouped -- \"Arms.ArmRadius\", or \"Noise.NoiseOffset.X\" for one ")
 				TEXT("component of a vector. A path that stops on a group designates the ")
-				TEXT("whole group and is not rollable, and NoiseTexture is categorical: it ")
-				TEXT("belongs in NoiseTextures instead."),
+				TEXT("whole group and is not rollable, and the four field textures are ")
+				TEXT("categorical: they belong in WarpGasTextures, WarpHaloTextures, ")
+				TEXT("NoiseGasTextures or NoiseHaloTextures instead."),
 				*GetName(), Index, *Range.Parameter.ToString());
 			bValid = false;
 			continue;

@@ -11,7 +11,8 @@
 // keeping three implementations in agreement by hand.
 //
 // The C++ side exists for parameter derivation, authoring and diagnostics. IT MUST NEVER
-// PLACE ENTITIES. The shim stubs Texture3D to the neutral 0.5, so the C++ field reduces
+// PLACE ENTITIES. The shim stubs both texture types to their own neutral -- 0.5 for the
+// UNORM modulation volumes, 0 for the signed warp volumes -- so the C++ field reduces
 // exactly to the analytic one -- and a texture-free approximation of a textured field
 // produces a perfectly ordinary-looking galaxy that ignores what the material draws.
 //
@@ -45,9 +46,25 @@
 #define GALAXY_POW_EPSILON 1e-6f
 #define GALAXY_MAX_ARMS 16
 
-// Separates the halo noise domain from the gas one so their structure does not
-// correlate. Arbitrary; only needs to be large against feature size.
-#define GALAXY_HALO_DOMAIN float3(53.7f, 29.1f, 71.3f)
+// GALAXY_HALO_DOMAIN IS GONE. It offset the halo fetches into a distant region of the
+// noise volume so their structure would not correlate with the gas fetches -- necessary
+// only because all four fetches read ONE texture. The field now takes four, one per
+// fetch, so gas and halo share no asset and there is nothing left to decorrelate. An
+// offset would only move the halo to a different part of its own texture.
+//
+// NoiseOffset stays and still does its own job: it varies which region of an asset a
+// GALAXY reads, which is what gives two galaxies on the same archetype different noise.
+
+// THE SIGNED TEXTURE TYPE. The two warp fetches read curl/gradient vector assets whose
+// values are already in [-1,1]; the two modulation fetches read UNORM multinoise in
+// [0,1]. The shader compiler has one resource type for both -- the difference is entirely
+// in the decode, written out at each fetch site -- so this alias exists solely to let the
+// shared file NAME the convention. The C++ shim defines Texture3DSigned as a real distinct
+// type with its own neutral, which is what makes a fetch site given the wrong convention a
+// compile error there rather than a silent shear here.
+#ifndef GALAXY_HLSL_SHIM
+#define Texture3DSigned Texture3D
+#endif
 
 // ==========================================================================
 // THE STEP FLOOR THE FIELD ITSELF IMPLIES
@@ -277,7 +294,11 @@ struct GalaxyDensityParams
     float4 NoiseScale; // modulation frequency, frame convention
     float4 WarpScale; // warp frequency, frame convention
     float4 NoiseChannelWeights; // signed channel mix
-    float NoiseRidged; // 0 = smooth, 1 = ridged filaments and lanes
+    // NoiseRidged REMOVED. It lerped each centred channel toward 1-2|c| at sample time,
+    // which is a bake-time decision paid for per fetch: four lerps and four abs on the
+    // hottest path in the stack, to reproduce something a ridged noise volume already is.
+    // The library now carries dedicated ridged bakes, so ridging is chosen by WHICH ASSET
+    // is bound rather than by a uniform, and it costs nothing at sample time.
     float NoiseEnable; // 0 skips every texture read
     float HaloTwistInherit; // fraction of the spiral twist the halo frame takes
 
@@ -1034,7 +1055,14 @@ GalaxyDensityParams MakeGalaxyDensityParams(
     float InArmHostFalloff,
     float InBulgeConcentration,
     float InBackgroundConcentration,
-    float InNoiseRidged,
+    // InNoiseRidged REMOVED FROM THE MIDDLE OF THIS LIST, and that is a break in the
+    // append-only rule below rather than an exception to it. The rule exists because the
+    // material's Custom node calls this POSITIONALLY, so anything that shifts an argument
+    // shifts every pin after it -- and a Custom node fails at shader compile, not at build.
+    // Removing is exactly as disruptive as inserting. It is done here deliberately, once,
+    // because leaving a dead float in the signature to preserve positions would be worse:
+    // the pin would still have to be wired to something, and the next reader would have to
+    // discover it does nothing. The Custom node body was updated in the same pass.
     float InNoiseEnable,
     // APPENDED, not inserted, and it stays that way for anything added later. The
     // material's Custom node calls this positionally and a Custom node fails at SHADER
@@ -1188,7 +1216,6 @@ GalaxyDensityParams MakeGalaxyDensityParams(
     P.NoiseScale = max(InNoiseScale, 1e-6f);
     P.WarpScale = max(InWarpScale, 1e-6f);
     P.NoiseChannelWeights = InNoiseChannelWeights;
-    P.NoiseRidged = saturate(InNoiseRidged);
     P.NoiseEnable = InNoiseEnable;
 
     // --- OPTICAL DEPTH NORMALISATION ---
@@ -1243,9 +1270,30 @@ GalaxyDensityParams MakeGalaxyDensityParams(
 // ===========================================================================
 // TEXTURE-SAMPLING FIELD
 //
-// Compiles on both sides: the shim stubs Texture3D and SamplerState to the neutral
-// 0.5, so every noise term comes out zero and GalaxySample reduces to SampleAnalytic
-// term for term.
+// FOUR TEXTURES, FOUR FETCHES, one per fetch and split BY FAMILY as well as by role:
+//
+//   WarpTexGas     gas warp        signed vector field  displaces arms and disc
+//   WarpTexHalo    halo warp       signed vector field  displaces bulge and background
+//   NoiseTexGas    gas modulation  UNORM multinoise     lanes and filament in the gas
+//   NoiseTexHalo   halo modulation UNORM multinoise     grain in the bulge and halo
+//
+// SPLIT BY FAMILY, NOT ONLY BY ROLE, because gas and halo want opposite things from a
+// texture and one asset could only ever be a compromise. Gas lanes want ridged,
+// filamentary, Worley-leaning structure; the halo wants something smooth and
+// low-frequency. That used to be a single NoiseRidged uniform applied to both at once,
+// which is why it was always set to a value that suited neither. Asset choice replaces it.
+//
+// THE MODULATION FETCH IS WHY THIS MATTERED MOST. GalaxySampleNoiseTex centres four
+// channels and mixes them with a signed weight vector, which is built for a multinoise
+// asset -- four uncorrelated generators, one per channel. Fed four channels of one packed
+// Perlin-Worley volume it was mixing four VIEWS of one field: the values decorrelate but
+// the structure does not, so all four channels transition in the same places and
+// NoiseChannelWeights was doing far less than its signature suggests.
+//
+// Compiles on both sides: the shim stubs each texture type to its own neutral -- 0.5 for
+// the UNORM modulation volumes, 0 for the signed warp volumes -- so every noise term comes
+// out zero and GalaxySample reduces to SampleAnalytic term for term. Getting a neutral
+// wrong is silent: a signed asset stubbed at 0.5 would shear the whole C++ field.
 //
 // NEVER BIND, ONLY RECEIVE, as everywhere else here. Nothing owns a texture; each
 // function takes the one its caller already has. Anything that binds a resource, or
@@ -1267,22 +1315,27 @@ GalaxyDensityParams MakeGalaxyDensityParams(
 // downstream modulator is 1 + Amount * n, so large |n| spikes density as well as
 // clamping it to zero. Keep sum|w| near 1 unless gain is wanted.
 //
-// Ridging happens HERE, per channel, not on the weighted sum: the 1-2|c| fold only
-// maps back into [-1,1] when its input is already bounded there, which each centred
-// channel is and the weighted sum is not.
-float GalaxySampleNoiseTex(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 Pos)
+// RIDGING IS GONE FROM HERE. It lerped each centred channel toward the 1-2|c| fold, which
+// had to happen per channel rather than on the weighted sum -- the fold only maps back
+// into [-1,1] when its input is already bounded there, which a centred channel is and the
+// weighted sum is not. That constraint is why it cost four lerps and four abs per fetch on
+// the hottest path in the stack.
+//
+// It is now a BAKE-TIME choice: the library carries dedicated ridged volumes, so a galaxy
+// gets ridged lanes by being bound a ridged asset. Cheaper, and better -- a baked ridge can
+// be built from the right generator per channel instead of folding whatever was there.
+//
+// The weight mixer is unchanged and finally has something to mix. Fed a multinoise asset,
+// the four channels are four independent generators, so a signed weight vector genuinely
+// selects and blends distinct fields rather than four views of one.
+float GalaxySampleNoiseTex(GalaxyDensityParams P, Texture3D InNoiseTex, SamplerState InNoiseSampler, float3 Pos)
 {
-    float4 t = InTex.SampleLevel(InSampler, Pos, 0);
+    float4 t = InNoiseTex.SampleLevel(InNoiseSampler, Pos, 0);
 
     float cx = t.x * 2.0f - 1.0f;
     float cy = t.y * 2.0f - 1.0f;
     float cz = t.z * 2.0f - 1.0f;
     float cw = t.w * 2.0f - 1.0f;
-
-    cx = lerp(cx, 1.0f - 2.0f * abs(cx), P.NoiseRidged);
-    cy = lerp(cy, 1.0f - 2.0f * abs(cy), P.NoiseRidged);
-    cz = lerp(cz, 1.0f - 2.0f * abs(cz), P.NoiseRidged);
-    cw = lerp(cw, 1.0f - 2.0f * abs(cw), P.NoiseRidged);
 
     return dot(P.NoiseChannelWeights, float4(cx, cy, cz, cw));
 }
@@ -1293,9 +1346,9 @@ float GalaxySampleNoiseTex(GalaxyDensityParams P, Texture3D InTex, SamplerState 
 //
 // For genuinely more fractal detail, bake a deeper field into a larger volume rather
 // than stacking reads here: the cost lands once at bake time instead of per sample.
-float GalaxyNoise(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 Pos)
+float GalaxyNoise(GalaxyDensityParams P, Texture3D InNoiseTex, SamplerState InNoiseSampler, float3 Pos)
 {
-    return GalaxySampleNoiseTex(P, InTex, InSampler, Pos);
+    return GalaxySampleNoiseTex(P, InNoiseTex, InNoiseSampler, Pos);
 }
 
 // Full field: analytic layers, positionally warped, then modulated.
@@ -1303,7 +1356,18 @@ float GalaxyNoise(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler
 // displaces the position they are evaluated at, but modulation is sampled AFTER,
 // gated on the layers being non-zero -- most of the volume is empty, so that gate
 // skips the octave loop for the majority of march steps.
-float GalaxySample(GalaxyDensityParams P, Texture3D InTex, SamplerState InSampler, float3 InSamplePos)
+// FOUR PAIRS, spelled out rather than hidden behind a parameter macro. The list is long
+// and deliberately so: which asset reaches which fetch is the entire content of the
+// texture split, and a macro would put the one thing a reader needs to check somewhere
+// other than the signature. The warp pair is Texture3DSigned and the modulation pair is
+// Texture3D, so the C++ compiler catches a swap between the two roles -- though not one
+// between gas and halo within a role, since those share a type.
+float GalaxySample(GalaxyDensityParams P,
+                   Texture3DSigned InWarpTexGas, SamplerState InWarpSamplerGas,
+                   Texture3DSigned InWarpTexHalo, SamplerState InWarpSamplerHalo,
+                   Texture3D InNoiseTexGas, SamplerState InNoiseSamplerGas,
+                   Texture3D InNoiseTexHalo, SamplerState InNoiseSamplerHalo,
+                   float3 InSamplePos)
 {
     // Squared, so out-of-bounds samples never pay for the sqrt. BEFORE the rotation,
     // which cannot change it -- and this way the majority of samples, which are out of
@@ -1345,24 +1409,43 @@ float GalaxySample(GalaxyDensityParams P, Texture3D InTex, SamplerState InSample
     // RGB supplies a three-component vector directly. The two layers in a family
     // share the fetch and scale it independently, so they can warp in opposite
     // directions for the price of one lookup.
+    //
+    // NO CENTRING STEP ANY MORE. Both of these read (v - 0.5), because the shared asset
+    // was UNORM and a displacement has to be signed. They now read purpose-baked curl and
+    // gradient vector volumes which ARE signed: the asset stores [-1,1] and the fetch
+    // returns it.
+    //
+    // THIS DOUBLES THE DECODED RANGE, from [-0.5,+0.5] to [-1,+1], so every warp amount
+    // means twice the displacement it used to. The four WarpAmount defaults were halved in
+    // GalaxyParams.h to compensate; an archetype authored against the old convention will
+    // warp twice as hard until its amounts are halved too.
+    //
+    // AN UNSIGNED ASSET BOUND HERE fails the way it does everywhere in this stack: a [0,1]
+    // field read as signed has a mean of +0.5, so the family is bodily TRANSLATED by half
+    // its warp amount rather than locally displaced. The disc still looks like a disc, just
+    // not concentric with the bulge. Check the asset format, not the amounts.
     float3 gasWarp = float3(0.0f, 0.0f, 0.0f);
     float3 haloWarp = float3(0.0f, 0.0f, 0.0f);
 
     if (bGasNoise && (P.WarpAmountArms != 0.0f || P.WarpAmountDisc != 0.0f))
     {
         float3 wf = P.NoiseFrame(NormPos, gasTwist, float2(P.WarpScale.x, P.WarpScale.y), P.NoiseOffset);
-        float4 ws = InTex.SampleLevel(InSampler, wf, 0);
-        gasWarp = float3(ws.x - 0.5f, ws.y - 0.5f, ws.z - 0.5f);
+        float4 ws = InWarpTexGas.SampleLevel(InWarpSamplerGas, wf, 0);
+        gasWarp = float3(ws.x, ws.y, ws.z);
     }
 
     // From the ORIGINAL position, not a gas-warped one, so the two displacements stay
     // independent rather than compounding.
+    //
+    // NO HALO DOMAIN OFFSET. It read at P.NoiseOffset + GALAXY_HALO_DOMAIN to keep the halo
+    // off the gas fetch's region of the SAME texture. Different textures now, so the offset
+    // has nothing to separate.
     if (bHaloNoise && (P.WarpAmountBulge != 0.0f || P.WarpAmountBackground != 0.0f))
     {
         float3 hf = P.NoiseFrame(NormPos, haloTwist, float2(P.WarpScale.z, P.WarpScale.w),
-                                 P.NoiseOffset + GALAXY_HALO_DOMAIN);
-        float4 hs = InTex.SampleLevel(InSampler, hf, 0);
-        haloWarp = float3(hs.x - 0.5f, hs.y - 0.5f, hs.z - 0.5f);
+                                 P.NoiseOffset);
+        float4 hs = InWarpTexHalo.SampleLevel(InWarpSamplerHalo, hf, 0);
+        haloWarp = float3(hs.x, hs.y, hs.z);
     }
 
     float4 L = P.SampleLayersWarped(NormPos, gasWarp, haloWarp);
@@ -1381,15 +1464,15 @@ float GalaxySample(GalaxyDensityParams P, Texture3D InTex, SamplerState InSample
         && (L.x + L.y) > 1e-4f)
     {
         float3 nf = P.NoiseFrame(NormPos, gasTwist, float2(P.NoiseScale.x, P.NoiseScale.y), P.NoiseOffset);
-        gasNoise = GalaxyNoise(P, InTex, InSampler, nf);
+        gasNoise = GalaxyNoise(P, InNoiseTexGas, InNoiseSamplerGas, nf);
     }
 
     if (bHaloNoise && (P.NoiseAmountBulge != 0.0f || P.NoiseAmountBackground != 0.0f)
         && (L.z + L.w) > 1e-4f)
     {
         float3 hf = P.NoiseFrame(NormPos, haloTwist, float2(P.NoiseScale.z, P.NoiseScale.w),
-                                 P.NoiseOffset + GALAXY_HALO_DOMAIN);
-        haloNoise = GalaxyNoise(P, InTex, InSampler, hf);
+                                 P.NoiseOffset);
+        haloNoise = GalaxyNoise(P, InNoiseTexHalo, InNoiseSamplerHalo, hf);
     }
 
     L = P.ApplyModulation(L, gasNoise, haloNoise);

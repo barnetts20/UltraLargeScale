@@ -37,10 +37,25 @@ namespace GalaxySeed
 	inline constexpr uint32 Void = ProcSeed::ChannelId("Galaxy.Void");
 	inline constexpr uint32 Master = ProcSeed::ChannelId("Galaxy.Master");
 
-	/** Which entry of the archetype's NoiseTextures bag this galaxy draws. Separate
-	 *  from Noise so that adding a texture to the bag does not disturb noise
-	 *  parameter rolls, and vice versa. */
-	inline constexpr uint32 NoiseTexture = ProcSeed::ChannelId("Galaxy.NoiseTexture");
+	/** Which entry of each archetype texture bag this galaxy draws. Separate from Noise so
+	 *  that adding a texture to a bag does not disturb noise parameter rolls, and vice
+	 *  versa.
+	 *
+	 *  FOUR CHANNELS, ONE PER BAG, rather than one channel indexing all four. A shared
+	 *  channel would lock the four choices together -- every galaxy that drew ridged gas
+	 *  would draw the same halo asset alongside it, so the bags would multiply out to as
+	 *  many distinct galaxies as the SHORTEST bag has entries. Independent channels give
+	 *  the full product, and adding an entry to one bag leaves the other three rolls
+	 *  undisturbed.
+	 *
+	 *  Galaxy.NoiseTexture was the single channel these replace. The name is retired rather
+	 *  than reused for one of them: a reused ChannelId would silently carry the old stream
+	 *  into a new meaning, so every existing galaxy would keep its old index for one of the
+	 *  four bags and roll fresh for the rest. Retiring it rerolls all four cleanly. */
+	inline constexpr uint32 WarpTexGas = ProcSeed::ChannelId("Galaxy.WarpTexGas");
+	inline constexpr uint32 WarpTexHalo = ProcSeed::ChannelId("Galaxy.WarpTexHalo");
+	inline constexpr uint32 NoiseTexGas = ProcSeed::ChannelId("Galaxy.NoiseTexGas");
+	inline constexpr uint32 NoiseTexHalo = ProcSeed::ChannelId("Galaxy.NoiseTexHalo");
 
 	/** The GPU placement key, INDEXED BY TIER (0 Large, 1 Mid, 2 Small).
 	 *
@@ -176,9 +191,15 @@ struct ULTRALARGESCALE_API FGalaxyArmParams
 	float ArmNoiseAmount = 0.333f;
 
 	/** Positional warp per layer. Signed: negative flips the displacement direction.
-	 *  Affects render and placement alike, as the amounts above do. */
+	 *  Affects render and placement alike, as the amounts above do.
+	 *
+	 *  HALVED WITH THE SIGNED WARP ASSETS, from 0.05. The warp fetch used to decode a UNORM
+	 *  volume as (v - 0.5), giving [-0.5,+0.5]; it now reads a signed vector volume raw,
+	 *  giving [-1,+1]. Same amount, twice the displacement -- so every warp amount in this
+	 *  file was halved to hold the previous look. An archetype authored against the old
+	 *  convention warps twice as hard until its own amounts are halved. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float WarpAmountArms = 0.05f;
+	float WarpAmountArms = 0.025f;
 #pragma endregion
 
 #pragma region Structure
@@ -255,8 +276,9 @@ struct ULTRALARGESCALE_API FGalaxyDiscParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
 	float DiscNoiseAmount = 0.1f;
 
+	/** Halved with the signed warp assets; see WarpAmountArms. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float WarpAmountDisc = 0.01f;
+	float WarpAmountDisc = 0.005f;
 #pragma endregion
 
 #pragma region Structure
@@ -318,7 +340,7 @@ struct ULTRALARGESCALE_API FGalaxyBulgeParams
 	float BulgeNoiseAmount = 0.5f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float WarpAmountBulge = 0.05f;
+	float WarpAmountBulge = 0.025f;
 #pragma endregion
 
 #pragma region Structure
@@ -400,8 +422,17 @@ struct ULTRALARGESCALE_API FGalaxyNoiseFieldParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field")
 	FVector3f NoiseOffset = FVector3f(1.0f, 0.0f, 0.0f);
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float NoiseRidged = 0.0f;
+	// NoiseRidged REMOVED. It lerped every centred channel of every modulation fetch
+	// toward the 1-2|c| fold, at four lerps and four abs per fetch on the hottest path in
+	// the stack, to produce something a ridged noise volume simply IS.
+	//
+	// IT WAS ALSO ONE VALUE FOR TWO FAMILIES. Gas lanes want a hard ridge and the halo
+	// wants none, so any setting suited one and spoiled the other -- which is why it
+	// shipped at 0. Now that gas and halo read separate assets, ridging is chosen by
+	// WHICH ASSET IS BOUND, independently per family, at no per-sample cost.
+	//
+	// AN ARCHETYPE WANTING RIDGED GAS LANES points NoiseGasTextures at a ridged bake.
+	// Nothing to set here.
 
 	/** How much of the spiral twist the bulge/background noise frame inherits. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field")
@@ -457,40 +488,130 @@ struct ULTRALARGESCALE_API FGalaxyMasterParams
 	float MasterDensityPower = 1.0f;
 };
 
+// NOT A USTRUCT, and it must stay ABOVE the USTRUCT() macro below rather than between it
+// and the struct it decorates. UHT binds a USTRUCT() to the very next struct it sees, so a
+// plain struct slipped in between silently steals the macro and fails with "Expected a
+// GENERATED_BODY() at the start of the struct" -- pointing at this struct rather than at the
+// declaration that actually lost its macro.
+//
+// It is deliberately not reflected: it holds raw non-owning pointers for transport, so
+// exposing it to Blueprint or to the GC would imply a lifetime it does not have.
+/** The field's four volume textures, RESOLVED. One bundle rather than four loose pointers,
+ *  because this set crosses the same boundaries the universe layer's does -- actor to
+ *  material, actor to data generator, generator to dispatch, across a thread hop and into a
+ *  render command -- and four parameters at each is four chances to pass three of them.
+ *
+ *  ALL FOUR OR NONE, enforced by IsComplete at every consumer. There is no partial mode: a
+ *  missing modulation volume takes its family's noise term to zero and a missing warp
+ *  volume straightens that family's displacement, and both change the FIELD rather than
+ *  degrading it, so placement against them would not approximate what the material draws.
+ *
+ *  RAW POINTERS, not UPROPERTY. Transport only; FGalaxyProceduralParams owns the
+ *  TObjectPtr references that keep these alive. */
+struct FGalaxyFieldTextures
+{
+	UTexture* WarpGas = nullptr;
+	UTexture* WarpHalo = nullptr;
+	UTexture* NoiseGas = nullptr;
+	UTexture* NoiseHalo = nullptr;
+
+	bool IsComplete() const
+	{
+		return WarpGas != nullptr && WarpHalo != nullptr
+			&& NoiseGas != nullptr && NoiseHalo != nullptr;
+	}
+
+	/** Which ones are missing, for a log line that says something actionable. Empty when
+	 *  the set is complete. */
+	FString DescribeMissing() const
+	{
+		TArray<FString> Missing;
+		if (!WarpGas) { Missing.Add(TEXT("WarpTexGas")); }
+		if (!WarpHalo) { Missing.Add(TEXT("WarpTexHalo")); }
+		if (!NoiseGas) { Missing.Add(TEXT("NoiseTexGas")); }
+		if (!NoiseHalo) { Missing.Add(TEXT("NoiseTexHalo")); }
+		return FString::Join(Missing, TEXT(", "));
+	}
+};
+
 USTRUCT(BlueprintType)
 struct ULTRALARGESCALE_API FGalaxyProceduralParams
 {
 	GENERATED_BODY()
 
 #pragma region Ungrouped -- the two knobs reached for most often, kept at the top
-	/** The volume texture BOTH the dispatch and the material sample. REQUIRED.
+	/** THE FOUR VOLUME TEXTURES BOTH THE DISPATCH AND THE MATERIAL SAMPLE. ALL REQUIRED.
 	 *
-	 *  PROCEDURAL, NOT CONFIG. It is an input to the field evaluation, so swapping it
-	 *  changes the look and the density the placement pass measures -- it is exactly
-	 *  as much a morphology decision as BulgeConcentration. It sits here so a future
-	 *  bag of packed noise assets can be drawn from per galaxy.
+	 *  One texture served every fetch until the split; the field now takes one per fetch,
+	 *  divided by ROLE and by FAMILY at once:
 	 *
-	 *  CATEGORICAL, NOT CONTINUOUS. A Min/Max range means nothing for a texture, so it
-	 *  is drawn from UGalaxyArchetype::NoiseTextures -- a candidate ARRAY -- and this
-	 *  member holds the resolved choice.
+	 *    WarpTexGas     gas warp        signed vector volume   displaces arms and disc
+	 *    WarpTexHalo    halo warp       signed vector volume   displaces bulge, background
+	 *    NoiseTexGas    gas modulation  UNORM multinoise       lanes and filament
+	 *    NoiseTexHalo   halo modulation UNORM multinoise       grain in bulge and halo
 	 *
-	 *  Placement is GPU-only, and the dispatch samples this. Without it the galaxy
-	 *  generates NOTHING -- there is no analytic path behind it any more.
-	 *  AGalaxyActor::InitializeData substitutes DefaultNoiseTexture when this is unset,
-	 *  which is what keeps an unauthored archetype from silently producing an empty
-	 *  galaxy. NOT the constructor: ReInit assigns Params wholesale, so anything the
-	 *  constructor wrote into Params is gone by the time a pooled galaxy generates.
+	 *  PROCEDURAL, NOT CONFIG. They are inputs to the field evaluation, so swapping one
+	 *  changes the look and the density the placement pass measures -- exactly as much a
+	 *  morphology decision as BulgeConcentration. They sit here so the archetype's bags can
+	 *  be drawn from per galaxy.
 	 *
-	 *  Set NEVER STREAM on the asset. GalaxyDensityCore.ush reads mip 0 on both paths, but
-	 *  the material handles streaming residency and a compute dispatch does not: if
+	 *  CATEGORICAL, NOT CONTINUOUS. A Min/Max range means nothing for a texture, so each is
+	 *  drawn from its own candidate ARRAY on UGalaxyArchetype and these members hold the
+	 *  resolved choices. FOUR BAGS, FOUR INDEPENDENT ROLLS, so a galaxy can pair ridged gas
+	 *  lanes with a smooth halo without either bag having to enumerate the combinations.
+	 *
+	 *  WHICH IS WHERE RIDGING LIVES NOW. NoiseRidged was a uniform lerping every channel
+	 *  toward a fold at sample time, one value shared by gas and halo, and it shipped at 0
+	 *  because no setting suited both. Point NoiseGasTextures at ridged bakes and
+	 *  NoiseHaloTextures at smooth ones and each family gets what it wants, for free.
+	 *
+	 *  THE WARP PAIR MUST BE SIGNED, values in [-1,1]. The shader applies their channels
+	 *  directly as displacements with no centring step at all. A UNORM volume cannot carry
+	 *  that: read as signed it has a mean of +0.5, and the family is bodily translated by
+	 *  half its warp amount rather than locally displaced -- the disc still looks like a
+	 *  disc, just not concentric with the bulge. Check the asset's format.
+	 *
+	 *  Placement is GPU-only and the dispatch samples all four. With any one unset the
+	 *  galaxy generates NOTHING -- there is no analytic path behind it any more.
+	 *  AGalaxyActor::InitializeData substitutes its defaults for whichever are unset, which
+	 *  is what keeps an unauthored archetype from silently producing an empty galaxy. NOT
+	 *  the constructor: ReInit assigns Params wholesale, so anything the constructor wrote
+	 *  into Params is gone by the time a pooled galaxy generates.
+	 *
+	 *  Set NEVER STREAM on all four assets. GalaxyDensityCore.ush reads mip 0 on both paths,
+	 *  but the material handles streaming residency and a compute dispatch does not: if
 	 *  mip 0 is not resident when the dispatch runs it reads whatever is, and placement
 	 *  silently stops matching the render.
 	 *
-	 *  The sampler here is Trilinear/Wrap. If the material's Texture Sample node uses
-	 *  anything else the two paths read different values at the same coordinate, which
-	 *  shows up as a small plausible-looking difference rather than an obvious break. */
+	 *  The samplers here are Trilinear/Wrap. If the material's Custom node pins carry
+	 *  anything else -- and they inherit whatever addressing each ASSET is saved with -- the
+	 *  two paths read different values at the same coordinate, which shows up as a small
+	 *  plausible-looking difference rather than an obvious break. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field")
-	TObjectPtr<UVolumeTexture> NoiseTexture = nullptr;
+	TObjectPtr<UVolumeTexture> WarpTexGas = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field")
+	TObjectPtr<UVolumeTexture> WarpTexHalo = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field")
+	TObjectPtr<UVolumeTexture> NoiseTexGas = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field")
+	TObjectPtr<UVolumeTexture> NoiseTexHalo = nullptr;
+
+	/** The four as a transport bundle, for the data generator and the dispatch.
+	 *
+	 *  BUILT ON DEMAND rather than cached, so it cannot go stale against the members above
+	 *  after a roll or a pooled ReInit rewrites them. It is four pointer copies. */
+	FGalaxyFieldTextures GetFieldTextures() const
+	{
+		FGalaxyFieldTextures Out;
+		Out.WarpGas = WarpTexGas;
+		Out.WarpHalo = WarpTexHalo;
+		Out.NoiseGas = NoiseTexGas;
+		Out.NoiseHalo = NoiseTexHalo;
+		return Out;
+	}
 
 	/** FILL FRACTION on every tier's capacity TARGET. The ONLY handle on star count.
 	 *
@@ -643,7 +764,6 @@ struct ULTRALARGESCALE_API FGalaxyProceduralParams
 		Out.InArmHostFalloff = Arms.ArmHostFalloff;
 		Out.InBulgeConcentration = Bulge.BulgeConcentration;
 		Out.InBackgroundConcentration = Background.BackgroundConcentration;
-		Out.InNoiseRidged = Noise.NoiseRidged;
 		// ALWAYS TEXTURED. Placement samples the volume texture unconditionally --
 		// that is the whole point of the GPU path, and a switch that turned it off
 		// here would make the placed field differ from the drawn one with nothing

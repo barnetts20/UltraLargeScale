@@ -139,8 +139,20 @@ float PlaceExtentMin;
 float PlaceExtentMax;
 float PlaceExtentExponent;
 
-Texture3D NoiseTex;
-SamplerState NoiseTexSampler;
+// FOUR FIELD TEXTURES, matching the material's Custom node pin for pin. Two signed vector
+// volumes for the warp fetches, two UNORM multinoise volumes for the modulation fetches,
+// split by family as well as by role. See the table in GalaxyDensityCore.ush.
+//
+// ALL FOUR OR NONE. Placement samples the field the material draws, so a dispatch bound
+// with three of these and a stale fourth places stars against a field nobody renders.
+Texture3D WarpTexGas;
+SamplerState WarpTexGasSampler;
+Texture3D WarpTexHalo;
+SamplerState WarpTexHaloSampler;
+Texture3D NoiseTexGas;
+SamplerState NoiseTexGasSampler;
+Texture3D NoiseTexHalo;
+SamplerState NoiseTexHaloSampler;
 
 // --- field parameters, raw, in the order MakeGalaxyDensityParams takes them -------
 // RAW, NOT PRE-DERIVED. Uploading a derived GalaxyDensityParams as a constant buffer
@@ -175,7 +187,6 @@ float InArmRadialGrowth;
 float InArmHostFalloff;
 float InBulgeConcentration;
 float InBackgroundConcentration;
-float InNoiseRidged;
 float InNoiseEnable;
 float4 InFieldOrientation;
 
@@ -215,7 +226,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
         InDiscLopsidedAmount, InDiscLopsidedPhase, InArmCount, InArmAsymSeed,
         InArmProfileExponent, InArmRadialGrowth, InArmHostFalloff,
         InBulgeConcentration, InBackgroundConcentration,
-        InNoiseRidged, InNoiseEnable, InFieldOrientation);
+        InNoiseEnable, InFieldOrientation);
 
     const float InvAnchor = 1.0f / max(BudgetAnchor, 1e-6f);
     const float Exponent = max(PlaceSpawnExponent, 1e-3f);
@@ -259,7 +270,12 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
         // invisibly -- the envelope would simply run small and the ratio would clip
         // across the peaks.
         const float ProbeDensity = max(
-            GalaxySample(P, NoiseTex, NoiseTexSampler, ProbePos * InvGalaxyExtent), 0.0f);
+            GalaxySample(P,
+                WarpTexGas, WarpTexGasSampler,
+                WarpTexHalo, WarpTexHaloSampler,
+                NoiseTexGas, NoiseTexGasSampler,
+                NoiseTexHalo, NoiseTexHaloSampler,
+                ProbePos * InvGalaxyExtent), 0.0f);
 
         LocalPeak = max(LocalPeak, ProbeDensity);
 
@@ -360,7 +376,12 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
             Cell.Coord.x, Cell.Coord.y, Cell.Coord.z,
             (int) Slot * GALAXY_SLOT_STRIDE + KeySeed);
 
-        const float Density = GalaxySample(P, NoiseTex, NoiseTexSampler, C.Norm);
+        const float Density = GalaxySample(P,
+            WarpTexGas, WarpTexGasSampler,
+            WarpTexHalo, WarpTexHaloSampler,
+            NoiseTexGas, NoiseTexGasSampler,
+            NoiseTexHalo, NoiseTexHaloSampler,
+            C.Norm);
 
         GalaxyEntity E = P.FinishEntity(Q, C, Density);
 

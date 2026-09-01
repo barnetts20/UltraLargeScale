@@ -41,13 +41,32 @@ AGalaxyActor::AGalaxyActor()
 	// the material handles streaming residency and a compute dispatch does not: if
 	// mip 0 is not resident when the dispatch runs it reads whatever is, and placement
 	// silently stops matching the render.
+	// FOUR NOW, one per fetch. The warp pair takes signed vector volumes and the modulation
+	// pair UNORM multinoise -- they are not interchangeable, and binding a multinoise volume
+	// to a warp slot translates that family instead of displacing it.
+	//
+	// GAS AND HALO TAKE DIFFERENT DEFAULTS BY ROLE BUT THE SAME ASSET WITHIN A ROLE, for now.
+	// The families reading different assets is what the split bought; giving them different
+	// CONTENT is the curation step, and until the bags are filled the honest default is the
+	// same asset in both slots of a role. That is still strictly better than before, because
+	// gas and halo no longer share a fetch and no longer need GALAXY_HALO_DOMAIN to pull
+	// them apart -- but the visible gain arrives when NoiseGasTextures gets ridged bakes.
 	{
+		static ConstructorHelpers::FObjectFinder<UVolumeTexture> DefaultWarp(
+			TEXT("/UniverseNoisePack/128/VT_PerlinCurl_S4.VT_PerlinCurl_S4"));
 		static ConstructorHelpers::FObjectFinder<UVolumeTexture> DefaultNoise(
-			TEXT("/UltraLargeScale/VolumeTextures/VT_PerlinWorley_Balanced.VT_PerlinWorley_Balanced"));
+			TEXT("/UniverseNoisePack/256/VT_MultiNoise_1_S8.VT_MultiNoise_1_S8"));
+
+		if (DefaultWarp.Succeeded())
+		{
+			DefaultWarpTexGas = DefaultWarp.Object;
+			DefaultWarpTexHalo = DefaultWarp.Object;
+		}
 
 		if (DefaultNoise.Succeeded())
 		{
-			DefaultNoiseTexture = DefaultNoise.Object;
+			DefaultNoiseTexGas = DefaultNoise.Object;
+			DefaultNoiseTexHalo = DefaultNoise.Object;
 		}
 	}
 }
@@ -185,17 +204,44 @@ void AGalaxyActor::InitializeData()
 	// Bake the resolved texture back into Params so the generator, which only sees
 	// Params, samples exactly what the material samples. HERE rather than in the
 	// constructor because ReInit assigns Params wholesale.
-	if (Params.Procedural.NoiseTexture == nullptr)
+	// FOUR SLOTS, EACH FILLED INDEPENDENTLY, so an archetype that curates only its gas bags
+	// still gets working halo textures from the defaults.
 	{
-		Params.Procedural.NoiseTexture = ResolveNoiseTexture();
-		if (!Params.Procedural.NoiseTexture)
+		const FGalaxyFieldTextures Resolved = ResolveFieldTextures();
+
+		if (Params.Procedural.WarpTexGas == nullptr)
+		{
+			Params.Procedural.WarpTexGas = Cast<UVolumeTexture>(Resolved.WarpGas);
+		}
+		if (Params.Procedural.WarpTexHalo == nullptr)
+		{
+			Params.Procedural.WarpTexHalo = Cast<UVolumeTexture>(Resolved.WarpHalo);
+		}
+		if (Params.Procedural.NoiseTexGas == nullptr)
+		{
+			Params.Procedural.NoiseTexGas = Cast<UVolumeTexture>(Resolved.NoiseGas);
+		}
+		if (Params.Procedural.NoiseTexHalo == nullptr)
+		{
+			Params.Procedural.NoiseTexHalo = Cast<UVolumeTexture>(Resolved.NoiseHalo);
+		}
+
+		// NAMES THE MISSING ONES. With four assets "the texture is unset" sends the reader
+		// to check four bags and four defaults, and the common case is that three resolved
+		// and one did not.
+		// RE-RESOLVED, not the local above: the four assignments may have filled Params, and
+		// this reports the state AFTER fallback rather than before it.
+		const FGalaxyFieldTextures Final = ResolveFieldTextures();
+		if (!Final.IsComplete())
 		{
 			// Nothing behind this. The tier batches will fail closed and log, but they
 			// will do it three times per galaxy with no indication of the cause.
 			UE_LOG(LogTemp, Error,
-				TEXT("AGalaxyActor::InitializeData - NoiseTexture is unset and the ")
-				TEXT("fallback asset did not resolve. Placement is GPU-only, so this ")
-				TEXT("galaxy will generate NO entities at any tier."));
+				TEXT("AGalaxyActor::InitializeData - field textures unresolved (%s), and the ")
+				TEXT("fallback assets did not resolve either. Placement is GPU-only and the ")
+				TEXT("dispatch samples all four, so this galaxy will generate NO entities at ")
+				TEXT("any tier. Check that the UniverseNoisePack plugin is enabled."),
+				*Final.DescribeMissing());
 		}
 	}
 
@@ -227,9 +273,9 @@ void AGalaxyActor::InitializeVolumetric()
 			// Resolve every asset up front and bail loudly.
 			UStaticMesh* BoxMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/UltraLargeScale/UnitBoxInvertedNormals.UnitBoxInvertedNormals"));
 			UMaterialInterface* ParentMat = LoadObject<UMaterialInterface>(nullptr, *Self->VolumetricMaterialPath);
-			// THE SAME OBJECT the compute path samples, not a second lookup by path.
-			// See AGalaxyActor::ResolveNoiseTexture.
-			UVolumeTexture* NoiseTex = Self->ResolveNoiseTexture();
+			// THE SAME OBJECTS the compute path samples, not a second lookup by path.
+			// See AGalaxyActor::ResolveFieldTextures.
+			const FGalaxyFieldTextures FieldTextures = Self->ResolveFieldTextures();
 
 			if (!BoxMesh || !ParentMat)
 			{
@@ -237,13 +283,42 @@ void AGalaxyActor::InitializeVolumetric()
 				CompletionPromise.SetValue();
 				return;
 			}
-			if (!NoiseTex)
+			if (!FieldTextures.IsComplete())
 			{
-				UE_LOG(LogTemp, Warning, TEXT("AGalaxyActor::InitializeVolumetric - no noise texture resolved; ") TEXT("the field will render without modulation or positional warp, and will not match placement."));
+				UE_LOG(LogTemp, Warning,
+					TEXT("AGalaxyActor::InitializeVolumetric - field textures unresolved (%s); ")
+					TEXT("the corresponding family loses its modulation or its positional warp, ")
+					TEXT("and the render will not match placement."),
+					*FieldTextures.DescribeMissing());
 			}
 
 			Self->VolumeMaterial = UMaterialInstanceDynamic::Create(ParentMat, Self);
-			if (NoiseTex) Self->VolumeMaterial->SetTextureParameterValue(FName("NoiseTex"), NoiseTex);
+
+			// PIN NAMES MATCH THE .usf DECLARATIONS EXACTLY. A MID silently ignores a name
+			// the material does not have, so a renamed pin keeps whatever the parent
+			// material had -- most likely a default grey, which reads as "the warp stopped
+			// working" rather than as a naming mistake.
+			//
+			// SET INDIVIDUALLY, so a partial set still binds what it has. Right for the
+			// RENDER, which degrades to something visibly wrong; emphatically not right for
+			// PLACEMENT, which refuses to run rather than place against a field the render
+			// is not drawing. The two paths differ here deliberately.
+			if (FieldTextures.WarpGas)
+			{
+				Self->VolumeMaterial->SetTextureParameterValue(FName("WarpTexGas"), FieldTextures.WarpGas);
+			}
+			if (FieldTextures.WarpHalo)
+			{
+				Self->VolumeMaterial->SetTextureParameterValue(FName("WarpTexHalo"), FieldTextures.WarpHalo);
+			}
+			if (FieldTextures.NoiseGas)
+			{
+				Self->VolumeMaterial->SetTextureParameterValue(FName("NoiseTexGas"), FieldTextures.NoiseGas);
+			}
+			if (FieldTextures.NoiseHalo)
+			{
+				Self->VolumeMaterial->SetTextureParameterValue(FName("NoiseTexHalo"), FieldTextures.NoiseHalo);
+			}
 
 			// One call, one source of truth. See PushDensityParams.
 			Self->PushDensityParams(Self->VolumeMaterial);
@@ -381,7 +456,6 @@ void AGalaxyActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
 	InMID->SetScalarParameterValue(TEXT("WarpHaloVerticalScale"), D.Noise.WarpHaloVerticalScale);
 	InMID->SetVectorParameterValue(TEXT("NoiseChannelWeights"), D.Noise.NoiseChannelWeights);
 	InMID->SetVectorParameterValue(TEXT("NoiseOffset"), FLinearColor(D.Noise.NoiseOffset.X, D.Noise.NoiseOffset.Y, D.Noise.NoiseOffset.Z, 0.0f));
-	InMID->SetScalarParameterValue(TEXT("NoiseRidged"), D.Noise.NoiseRidged);
 
 	// ONE VECTOR CARRYING BOTH: xyz the disc normal, w the spin in degrees. The
 	// derivation already takes a single float4, so a separate scalar would have been an
