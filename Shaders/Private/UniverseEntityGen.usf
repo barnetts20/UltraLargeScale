@@ -190,8 +190,23 @@ float PlaceExtentMin;
 float PlaceExtentMax;
 float PlaceExtentExponent;
 
-Texture3D NoiseTex;
-SamplerState NoiseTexSampler;
+// FOUR FIELD TEXTURES, matching the material's Custom node pin for pin. The field splits
+// its fetches across purpose-baked assets: two UNORM multinoise volumes for the region
+// axes, two signed vector volumes for the warp octaves. See the fetch table in
+// UniverseDensityCore.ush.
+//
+// ALL FOUR OR NONE. Placement samples the field the material draws, so a dispatch bound
+// with three of these and a stale fourth places against a field nobody renders. The CPU
+// side refuses to dispatch unless every one resolves -- see UniverseEntityGen.cpp -- which
+// is the same all-or-nothing rule the single texture had, widened rather than relaxed.
+Texture3D VarianceTexA;
+SamplerState VarianceTexASampler;
+Texture3D VarianceTexB;
+SamplerState VarianceTexBSampler;
+Texture3D WarpTexLarge;
+SamplerState WarpTexLargeSampler;
+Texture3D WarpTexSmall;
+SamplerState WarpTexSmallSampler;
 
 // --- field parameters, raw, in the order MakeUniverseDensityParams takes them ----------
 // RAW, NOT PRE-DERIVED. Uploading a derived UniverseDensityParams as a constant buffer would
@@ -333,7 +348,10 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
         // faded field would make the envelope -- and therefore every cell's candidate count
         // -- depend on where the player was standing when the cell was generated.
         const float ProbeDensity = max(
-            P.SampleAtPosition(NoiseTex, NoiseTexSampler,
+            P.SampleAtPosition(VarianceTexA, VarianceTexASampler,
+                VarianceTexB, VarianceTexBSampler,
+                WarpTexLarge, WarpTexLargeSampler,
+                WarpTexSmall, WarpTexSmallSampler,
                 float3(ProbePos.x * InvFieldExtent,
                        ProbePos.y * InvFieldExtent,
                        ProbePos.z * InvFieldExtent)), 0.0f);
@@ -447,7 +465,12 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
             Cell.Coord.x, Cell.Coord.y, Cell.Coord.z,
             (int) Slot * UNIVERSE_SLOT_STRIDE + KeySeed);
 
-        const float Density = P.SampleAtPosition(NoiseTex, NoiseTexSampler, C.Norm);
+        const float Density = P.SampleAtPosition(
+            VarianceTexA, VarianceTexASampler,
+            VarianceTexB, VarianceTexBSampler,
+            WarpTexLarge, WarpTexLargeSampler,
+            WarpTexSmall, WarpTexSmallSampler,
+            C.Norm);
 
         UniverseEntity E = FinishUniverseEntity(Q, C, Density);
 

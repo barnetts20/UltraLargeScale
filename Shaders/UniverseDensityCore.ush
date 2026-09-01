@@ -1,16 +1,23 @@
 #pragma once
 
 // UniverseDensityCore.ush
-// Cosmic-web density field. TAKES RESOURCES: the domain warp is a Texture3D fetch,
-// so this file is compiled by C++ behind GalaxyHLSLShim.h exactly as the galaxy core
-// is -- the shim stubs Texture3D::SampleLevel to a neutral 0.5, and the C++ field
-// therefore reduces to the UNWARPED analytic web while the shader gets the warped
-// one. That divergence is deliberate and bounded: it is a displacement of at most
-// WarpAmount cells, it affects nothing that is currently consuming the CPU field,
-// and entity generation for this layer lands on the compute harness the galaxy layer
-// already uses, which samples the same texture the shader does. UniverseDensity.ush
-// is now the ray march and nothing else -- warp, regional variance, the analytic
-// web, and the density composition all live here, in SampleAtPosition.
+// Cosmic-web density field. TAKES RESOURCES: FOUR volume textures, threaded down from
+// the caller and never bound here. Two are UNORM multinoise, read by the region-axis
+// fetches; two are signed vector fields, read by the warp octaves. The full mapping is
+// in the fetch table below.
+//
+// This file is compiled by C++ behind GalaxyHLSLShim.h exactly as the galaxy core is.
+// The shim stubs BOTH texture types to their own neutral -- 0.5 for the UNORM variance
+// volumes, which is the midpoint of every authored range, and 0 for the signed warp
+// volumes, which is zero displacement -- and the C++ field therefore reduces to the
+// UNWARPED analytic web while the shader gets the warped one. Getting either neutral
+// wrong is silent: a signed asset stubbed at 0.5 shears the whole C++ field instead of
+// leaving it alone. That divergence is deliberate and bounded: it is a displacement of
+// at most WarpAmount cells, it affects nothing that is currently consuming the CPU
+// field, and entity generation for this layer lands on the compute harness the galaxy
+// layer already uses, which samples the same four textures the shader does.
+// UniverseDensity.ush is now the ray march and nothing else -- warp, regional variance,
+// the analytic web, and the density composition all live here, in SampleAtPosition.
 //
 // PARITY RULES -- both compilers see this file:
 //   - Suffix every float literal (0.5f, not 0.5). C++ types an unsuffixed literal as
@@ -125,6 +132,17 @@
 // an instruction count and useless for anything else.
 #ifndef UNIVERSE_COST_PROBE
 #define UNIVERSE_COST_PROBE 0
+#endif
+
+// THE SIGNED TEXTURE TYPE. The two warp octaves read curl/gradient vector assets whose
+// values are already in [-1,1]; the two variance fetches read UNORM multinoise in [0,1].
+// The shader compiler has one resource type for both -- the difference is entirely in the
+// decode, which is written out at each fetch site -- so this alias exists solely to let
+// the shared file NAME the convention. The C++ shim defines Texture3DSigned as a real
+// distinct type with its own neutral, which is what makes a fetch site given the wrong
+// convention a compile error there rather than a silent shear here.
+#ifndef GALAXY_HLSL_SHIM
+#define Texture3DSigned Texture3D
 #endif
 
 #define UNIVERSE_PI 3.14159265358979323846f
@@ -411,23 +429,38 @@
 #define UNIVERSE_WARP_WRAP_MASK ((1 << UNIVERSE_WARP_WRAP_SHIFT) - 1)
 #define UNIVERSE_WARP_WRAP ((float) (1 << UNIVERSE_WARP_WRAP_SHIFT))
 
-// ONE TEXTURE, EVERY FETCH. The large warp octave used to read a separate curl volume
-// so its three channels were guaranteed to be one coherent vector field rather than
-// three unrelated archetypes at three scales -- an axis-aligned warp was the failure
-// mode that guarded against:
+// FOUR TEXTURES, FIVE FETCHES. Every fetch here used to read one packed Perlin-Worley
+// volume; the field now takes four purpose-baked assets, each matched to what its site
+// actually consumes:
 //
-//   large octave   NoiseTex, the packed Perlin-Worley
-//   small octave   NoiseTex, the packed Perlin-Worley
-//   region axes    NoiseTex
-//   region axes    NoiseTex, second scale
+//   VarianceTexA   region axes, coarse scale     multinoise, UNORM, four archetypes
+//   VarianceTexB   region axes, finer scale      multinoise, UNORM, a DIFFERENT four
+//   WarpTexLarge   large octave, fine lattice    signed vector field
+//                  large octave, coarse lattice  signed vector field, same asset
+//   WarpTexSmall   small octave                  signed vector field
 //
-// Measurement went the other way: the packed Perlin-Worley volume simply looked
-// better as the large octave than the curl volume did, so it now reads NoiseTex like
-// everything else, WarpTex is gone as a resource, and UNIVERSE_WARPTEX_SIGNED goes
-// with it -- there is only one decode now, the same UNORM v*2-1 the small octave and
-// the region fetches already used.
+// THE LARGE OCTAVE'S TWO FETCHES MUST STAY ON ONE ASSET. The coarse-lattice fetch is
+// deliberately the same warp geometry read at the coarse lattice's scale -- that is what
+// WarpLargeWeights.w interpolates toward at follow 1, and it is the only reason the two
+// tiers bend like one field rather than two. Giving the coarse fetch its own texture
+// would not be a finer split, it would delete the self-similarity the dial exists for.
 //
-// WHAT THIS COSTS. Curl noise is divergence-free by construction, so
+// WHY THE VARIANCE FETCHES GET DIFFERENT ASSETS AND NOT JUST DIFFERENT SCALES. Both
+// resolve four axes from four channels, and the argument at RegionAxes for why one fetch
+// suffices is that the asset is packed with a different archetype per channel. That
+// argument is per-asset. Two fetches into the SAME asset at two scales share every
+// archetype, so field A's structure axes and field B's appearance axes came from the same
+// four generators -- a weaker version of exactly the correlation the packed asset was
+// introduced to break, one level up. Two multinoise variants, built from different forms
+// in each channel, remove it: A and B now have no generator in common at all.
+//
+// THE WARP OCTAVES ARE CURL AGAIN, and this reverses a decision that was made on
+// measurement and is now reversed on better assets rather than on better reasoning. The
+// large octave previously read a separate curl volume, which was dropped because the
+// packed Perlin-Worley simply looked better -- so both octaves became generic
+// three-channel fields, and the note that stood here recorded what that cost.
+//
+// Curl noise is divergence-free by construction, so
 // det(I + A*grad v) = 1 + A*div(v) + O(A^2) = 1 + O(A^2): the first-order volume
 // change vanishes identically and the map folds only at second order. A generic field
 // folds at first order and has no such guarantee. Measured against a generic
@@ -440,29 +473,29 @@
 //    1.80      2.536%    0.565%
 //    2.50     12.400%    4.750%
 //
-// Both octaves are now the generic column: the shear ceiling below is no longer a
-// conservative bound with headroom above it, it is close to the actual tear point.
-// Amplitudes tuned near the old ceiling are worth re-checking against this table.
+// Both octaves are back in the curl column, so the fold ceiling below is a conservative
+// bound with real headroom above it again rather than something close to the actual tear
+// point. AMPLITUDES TUNED AGAINST THE GENERIC FIELD ARE NOW CONSERVATIVE by roughly the
+// margin in that table, and the ranges are worth reopening upward.
 //
-// It also means void size is no longer purely VoidSizeSpread's job. A
-// divergence-free warp cannot vary void size, which is why VoidSizeSpread was the
-// only source of that variation; Perlin-Worley carries no such guarantee, so some of
-// what reads as size variation now may be coming from the large octave instead. Not
-// necessarily a problem -- may be exactly the organic read that was wanted -- but it
-// is a second mechanism doing a job that used to have one, worth an eye if void size
-// ever needs to be tuned independently of warp amplitude again.
+// IT ALSO HANDS VOID SIZE BACK TO VoidSizeSpread ALONE. A divergence-free warp cannot
+// vary void size -- that is what divergence-free means -- so under the generic field some
+// of what read as size variation was coming from the large octave rather than from the
+// parameter that names it. Two mechanisms doing one job is now one again, and void size
+// is independently tunable from warp amplitude in the way the parameter implies.
 //
-// SWIZZLE TEST still applies as a diagnostic even without a per-octave asset choice
-// to defend: read .yzx instead of .xyz for an octave and see whether the field's
-// character rotates with it. If it does, that octave is axis-coupled.
+// SWIZZLE TEST, still the diagnostic for a wrongly-baked warp asset: read .yzx instead of
+// .xyz for an octave and see whether the field's character rotates with it. If it does,
+// that octave is axis-coupled and is not the coherent vector field it is being decoded as.
 
-// Fractional UV offsets, one per fetch. The two warp octaves are already decorrelated
-// by their scale ratio, and now share a texture with the noise and region fetches, so
-// these offsets mostly guard against a scale ratio someone has set to one and against
-// every fetch that shares this asset landing on the same phase. The region offset is
-// load-bearing for the same reason: the two region fetches read the SAME texture, and
-// without a phase offset on top of their scale difference they would repeat each other's
-// content. Whole numbers would be invisible under repeat addressing.
+// Fractional UV offsets, one per fetch. THESE ARE NO LONGER LOAD-BEARING and the reason
+// they were is worth stating, because it is gone: every fetch used to read one asset, so
+// without a phase offset on top of their scale difference the two region fetches repeated
+// each other's content outright and the two warp octaves did too at any scale ratio near
+// one. On four separate assets there is nothing left to repeat. They are kept because
+// they cost nothing and still guard the one remaining case -- the coarse and fine large-
+// octave fetches, which genuinely do share an asset -- and because removing them would
+// move every existing field. Whole numbers would be invisible under repeat addressing.
 
 // ==========================================================================
 // THE FETCH SCALES ARE FIXED, AND STAY FIXED
@@ -824,18 +857,39 @@ struct UniverseDensityParams
         return (x > UNIVERSE_POW_EPSILON) ? pow(x, p) : 0.0f;
     }
 
-    // Two conventions for turning one raw texture fetch into what a sample site
-    // needs, both centring the UNORM fetch to [-1,1] first. A WARP OCTAVE needs three
-    // axes, not one number, so its weights are an elementwise GAIN on the decoded
-    // channels -- w has nowhere to go, since there is no fourth displacement axis.
+    // Turns one raw warp fetch into the three displacement axes a warp octave needs.
+    // Weights are an elementwise GAIN on the channels -- w has nowhere to go, since there
+    // is no fourth displacement axis.
+    //
+    // NO CENTRING STEP ANY MORE. This used to read (RawSample * 2 - 1) * InWeights,
+    // because both octaves fetched the same UNORM packed volume every other site read and
+    // a displacement has to be signed. The warp octaves now read purpose-baked curl and
+    // gradient vector fields, which ARE signed: the asset stores [-1,1] and the fetch
+    // returns it, so centring a second time would halve every displacement and offset it
+    // by minus one.
+    //
+    // THE FAILURE IF AN UNSIGNED ASSET IS EVER BOUND HERE is not subtle and is worth
+    // recognising: a [0,1] field decoded as signed has a mean of +0.5 rather than 0, so
+    // the whole web is bodily translated by half the warp amplitude along every axis
+    // instead of being locally displaced by it. Structure still forms; it simply is not
+    // where the analytic diagram says it is, and placement follows the shader so nothing
+    // disagrees visibly. Check the asset, not the amplitudes.
+    //
     // The scalar-site convention that used to sit beside this -- four channels collapsed
     // with a dot product -- went out with the cluster/gas stage, its only consumer. It is
     // worth restoring rather than reinventing if a new stage needs one weighted number
     // out of a fetch: positive takes the channel, negative inverts it, |w| > 1 is gain.
+    // Note that such a site would have to state its own convention, since the two texture
+    // families no longer share one.
     float3 WeightedVector3(float4 RawSample, float4 InWeights)
     {
-        float4 c = (RawSample * 2.0f - 1.0f) * InWeights;
-        return c.xyz;
+        float4 c = RawSample * InWeights;
+
+        // COMPONENTS, NOT A SWIZZLE. This read c.xyz, which broke this file's own parity
+        // rule -- no swizzles beyond .x/.y/.z/.w -- and was one of the reasons the universe
+        // core had never actually compiled under GalaxyHLSLShim.h. Identical in HLSL,
+        // buildable in C++.
+        return float3(c.x, c.y, c.z);
     }
 
     // THE VARIANCE CONVENTION: every packed (min, max, bias, free) field is resolved
@@ -971,6 +1025,14 @@ struct UniverseDensityParams
     // which is why the second region field is a second fetch at a different SCALE
     // rather than four more runtime-scaled channels.
     //
+    // THE TEXTURE IS AN ARGUMENT, and the two calls now pass DIFFERENT ASSETS rather than
+    // the same one at two scales. The paragraph above is an argument about one asset's
+    // four channels; it says nothing about two fetches into that asset, which shared all
+    // four generators and reintroduced the same correlation between the structure field
+    // and the appearance field. Field A takes one multinoise variant and field B takes the
+    // other, so there is no generator common to the two. The scale and phase arguments
+    // stay -- they still separate the two fields' PERIODS, which is a different job.
+    //
     // ASSUMES THE CHANNELS ARE NORMALIZED, centred at 0.5 with comparable spread.
     // Different archetypes have genuinely different histograms -- worley F1 is not
     // uniform, ridged is not centred -- and if they arrive raw then a Range's min and
@@ -995,7 +1057,7 @@ struct UniverseDensityParams
     // steps moved to the call sites, since every consumer is now a packed Range with
     // its own bias and its own min/max, via VarianceT/VarianceRemap. This function is
     // just the fetch.
-    float4 RegionAxes(Texture3D InTex, SamplerState InSampler,
+    float4 RegionAxes(Texture3D InVarianceTex, SamplerState InVarianceSampler,
                       int InCellX, int InCellY, int InCellZ, float3 InFrac,
                       float InScale, float3 InPhase)
     {
@@ -1008,13 +1070,18 @@ struct UniverseDensityParams
         // Same masked cell-relative construction as the warp, and exact for the same
         // reason. Both region scales are quantized so the 4096-cell wrap closes
         // seamlessly. Scale and phase are arguments rather than struct reads because
-        // this is called TWICE per sample now, once per region field.
+        // this is called TWICE per sample, once per region field -- and so, now, is the
+        // texture, because those two calls read two different multinoise assets.
         float3 uv = float3(
             (float(InCellX & UNIVERSE_WARP_WRAP_MASK) + InFrac.x) * InScale + InPhase.x,
             (float(InCellY & UNIVERSE_WARP_WRAP_MASK) + InFrac.y) * InScale + InPhase.y,
             (float(InCellZ & UNIVERSE_WARP_WRAP_MASK) + InFrac.z) * InScale + InPhase.z);
 
-        return InTex.SampleLevel(InSampler, uv, 0.0f);
+        // UNORM, and returned RAW. VarianceT wants a [0,1] lerp factor and centres
+        // nothing, so this fetch has no decode at all -- unlike the warp fetches, whose
+        // assets are signed. The two conventions are why the four textures do not all
+        // arrive as one array.
+        return InVarianceTex.SampleLevel(InVarianceSampler, uv, 0.0f);
 #endif
     }
 
@@ -1342,11 +1409,21 @@ struct UniverseDensityParams
     // of one lattice cell and holding the axes constant along it changes the field by
     // less than the dither. It was costing 8 hashes on every one of 256 steps to
     // resolve a variation that cannot occur within a single ray.
-    // Takes the texture and sampler because the warp is a fetch. Threaded through
-    // rather than held as a struct member: HLSL resource types in a struct that is
-    // also constructed as a local are a portability problem, and the galaxy core
-    // settled the same question the same way.
-    float SampleCell(Texture3D InTex, SamplerState InSampler,
+    // Takes the textures and samplers because the warp and the region axes are fetches.
+    // Threaded through rather than held as struct members: HLSL resource types in a
+    // struct that is also constructed as a local are a portability problem, and the
+    // galaxy core settled the same question the same way.
+    //
+    // FOUR PAIRS RATHER THAN ONE, and spelled out rather than hidden behind a parameter
+    // macro. The list is long and it is deliberately long: which asset reaches which
+    // fetch is the entire content of this change, and a macro that collapsed it would put
+    // the one thing a reader needs to check somewhere other than the signature. The two
+    // variance textures are UNORM, the two warp textures are signed -- see
+    // WeightedVector3 -- and the types differ so the compiler catches a swap.
+    float SampleCell(Texture3D InVarianceTexA, SamplerState InVarianceSamplerA,
+                     Texture3D InVarianceTexB, SamplerState InVarianceSamplerB,
+                     Texture3DSigned InWarpTexLarge, SamplerState InWarpSamplerLarge,
+                     Texture3DSigned InWarpTexSmall, SamplerState InWarpSamplerSmall,
                      int InCellX, int InCellY, int InCellZ, float3 InFrac,
                      int InLargeX, int InLargeY, int InLargeZ, float3 InLargeFrac)
     {
@@ -1415,7 +1492,8 @@ struct UniverseDensityParams
         // why they get the coarser of the two scales.
         if (bRegionEnableA > 0.5f)
         {
-            float4 a = RegionAxes(InTex, InSampler, cx, cy, cz, frac, RegionScaleA,
+            float4 a = RegionAxes(InVarianceTexA, InVarianceSamplerA,
+                                  cx, cy, cz, frac, RegionScaleA,
                                   float3(UNIVERSE_REGION_A_OFFSET_U,
                                          UNIVERSE_REGION_A_OFFSET_V,
                                          UNIVERSE_REGION_A_OFFSET_W));
@@ -1472,7 +1550,8 @@ struct UniverseDensityParams
         // with internal variety rather than thirteen properties all switching at once.
         if (bRegionEnableB > 0.5f)
         {
-            float4 b = RegionAxes(InTex, InSampler, cx, cy, cz, frac, RegionScaleB,
+            float4 b = RegionAxes(InVarianceTexB, InVarianceSamplerB,
+                                  cx, cy, cz, frac, RegionScaleB,
                                   float3(UNIVERSE_REGION_B_OFFSET_U,
                                          UNIVERSE_REGION_B_OFFSET_V,
                                          UNIVERSE_REGION_B_OFFSET_W));
@@ -1531,17 +1610,20 @@ struct UniverseDensityParams
             // SampleLevel, not Sample. Inside a dynamic loop the derivatives that
             // drive mip selection are undefined, and the galaxy core makes the same
             // call for the same reason.
-            // SAME TEXTURE now, but still two independent fetches: neither address
-            // depends on the other's result, so they still issue together. What used
-            // to make them independent -- different assets -- is gone; issuing
-            // together never depended on that, only on the addresses being computed
-            // first, which is still true.
-            float4 vL = InTex.SampleLevel(InSampler, uvL, 0.0f);
-            float4 vS = InTex.SampleLevel(InSampler, uvS, 0.0f);
+            //
+            // TWO INDEPENDENT FETCHES INTO TWO DIFFERENT TEXTURES. Neither address
+            // depends on the other's result, so the two loads issue together -- which
+            // is why the small octave is sampled at the UNWARPED coordinate, and the
+            // only property that has ever mattered here. The assets being separate
+            // again is incidental to the issue order and helpful to the cache: two
+            // small working sets rather than two strides through one large one.
+            float4 vL = InWarpTexLarge.SampleLevel(InWarpSamplerLarge, uvL, 0.0f);
+            float4 vS = InWarpTexSmall.SampleLevel(InWarpSamplerSmall, uvS, 0.0f);
 
-            // Per-axis weighted decode now, instead of a bare UNORM->signed conversion
-            // -- WarpLargeWeights/WarpSmallWeights let each displacement axis be
-            // gained, zeroed, or inverted independently. See WeightedVector3.
+            // Per-axis weighted decode, and NO centring step -- these assets are signed
+            // already. WarpLargeWeights/WarpSmallWeights let each displacement axis be
+            // gained, zeroed, or inverted independently. See WeightedVector3, which is
+            // also where the failure mode for a wrongly-signed asset is written down.
             float3 dL = WeightedVector3(vL, WarpLargeWeights);
             float3 dS = WeightedVector3(vS, WarpSmallWeights);
 
@@ -1642,7 +1724,7 @@ struct UniverseDensityParams
                     lby * WarpScaleLarge + UNIVERSE_WARP_LARGE_OFFSET_Y,
                     lbz * WarpScaleLarge + UNIVERSE_WARP_LARGE_OFFSET_Z);
 
-                float4 vLC = InTex.SampleLevel(InSampler, uvLC, 0.0f);
+                float4 vLC = InWarpTexLarge.SampleLevel(InWarpSamplerLarge, uvLC, 0.0f);
                 float3 dLC = WeightedVector3(vLC, WarpLargeWeights);
 
                 // HOW MUCH OF THE RATIO THE AMPLITUDE FOLLOWS, from
@@ -1920,7 +2002,16 @@ struct UniverseDensityParams
         return D;
     }
 
-    float SampleAtPosition(Texture3D InTex, SamplerState InSampler, float3 InNormPos)
+    // THE FOUR TEXTURES ARRIVE HERE AND GO STRAIGHT THROUGH. This function's job is the
+    // coordinate decomposition and nothing else; it takes the resources only because
+    // SampleCell needs them and nothing between the caller and there may hold one. Every
+    // caller -- the march, both entity-gen passes -- passes all four, so a layer that
+    // renders with one set and places with another is not expressible.
+    float SampleAtPosition(Texture3D InVarianceTexA, SamplerState InVarianceSamplerA,
+                           Texture3D InVarianceTexB, SamplerState InVarianceSamplerB,
+                           Texture3DSigned InWarpTexLarge, SamplerState InWarpSamplerLarge,
+                           Texture3DSigned InWarpTexSmall, SamplerState InWarpSamplerSmall,
+                           float3 InNormPos)
     {
         // The fractional offset is added BEFORE the floor, so its carry into the
         // integer cell falls out of the same floor that decomposes the position.
@@ -1968,7 +2059,10 @@ struct UniverseDensityParams
         int ly = (int) lfy + LargeOffsetCellY;
         int lz = (int) lfz + LargeOffsetCellZ;
 
-        return SampleCell(InTex, InSampler,
+        return SampleCell(InVarianceTexA, InVarianceSamplerA,
+                          InVarianceTexB, InVarianceSamplerB,
+                          InWarpTexLarge, InWarpSamplerLarge,
+                          InWarpTexSmall, InWarpSamplerSmall,
                           cx, cy, cz, frac,
                           lx, ly, lz, lfrac);
     }
@@ -2125,16 +2219,21 @@ int FloorDiv(int InValue, int InDivisor)
 //                   translates whole regions rigidly and the straight Voronoi edges
 //                   arrive straight; large scale with small amplitude is grain rather
 //                   than curvature.
-//   WarpTexGradient a property of the ASSET, and the one pin here that is measured
-//                   rather than chosen. Wrong in both directions: understate it and
-//                   the march skips further than it may and steps over features while
-//                   the mean error stays negligible; overstate it and the skip
-//                   collapses and the march does work it did not need to. A 64^3
-//                   three-octave smooth volume measures 14.09. If the amplitudes look
-//                   right but the predicted shear is far above one, this pin is what
-//                   disagrees -- the ratio between where the web ACTUALLY tears and
-//                   1/(scale * G) is the factor to correct it by. Becomes 1 and then
-//                   disappears once volumes are gradient-normalized at bake time.
+//   WarpTexGradientLarge / WarpTexGradientSmall
+//                   a property of the ASSETS, and the only pins here that are measured
+//                   rather than chosen. ONE PER OCTAVE, because the two octaves read
+//                   different volumes now -- a single pin could only be an average of
+//                   two, and a bake that sharpened one asset would move the other's
+//                   predicted term. Wrong in both directions: understate one and the
+//                   march skips further than it may and steps over features while the
+//                   mean error stays negligible; overstate it and the skip collapses
+//                   and the march does work it did not need to. 14.09 was measured on
+//                   the retired single packed volume and is a placeholder on both until
+//                   each curl bake is measured. If the amplitudes look right but the
+//                   predicted shear is far above one, these pins are what disagree --
+//                   the ratio between where the web ACTUALLY tears and 1/(scale * G) is
+//                   the factor to correct by. Each becomes 1 and then disappears once
+//                   its volume is gradient-normalized at bake time.
 //   VoidFloorRange  below zero makes density negative, which the ray march's
 //                   exp(-density) turns into unbounded gain rather than opacity. Both
 //                   ends, now that it is ranged: a range spanning zero puts the
@@ -2279,18 +2378,24 @@ UniverseDensityParams MakeUniverseDensityParams(
     //
     // The ceiling is still real and still has to be respected by hand:
     //
-    //     (AmountLarge*ScaleLarge + AmountSmall*ScaleSmall) * G  <=  1
+    //     AmountLarge*ScaleLarge*G_large + AmountSmall*ScaleSmall*G_small  <=  1
     //
-    // where G is the largest |dTex/dUV| the filtered asset reaches -- one value now,
-    // both octaves reading the same texture -- and each Amount is that octave's
-    // Range.y, the worst case a region can resolve to. Past one the displacement
-    // folds, neighbouring samples cross over, and the web tears rather than bends.
-    // Neither octave is divergence-free any more, so there is no headroom above one
-    // the way curl noise had -- see the domain-warp section above -- so this ceiling
-    // is close to the real tear point rather than a conservative bound under it.
-    // Widening WarpAmountLargeRange eats further into that margin on the inflated
-    // end, since it is now possible for the large octave to exceed its old fixed
-    // amount where it never could before.
+    // where each G is the largest |dTex/dUV| that octave's own filtered asset reaches
+    // and each Amount is that octave's Range.y, the worst case a region can resolve to.
+    // Past one the displacement folds, neighbouring samples cross over, and the web tears
+    // rather than bends.
+    //
+    // TWO GRADIENTS NOW, NOT ONE. The octaves read separate assets, so a bake that
+    // sharpens one does not move the other's term and the two halves of this sum have to
+    // be checked separately. If both assets are gradient-normalized at bake -- which is
+    // the thing to ask the bake for -- both G go to 1 and the ceiling reduces to the
+    // amounts and scales alone, which is the only form of it anyone can hold in their head
+    // while tuning.
+    //
+    // BOTH OCTAVES ARE DIVERGENCE-FREE AGAIN, so there is genuine headroom above one
+    // rather than a bound sitting on the real tear point -- see the domain-warp section
+    // above for the measured margin. Amounts tuned while the octaves were generic fields
+    // are conservative by roughly that factor and can be reopened.
     //
     // Practical version, unchanged: fix the scales, raise one range's max until the
     // web visibly tears, back off about thirty percent.

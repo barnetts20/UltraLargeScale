@@ -434,20 +434,49 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Niagara")
 	UNiagaraSystem* SectorSmallCloud;
 
-	/** The packed noise volume the density field fetches, resolved from
-	 *  MaterialParams.VolumeNoise.
+	/** The four volume textures the density field fetches, resolved from the authored paths
+	 *  in MaterialParams.
 	 *
-	 *  ONE ASSET, TWO CONSUMERS, RESOLVED ONCE. The material instance samples it and the
-	 *  entity-gen dispatch samples it, and they are not merely required to match -- they
-	 *  are handed the same pointer. The galaxy layer keeps a separate NoiseTexture property
+	 *  FOUR ASSETS, TWO CONSUMERS, RESOLVED ONCE. The material instance samples them and the
+	 *  entity-gen dispatch samples them, and they are not merely required to match -- both
+	 *  are handed the same pointers. The galaxy layer keeps a separate NoiseTexture property
 	 *  that must be set to agree with its material's, which nothing checks; placement and
 	 *  render can silently sample different assets there, and the only symptom is entities
-	 *  sitting off the structure.
+	 *  sitting off the structure. That risk scales with the asset count, which is why the
+	 *  split did not become four independently-authored pins on each side.
+	 *
+	 *  SEPARATE UPROPERTY MEMBERS rather than an FUniverseFieldTextures member, because this
+	 *  is where the REFERENCES live and UPROPERTY is what keeps them alive across a GC.
+	 *  FUniverseFieldTextures is a transport struct of raw pointers with no ownership; the
+	 *  actor builds one from these on demand via GetFieldTextures.
 	 *
 	 *  Loaded in LoadRuntimeAssets, on the game thread, because LoadObject is not thread
 	 *  safe and the generator's dispatch path may run on a worker. */
 	UPROPERTY()
-	UVolumeTexture* FieldNoiseTexture = nullptr;
+	UVolumeTexture* FieldVarianceTexA = nullptr;
+
+	UPROPERTY()
+	UVolumeTexture* FieldVarianceTexB = nullptr;
+
+	UPROPERTY()
+	UVolumeTexture* FieldWarpTexLarge = nullptr;
+
+	UPROPERTY()
+	UVolumeTexture* FieldWarpTexSmall = nullptr;
+
+	/** The four as a transport bundle, for the generator and the dispatch.
+	 *
+	 *  BUILT ON DEMAND rather than cached, so it cannot go stale against the members above
+	 *  after a pooled reuse reloads them. It is four pointer copies. */
+	FUniverseFieldTextures GetFieldTextures() const
+	{
+		FUniverseFieldTextures Out;
+		Out.VarianceA = FieldVarianceTexA;
+		Out.VarianceB = FieldVarianceTexB;
+		Out.WarpLarge = FieldWarpTexLarge;
+		Out.WarpSmall = FieldWarpTexSmall;
+		return Out;
+	}
 
 #pragma endregion
 

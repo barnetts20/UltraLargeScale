@@ -11,6 +11,64 @@
  *
  *  ADD, NEVER REUSE. A channel is free; sharing one between two consumers reintroduces
  *  exactly the aliasing ProcSeed exists to prevent. */
+class UTexture;
+
+/** The field's four volume textures, RESOLVED. One bundle rather than four loose pointers,
+ *  and that is the whole reason it exists: this set travels from the actor to the material,
+ *  to the data generator, to the entity-gen dispatch, across two thread hops and into a
+ *  render command. Four parameters at each of those boundaries is four chances to pass
+ *  three of them, and a dispatch bound with a stale fourth texture places entities against
+ *  a field nobody renders -- which looks exactly like a plausible cosmic web with the
+ *  entities somewhere else.
+ *
+ *  ALL FOUR OR NONE, enforced by IsComplete at every consumer. There is deliberately no
+ *  partial mode: with one texture missing the field does not degrade, it becomes a
+ *  different field. The variance fetches fall back to a neutral 0.5 -- the midpoint of
+ *  every authored range, so all regional structure vanishes -- and a missing warp volume
+ *  straightens the bisectors outright. Both are changes in GEOMETRY, not shading, so
+ *  placement against them is not an approximation of the rendered field but an unrelated
+ *  one.
+ *
+ *  RAW POINTERS, not UPROPERTY. This is a transport struct; the actor owns the references
+ *  that keep the objects alive, and every consumer here outlives nothing. Anything holding
+ *  one of these across a frame boundary should hold the actor's pointers instead. */
+struct FUniverseFieldTextures
+{
+	/** Region axes, coarse scale -- the structure field. UNORM multinoise. */
+	UTexture* VarianceA = nullptr;
+
+	/** Region axes, finer scale -- the appearance field. A DIFFERENT multinoise variant;
+	 *  see the authored paths in FUniverseMaterialParams for why it must not be the same
+	 *  asset as VarianceA. */
+	UTexture* VarianceB = nullptr;
+
+	/** Large warp octave. Signed vector field. Read TWICE per sample -- once on the fine
+	 *  lattice and once on the coarse one -- and those two fetches must stay on one asset
+	 *  or the two tiers stop bending like one field. */
+	UTexture* WarpLarge = nullptr;
+
+	/** Small warp octave. Signed vector field. */
+	UTexture* WarpSmall = nullptr;
+
+	bool IsComplete() const
+	{
+		return VarianceA != nullptr && VarianceB != nullptr
+			&& WarpLarge != nullptr && WarpSmall != nullptr;
+	}
+
+	/** Which ones are missing, for a log line that says something actionable. Returns an
+	 *  empty string when the set is complete. */
+	FString DescribeMissing() const
+	{
+		TArray<FString> Missing;
+		if (!VarianceA) { Missing.Add(TEXT("VarianceA")); }
+		if (!VarianceB) { Missing.Add(TEXT("VarianceB")); }
+		if (!WarpLarge) { Missing.Add(TEXT("WarpLarge")); }
+		if (!WarpSmall) { Missing.Add(TEXT("WarpSmall")); }
+		return FString::Join(Missing, TEXT(", "));
+	}
+};
+
 namespace UniverseSeed
 {
 	/** The GPU placement key. One channel for all three tiers -- the tier index enters
@@ -316,14 +374,22 @@ struct ULTRALARGESCALE_API FUniverseWarpOctaveParams
 	 *  so a value carried over from it must be doubled to displace the same distance.
 	 *
 	 *  IT IS DENOMINATED IN THE ASSET'S VALUE SCALE, not in an absolute one, which is what
-	 *  makes it move whenever MaterialParams.VolumeNoise is swapped. The core decodes a
+	 *  makes it move whenever this octave's warp volume is swapped. The core decodes a
 	 *  displacement from the fetched channels and multiplies by this; a volume whose
 	 *  channels swing half as far needs twice the amount for the same bend. The defaults
-	 *  here are tuned against VT_Multi_S4 and mean nothing against a different bake --
-	 *  re-tune the pair (this and WarpTexGradient) together when the asset changes, and
-	 *  read PredictedFoldShear rather than the picture while doing it. */
+	 *  RE-TUNED FOR THE SIGNED VECTOR ASSET, in the material and transcribed here. It was
+	 *  (0.5 .. 2.5); the signed volume needs roughly two thirds of that for the same bend,
+	 *  which is what a decode losing its centring step does to a value scale. Re-tune the
+	 *  pair (this and this octave's WarpTexGradient) together whenever the asset changes,
+	 *  and read PredictedFoldShear rather than the picture while doing it. Each octave now
+	 *  has its own asset and its own gradient, so the two are re-tuned independently.
+	 *
+	 *  THE RANGE IS A 4x SPREAD around a linear bias, so a region can resolve anywhere from
+	 *  a barely-bent web to a strongly-bent one. That is wider than the small octave's in
+	 *  ratio terms and much narrower in shear terms, because the coarse lattice divides
+	 *  this octave's contribution by the lattice ratio. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Warp")
-	FUniverseVarianceRange Amount = FUniverseVarianceRange(0.5f, 2.5f, 1.0f);
+	FUniverseVarianceRange Amount = FUniverseVarianceRange(0.333f, 1.333f, 1.0f);
 
 	/** Texture repeats per small cell, riding Amount's .w.
 	 *
@@ -344,7 +410,15 @@ struct ULTRALARGESCALE_API FUniverseWarpOctaveParams
 	 *  with Region.ScaleAppearance's 41 and re-aligns every ninety-nine cells -- twenty
 	 *  proxy widths, the worst pairing in the set. That is what this value was moved off
 	 *  410 to avoid; see the note on Region.ScaleAppearance. Author 0.1 in the details
-	 *  panel and the grid comes back. */
+	 *  panel and the grid comes back.
+	 *
+	 *  ANYTHING IN [0.09984, 0.10008] IS THIS SAME NUMBER. The quantum is 1/4096, about
+	 *  0.000244, so an edit smaller than that lands back on 409 and changes nothing at all
+	 *  -- the material shows the authored value while the field uses the quantized one, and
+	 *  the two only agree by accident. A material tweak of 0.099787 was measured resolving
+	 *  to 409 exactly as 0.099854 does, which is why this default did not move with the
+	 *  rest of the warp retune. To actually shift this scale, move by at least one quantum
+	 *  and check the new numerator against the coprimality table in Validate(). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Warp", meta = (ClampMin = "0.0"))
 	float Scale = 0.099854f;
 
@@ -625,25 +699,37 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bounds", meta = (ClampMin = "0.0"))
 	float BoundsFadeStart = 0.0f;
 
-	/** The largest |dTex/dUV| the filtered noise volume reaches. A property of the ASSET,
-	 *  measured rather than chosen, and NOT one of the sixteen derivation inputs -- it is
-	 *  used only to predict the fold ceiling. A 64^3 three-octave smooth volume measures
-	 *  14.09.
+	/** The largest |dTex/dUV| each filtered WARP volume reaches. A property of the ASSET,
+	 *  measured rather than chosen, and NOT one of the derivation inputs -- used only to
+	 *  predict the fold ceiling.
 	 *
-	 *  STALE, AND KNOWINGLY SO. 14.09 was measured on VT_PerlinWorley_Balanced and the
-	 *  field now fetches VT_Multi_S4, whose value scale is different enough that the warp
-	 *  amounts had to move with it. Until this is re-measured on the new bake,
-	 *  PredictedFoldShear and everything Validate() says about the fold ceiling are
-	 *  arithmetic on the wrong constant -- so treat a ceiling warning as unproven rather
-	 *  than as a reading, in either direction.
+	 *  TWO OF THEM NOW, ONE PER OCTAVE, because the octaves read separate assets. This was
+	 *  a single pin when every fetch shared one volume, and a single pin is now actively
+	 *  misleading: a bake that sharpens the small octave would move the large octave's
+	 *  predicted term too, so the two halves of the ceiling sum have to be checked
+	 *  separately. Splitting it is what makes PredictedFoldShear arithmetic on the right
+	 *  constants rather than on an average of two.
+	 *
+	 *  THE VARIANCE VOLUMES NEED NO EQUIVALENT. Their channels feed VarianceT as lerp
+	 *  factors, never as displacements, so their gradient cannot fold anything.
+	 *
+	 *  BOTH ARE STALE AND KNOWINGLY SO. 14.09 was measured on VT_PerlinWorley_Balanced, and
+	 *  neither warp octave reads that asset any more -- they read purpose-baked signed
+	 *  vector volumes whose value scale is different again, and whose decode no longer
+	 *  centres. Until each is re-measured on its own bake, PredictedFoldShear and everything
+	 *  Validate() says about the fold ceiling are arithmetic on the wrong constants -- treat
+	 *  a ceiling warning as unproven rather than as a reading, in either direction.
 	 *
 	 *  WRONG IN BOTH DIRECTIONS. If the amplitudes look right but the predicted shear is
-	 *  far above one, this is the number that disagrees, and the ratio between where the
-	 *  web actually tears and the prediction is the factor to correct it by. Becomes 1 and
-	 *  drops out entirely once volumes are gradient-normalized at bake time -- which the
-	 *  authoring tool can now do, and doing it retires this pin. */
+	 *  far above one, these are the numbers that disagree, and the ratio between where the
+	 *  web actually tears and the prediction is the factor to correct by. Each becomes 1 and
+	 *  drops out entirely once its volume is gradient-normalized at bake time -- which the
+	 *  authoring tool can now do, and doing it for both retires this pair. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Asset", meta = (ClampMin = "0.0"))
-	float WarpTexGradient = 14.09f;
+	float WarpTexGradientLarge = 14.09f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Asset", meta = (ClampMin = "0.0"))
+	float WarpTexGradientSmall = 14.09f;
 
 	FUniverseDensityParams()
 	{
@@ -652,13 +738,29 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 		// seven times higher: fine grain against coarse bend. See the fold ceiling note on
 		// the member.
 		//
-		// TUNED AGAINST VT_Multi_S4 like the large octave's, and for the same reason -- the
-		// amount is denominated in the asset's value scale. The spread is wide (0.05..0.3,
-		// biased to the low end) because this octave is the one the appearance fetch varies
-		// most visibly: it is the difference between a province of clean sheets and one of
-		// broken filament.
+		// THE AMOUNT SURVIVED THE ASSET SWAP UNCHANGED, which is worth stating because the
+		// large octave's did not. The spread is wide (0.05..0.3, biased hard to the low end)
+		// because this octave is the one the appearance fetch varies most visibly: it is the
+		// difference between a province of clean sheets and one of broken filament. That
+		// shape held up against the curl volume without retuning.
+		//
+		// IT IS ALSO ESSENTIALLY THE WHOLE FOLD CEILING. The coarse lattice multiplies this
+		// octave by the lattice ratio and divides the large one by it, so at the shipped
+		// defaults this term is about 94% of predicted shear. Raising this max is the single
+		// most dangerous edit in the warp block, and it is the reason the curl volume is on
+		// this octave rather than the other one -- see the asset paths in
+		// FUniverseMaterialParams.
 		WarpSmall.Amount = FUniverseVarianceRange(0.05f, 0.3f, 2.0f);
-		WarpSmall.Scale = 0.75f;
+
+		// 3079/4096, MOVED OFF 0.75 DELIBERATELY. 0.75 quantizes to 3072, which is
+		// 2^10 * 3 -- composite, and the only composite numerator in the set. It happened
+		// to stay coprime with the other three (19, 41 and 409 are all prime and none
+		// divides 3072), so nothing was visibly wrong, but it was one badly-chosen
+		// neighbouring scale away from a re-alignment. 3079 is prime, which makes this
+		// scale coprime with ANY other numerator by construction rather than by luck.
+		//
+		// The value moved by 0.23%, far below anything the eye reads as a frequency change.
+		WarpSmall.Scale = 0.751730f;
 		WarpSmall.LatticeFollow = 0.0f; // ignored; the small octave is pinned at full follow
 	}
 
@@ -760,11 +862,17 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 	/** NO CPU DERIVATION YET, and the omission is deliberate rather than pending.
 	 *
 	 *  The galaxy layer compiles its core into C++ behind GalaxyHLSLShim.h and returns a
-	 *  constructed params struct. The universe core does not currently compile that way:
-	 *  WeightedVector3 returns c.xyz and the shim's float4 has no .xyz accessor, and the
-	 *  weighted-scalar path needs float4 - float and float4 * float4 which the shim also
-	 *  lacks. Those gaps are pre-existing and latent, since nothing consumes this field
-	 *  from C++ yet.
+	 *  constructed params struct. The universe core did not, for three reasons, and the
+	 *  texture split closed all three as a side effect rather than as a goal:
+	 *  WeightedVector3 returned c.xyz against a shim float4 with no .xyz accessor (it now
+	 *  builds the float3 componentwise, which is what this file's own parity rules always
+	 *  required); it needed float4 * float4, which the shim now has; and the weighted-scalar
+	 *  path needed float4 - float, which no longer exists at all -- it went out with the
+	 *  cluster/gas stage that was its only consumer.
+	 *
+	 *  Verified only to the extent that the decode and both texture neutrals compile and
+	 *  reduce correctly. The rest of the core has not been built on this side, so treat a
+	 *  first compile as likely to surface more gaps of the same kind.
 	 *
 	 *  CLOSING THEM WOULD NOT MAKE A CPU PLACEMENT PATH CORRECT. The shim stubs Texture3D
 	 *  fetches to a neutral 0.5, so the C++ field reduces to the unwarped analytic web --
@@ -782,7 +890,8 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 #pragma region Validation
 	 /** Predicted worst-case warp shear on the COARSE lattice, where the ceiling binds:
 	  *
-	  *      (AmountLarge * ScaleLarge / ratio + AmountSmall * ScaleSmall * ratio) * Gradient
+	  *      AmountLarge * ScaleLarge / ratio * GradientLarge
+	  *    + AmountSmall * ScaleSmall * ratio * GradientSmall
 	  *
 	  *  At or below 1 the web bends. Above it the displacement folds, neighbouring samples
 	  *  cross over, and the web TEARS -- and only in the regions the blend has handed to the
@@ -790,19 +899,27 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 	  *  reads as a warp amplitude problem.
 	  *
 	  *  Each amount is that octave's MAX, since that is what a region can actually resolve
-	  *  to. Neither octave is divergence-free, so there is no headroom above 1 the way curl
-	  *  noise had: this sits close to the real tear point rather than being a conservative
-	  *  bound under it. Practical tuning is unchanged -- fix the scales, raise one amplitude
-	  *  until the web visibly tears, back off about thirty percent. */
+	  *  to, and each octave carries its OWN gradient because the two read different assets.
+	  *
+	  *  BOTH OCTAVES ARE DIVERGENCE-FREE AGAIN, now that each reads a curl volume rather
+	  *  than a slice of one generic packed field, so there is real headroom above 1 rather
+	  *  than a bound sitting on the tear point -- a curl field folds only at second order.
+	  *  A prediction slightly over 1 is therefore no longer the emergency it was. Practical
+	  *  tuning is unchanged -- fix the scales, raise one amplitude until the web visibly
+	  *  tears, back off about thirty percent. */
 	float PredictedFoldShear() const
 	{
 		const float Ratio = FMath::Max(FMath::RoundToFloat(
 			FMath::Max(Lattice.CellSizeLarge, 0.0f) / FMath::Max(Lattice.CellSizeSmall, 1e-6f)), 1.0f);
 
-		const float LargeTerm = WarpLarge.Amount.Max * WarpLarge.Scale / Ratio;
-		const float SmallTerm = WarpSmall.Amount.Max * WarpSmall.Scale * Ratio;
+		// EACH TERM CARRIES ITS OWN ASSET'S GRADIENT. Factoring one gradient out of the sum
+		// is only valid while both octaves read the same volume, which they no longer do.
+		const float LargeTerm =
+			WarpLarge.Amount.Max * WarpLarge.Scale / Ratio * WarpTexGradientLarge;
+		const float SmallTerm =
+			WarpSmall.Amount.Max * WarpSmall.Scale * Ratio * WarpTexGradientSmall;
 
-		return (LargeTerm + SmallTerm) * WarpTexGradient;
+		return LargeTerm + SmallTerm;
 	}
 
 	/** Cells before two scales re-align, given both are whole numbers of 1/4096ths. Two
@@ -958,32 +1075,101 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material|Debug")
 	bool bDebugColorByDensity = false;
 
-	/** The packed noise volume the field fetches for both region variances and both warp
-	 *  octaves.
+	/** THE FOUR FIELD VOLUMES. One packed asset used to serve every fetch; the field now
+	 *  takes a purpose-baked volume per site, because the two families want opposite things
+	 *  from a texture and one asset could only be a compromise between them. The mapping is
+	 *  in the fetch table at the top of UniverseDensityCore.ush.
 	 *
-	 *  ITS REQUIREMENTS: periodic, so repeat addressing closes the 4096-cell wrap;
-	 *  per-channel normalized to 0.5 with comparable spread; a distinct archetype per
-	 *  channel. Ideally gradient-normalized too, which makes WarpTexGradient 1 and drops it
-	 *  out of the fold ceiling entirely.
+	 *  ALL FOUR MUST REACH THE COMPUTE PATH. Placement and render sample one field or they
+	 *  are not one field, and that is now four correspondences to keep rather than one. The
+	 *  actor resolves all four in LoadRuntimeAssets and hands the same pointers to the
+	 *  material instance and to the dispatch, so the correspondence stays structural rather
+	 *  than becoming four things to remember.
 	 *
-	 *  THE SAME ASSET MUST REACH THE COMPUTE PATH. Placement and render sample one texture
-	 *  or they are not one field. Both sides resolve this one string -- the material's
-	 *  NoiseTex in InitializeVolumetric and FieldNoiseTexture in LoadRuntimeAssets -- so
-	 *  there is nothing else to change when it moves.
+	 *  VARIANCE VOLUMES -- the two region-axis fetches. Periodic, so repeat addressing
+	 *  closes the 4096-cell wrap. UNORM, per-channel normalized to 0.5 with comparable
+	 *  spread, since a channel feeds VarianceT as a raw [0,1] lerp factor and a channel with
+	 *  a different histogram makes a Range's min and max land somewhere other than where
+	 *  they were authored. A distinct archetype per channel.
 	 *
-	 *  IT NOW LIVES IN ANOTHER PLUGIN'S CONTENT, /VolumeNoiseLib rather than
-	 *  /UltraLargeScale, and that carries two conditions this string cannot enforce.
-	 *  VolumeNoiseLib must be ENABLED, or the mount point does not exist and LoadObject
-	 *  returns null -- which surfaces as the unwarped analytic web, a plausible-looking
-	 *  field rather than an error. And because the reference is a STRING rather than a hard
-	 *  TObjectPtr, the cooker has no edge to follow: the asset needs to be reachable from a
-	 *  cooked reference or listed in the project's additional asset directories, or a
-	 *  packaged build loses the warp while the editor keeps it.
+	 *  THE TWO MUST BE DIFFERENT MULTINOISE VARIANTS, not the same asset twice. A is the
+	 *  structure field and B is the appearance field, and the whole point of separating them
+	 *  is that a province's shape and its painting change in different places. Two fetches
+	 *  into one asset share all four generators and put the boundaries back together at a
+	 *  scale offset -- the correlation this layer has now removed twice, once between
+	 *  channels and once between fields. LoadRuntimeAssets warns if they resolve equal.
 	 *
-	 *  THE WARP AMOUNTS AND WarpTexGradient BELONG TO WHATEVER THIS NAMES. Changing the
-	 *  asset without re-tuning those three is a silent retune of the field's geometry. */
+	 *  WARP VOLUMES -- the two domain-warp octaves. Periodic for the same reason. SIGNED,
+	 *  values in [-1,1], because the shader applies them as displacements with NO centring
+	 *  step at all -- see WeightedVector3, where the failure mode for an unsigned asset is
+	 *  written out. And a coherent VECTOR field across xyz rather than three unrelated
+	 *  scalar archetypes, or the warp is axis-coupled and the swizzle test shows it.
+	 *
+	 *  CURL FOR PREFERENCE. Divergence-free warp folds only at second order, which is worth
+	 *  a factor of several in usable amplitude and hands void-size variation back to
+	 *  VoidSizeSpread alone. Gradient fields work and are not divergence-free.
+	 *
+	 *  GRADIENT-NORMALIZED AT BAKE IF POSSIBLE, for both warp volumes: that sets the
+	 *  matching WarpTexGradient pin to 1 and reduces the fold ceiling to amounts and scales
+	 *  alone, which is the only form of it that can be held in the head while tuning.
+	 *
+	 *  THEY LIVE IN ANOTHER PLUGIN'S CONTENT, /UniverseNoisePack rather than
+	 *  /UltraLargeScale, and that carries two conditions these strings cannot enforce.
+	 *  UniverseNoisePack must be ENABLED, or the mount point does not exist and LoadObject
+	 *  returns null -- which surfaces as a plausible-looking field rather than an error, and
+	 *  fails for all four at once. And because these are STRINGS rather than hard
+	 *  TObjectPtrs, the cooker has no edge to follow: each asset needs to be reachable from
+	 *  a cooked reference or listed in the project's additional asset directories, or a
+	 *  packaged build loses structure the editor keeps.
+	 *
+	 *  FULL Package.Object FORM, not the package path alone. LoadObject can often infer the
+	 *  object name from the package, but "often" is doing real work in that sentence -- it
+	 *  is the form that is least reliable in a packaged build, and it is what the previous
+	 *  single path used. The mesh and material loads elsewhere in this actor already spell
+	 *  the object out; these now match.
+	 *
+	 *  THE WARP AMOUNTS AND BOTH WarpTexGradient PINS BELONG TO WHATEVER THESE NAME.
+	 *  Changing an asset without re-tuning its octave's pair is a silent retune of the
+	 *  field's geometry.
+	 *
+	 *  CURL GOES ON THE SMALL OCTAVE, THE PLAIN VECTOR FIELD ON THE LARGE ONE. Only one of
+	 *  the two warp assets is divergence-free, so this is a real choice, and the two
+	 *  arguments point opposite ways:
+	 *
+	 *    - the FOLD BUDGET wants curl on the SMALL octave. On the coarse lattice the small
+	 *      term carries a factor of ratio while the large term is divided by it, so the
+	 *      small octave is essentially the entire ceiling -- around 94% of predicted shear
+	 *      at the shipped defaults. Divergence-free warp folds only at second order, so
+	 *      curl buys headroom exactly where all the risk is concentrated.
+	 *    - VOID SIZE wants curl on the LARGE octave. A divergence-free warp cannot vary void
+	 *      size; a generic one can, and when both octaves were generic some of what read as
+	 *      size variation was coming from the large octave rather than from VoidSizeSpread,
+	 *      the parameter that names the effect.
+	 *
+	 *  THE FOLD BUDGET WINS, ON MEASUREMENT RATHER THAN ON ARGUMENT -- this was tried the
+	 *  other way round first and swapped after looking at it. The arithmetic backs up what
+	 *  the eye picked: 94% of the ceiling sitting on one octave makes that octave the only
+	 *  one worth protecting, and the void-size contamination on the large octave is a
+	 *  second-order authoring annoyance by comparison. If void size ever needs to be tuned
+	 *  cleanly against VoidSizeSpread alone, that is the reason to revisit, not tearing.
+	 *
+	 *  BOTH WARP ASSETS ARE S4 and both variance assets are S8. The warps came down from S8
+	 *  deliberately: they are what the eye reads as structure, so they benefit most from the
+	 *  larger features a lower tiling interval gives at the same resolution. The variance
+	 *  fetches run at scales two orders of magnitude coarser -- 19 and 41 against 409 and
+	 *  3079 per 4096 cells -- so their features are enormous in cell terms either way and a
+	 *  higher interval costs them nothing visible. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	FString VolumeNoise = "/VolumeNoiseLib/Noise/Multi-Noise/Base/VT_Multi_S4";
+	FString VarianceVolumeA = "/UniverseNoisePack/VT_MultiNoise_1_S8.VT_MultiNoise_1_S8";
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	FString VarianceVolumeB = "/UniverseNoisePack/VT_MultiNoise_2_S8.VT_MultiNoise_2_S8";
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	FString WarpVolumeLarge = "/UniverseNoisePack/VT_PerlinVector_S4.VT_PerlinVector_S4";
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
+	FString WarpVolumeSmall = "/UniverseNoisePack/VT_PerlinCurl_S4.VT_PerlinCurl_S4";
 
 	/** Steps the march will actually take, as opposed to the budget it was given. The two
 	 *  diverge fast: at growth 4 a budget of 32 resolves to about 13. Diagnostic rather

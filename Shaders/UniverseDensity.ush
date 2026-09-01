@@ -7,8 +7,11 @@
 // per sample. This file's job is purely the sphere-bounded march: step sizing,
 // accumulation, early-out, and calling that one function once per step.
 //
-// The texture and sampler are threaded down into the core rather than sampled here, same
-// as before. THE FIELD OFFSET NO LONGER PASSES THROUGH THIS FUNCTION AT ALL: it is
+// The textures and samplers are threaded down into the core rather than sampled here,
+// same as before -- there are FOUR pairs now rather than one, since the field's fetches
+// were split onto purpose-baked assets, but this file's relationship to them is unchanged:
+// it holds them, it never reads them. THE FIELD OFFSET NO LONGER PASSES THROUGH THIS
+// FUNCTION AT ALL: it is
 // constant for the draw, so it is resolved once into the params struct instead of being
 // handed to every sample. It still has to stay split into an integer cell count and a
 // fraction -- a float3 carrying the player's position stops resolving a fraction of a
@@ -81,7 +84,11 @@
 //
 // The step count rides in G because cost has no other observer: a march that truncates
 // looks identical to one that finished, and the far half of the volume is simply absent.
-float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState InSampler,
+float4 UniverseRayMarch(UniverseDensityParams P,
+                        Texture3D InVarianceTexA, SamplerState InVarianceSamplerA,
+                        Texture3D InVarianceTexB, SamplerState InVarianceSamplerB,
+                        Texture3DSigned InWarpTexLarge, SamplerState InWarpSamplerLarge,
+                        Texture3DSigned InWarpTexSmall, SamplerState InWarpSamplerSmall,
                         float3 InStartPos, float3 InViewVec, float3 InCamPosN,
                         float InStepGrowth, float InMinStep, float InStepCount,
                         int InMaxSteps, float InDensityScale, float InJitter,
@@ -218,7 +225,11 @@ float4 UniverseRayMarch(UniverseDensityParams P, Texture3D InTex, SamplerState I
         // moved ahead of the fetch.
         float3 samplePos = o + dir * (t + h * 0.5);
 
-        float density = P.SampleAtPosition(InTex, InSampler, samplePos);
+        float density = P.SampleAtPosition(InVarianceTexA, InVarianceSamplerA,
+                                           InVarianceTexB, InVarianceSamplerB,
+                                           InWarpTexLarge, InWarpSamplerLarge,
+                                           InWarpTexSmall, InWarpSamplerSmall,
+                                           samplePos);
         if (bShape)
         {
             density = P.PowSafe(density, InNoisePower);

@@ -15,8 +15,11 @@
 //   - There is no field offset. The proxy's offset is a property of the VIEW; the field
 //     is static in caller space and placement needs none. See InvFieldExtent in the .usf.
 //   - A field sample here is a fifty-four candidate walk across two lattices plus five
-//     texture fetches, roughly fifteen to twenty-five times a galaxy sample. Probe cost
-//     therefore dominates far sooner, and GenerationSubdivision wants to sit lower.
+//     texture fetches across FOUR distinct volumes, roughly fifteen to twenty-five times a
+//     galaxy sample. Probe cost therefore dominates far sooner, and GenerationSubdivision
+//     wants to sit lower. Splitting the assets did not change the fetch count -- it was
+//     five before, into one texture -- so this cost estimate is unchanged; what it changed
+//     is cache behaviour, since five fetches now touch four working sets rather than one.
 
 #pragma once
 
@@ -144,8 +147,24 @@ public:
 		SHADER_PARAMETER(float, PlaceExtentMax)
 		SHADER_PARAMETER(float, PlaceExtentExponent)
 
-		SHADER_PARAMETER_TEXTURE(Texture3D, NoiseTex)
-		SHADER_PARAMETER_SAMPLER(SamplerState, NoiseTexSampler)
+		// THE FOUR FIELD VOLUMES, matching the .usf declarations and the material's Custom
+		// node pin for pin. Two UNORM multinoise volumes for the region axes, two signed
+		// vector volumes for the warp octaves.
+		//
+		// FOUR SAMPLERS RATHER THAN ONE SHARED. They are all currently the same static
+		// state -- trilinear, wrap on every axis -- so this costs four descriptor slots to
+		// say nothing. It buys the ability to give one asset different addressing without
+		// touching the other three, which is the likely next thing to want: the warp
+		// volumes and the variance volumes have different periodicity requirements and only
+		// the warp ones are forced to wrap by the cell-index mask.
+		SHADER_PARAMETER_TEXTURE(Texture3D, VarianceTexA)
+		SHADER_PARAMETER_SAMPLER(SamplerState, VarianceTexASampler)
+		SHADER_PARAMETER_TEXTURE(Texture3D, VarianceTexB)
+		SHADER_PARAMETER_SAMPLER(SamplerState, VarianceTexBSampler)
+		SHADER_PARAMETER_TEXTURE(Texture3D, WarpTexLarge)
+		SHADER_PARAMETER_SAMPLER(SamplerState, WarpTexLargeSampler)
+		SHADER_PARAMETER_TEXTURE(Texture3D, WarpTexSmall)
+		SHADER_PARAMETER_SAMPLER(SamplerState, WarpTexSmallSampler)
 
 		// Raw field inputs, in MakeUniverseDensityParams order, and written by
 		// FUniverseDensityParams::FillShaderParameters. Deriving in the shader rather than
@@ -415,7 +434,7 @@ namespace UniverseEntityGen
 		const TArray<FUniverseGenCell>& InCells,
 		int32 InKeySeed,
 		float InInvFieldExtent,
-		UTexture* InNoiseTexture,
+		const FUniverseFieldTextures& InFieldTextures,
 		TArray<float>& OutCellMass);
 
 	/** Dispatch, wait, and return the placed entities.
@@ -430,8 +449,11 @@ namespace UniverseEntityGen
 	 *
 	 *  Returns false on timeout, leaving OutEntities untouched. THERE IS NO CPU PATH BEHIND
 	 *  THIS, and for this layer that is structural rather than incidental: the shim stubs
-	 *  texture fetches to a neutral 0.5, and this field's geometry depends on those fetches.
-	 *  The caller blanks the affected slots rather than filling them another way. */
+	 *  texture fetches to their neutral, and this field's geometry depends on those fetches.
+	 *  The caller blanks the affected slots rather than filling them another way.
+	 *
+	 *  RETURNS FALSE IMMEDIATELY if InFieldTextures is not complete. All four or none --
+	 *  see FUniverseFieldTextures. */
 	bool GenerateBatchBlocking(
 		const FUniverseParams& InParams,
 		const FTierParams& InTierParams,
@@ -441,7 +463,7 @@ namespace UniverseEntityGen
 		int32 InSlotCapacity,
 		int32 InKeySeed,
 		float InInvFieldExtent,
-		UTexture* InNoiseTexture,
+		const FUniverseFieldTextures& InFieldTextures,
 		float InBudgetScale,
 		TArray<FUniverseEntityOut>& OutEntities,
 		TArray<uint32>& OutCounts);
@@ -460,7 +482,7 @@ namespace UniverseEntityGen
 		int32 InSlotCapacity,
 		int32 InKeySeed,
 		float InInvFieldExtent,
-		UTexture* InNoiseTexture,
+		const FUniverseFieldTextures& InFieldTextures,
 		float InBudgetScale,
 		bool bInCalibrateOnly,
 		TSharedRef<FUniverseEntityGenRequest> OutRequest);

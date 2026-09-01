@@ -310,7 +310,7 @@ void AUniverseActor::InitializeData()
 	// The texture is the same object the material instance is given, not a second one
 	// authored to match.
 	UniverseGenerator.FieldExtent = GetVolumetricProxyExtent();
-	UniverseGenerator.NoiseTexture = FieldNoiseTexture;
+	UniverseGenerator.FieldTextures = GetFieldTextures();
 
 	// NO GENERATOR INITIALIZE. It built the legacy FastNoise graph and did nothing
 	// else; the generator's remaining state is FieldExtent and NoiseTexture, both set
@@ -513,7 +513,21 @@ void AUniverseActor::InitializeVolumetric()
 			// Resolve every asset up front and bail loudly.
 			UStaticMesh* BoxMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/UltraLargeScale/UnitBoxInvertedNormals.UnitBoxInvertedNormals"));
 			UMaterialInterface* ParentMat = LoadObject<UMaterialInterface>(nullptr, *Self->VolumetricMaterialPath);
-			UVolumeTexture* NoiseTex = LoadObject<UVolumeTexture>(nullptr, *Self->UniverseParams.MaterialParams.VolumeNoise);
+			// THE FIELD VOLUMES ARE ALREADY RESOLVED and are deliberately NOT loaded here.
+			// AProceduralSpaceActor::Initialize calls LoadRuntimeAssets in its game-thread
+			// prologue, before dispatching the async chain that reaches this function, so
+			// the four pointers are populated by the time this runs.
+			//
+			// A SECOND LoadObject AGAINST THE SAME PATHS WOULD BE WRONG, not merely
+			// redundant. It returns the same objects today and stops doing so the moment
+			// anything edits the paths between the two calls -- at which point the material
+			// samples one set of assets and the entity-gen dispatch, which reads the
+			// pointers LoadRuntimeAssets stored, samples another. That is the exact failure
+			// the single resolve point exists to make unrepresentable, and it is silent:
+			// both fields look like plausible cosmic webs.
+			//
+			// The mesh and parent material below are still loaded here because they have no
+			// second consumer and nothing stores them.
 
 			if (!BoxMesh || !ParentMat)
 			{
@@ -521,19 +535,57 @@ void AUniverseActor::InitializeVolumetric()
 				CompletionPromise.SetValue();
 				return;
 			}
-			if (!NoiseTex)
+			const FUniverseFieldTextures FieldTextures = Self->GetFieldTextures();
+
+			if (!FieldTextures.IsComplete())
 			{
-				// LOUDER THAN THE GALAXY'S EQUIVALENT, because it means more here. Both
-				// region fetches and both warp octaves read this one asset, and with no
-				// texture they return neutral and the field collapses to the unwarped
-				// analytic web -- a change in GEOMETRY, not just in shading. What renders
-				// is a clean cellular lattice rather than a cosmic web, and it looks
-				// deliberate.
-				UE_LOG(LogTemp, Warning, TEXT("AUniverseActor::InitializeVolumetric - noise texture '%s' unresolved; ") TEXT("the field collapses to the unwarped analytic web -- no regional variance, no domain warp, straight bisectors."), *Self->UniverseParams.MaterialParams.VolumeNoise);
+				// LOUDER THAN THE GALAXY'S EQUIVALENT, because it means more here. A missing
+				// variance volume returns neutral and takes every regional axis to its
+				// authored midpoint; a missing warp volume returns neutral and straightens
+				// the bisectors outright. Either is a change in GEOMETRY, not just in
+				// shading. What renders is a clean cellular lattice rather than a cosmic
+				// web, and it looks deliberate.
+				UE_LOG(LogTemp, Warning,
+					TEXT("AUniverseActor::InitializeVolumetric - field volumes unresolved (%s); ")
+					TEXT("the field loses the corresponding structure -- regional variance goes ")
+					TEXT("to its midpoints, the domain warp goes to zero, bisectors straighten. ")
+					TEXT("Check that the UniverseNoisePack plugin is enabled and the paths ")
+					TEXT("are correct."),
+					*FieldTextures.DescribeMissing());
 			}
 
 			Self->VolumeMaterial = UMaterialInstanceDynamic::Create(ParentMat, Self);
-			if (NoiseTex) Self->VolumeMaterial->SetTextureParameterValue(FName("NoiseTex"), NoiseTex);
+
+			// PIN NAMES MATCH THE .usf DECLARATIONS EXACTLY. A MID silently ignores a name
+			// the material does not have, so a renamed pin here is a texture that keeps
+			// whatever the parent material had -- most likely a default grey, which reads as
+			// "the warp stopped working" rather than as a naming mistake.
+			//
+			// SET INDIVIDUALLY, so a partial set still binds what it has. That is the right
+			// call for the RENDER, which degrades to something visible and obviously wrong;
+			// it is emphatically not the right call for PLACEMENT, which refuses to run at
+			// all rather than place against a field the render is not drawing. The two paths
+			// differ here deliberately.
+			if (FieldTextures.VarianceA)
+			{
+				Self->VolumeMaterial->SetTextureParameterValue(
+					FName("VarianceTexA"), Self->FieldVarianceTexA);
+			}
+			if (FieldTextures.VarianceB)
+			{
+				Self->VolumeMaterial->SetTextureParameterValue(
+					FName("VarianceTexB"), Self->FieldVarianceTexB);
+			}
+			if (FieldTextures.WarpLarge)
+			{
+				Self->VolumeMaterial->SetTextureParameterValue(
+					FName("WarpTexLarge"), Self->FieldWarpTexLarge);
+			}
+			if (FieldTextures.WarpSmall)
+			{
+				Self->VolumeMaterial->SetTextureParameterValue(
+					FName("WarpTexSmall"), Self->FieldWarpTexSmall);
+			}
 
 			// THE OFFSET ALWAYS. It is runtime state with no authored counterpart on the
 			// instance, so there is nothing for it to clobber and nothing else can supply it.
@@ -634,25 +686,71 @@ void AUniverseActor::LoadRuntimeAssets()
 	if (!SectorMidCloud)   SectorMidCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorMid.NG_SectorMid"));
 	if (!SectorSmallCloud) SectorSmallCloud = LoadObject<UNiagaraSystem>(nullptr, TEXT("/UltraLargeScale/Sector/NG_SectorSmall.NG_SectorSmall"));
 
-	// THE FIELD'S NOISE VOLUME, resolved once from the one authored path so the material
-	// and the entity-gen dispatch cannot end up on different assets. Game thread, because
+	// THE FIELD'S FOUR VOLUMES, resolved once from the authored paths so the material and
+	// the entity-gen dispatch cannot end up on different assets. Game thread, because
 	// LoadObject is not thread safe and the dispatch path runs on a worker.
-	if (!FieldNoiseTexture)
-	{
-		FieldNoiseTexture = LoadObject<UVolumeTexture>(
-			nullptr, *UniverseParams.MaterialParams.VolumeNoise);
+	//
+	// EACH GUARDED SEPARATELY so a pooled reuse reloads only what it is missing, and each
+	// reported separately so a single bad path names itself. A combined check would say
+	// "textures unresolved" for a typo in one of four.
+	const FUniverseMaterialParams& MatParams = UniverseParams.MaterialParams;
 
-		if (!FieldNoiseTexture)
+	struct FFieldVolumeSlot
+	{
+		UVolumeTexture** Target;
+		const FString* Path;
+		const TCHAR* Name;
+	};
+
+	const FFieldVolumeSlot Slots[] = {
+		{ &FieldVarianceTexA, &MatParams.VarianceVolumeA, TEXT("VarianceVolumeA") },
+		{ &FieldVarianceTexB, &MatParams.VarianceVolumeB, TEXT("VarianceVolumeB") },
+		{ &FieldWarpTexLarge, &MatParams.WarpVolumeLarge, TEXT("WarpVolumeLarge") },
+		{ &FieldWarpTexSmall, &MatParams.WarpVolumeSmall, TEXT("WarpVolumeSmall") },
+	};
+
+	for (const FFieldVolumeSlot& Slot : Slots)
+	{
+		if (*Slot.Target)
 		{
-			// Not a warning that can be deferred. Without this the material renders the
-			// unwarped analytic web -- a different field -- and entity generation refuses
-			// to run at all rather than place against one.
-			UE_LOG(LogTemp, Error,
-				TEXT("AUniverseActor::LoadRuntimeAssets - noise volume '%s' unresolved. ")
-				TEXT("The render will lose its warp and regional variance, and entity ")
-				TEXT("generation will place nothing."),
-				*UniverseParams.MaterialParams.VolumeNoise);
+			continue;
 		}
+
+		*Slot.Target = LoadObject<UVolumeTexture>(nullptr, **Slot.Path);
+
+		if (!*Slot.Target)
+		{
+			// Not a warning that can be deferred. Without this the material renders a
+			// DIFFERENT FIELD -- a missing variance volume takes every regional axis to its
+			// midpoint, a missing warp volume straightens the bisectors -- and entity
+			// generation refuses to run at all rather than place against one.
+			//
+			// A NULL HERE IS AS LIKELY TO BE THE MOUNT POINT AS THE PATH. These assets live
+			// in UniverseNoisePack's content; with that plugin disabled the mount does not
+			// exist and every one of the four returns null at once.
+			UE_LOG(LogTemp, Error,
+				TEXT("AUniverseActor::LoadRuntimeAssets - field volume %s ('%s') unresolved. ")
+				TEXT("The render will lose part of its structure and entity generation will ")
+				TEXT("place nothing until every one of the four resolves. If all four failed, ")
+				TEXT("check that the UniverseNoisePack plugin is enabled."),
+				Slot.Name, **Slot.Path);
+		}
+	}
+
+	// THE TWO VARIANCE VOLUMES MUST NOT BE THE SAME ASSET, and this is cheap to check and
+	// expensive to notice otherwise. Field A decides the web's structure and field B decides
+	// its painting; the entire reason they are two fetches is that a province's shape and its
+	// appearance should change in different places. Pointed at one asset they share all four
+	// generators and their boundaries re-align at a scale offset, which reads as a field with
+	// less variety than it had rather than as a misconfiguration.
+	if (FieldVarianceTexA && FieldVarianceTexA == FieldVarianceTexB)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("AUniverseActor::LoadRuntimeAssets - VarianceVolumeA and VarianceVolumeB ")
+			TEXT("resolve to the same asset ('%s'). The structure and appearance region ")
+			TEXT("fields will share every generator and their boundaries will correlate. ")
+			TEXT("Point them at two different multinoise variants."),
+			*MatParams.VarianceVolumeA);
 	}
 }
 

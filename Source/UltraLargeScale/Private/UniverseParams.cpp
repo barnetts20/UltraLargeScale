@@ -19,15 +19,18 @@ bool FUniverseDensityParams::Validate(const TCHAR* InContext) const
 	if (Shear > 1.0f)
 	{
 		bOk = false;
+		// BOTH GRADIENTS REPORTED, one per octave, because the octaves read separate assets
+		// now and each term carries its own. A single number here would be an average of two
+		// and would send the reader to the wrong pin half the time.
 		UE_LOG(LogTemp, Warning,
 			TEXT("%s: predicted warp shear on the coarse lattice is %.3f, above the fold ")
 			TEXT("ceiling of 1. The web will tear rather than bend, and only in coarse ")
 			TEXT("regions. The small octave almost always binds: amount %.4f x scale %.4f ")
-			TEXT("x ratio, against the large octave's %.4f x %.4f / ratio. Gradient %.2f."),
+			TEXT("x ratio x gradient %.2f, against the large octave's %.4f x %.4f / ratio ")
+			TEXT("x gradient %.2f."),
 			InContext, Shear,
-			WarpSmall.Amount.Max, WarpSmall.Scale,
-			WarpLarge.Amount.Max, WarpLarge.Scale,
-			WarpTexGradient);
+			WarpSmall.Amount.Max, WarpSmall.Scale, WarpTexGradientSmall,
+			WarpLarge.Amount.Max, WarpLarge.Scale, WarpTexGradientLarge);
 	}
 	else if (Shear > 0.7f)
 	{
@@ -42,6 +45,18 @@ bool FUniverseDensityParams::Validate(const TCHAR* InContext) const
 	// Four texture scales, each a whole number of 1/4096ths. Any pair re-aligns every
 	// 4096/gcd cells, so a shared factor puts a visible repeat inside the precision wrap.
 	// ADDING A FIFTH FETCH MEANS ADDING IT TO THIS TABLE and checking it against all four.
+	//
+	// WEAKER THAN IT WAS, AND WORTH KNOWING WHICH WAY. When every fetch read one packed
+	// volume, a shared factor between two scales meant those two fetches literally repeated
+	// each other's CONTENT at the re-alignment period -- the same texels, twice. All four
+	// of these now read different assets, so that failure is gone outright: two fetches into
+	// two unrelated volumes cannot repeat content whatever their periods do.
+	//
+	// What survives is the weaker structural version: two fields whose periods share a
+	// factor have their region BOUNDARIES co-occur, so provinces start and stop in the same
+	// places even though they are made of different noise. That is still worth avoiding and
+	// still what this check finds, but it is a subtlety rather than a visible tiling seam,
+	// so treat a warning here as advisory rather than as a defect.
 	struct FNamedScale { const TCHAR* Name; float Scale; };
 	const FNamedScale Scales[] = {
 		{ TEXT("Region.ScaleStructure"),  Region.ScaleStructure },

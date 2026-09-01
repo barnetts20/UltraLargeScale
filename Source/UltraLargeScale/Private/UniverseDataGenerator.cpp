@@ -172,7 +172,7 @@ float UniverseDataGenerator::GetTierBudgetScale(
 		return *Cached;
 	}
 
-	if (NoiseTexture == nullptr || FieldExtent <= 0.0)
+	if (!FieldTextures.IsComplete() || FieldExtent <= 0.0)
 	{
 		return 0.0f;
 	}
@@ -233,7 +233,7 @@ float UniverseDataGenerator::GetTierBudgetScale(
 
 	if (UniverseEntityGen::CalibrateBlocking(
 		Params, InTierParams, Cells, TierKeySeed(InSeedOffset),
-		InvFieldExtent, NoiseTexture, CellMass)
+		InvFieldExtent, FieldTextures, CellMass)
 		&& CellMass.Num() == AllCells.Num())
 	{
 		// REDUCED HERE, NOT ON THE GPU, and in double.
@@ -366,13 +366,19 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 	// spamming on every boundary cross. A misconfiguration would otherwise surface only as
 	// a tier that never populates, which reads as a streaming problem rather than a setup
 	// one.
-	if (NoiseTexture == nullptr)
+	if (!FieldTextures.IsComplete())
 	{
+		// NAMES THE MISSING ONES. With four assets "the texture is unresolved" sends the
+		// developer to check four paths, and the common case is that three are fine and one
+		// path has a typo in it.
 		ensureMsgf(false,
-			TEXT("UniverseEntityGen: NoiseTexture is unresolved, so the sector will place ")
-			TEXT("NOTHING -- placement is GPU-only and the dispatch samples it. It is ")
-			TEXT("loaded from MaterialParams.VolumeNoise; check that path and that the ")
-			TEXT("asset has NEVER STREAM set."));
+			TEXT("UniverseEntityGen: field textures unresolved (%s), so the sector will ")
+			TEXT("place NOTHING -- placement is GPU-only and the dispatch samples all four. ")
+			TEXT("They are loaded from the VarianceVolumeA/B and WarpVolumeLarge/Small paths ")
+			TEXT("in MaterialParams; check those paths, that UniverseNoisePack is enabled, ")
+			TEXT("and ")
+			TEXT("that each asset has NEVER STREAM set."),
+			*FieldTextures.DescribeMissing());
 		return FailBatch();
 	}
 
@@ -447,7 +453,7 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 	if (!UniverseEntityGen::GenerateBatchBlocking(
 		Params, InTierParams, Cells, EntityCapacity,
 		InBuffer.SlotCoord.Num(), InBuffer.SlotCapacity,
-		TierKeySeed(InSeedOffset), InvFieldExtent, NoiseTexture,
+		TierKeySeed(InSeedOffset), InvFieldExtent, FieldTextures,
 		BudgetScale, Entities, Counts))
 	{
 		return FailBatch();

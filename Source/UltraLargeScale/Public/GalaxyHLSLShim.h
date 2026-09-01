@@ -30,6 +30,14 @@
 
 #include <cmath>
 
+// IDENTIFIES THE C++ SIDE to the shared .ush files. They need it for exactly one thing:
+// the resource stubs below are C++ TYPES, so a .ush that names a stub type has to alias
+// that name to a real HLSL resource type when the shader compiler is reading it. See
+// Texture3DSigned. Nothing else in the shared files may branch on this -- a divergence
+// gated on the compiler is precisely what this whole arrangement exists to prevent, and
+// the one exception is a type name rather than any behaviour.
+#define GALAXY_HLSL_SHIM 1
+
 #ifdef _MSC_VER
 #ifndef NOMINMAX
 #define NOMINMAX    // else Windows.h turns max/min into macros
@@ -81,6 +89,15 @@ namespace GalaxyHLSL
     inline float4 operator*(const float4& A, float S) { return float4(A.x * S, A.y * S, A.z * S, A.w * S); }
     inline float4 operator*(float S, const float4& A) { return float4(A.x * S, A.y * S, A.z * S, A.w * S); }
 
+    // ELEMENTWISE. HLSL's float4 * float4 is componentwise, not a dot product, and the
+    // universe core's WeightedVector3 relies on it to gain each displacement axis
+    // independently. Added because that core had never compiled on this side -- the gap was
+    // known and recorded in UniverseParams.h, and it is one line.
+    inline float4 operator*(const float4& A, const float4& B)
+    {
+        return float4(A.x * B.x, A.y * B.y, A.z * B.z, A.w * B.w);
+    }
+
     // ---------------------------------------------------------------------------
     // RESOURCE STUBS
     //
@@ -100,6 +117,22 @@ namespace GalaxyHLSL
     // Returning 0.5 rather than 0 matters. Zero would centre to -1, drive modulation to
     // max(1 - Amount, 0) and warp by half a domain, so the C++ field would differ from
     // the analytic one instead of equalling it.
+    //
+    // TWO STUBS, BECAUSE THERE ARE NOW TWO TEXTURE CONVENTIONS AND THEY HAVE DIFFERENT
+    // NEUTRALS. Splitting the universe field's one packed volume into four purpose-baked
+    // assets split the decode with it:
+    //
+    //   Texture3D        UNORM, values in [0,1], neutral 0.5. The variance fetches, whose
+    //                    channels feed VarianceT as a [0,1] lerp factor directly.
+    //   Texture3DSigned  values already in [-1,1], neutral 0. The curl/gradient vector
+    //                    fields the warp octaves read, which carry their own sign and are
+    //                    no longer centred by the shader at all.
+    //
+    // GETTING THE NEUTRAL WRONG HERE IS SILENT AND STRUCTURAL. A signed asset stubbed at
+    // 0.5 displaces the C++ field by half the warp amplitude on every axis, so the CPU
+    // field stops being the unwarped analytic web and becomes a uniformly-sheared version
+    // of it -- which still evaluates, still looks like a cosmic web, and no longer matches
+    // what the shader draws anywhere.
     // ---------------------------------------------------------------------------
 
     struct SamplerState {};
@@ -109,6 +142,19 @@ namespace GalaxyHLSL
         float4 SampleLevel(const SamplerState&, const float3&, float) const
         {
             return float4(0.5f, 0.5f, 0.5f, 0.5f);
+        }
+    };
+
+    // Distinct TYPE rather than a flag on the one above, so a fetch site cannot be given
+    // the wrong convention without a compile error. On the HLSL side this name aliases
+    // straight back to Texture3D -- see the guard at the top of UniverseDensityCore.ush --
+    // because a shader has no use for the distinction: it is the decode that differs, and
+    // the decode is written out at the call site.
+    struct Texture3DSigned
+    {
+        float4 SampleLevel(const SamplerState&, const float3&, float) const
+        {
+            return float4(0.0f, 0.0f, 0.0f, 0.0f);
         }
     };
 

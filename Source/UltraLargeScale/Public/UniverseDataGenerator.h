@@ -53,18 +53,22 @@ public:
 	 *  Zero until the actor sets it, which every GPU path below treats as unconfigured. */
 	double FieldExtent = 0.0;
 
-	/** The packed noise volume, resolved.
+	/** The field's four volume textures, resolved.
 	 *
-	 *  THE SAME OBJECT THE MATERIAL SAMPLES, guaranteed rather than asked for: the actor
-	 *  loads it once from MaterialParams.VolumeNoise and hands the pointer to both. The
-	 *  galaxy layer keeps a separate NoiseTexture property that must be set to match its
-	 *  material's, which is a correspondence nothing checks -- placement and render can
-	 *  silently sample different assets and the only symptom is entities off the
-	 *  structure. Resolving from the one path removes the question.
+	 *  THE SAME OBJECTS THE MATERIAL SAMPLES, guaranteed rather than asked for: the actor
+	 *  loads all four from the authored paths in MaterialParams and hands the same bundle to
+	 *  the material instance and to this. The galaxy layer keeps a separate NoiseTexture
+	 *  property that must be set to match its material's, which is a correspondence nothing
+	 *  checks -- placement and render can silently sample different assets and the only
+	 *  symptom is entities off the structure. Resolving from the authored paths removes the
+	 *  question, and it matters four times as much now that there are four of them.
+	 *
+	 *  ONE BUNDLE, NOT FOUR MEMBERS, so a caller cannot pass a partial set. See
+	 *  FUniverseFieldTextures for why all-or-nothing is the only sound rule here.
 	 *
 	 *  Held raw rather than as a UPROPERTY because this class is not a UObject; the actor
-	 *  owns the reference that keeps it alive. */
-	UTexture* NoiseTexture = nullptr;
+	 *  owns the references that keep them alive. */
+	FUniverseFieldTextures FieldTextures;
 
 	/** One cell of a tier's generation grid.
 	 *

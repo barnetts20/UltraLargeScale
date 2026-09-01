@@ -27,7 +27,7 @@ namespace UniverseEntityGen
 		int32 InSlotCapacity,
 		int32 InKeySeed,
 		float InInvFieldExtent,
-		UTexture* InNoiseTexture,
+		const FUniverseFieldTextures& InFieldTextures,
 		float InBudgetScale,
 		bool bInCalibrateOnly,
 		TSharedRef<FUniverseEntityGenRequest> OutRequest)
@@ -98,7 +98,15 @@ namespace UniverseEntityGen
 		// A weak pointer, so a sector torn down while a batch is in flight resolves to null
 		// and the dispatch bails, rather than the marshalled lambda keeping a destroyed
 		// texture alive or dereferencing one.
-		TWeakObjectPtr<UTexture> WeakNoise(InNoiseTexture);
+		//
+		// FOUR OF THEM, and every one is checked on the game thread below. Weak pointers do
+		// not expire as a group -- four separate objects can be collected independently --
+		// so "the set was complete when Dispatch was called" says nothing about whether it
+		// still is by the time the marshalled lambda runs.
+		TWeakObjectPtr<UTexture> WeakVarianceA(InFieldTextures.VarianceA);
+		TWeakObjectPtr<UTexture> WeakVarianceB(InFieldTextures.VarianceB);
+		TWeakObjectPtr<UTexture> WeakWarpLarge(InFieldTextures.WarpLarge);
+		TWeakObjectPtr<UTexture> WeakWarpSmall(InFieldTextures.WarpSmall);
 
 		// Allocated HERE, on the calling thread, not inside the render command.
 		//
@@ -135,7 +143,10 @@ namespace UniverseEntityGen
 		{
 			TArray<FUniverseGenCell> Cells;
 			FUniverseDensityParams Density;
-			TWeakObjectPtr<UTexture> Noise;
+			TWeakObjectPtr<UTexture> VarianceA;
+			TWeakObjectPtr<UTexture> VarianceB;
+			TWeakObjectPtr<UTexture> WarpLarge;
+			TWeakObjectPtr<UTexture> WarpSmall;
 			int32 EntityCapacity = 0;
 			int32 NumSlots = 0;
 			int32 SlotCapacity = 0;
@@ -157,7 +168,10 @@ namespace UniverseEntityGen
 
 		Payload->Cells = MoveTemp(InCells);
 		Payload->Density = D;
-		Payload->Noise = WeakNoise;
+		Payload->VarianceA = WeakVarianceA;
+		Payload->VarianceB = WeakVarianceB;
+		Payload->WarpLarge = WeakWarpLarge;
+		Payload->WarpSmall = WeakWarpSmall;
 		Payload->EntityCapacity = InEntityCapacity;
 		Payload->NumSlots = InNumSlots;
 		Payload->SlotCapacity = InSlotCapacity;
@@ -175,26 +189,55 @@ namespace UniverseEntityGen
 
 		auto EnqueueOnRenderThread = [Payload, OutRequest, EntityReadback, CountReadbackPtr]() mutable
 			{
-				// On the game thread now: safe to touch the UObject.
-				UTexture* NoiseTexture = Payload->Noise.Get();
-				FTextureResource* NoiseResource = NoiseTexture ? NoiseTexture->GetResource() : nullptr;
+				// On the game thread now: safe to touch the UObjects.
+				//
+				// RESOLVED AS A SET, and the set is all-or-nothing. Each GetResource() is a
+				// UObject access that is only legal here, and each can independently come
+				// back null -- a texture collected since Dispatch was called, or one still
+				// streaming in.
+				UTexture* VarianceATex = Payload->VarianceA.Get();
+				UTexture* VarianceBTex = Payload->VarianceB.Get();
+				UTexture* WarpLargeTex = Payload->WarpLarge.Get();
+				UTexture* WarpSmallTex = Payload->WarpSmall.Get();
 
-				if (!NoiseResource)
+				FTextureResource* VarianceARes = VarianceATex ? VarianceATex->GetResource() : nullptr;
+				FTextureResource* VarianceBRes = VarianceBTex ? VarianceBTex->GetResource() : nullptr;
+				FTextureResource* WarpLargeRes = WarpLargeTex ? WarpLargeTex->GetResource() : nullptr;
+				FTextureResource* WarpSmallRes = WarpSmallTex ? WarpSmallTex->GetResource() : nullptr;
+
+				if (!VarianceARes || !VarianceBRes || !WarpLargeRes || !WarpSmallRes)
 				{
 					// Nothing will ever land. Say so, or the worker waits out the whole
 					// timeout for a copy that was never enqueued.
 					//
-					// AND IT IS FATAL HERE RATHER THAN DEGRADED. With no texture the field
-					// would still evaluate -- to the unwarped analytic web, with both region
-					// fetches neutral -- which is a DIFFERENT FIELD from the one the material
-					// draws. Placing against it would look like a plausible cosmic web whose
-					// entities sit nowhere near the rendered filaments.
+					// AND IT IS FATAL HERE RATHER THAN DEGRADED, for ANY of the four. With a
+					// texture missing the field would still evaluate -- a missing variance
+					// volume reads neutral and takes every regional axis to its midpoint, a
+					// missing warp volume reads neutral and straightens the bisectors -- and
+					// both are a DIFFERENT FIELD from the one the material draws, not a
+					// coarser version of it. Placing against either would look like a
+					// plausible cosmic web whose entities sit nowhere near the rendered
+					// filaments.
+					//
+					// NO PARTIAL BIND, specifically. Binding the three that resolved and
+					// leaving the fourth null is the worst available outcome: it is the case
+					// that most looks like it worked.
+					UE_LOG(LogTemp, Warning,
+						TEXT("UniverseEntityGen: aborting dispatch -- field textures unresolved ")
+						TEXT("(VarianceA %s, VarianceB %s, WarpLarge %s, WarpSmall %s). ")
+						TEXT("Placement is GPU-only and samples all four; nothing will be placed."),
+						VarianceARes ? TEXT("ok") : TEXT("NULL"),
+						VarianceBRes ? TEXT("ok") : TEXT("NULL"),
+						WarpLargeRes ? TEXT("ok") : TEXT("NULL"),
+						WarpSmallRes ? TEXT("ok") : TEXT("NULL"));
+
 					OutRequest->bAborted = true;
 					return;
 				}
 
 				ENQUEUE_RENDER_COMMAND(UniverseEntityGenDispatch)(
-					[Payload, OutRequest, EntityReadback, CountReadbackPtr, NoiseResource]
+					[Payload, OutRequest, EntityReadback, CountReadbackPtr,
+					VarianceARes, VarianceBRes, WarpLargeRes, WarpSmallRes]
 					(FRHICommandListImmediate& RHICmdList) mutable
 					{
 						// Named explicitly rather than reached through a capture chain.
@@ -202,7 +245,14 @@ namespace UniverseEntityGen
 						const int32 Total = Payload->EntityCapacity;
 
 						const int32 InKeySeed = Payload->KeySeed;
-						if (!NoiseResource->TextureRHI)
+
+						// EVERY RHI HANDLE, not just one. A resource can exist with a null
+						// TextureRHI while its mips are still being streamed, and that is
+						// per-texture rather than per-set: the four assets stream
+						// independently, so the first frame after a sector loads is exactly
+						// when three of four can be ready.
+						if (!VarianceARes->TextureRHI || !VarianceBRes->TextureRHI
+							|| !WarpLargeRes->TextureRHI || !WarpSmallRes->TextureRHI)
 						{
 							OutRequest->bAborted = true;
 							return;
@@ -309,14 +359,37 @@ namespace UniverseEntityGen
 						Common.PlaceExtentMax = Payload->PlaceExtentMax;
 						Common.PlaceExtentExponent = Payload->PlaceExtentExponent;
 
-						Common.NoiseTex = NoiseResource->TextureRHI;
+						Common.VarianceTexA = VarianceARes->TextureRHI;
+						Common.VarianceTexB = VarianceBRes->TextureRHI;
+						Common.WarpTexLarge = WarpLargeRes->TextureRHI;
+						Common.WarpTexSmall = WarpSmallRes->TextureRHI;
 
 						// AM_WRAP ON ALL THREE AXES, and it is correctness rather than taste.
-						// The field's warp UV wraps every 4096 cells by masking the cell
-						// index, and the two sides of that wrap are the same texel only if
+						// Every one of the field's UVs is built from a MASKED cell index --
+						// both warp octaves and both region fetches -- so it wraps every 4096
+						// cells, and the two sides of that wrap are the same texel only if
 						// the sampler repeats. Clamp would mirror the seam into a wall of
 						// constant warp at the wrap boundary.
-						Common.NoiseTexSampler = TStaticSamplerState<
+						//
+						// THE SAME STATE FOR ALL FOUR, written out four times rather than
+						// hoisted into a local. TStaticSamplerState::GetRHI returns the same
+						// cached object for the same template arguments, so this is four
+						// reads of one pointer and not four allocations -- and keeping the
+						// arguments visible per texture is what makes it a one-line edit
+						// when one of them wants different addressing.
+						//
+						// MUST MATCH THE MATERIAL'S SAMPLERS. The material's Custom node pins
+						// carry whatever addressing the texture asset itself is authored with,
+						// so an asset saved with clamp addressing gives the render a different
+						// field from the one this dispatch places against, at the wrap only.
+						// Set every one of the four assets to wrap in its own asset settings.
+						Common.VarianceTexASampler = TStaticSamplerState<
+							SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
+						Common.VarianceTexBSampler = TStaticSamplerState<
+							SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
+						Common.WarpTexLargeSampler = TStaticSamplerState<
+							SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
+						Common.WarpTexSmallSampler = TStaticSamplerState<
 							SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
 
 						// The field inputs, exactly as the material's Custom node passes them.
@@ -561,7 +634,7 @@ namespace UniverseEntityGen
 		const TArray<FUniverseGenCell>& InCells,
 		int32 InKeySeed,
 		float InInvFieldExtent,
-		UTexture* InNoiseTexture,
+		const FUniverseFieldTextures& InFieldTextures,
 		TArray<float>& OutCellMass)
 	{
 		OutCellMass.Reset();
@@ -572,7 +645,10 @@ namespace UniverseEntityGen
 			return false;
 		}
 
-		if (InCells.Num() == 0 || InNoiseTexture == nullptr)
+		// ALL FOUR OR NONE -- see FUniverseFieldTextures. Calibrating against a partial set
+		// would produce budgets fitted to a field the material does not draw, and those
+		// budgets are then cached per tier and reused for the session.
+		if (InCells.Num() == 0 || !InFieldTextures.IsComplete())
 		{
 			return false;
 		}
@@ -585,7 +661,7 @@ namespace UniverseEntityGen
 
 		// One token slot: the generate pass never runs, so nothing claims one.
 		Dispatch(InParams, InTierParams, InCells, TokenCapacity, 1, TokenCapacity,
-			InKeySeed, InInvFieldExtent, InNoiseTexture, 0.0f, true, Request);
+			InKeySeed, InInvFieldExtent, InFieldTextures, 0.0f, true, Request);
 
 		if (!Request->Readback.IsValid())
 		{
@@ -631,7 +707,7 @@ namespace UniverseEntityGen
 		int32 InSlotCapacity,
 		int32 InKeySeed,
 		float InInvFieldExtent,
-		UTexture* InNoiseTexture,
+		const FUniverseFieldTextures& InFieldTextures,
 		float InBudgetScale,
 		TArray<FUniverseEntityOut>& OutEntities,
 		TArray<uint32>& OutCounts)
@@ -645,7 +721,7 @@ namespace UniverseEntityGen
 			return false;
 		}
 
-		if (InCells.Num() == 0 || InEntityCapacity <= 0 || InNoiseTexture == nullptr)
+		if (InCells.Num() == 0 || InEntityCapacity <= 0 || !InFieldTextures.IsComplete())
 		{
 			return false;
 		}
@@ -653,7 +729,7 @@ namespace UniverseEntityGen
 		TSharedRef<FUniverseEntityGenRequest> Request = MakeShared<FUniverseEntityGenRequest>();
 
 		Dispatch(InParams, InTierParams, InCells, InEntityCapacity, InNumSlots,
-			InSlotCapacity, InKeySeed, InInvFieldExtent, InNoiseTexture,
+			InSlotCapacity, InKeySeed, InInvFieldExtent, InFieldTextures,
 			InBudgetScale, false, Request);
 
 		if (!Request->Readback.IsValid())
