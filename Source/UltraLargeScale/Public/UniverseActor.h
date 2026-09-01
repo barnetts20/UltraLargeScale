@@ -348,8 +348,22 @@ protected:
 	 *
 	 *  Computed in double and split by floor, because VirtualTraversal is the quantity that
 	 *  actually reaches the magnitudes this coordinate design exists for. What it is handed
-	 *  to is narrower than it is -- see the precision note on FUniverseFieldOffset. */
+	 *  to is narrower than it is -- see the precision note on FUniverseFieldOffset.
+	 *
+	 *  PUBLIC, AND THE ONLY MEMBER OF THIS REGION THAT IS. It is the field's own idea of
+	 *  where the player is -- the exact value PushFieldOffset marshals to the material --
+	 *  so a reader that wants to DISPLAY a field-space position (ULSNavReadout) calls this
+	 *  rather than repeating the two divisions against its own copy of the proxy extent and
+	 *  the small cell size. A reconstruction would be free to drift from either while still
+	 *  producing a perfectly plausible number on screen, which is the class of mismatch
+	 *  every safeguard around this field exists to make impossible or loud.
+	 *
+	 *  The access island is deliberately narrow -- GetVolumetricProxyExtent and
+	 *  GetEffectiveCellSizeSmall stay protected -- because exposing THOSE is what would let
+	 *  a caller rebuild the offset instead of asking for it. */
+public:
 	FUniverseFieldOffset ComputeFieldOffset() const;
+protected:
 
 #pragma endregion
 
