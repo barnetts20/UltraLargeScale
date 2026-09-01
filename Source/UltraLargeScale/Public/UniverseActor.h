@@ -328,6 +328,15 @@ protected:
 	 *  true the two agree by construction and this returns the same number either way. */
 	float GetEffectiveCellSizeSmall() const;
 
+	/** THE LARGE CELL SIZE, ON THE SAME TERMS AS THE SMALL ONE, and read back off the same
+	 *  live pin for the same reason: while bPushDensityParams is false the material instance
+	 *  owns CellSizeRange, and a lattice ratio built from one live component and one authored
+	 *  component is a ratio neither side ever has.
+	 *
+	 *  Only ComputeFieldOffset needs it, and only to derive the field period it reduces the
+	 *  offset by. Nothing renders from it. */
+	float GetEffectiveCellSizeLarge() const;
+
 	/** HALF-EXTENT OF THE PROXY, and the single number both the box scale and the offset
 	 *  normalization are derived from -- they are the same frame, and computing them from
 	 *  two expressions is how they drift apart without anything looking obviously wrong.

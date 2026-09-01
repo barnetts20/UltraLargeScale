@@ -194,5 +194,27 @@ bool FUniverseDensityParams::Validate(const TCHAR* InContext) const
 			InContext);
 	}
 
+
+	// A ratio past WrapAlign makes one period block exceed the float-exact range, so the
+	// period falls back to a single block that is ABOVE it and the offset pin starts
+	// quantizing again -- with the wrap in place and apparently working, which is the part
+	// that would waste an afternoon. Not reachable by any sane authoring (coarse cells four
+	// thousand times the fine ones), but silent if it ever happens.
+	{
+		const int32 WrapRatio = UniverseCellWrap::DeriveRatio(
+			static_cast<double>(Lattice.CellSizeSmall),
+			static_cast<double>(Lattice.CellSizeLarge));
+
+		if (WrapRatio > UniverseCellWrap::WrapAlign)
+		{
+			bOk = false;
+			UE_LOG(LogTemp, Warning,
+				TEXT("%s: lattice ratio %d exceeds %d, so the field period cannot fit under ")
+				TEXT("the float-exact offset range and the offset pin will quantize at long ")
+				TEXT("traversals. Reduce CellSizeLarge / CellSizeSmall."),
+				InContext, WrapRatio, UniverseCellWrap::WrapAlign);
+		}
+	}
+
 	return bOk;
 }

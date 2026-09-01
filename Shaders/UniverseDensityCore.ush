@@ -429,6 +429,76 @@
 #define UNIVERSE_WARP_WRAP_MASK ((1 << UNIVERSE_WARP_WRAP_SHIFT) - 1)
 #define UNIVERSE_WARP_WRAP ((float) (1 << UNIVERSE_WARP_WRAP_SHIFT))
 
+// THE FIELD PERIOD, in small cells, and the reason the offset pin can stay a float3.
+//
+// The offset reaches the shader as a float3, and a float32 holds integers exactly only
+// to 2^24. Past that the pin quantizes: the field stops advancing smoothly, then stalls
+// on whichever axis saturated first, and BOTH paths read the same wrong value so nothing
+// disagrees and nothing complains. Reducing the offset modulo a period below 2^24 keeps
+// the pin exact forever, at the cost of making the field repeat.
+//
+// THE REPEAT IS NOT A COMPROMISE AT THIS SCALE. The period works out near 1.6e7 cells,
+// about 3.7 million Gly -- some forty thousand observable-universe diameters. The warp
+// and region textures already repeat at 4096 cells, four thousand times sooner, and that
+// has never been visible. What this is NOT is the reasoning at ScaleStructure: octave
+// scales are kept coprime because a repeat every ninety-nine cells is a pattern the eye
+// finds immediately. Nothing finds this one.
+//
+// IT IS A TORUS, NOT A SEAM. Cell indices are hashed, and the neighbourhood walk wraps at
+// the LOOKUP rather than at the sample -- so cell period-1's neighbour at +1 IS cell 0,
+// that adjacency is real, and the tessellation closes. There is no plane where the field
+// steps. Wrapping the sample position instead of the lookup would produce exactly such a
+// plane, which is the mistake this arrangement exists to avoid.
+//
+// TWO DIVISORS, BOTH REQUIRED, and missing either one puts the seam back:
+//
+//   ratio  -- the large lattice index is FloorDiv(small, ratio), so unless the period
+//             contains a whole number of large cells the coarse lattice wraps at a
+//             different place from the fine one and they tear against each other.
+//
+//   4096   -- the warp and region UVs are built from (cell & UNIVERSE_WARP_WRAP_MASK),
+//             so two cells a period apart share a UV only if the period preserves the
+//             low twelve bits. Without this the density is continuous across the wrap
+//             and the WARP is not, which reads as a displacement snap rather than as a
+//             tiling artifact and would be very hard to trace back to here.
+//
+// So the period is the largest multiple of (4096 * ratio) that stays under 2^24. At
+// ratio 3 that is 16,773,120; at ratio 1 or 4 it is exactly 2^24, whose largest reduced
+// value is 2^24 - 1 and therefore still exact. NOTE that this imposes NO power-of-two
+// constraint on the ratio -- an earlier form of this derivation did, and did not need to.
+//
+// DEGENERATE CASE: a ratio above 4096 makes one block exceed 2^24 and the period falls
+// back to a single block, which is above the exact range. That is a lattice whose coarse
+// cells are four thousand times its fine ones -- not a configuration this field has, and
+// not one worth bending the formula for. FUniverseParams::Validate warns on it.
+#define UNIVERSE_CELL_EXACT_MAX (1 << 24)
+#define UNIVERSE_CELL_WRAP_ALIGN (1 << UNIVERSE_WARP_WRAP_SHIFT)
+
+// Reduces a cell index into [0, InPeriod). Used ONCE PER DRAW on the offset and once per
+// sample on the decomposed index -- never inside the neighbourhood walk, which uses
+// StepCell instead.
+//
+// NOT `%` ALONE: C++ and HLSL both truncate toward zero, so a negative index would come
+// back negative and hash as a different cell from its positive counterpart one period
+// away. Same reason the decomposition floors rather than truncates.
+int WrapCell(int InValue, int InPeriod)
+{
+    int r = InValue % InPeriod;
+    return (r < 0) ? (r + InPeriod) : r;
+}
+
+// The neighbour step, for an index ALREADY in [0, InPeriod) and an offset of at most one
+// cell. Two compares and a select, against the twenty-odd cycles of an integer modulo --
+// which matters because this runs fifty-four times per sample where WrapCell runs six.
+//
+// THE PRECONDITION IS NOT CHECKED and cannot be relaxed: hand it an unreduced index and
+// it returns one, silently, and the field grows a second lattice offset from the first.
+int StepCell(int InWrapped, int InOffset, int InPeriod)
+{
+    int n = InWrapped + InOffset;
+    return (n < 0) ? (n + InPeriod) : ((n >= InPeriod) ? (n - InPeriod) : n);
+}
+
 // FOUR TEXTURES, FIVE FETCHES. Every fetch here used to read one packed Perlin-Worley
 // volume; the field now takes four purpose-baked assets, each matched to what its site
 // actually consumes:
@@ -610,6 +680,12 @@ struct UniverseDensityParams
     int LargeOffsetCellX;
     int LargeOffsetCellY;
     int LargeOffsetCellZ;
+
+    // The field's period on each lattice, in that lattice's own cells. Derived once in
+    // MakeUniverseDensityParams; LargeCellPeriod is exactly CellPeriod / LatticeRatioInt,
+    // which is whole by construction of the period.
+    int CellPeriod;
+    int LargeCellPeriod;
     float LargeOffsetRemX;
     float LargeOffsetRemY;
     float LargeOffsetRemZ;
@@ -1223,10 +1299,32 @@ struct UniverseDensityParams
     float2 LatticeWeightSums(int InCellX, int InCellY, int InCellZ, float3 InFrac,
                              float InLambda, float InPivot,
                              float InResolvedSpread, float InSkewScale,
-                             float InDistScale, float InUBias)
+                             float InDistScale, float InUBias,
+                             int InPeriod)
     {
         float sumW = 0.0f;
         float sumSqW = 0.0f;
+
+        // THE WRAP HAPPENS AT THE LOOKUP, not at the sample, and that is the whole
+        // difference between a torus and a seam. The sample keeps its true position and
+        // its true fraction; only the IDENTITY of the node being fetched wraps. So the
+        // node one step past the last cell IS the node at zero, at the correct relative
+        // distance, and the tessellation closes with no discontinuity in the measure.
+        // Wrapping InFrac, or the position it came from, would fold the field onto
+        // itself instead and put a mirror plane at every period boundary.
+        //
+        // HOISTED PER AXIS: three wrapped indices per axis rather than one fixup per
+        // candidate, which is nine selects instead of eighty-one. The walk is fully
+        // unrolled, so these index as constants.
+        int wrapX[3];
+        int wrapY[3];
+        int wrapZ[3];
+        for (int wi = 0; wi < 3; wi++)
+        {
+            wrapX[wi] = StepCell(InCellX, wi - 1, InPeriod);
+            wrapY[wi] = StepCell(InCellY, wi - 1, InPeriod);
+            wrapZ[wi] = StepCell(InCellZ, wi - 1, InPeriod);
+        }
 
 #if UNIVERSE_COST_PROBE >= 3
         // Probe level 3: one cell, not twenty-seven. The field is not merely
@@ -1247,7 +1345,7 @@ struct UniverseDensityParams
                 for (int ox = -1; ox <= 1; ox++)
                 {
 #endif
-                    float4 h = CellHash(InCellX + ox, InCellY + oy, InCellZ + oz);
+                    float4 h = CellHash(wrapX[ox + 1], wrapY[oy + 1], wrapZ[oz + 1]);
 
                     // Node position relative to the sample, in this lattice's cell
                     // units.
@@ -1973,7 +2071,8 @@ struct UniverseDensityParams
         if (fineCeiling > -UNIVERSE_LATTICE_SKIP)
         {
             float2 fine = LatticeWeightSums(cx, cy, cz, frac, lam, pivot,
-                                            mSpread, mSkew, 1.0f, suppress);
+                                            mSpread, mSkew, 1.0f, suppress,
+                                            CellPeriod);
             sumW += fine.x;
             sumSqW += fine.y;
         }
@@ -1985,7 +2084,8 @@ struct UniverseDensityParams
             // field at two scales instead of two unrelated fields: a void's size
             // variation is the same fraction of its own cell on both.
             float2 coarse = LatticeWeightSums(lx, ly, lz, lfrac, lam, pivot,
-                                              mSpread, mSkew, ratioSq, 0.0f);
+                                              mSpread, mSkew, ratioSq, 0.0f,
+                                              LargeCellPeriod);
             sumW += coarse.x;
             sumSqW += coarse.y;
         }
@@ -2025,9 +2125,14 @@ struct UniverseDensityParams
 
         float3 frac = float3(cellPos.x - fx, cellPos.y - fy, cellPos.z - fz);
 
-        int cx = (int) fx + OffsetCellX;
-        int cy = (int) fy + OffsetCellY;
-        int cz = (int) fz + OffsetCellZ;
+        // REDUCED ONCE PER SAMPLE, with a modulo rather than a fixup: the marched
+        // position spans the whole proxy, so (int)fx is not bounded to a single cell
+        // the way a neighbour step is and one compare-and-add would not close it.
+        // Six modulos per sample against a fifty-four candidate walk carrying an exp2
+        // apiece; the walk itself uses the cheap form. See StepCell.
+        int cx = WrapCell((int) fx + OffsetCellX, CellPeriod);
+        int cy = WrapCell((int) fy + OffsetCellY, CellPeriod);
+        int cz = WrapCell((int) fz + OffsetCellZ, CellPeriod);
 
         // THE LARGE LATTICE'S SPLIT, and the whole reason the ratio is a whole number.
         // The position in large cells is (k + cellPos) / ratio, and k reaches 1e11, so
@@ -2055,9 +2160,9 @@ struct UniverseDensityParams
 
         float3 lfrac = float3(largePos.x - lfx, largePos.y - lfy, largePos.z - lfz);
 
-        int lx = (int) lfx + LargeOffsetCellX;
-        int ly = (int) lfy + LargeOffsetCellY;
-        int lz = (int) lfz + LargeOffsetCellZ;
+        int lx = WrapCell((int) lfx + LargeOffsetCellX, LargeCellPeriod);
+        int ly = WrapCell((int) lfy + LargeOffsetCellY, LargeCellPeriod);
+        int lz = WrapCell((int) lfz + LargeOffsetCellZ, LargeCellPeriod);
 
         return SampleCell(InVarianceTexA, InVarianceSamplerA,
                           InVarianceTexB, InVarianceSamplerB,
@@ -2313,19 +2418,34 @@ UniverseDensityParams MakeUniverseDensityParams(
 
     P.SeedHash = (uint) ((int) InSeed) * 2654435761u;
 
+    // THE PERIOD, DERIVED BEFORE THE SPLIT because the split is taken on the reduced
+    // index. See THE FIELD PERIOD near UNIVERSE_WARP_WRAP for both divisors and for why
+    // the ratio carries no power-of-two constraint.
+    int ratioInt = (int) ratio;
+    int periodBlock = UNIVERSE_CELL_WRAP_ALIGN * ratioInt;
+    int periodReps = max(UNIVERSE_CELL_EXACT_MAX / periodBlock, 1);
+    P.CellPeriod = periodBlock * periodReps;
+    P.LargeCellPeriod = P.CellPeriod / ratioInt;
+
     // THE OFFSET, SPLIT ONCE. kq is the offset expressed in whole large cells and the
     // remainder joins the fraction; see the derivation at SampleAtPosition for why this
     // has to be integer division rather than a float multiply by 1/ratio.
     P.OffsetFrac = InOffsetFrac;
 
-    int kx = (int) InOffsetCell.x;
-    int ky = (int) InOffsetCell.y;
-    int kz = (int) InOffsetCell.z;
+    // REDUCED HERE TOO, and not only on the CPU. AUniverseActor::ComputeFieldOffset
+    // already reduces, because the pin cannot carry an unreduced index exactly -- but
+    // that reduction is about float exactness, and THIS one is what defines the field's
+    // periodicity. Keeping both means a CPU that reduced by a different period (a stale
+    // cell size, a material instance owning CellSizeRange) costs precision in the offset
+    // and nothing else: the field still wraps cleanly at its own period rather than
+    // growing a seam wherever the two disagreed.
+    int kx = WrapCell((int) InOffsetCell.x, P.CellPeriod);
+    int ky = WrapCell((int) InOffsetCell.y, P.CellPeriod);
+    int kz = WrapCell((int) InOffsetCell.z, P.CellPeriod);
     P.OffsetCellX = kx;
     P.OffsetCellY = ky;
     P.OffsetCellZ = kz;
 
-    int ratioInt = (int) ratio;
     int kqx = FloorDiv(kx, ratioInt);
     int kqy = FloorDiv(ky, ratioInt);
     int kqz = FloorDiv(kz, ratioInt);

@@ -342,6 +342,28 @@ float AUniverseActor::GetEffectiveCellSizeSmall() const
 	return FMath::Max(Authored, 1e-6f);
 }
 
+float AUniverseActor::GetEffectiveCellSizeLarge() const
+{
+	const float Authored = UniverseParams.DensityParams.Lattice.CellSizeLarge;
+
+	if (!UniverseParams.MaterialParams.bPushDensityParams && VolumeMaterial)
+	{
+		const FLinearColor Live = VolumeMaterial->K2_GetVectorParameterValue(TEXT("CellSizeRange"));
+
+		// GUARDED ON .R, NOT .G, and deliberately. .G is legitimately allowed to be zero or
+		// below .R -- that is how a single-lattice field is authored -- so it cannot tell an
+		// authored zero from an absent pin the way the small size can. .R being positive is
+		// what says the pin resolved, and both components come out of the same fetch, so the
+		// pair is always consistent.
+		if (Live.R > 0.0f)
+		{
+			return Live.G;
+		}
+	}
+
+	return FMath::Max(Authored, 0.0f);
+}
+
 double AUniverseActor::GetVolumetricProxyExtent() const
 {
 	// (2R + 1) cells across, half-extent per cell, so this is the half-span of the
@@ -372,10 +394,37 @@ FUniverseFieldOffset AUniverseActor::ComputeFieldOffset() const
 	// formulation exists for, so the split has to happen while the value still has
 	// fractional precision left to split.
 	const double Ext = GetVolumetricProxyExtent();
-	const double InvCell = 1.0 / FMath::Max(
+	const double CellSmall = FMath::Max(
 		static_cast<double>(GetEffectiveCellSizeSmall()), 1e-6);
+	const double InvCell = 1.0 / CellSmall;
 
-	return FUniverseFieldOffset::FromCellPosition((VirtualTraversal / Ext) * InvCell);
+	FUniverseFieldOffset Offset =
+		FUniverseFieldOffset::FromCellPosition((VirtualTraversal / Ext) * InvCell);
+
+	// REDUCED BEFORE IT NARROWS, and that ordering is the whole point. The split above runs
+	// in double and is exact at any traversal; the pin it is headed for is a float3 and stops
+	// having a unit ulp at 2^24. Wrapping here means the integer that crosses is always
+	// inside the exact range, so the material receives the number this function computed
+	// rather than the nearest float to it.
+	//
+	// FRAC IS UNTOUCHED. It is in [0,1) by construction and carries no magnitude, so it has
+	// nothing to lose -- wrapping it would be wrapping a value that never leaves one cell.
+	//
+	// THE CORE REDUCES AGAIN, with a period it derives itself, and that redundancy is
+	// deliberate: this reduction is about float exactness, the core's is what defines the
+	// field's periodicity. If the two ever disagree -- a stale cell size, a material instance
+	// owning CellSizeRange -- the field still wraps cleanly and only the offset loses
+	// precision. See UniverseCellWrap.
+	const int32 Period = UniverseCellWrap::DerivePeriod(
+		UniverseCellWrap::DeriveRatio(
+			CellSmall, static_cast<double>(GetEffectiveCellSizeLarge())));
+
+	Offset.Cell = FIntVector(
+		UniverseCellWrap::Wrap(Offset.Cell.X, Period),
+		UniverseCellWrap::Wrap(Offset.Cell.Y, Period),
+		UniverseCellWrap::Wrap(Offset.Cell.Z, Period));
+
+	return Offset;
 }
 
 void AUniverseActor::PushFieldOffset(UMaterialInstanceDynamic* InMID) const

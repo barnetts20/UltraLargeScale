@@ -498,14 +498,80 @@ struct ULTRALARGESCALE_API FUniverseRegionParams
  *  authored, which is why it is a Pack() argument instead of a member -- it changes every
  *  frame and nothing else in the set does.
  *
- *  THE CELL COUNT IS int32 AND THE PIN IS float3, and neither is the magnitude the
- *  coordinate design was built for. MakeUniverseDensityParams casts InOffsetCell through
- *  (int), so the core's own ceiling is int32, about 2.1e9 small cells; marshalling through
- *  a float3 loses exactness above 2^24, about 1.7e7 cells, because a float32 has no unit
- *  ulp past that. The cell/frac formulation in the core survives 1e11. This hand-off to it
- *  does not. When traversal reaches those magnitudes the pin has to become a high and low
- *  part per axis, or the offset has to be folded into a cell index the caller supplies
- *  directly. Noted here rather than in the core because the core is not where it breaks. */
+ *  THE CELL COUNT IS REDUCED MODULO THE FIELD PERIOD, which is what keeps the float3 pin
+ *  exact rather than merely distant. A float32 has no unit ulp above 2^24, so an
+ *  unreduced index quantizes there: the field stops advancing smoothly and then stalls on
+ *  whichever axis saturated first, with both paths reading the same wrong value so
+ *  nothing disagrees and nothing complains. The period sits just under 2^24, so a reduced
+ *  index always round-trips.
+ *
+ *  The cost is that the field repeats -- at about 3.7 million Gly, four thousand times
+ *  further out than the warp and region textures already repeat. See THE FIELD PERIOD in
+ *  UniverseDensityCore.ush for the two divisors the period has to carry, and for why this
+ *  is not the situation ScaleStructure's coprime scales exist to avoid.
+ *
+ *  THE REDUCTION IS THE CALLER'S. FromCellPosition does the split and nothing else; the
+ *  wrap belongs where the period is known, which is AUniverseActor::ComputeFieldOffset.
+ *  An unreduced offset arriving here is not an error -- the core reduces again with its
+ *  own period -- it just wastes the exactness the reduction exists to preserve. */
+ /** THE FIELD PERIOD, MIRRORED. The authoritative derivation is in
+  *  MakeUniverseDensityParams; this is the copy AUniverseActor::ComputeFieldOffset needs in
+  *  order to reduce the offset BEFORE it narrows to the float3 pin.
+  *
+  *  A MIRROR IS NOT THE PREFERENCE. UniverseDensityCore.ush compiles for C++ behind
+  *  GalaxyHLSLShim.h, so in principle this could call the real thing -- but no universe
+  *  translation unit currently includes the core, and pulling the whole field surface into
+  *  UniverseActor.cpp to share four lines of integer arithmetic is a worse trade than the
+  *  duplication.
+  *
+  *  WHAT A DISAGREEMENT COSTS, and it is deliberately bounded: the core reduces AGAIN with
+  *  its own period, so a mismatch here cannot seam the field. It can only leave the offset
+  *  above 2^24 when it reaches the pin, which costs exactness in the offset and nothing
+  *  else. That is the whole reason the core's reduction was kept rather than trusting this
+  *  one -- it decomposes the failure into "less precise" instead of "wrong".
+  *
+  *  The ratio must be derived from the SAME cell sizes the core will receive. See
+  *  AUniverseActor::GetEffectiveCellSizeSmall / GetEffectiveCellSizeLarge for why those are
+  *  not unconditionally the authored values. */
+namespace UniverseCellWrap
+{
+	/** Mirror of UNIVERSE_CELL_EXACT_MAX and UNIVERSE_CELL_WRAP_ALIGN in the core. The
+	 *  second is the texture wrap (UNIVERSE_WARP_WRAP_SHIFT), which the period must
+	 *  preserve or the warp UV steps where the density does not. */
+	constexpr int32 ExactMax = 1 << 24;
+	constexpr int32 WrapAlign = 1 << 12;
+
+	/** The lattice ratio, rounded and floored exactly as MakeUniverseDensityParams rounds
+	 *  it. Any drift between the two roundings changes the period, so this expression is
+	 *  deliberately the same shape rather than the same intent. */
+	inline int32 DeriveRatio(double InCellSizeSmall, double InCellSizeLarge)
+	{
+		const double Small = FMath::Max(InCellSizeSmall, 1e-6);
+		const double Ratio = FMath::FloorToDouble(FMath::Max(InCellSizeLarge, 0.0) / Small + 0.5);
+		return FMath::Max(static_cast<int32>(Ratio), 1);
+	}
+
+	/** The largest multiple of (WrapAlign * ratio) below ExactMax. Both divisors are
+	 *  required; see THE FIELD PERIOD in the core. */
+	inline int32 DerivePeriod(int32 InRatio)
+	{
+		const int32 Ratio = FMath::Max(InRatio, 1);
+		const int32 Block = WrapAlign * Ratio;
+		return Block * FMath::Max(ExactMax / Block, 1);
+	}
+
+	/** Reduces into [0, InPeriod). FLOORED, not truncated: C++ and HLSL both truncate
+	 *  toward zero, so a negative index would come back negative and hash as a different
+	 *  cell from its counterpart one period away. */
+	inline int32 Wrap(int32 InValue, int32 InPeriod)
+	{
+		if (InPeriod <= 0) return InValue;
+		const int32 R = InValue % InPeriod;
+		return (R < 0) ? (R + InPeriod) : R;
+	}
+}
+
+
 USTRUCT(BlueprintType)
 struct ULTRALARGESCALE_API FUniverseFieldOffset
 {
