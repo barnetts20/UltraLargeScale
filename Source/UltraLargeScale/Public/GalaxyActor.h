@@ -49,13 +49,13 @@ public:
 	 *  to be acquired there; keeping it also means the asset is cooked rather than
 	 *  hoping a runtime LoadObject finds it. */
 	UPROPERTY(Transient)
-	TObjectPtr<UVolumeTexture> DefaultWarpTexGas = nullptr;
+	TObjectPtr<UVolumeTexture> DefaultWarpTexDisc = nullptr;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UVolumeTexture> DefaultWarpTexHalo = nullptr;
 
 	UPROPERTY(Transient)
-	TObjectPtr<UVolumeTexture> DefaultNoiseTexGas = nullptr;
+	TObjectPtr<UVolumeTexture> DefaultNoiseTexDisc = nullptr;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UVolumeTexture> DefaultNoiseTexHalo = nullptr;
@@ -72,19 +72,19 @@ public:
 	 *  stopped being true, so VolumeNoise went and both paths call this.
 	 *
 	 *  PER TEXTURE, NOT ALL OR NOTHING. Each falls back independently, so an archetype that
-	 *  curates only its gas bags still gets working halo textures from the defaults.
+	 *  curates only its disc bags still gets working halo textures from the defaults.
 	 *
 	 *  A function rather than a fixup in one Initialize phase because InitializeVolumetric
 	 *  and InitializeData do not have a guaranteed order between them. */
 	FGalaxyFieldTextures ResolveFieldTextures() const
 	{
 		FGalaxyFieldTextures Out;
-		Out.WarpGas = Params.Procedural.WarpTexGas
-			? Params.Procedural.WarpTexGas.Get() : DefaultWarpTexGas.Get();
+		Out.WarpDisc = Params.Procedural.WarpTexDisc
+			? Params.Procedural.WarpTexDisc.Get() : DefaultWarpTexDisc.Get();
 		Out.WarpHalo = Params.Procedural.WarpTexHalo
 			? Params.Procedural.WarpTexHalo.Get() : DefaultWarpTexHalo.Get();
-		Out.NoiseGas = Params.Procedural.NoiseTexGas
-			? Params.Procedural.NoiseTexGas.Get() : DefaultNoiseTexGas.Get();
+		Out.NoiseDisc = Params.Procedural.NoiseTexDisc
+			? Params.Procedural.NoiseTexDisc.Get() : DefaultNoiseTexDisc.Get();
 		Out.NoiseHalo = Params.Procedural.NoiseTexHalo
 			? Params.Procedural.NoiseTexHalo.Get() : DefaultNoiseTexHalo.Get();
 		return Out;

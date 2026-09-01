@@ -112,12 +112,12 @@ public:
 		// THE FOUR FIELD VOLUMES, matching the .usf declarations and the material's Custom
 		// node pin for pin. Two signed vector volumes for the warp fetches, two UNORM
 		// multinoise volumes for the modulation fetches.
-		SHADER_PARAMETER_TEXTURE(Texture3D, WarpTexGas)
-		SHADER_PARAMETER_SAMPLER(SamplerState, WarpTexGasSampler)
+		SHADER_PARAMETER_TEXTURE(Texture3D, WarpTexDisc)
+		SHADER_PARAMETER_SAMPLER(SamplerState, WarpTexDiscSampler)
 		SHADER_PARAMETER_TEXTURE(Texture3D, WarpTexHalo)
 		SHADER_PARAMETER_SAMPLER(SamplerState, WarpTexHaloSampler)
-		SHADER_PARAMETER_TEXTURE(Texture3D, NoiseTexGas)
-		SHADER_PARAMETER_SAMPLER(SamplerState, NoiseTexGasSampler)
+		SHADER_PARAMETER_TEXTURE(Texture3D, NoiseTexDisc)
+		SHADER_PARAMETER_SAMPLER(SamplerState, NoiseTexDiscSampler)
 		SHADER_PARAMETER_TEXTURE(Texture3D, NoiseTexHalo)
 		SHADER_PARAMETER_SAMPLER(SamplerState, NoiseTexHaloSampler)
 

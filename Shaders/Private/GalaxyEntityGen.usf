@@ -145,12 +145,12 @@ float PlaceExtentExponent;
 //
 // ALL FOUR OR NONE. Placement samples the field the material draws, so a dispatch bound
 // with three of these and a stale fourth places stars against a field nobody renders.
-Texture3D WarpTexGas;
-SamplerState WarpTexGasSampler;
+Texture3D WarpTexDisc;
+SamplerState WarpTexDiscSampler;
 Texture3D WarpTexHalo;
 SamplerState WarpTexHaloSampler;
-Texture3D NoiseTexGas;
-SamplerState NoiseTexGasSampler;
+Texture3D NoiseTexDisc;
+SamplerState NoiseTexDiscSampler;
 Texture3D NoiseTexHalo;
 SamplerState NoiseTexHaloSampler;
 
@@ -271,9 +271,9 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
         // across the peaks.
         const float ProbeDensity = max(
             GalaxySample(P,
-                WarpTexGas, WarpTexGasSampler,
+                WarpTexDisc, WarpTexDiscSampler,
                 WarpTexHalo, WarpTexHaloSampler,
-                NoiseTexGas, NoiseTexGasSampler,
+                NoiseTexDisc, NoiseTexDiscSampler,
                 NoiseTexHalo, NoiseTexHaloSampler,
                 ProbePos * InvGalaxyExtent), 0.0f);
 
@@ -377,9 +377,9 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
             (int) Slot * GALAXY_SLOT_STRIDE + KeySeed);
 
         const float Density = GalaxySample(P,
-            WarpTexGas, WarpTexGasSampler,
+            WarpTexDisc, WarpTexDiscSampler,
             WarpTexHalo, WarpTexHaloSampler,
-            NoiseTexGas, NoiseTexGasSampler,
+            NoiseTexDisc, NoiseTexDiscSampler,
             NoiseTexHalo, NoiseTexHaloSampler,
             C.Norm);
 

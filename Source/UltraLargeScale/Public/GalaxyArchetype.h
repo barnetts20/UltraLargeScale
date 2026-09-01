@@ -141,24 +141,24 @@ public:
 	 *  INDEPENDENT ROLLS ARE THE POINT, not an implementation detail. A single shared index
 	 *  would lock the four choices together, so the bags would produce only as many
 	 *  distinct galaxies as the SHORTEST bag has entries; separate streams give the full
-	 *  product. Three ridged gas volumes and two halo volumes is six combinations, not two.
+	 *  product. Three ridged disc volumes and two halo volumes is six combinations, not two.
 	 *
 	 *  THIS IS WHERE RIDGING LIVES NOW. NoiseRidged was a uniform folding every channel at
 	 *  sample time, one value shared by gas and halo, which is why it shipped at 0 -- no
-	 *  setting suited both families. Fill NoiseGasTextures with ridged bakes and
+	 *  setting suited both families. Fill NoiseDiscTextures with ridged bakes and
 	 *  NoiseHaloTextures with smooth ones and each family gets what it wants for free.
 	 *
 	 *  WIRED BUT UNCURATED. All four default empty, which reproduces the previous behaviour
 	 *  exactly: no roll happens and every galaxy takes the actor's defaults. Filling them
 	 *  is the next step, not part of the texture split. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rolls")
-	TArray<TObjectPtr<UVolumeTexture>> WarpGasTextures;
+	TArray<TObjectPtr<UVolumeTexture>> WarpDiscTextures;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rolls")
 	TArray<TObjectPtr<UVolumeTexture>> WarpHaloTextures;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rolls")
-	TArray<TObjectPtr<UVolumeTexture>> NoiseGasTextures;
+	TArray<TObjectPtr<UVolumeTexture>> NoiseDiscTextures;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rolls")
 	TArray<TObjectPtr<UVolumeTexture>> NoiseHaloTextures;

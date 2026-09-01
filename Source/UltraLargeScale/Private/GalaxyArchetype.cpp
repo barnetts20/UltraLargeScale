@@ -243,9 +243,9 @@ FGalaxyProceduralParams UGalaxyArchetype::Resolve(int32 InSeed, bool bInDefaults
 			}
 		};
 
-	RollTextureBag(WarpGasTextures, GalaxySeed::WarpTexGas, Out.WarpTexGas);
+	RollTextureBag(WarpDiscTextures, GalaxySeed::WarpTexDisc, Out.WarpTexDisc);
 	RollTextureBag(WarpHaloTextures, GalaxySeed::WarpTexHalo, Out.WarpTexHalo);
-	RollTextureBag(NoiseGasTextures, GalaxySeed::NoiseTexGas, Out.NoiseTexGas);
+	RollTextureBag(NoiseDiscTextures, GalaxySeed::NoiseTexDisc, Out.NoiseTexDisc);
 	RollTextureBag(NoiseHaloTextures, GalaxySeed::NoiseTexHalo, Out.NoiseTexHalo);
 
 	// LAST, so it can read every rolled value and derive, correlate or override from
@@ -286,8 +286,8 @@ bool UGalaxyArchetype::Validate() const
 				TEXT("grouped -- \"Arms.ArmRadius\", or \"Noise.NoiseOffset.X\" for one ")
 				TEXT("component of a vector. A path that stops on a group designates the ")
 				TEXT("whole group and is not rollable, and the four field textures are ")
-				TEXT("categorical: they belong in WarpGasTextures, WarpHaloTextures, ")
-				TEXT("NoiseGasTextures or NoiseHaloTextures instead."),
+				TEXT("categorical: they belong in WarpDiscTextures, WarpHaloTextures, ")
+				TEXT("NoiseDiscTextures or NoiseHaloTextures instead."),
 				*GetName(), Index, *Range.Parameter.ToString());
 			bValid = false;
 			continue;

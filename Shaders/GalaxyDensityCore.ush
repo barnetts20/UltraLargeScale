@@ -1272,10 +1272,17 @@ GalaxyDensityParams MakeGalaxyDensityParams(
 //
 // FOUR TEXTURES, FOUR FETCHES, one per fetch and split BY FAMILY as well as by role:
 //
-//   WarpTexGas     gas warp        signed vector field  displaces arms and disc
+//   WarpTexDisc     disc warp       signed vector field  displaces arms and disc
 //   WarpTexHalo    halo warp       signed vector field  displaces bulge and background
-//   NoiseTexGas    gas modulation  UNORM multinoise     lanes and filament in the gas
+//   NoiseTexDisc    disc modulation UNORM multinoise     lanes and filament in the disc
 //   NoiseTexHalo   halo modulation UNORM multinoise     grain in the bulge and halo
+//
+// DISC AND HALO IN THE PIN NAMES, gas and halo in the locals below, and the mismatch is
+// deliberate. The pins say DISC because a pin's job is to tell whoever is wiring the
+// material which LAYERS it reaches -- arms and disc for one, bulge and background for the
+// other -- and "gas" does not answer that question. The internals keep gasTwist,
+// bGasNoise, gasWarp and InGasWarp because inside the field the distinction really is
+// gas versus halo: it is why the two families want different noise in the first place.
 //
 // SPLIT BY FAMILY, NOT ONLY BY ROLE, because gas and halo want opposite things from a
 // texture and one asset could only ever be a compromise. Gas lanes want ridged,
@@ -1363,9 +1370,9 @@ float GalaxyNoise(GalaxyDensityParams P, Texture3D InNoiseTex, SamplerState InNo
 // Texture3D, so the C++ compiler catches a swap between the two roles -- though not one
 // between gas and halo within a role, since those share a type.
 float GalaxySample(GalaxyDensityParams P,
-                   Texture3DSigned InWarpTexGas, SamplerState InWarpSamplerGas,
+                   Texture3DSigned InWarpTexDisc, SamplerState InWarpSamplerDisc,
                    Texture3DSigned InWarpTexHalo, SamplerState InWarpSamplerHalo,
-                   Texture3D InNoiseTexGas, SamplerState InNoiseSamplerGas,
+                   Texture3D InNoiseTexDisc, SamplerState InNoiseSamplerDisc,
                    Texture3D InNoiseTexHalo, SamplerState InNoiseSamplerHalo,
                    float3 InSamplePos)
 {
@@ -1430,7 +1437,7 @@ float GalaxySample(GalaxyDensityParams P,
     if (bGasNoise && (P.WarpAmountArms != 0.0f || P.WarpAmountDisc != 0.0f))
     {
         float3 wf = P.NoiseFrame(NormPos, gasTwist, float2(P.WarpScale.x, P.WarpScale.y), P.NoiseOffset);
-        float4 ws = InWarpTexGas.SampleLevel(InWarpSamplerGas, wf, 0);
+        float4 ws = InWarpTexDisc.SampleLevel(InWarpSamplerDisc, wf, 0);
         gasWarp = float3(ws.x, ws.y, ws.z);
     }
 
@@ -1464,7 +1471,7 @@ float GalaxySample(GalaxyDensityParams P,
         && (L.x + L.y) > 1e-4f)
     {
         float3 nf = P.NoiseFrame(NormPos, gasTwist, float2(P.NoiseScale.x, P.NoiseScale.y), P.NoiseOffset);
-        gasNoise = GalaxyNoise(P, InNoiseTexGas, InNoiseSamplerGas, nf);
+        gasNoise = GalaxyNoise(P, InNoiseTexDisc, InNoiseSamplerDisc, nf);
     }
 
     if (bHaloNoise && (P.NoiseAmountBulge != 0.0f || P.NoiseAmountBackground != 0.0f)

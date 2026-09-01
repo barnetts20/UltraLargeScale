@@ -52,9 +52,9 @@ namespace GalaxySeed
 	 *  than reused for one of them: a reused ChannelId would silently carry the old stream
 	 *  into a new meaning, so every existing galaxy would keep its old index for one of the
 	 *  four bags and roll fresh for the rest. Retiring it rerolls all four cleanly. */
-	inline constexpr uint32 WarpTexGas = ProcSeed::ChannelId("Galaxy.WarpTexGas");
+	inline constexpr uint32 WarpTexDisc = ProcSeed::ChannelId("Galaxy.WarpTexDisc");
 	inline constexpr uint32 WarpTexHalo = ProcSeed::ChannelId("Galaxy.WarpTexHalo");
-	inline constexpr uint32 NoiseTexGas = ProcSeed::ChannelId("Galaxy.NoiseTexGas");
+	inline constexpr uint32 NoiseTexDisc = ProcSeed::ChannelId("Galaxy.NoiseTexDisc");
 	inline constexpr uint32 NoiseTexHalo = ProcSeed::ChannelId("Galaxy.NoiseTexHalo");
 
 	/** The GPU placement key, INDEXED BY TIER (0 Large, 1 Mid, 2 Small).
@@ -431,7 +431,7 @@ struct ULTRALARGESCALE_API FGalaxyNoiseFieldParams
 	// shipped at 0. Now that gas and halo read separate assets, ridging is chosen by
 	// WHICH ASSET IS BOUND, independently per family, at no per-sample cost.
 	//
-	// AN ARCHETYPE WANTING RIDGED GAS LANES points NoiseGasTextures at a ridged bake.
+	// AN ARCHETYPE WANTING RIDGED GAS LANES points NoiseDiscTextures at a ridged bake.
 	// Nothing to set here.
 
 	/** How much of the spiral twist the bulge/background noise frame inherits. */
@@ -510,15 +510,15 @@ struct ULTRALARGESCALE_API FGalaxyMasterParams
  *  TObjectPtr references that keep these alive. */
 struct FGalaxyFieldTextures
 {
-	UTexture* WarpGas = nullptr;
+	UTexture* WarpDisc = nullptr;
 	UTexture* WarpHalo = nullptr;
-	UTexture* NoiseGas = nullptr;
+	UTexture* NoiseDisc = nullptr;
 	UTexture* NoiseHalo = nullptr;
 
 	bool IsComplete() const
 	{
-		return WarpGas != nullptr && WarpHalo != nullptr
-			&& NoiseGas != nullptr && NoiseHalo != nullptr;
+		return WarpDisc != nullptr && WarpHalo != nullptr
+			&& NoiseDisc != nullptr && NoiseHalo != nullptr;
 	}
 
 	/** Which ones are missing, for a log line that says something actionable. Empty when
@@ -526,9 +526,9 @@ struct FGalaxyFieldTextures
 	FString DescribeMissing() const
 	{
 		TArray<FString> Missing;
-		if (!WarpGas) { Missing.Add(TEXT("WarpTexGas")); }
+		if (!WarpDisc) { Missing.Add(TEXT("WarpTexDisc")); }
 		if (!WarpHalo) { Missing.Add(TEXT("WarpTexHalo")); }
-		if (!NoiseGas) { Missing.Add(TEXT("NoiseTexGas")); }
+		if (!NoiseDisc) { Missing.Add(TEXT("NoiseTexDisc")); }
 		if (!NoiseHalo) { Missing.Add(TEXT("NoiseTexHalo")); }
 		return FString::Join(Missing, TEXT(", "));
 	}
@@ -545,9 +545,9 @@ struct ULTRALARGESCALE_API FGalaxyProceduralParams
 	 *  One texture served every fetch until the split; the field now takes one per fetch,
 	 *  divided by ROLE and by FAMILY at once:
 	 *
-	 *    WarpTexGas     gas warp        signed vector volume   displaces arms and disc
+	 *    WarpTexDisc     disc warp       signed vector volume   displaces arms and disc
 	 *    WarpTexHalo    halo warp       signed vector volume   displaces bulge, background
-	 *    NoiseTexGas    gas modulation  UNORM multinoise       lanes and filament
+	 *    NoiseTexDisc    disc modulation UNORM multinoise       lanes and filament
 	 *    NoiseTexHalo   halo modulation UNORM multinoise       grain in bulge and halo
 	 *
 	 *  PROCEDURAL, NOT CONFIG. They are inputs to the field evaluation, so swapping one
@@ -562,7 +562,7 @@ struct ULTRALARGESCALE_API FGalaxyProceduralParams
 	 *
 	 *  WHICH IS WHERE RIDGING LIVES NOW. NoiseRidged was a uniform lerping every channel
 	 *  toward a fold at sample time, one value shared by gas and halo, and it shipped at 0
-	 *  because no setting suited both. Point NoiseGasTextures at ridged bakes and
+	 *  because no setting suited both. Point NoiseDiscTextures at ridged bakes and
 	 *  NoiseHaloTextures at smooth ones and each family gets what it wants, for free.
 	 *
 	 *  THE WARP PAIR MUST BE SIGNED, values in [-1,1]. The shader applies their channels
@@ -588,13 +588,13 @@ struct ULTRALARGESCALE_API FGalaxyProceduralParams
 	 *  two paths read different values at the same coordinate, which shows up as a small
 	 *  plausible-looking difference rather than an obvious break. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field")
-	TObjectPtr<UVolumeTexture> WarpTexGas = nullptr;
+	TObjectPtr<UVolumeTexture> WarpTexDisc = nullptr;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field")
 	TObjectPtr<UVolumeTexture> WarpTexHalo = nullptr;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field")
-	TObjectPtr<UVolumeTexture> NoiseTexGas = nullptr;
+	TObjectPtr<UVolumeTexture> NoiseTexDisc = nullptr;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field")
 	TObjectPtr<UVolumeTexture> NoiseTexHalo = nullptr;
@@ -606,9 +606,9 @@ struct ULTRALARGESCALE_API FGalaxyProceduralParams
 	FGalaxyFieldTextures GetFieldTextures() const
 	{
 		FGalaxyFieldTextures Out;
-		Out.WarpGas = WarpTexGas;
+		Out.WarpDisc = WarpTexDisc;
 		Out.WarpHalo = WarpTexHalo;
-		Out.NoiseGas = NoiseTexGas;
+		Out.NoiseDisc = NoiseTexDisc;
 		Out.NoiseHalo = NoiseTexHalo;
 		return Out;
 	}

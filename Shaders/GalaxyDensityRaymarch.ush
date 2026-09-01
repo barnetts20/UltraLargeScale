@@ -83,9 +83,9 @@
 // FOUR TEXTURE PAIRS, held and never read -- this file marches, the core fetches. See the
 // table at the top of GalaxyDensityCore.ush for which asset serves which fetch.
 float4 GalaxyRayMarch(GalaxyDensityParams P,
-                      Texture3DSigned InWarpTexGas, SamplerState InWarpSamplerGas,
+                      Texture3DSigned InWarpTexDisc, SamplerState InWarpSamplerDisc,
                       Texture3DSigned InWarpTexHalo, SamplerState InWarpSamplerHalo,
-                      Texture3D InNoiseTexGas, SamplerState InNoiseSamplerGas,
+                      Texture3D InNoiseTexDisc, SamplerState InNoiseSamplerDisc,
                       Texture3D InNoiseTexHalo, SamplerState InNoiseSamplerHalo,
                       float3 InViewVec, float3 InCamPosN,
                       float InStepBudget, float InStepGrowth, int InMaxSteps,
@@ -204,9 +204,9 @@ float4 GalaxyRayMarch(GalaxyDensityParams P,
         // sample fails wherever rounding pushes tStart a hair outside, and because it is
         // view-direction dependent it shows as angle-dependent dropout at silhouettes.
         float density = GalaxySample(P,
-            InWarpTexGas, InWarpSamplerGas,
+            InWarpTexDisc, InWarpSamplerDisc,
             InWarpTexHalo, InWarpSamplerHalo,
-            InNoiseTexGas, InNoiseSamplerGas,
+            InNoiseTexDisc, InNoiseSamplerDisc,
             InNoiseTexHalo, InNoiseSamplerHalo,
             o + dir * (t + stepLen * 0.5));
         if (bShape)

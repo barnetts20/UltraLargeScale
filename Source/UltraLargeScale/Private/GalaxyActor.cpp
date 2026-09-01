@@ -50,7 +50,7 @@ AGalaxyActor::AGalaxyActor()
 	// CONTENT is the curation step, and until the bags are filled the honest default is the
 	// same asset in both slots of a role. That is still strictly better than before, because
 	// gas and halo no longer share a fetch and no longer need GALAXY_HALO_DOMAIN to pull
-	// them apart -- but the visible gain arrives when NoiseGasTextures gets ridged bakes.
+	// them apart -- but the visible gain arrives when NoiseDiscTextures gets ridged bakes.
 	{
 		static ConstructorHelpers::FObjectFinder<UVolumeTexture> DefaultWarp(
 			TEXT("/UniverseNoisePack/128/VT_PerlinCurl_S4.VT_PerlinCurl_S4"));
@@ -59,13 +59,13 @@ AGalaxyActor::AGalaxyActor()
 
 		if (DefaultWarp.Succeeded())
 		{
-			DefaultWarpTexGas = DefaultWarp.Object;
+			DefaultWarpTexDisc = DefaultWarp.Object;
 			DefaultWarpTexHalo = DefaultWarp.Object;
 		}
 
 		if (DefaultNoise.Succeeded())
 		{
-			DefaultNoiseTexGas = DefaultNoise.Object;
+			DefaultNoiseTexDisc = DefaultNoise.Object;
 			DefaultNoiseTexHalo = DefaultNoise.Object;
 		}
 	}
@@ -209,17 +209,17 @@ void AGalaxyActor::InitializeData()
 	{
 		const FGalaxyFieldTextures Resolved = ResolveFieldTextures();
 
-		if (Params.Procedural.WarpTexGas == nullptr)
+		if (Params.Procedural.WarpTexDisc == nullptr)
 		{
-			Params.Procedural.WarpTexGas = Cast<UVolumeTexture>(Resolved.WarpGas);
+			Params.Procedural.WarpTexDisc = Cast<UVolumeTexture>(Resolved.WarpDisc);
 		}
 		if (Params.Procedural.WarpTexHalo == nullptr)
 		{
 			Params.Procedural.WarpTexHalo = Cast<UVolumeTexture>(Resolved.WarpHalo);
 		}
-		if (Params.Procedural.NoiseTexGas == nullptr)
+		if (Params.Procedural.NoiseTexDisc == nullptr)
 		{
-			Params.Procedural.NoiseTexGas = Cast<UVolumeTexture>(Resolved.NoiseGas);
+			Params.Procedural.NoiseTexDisc = Cast<UVolumeTexture>(Resolved.NoiseDisc);
 		}
 		if (Params.Procedural.NoiseTexHalo == nullptr)
 		{
@@ -303,17 +303,17 @@ void AGalaxyActor::InitializeVolumetric()
 			// RENDER, which degrades to something visibly wrong; emphatically not right for
 			// PLACEMENT, which refuses to run rather than place against a field the render
 			// is not drawing. The two paths differ here deliberately.
-			if (FieldTextures.WarpGas)
+			if (FieldTextures.WarpDisc)
 			{
-				Self->VolumeMaterial->SetTextureParameterValue(FName("WarpTexGas"), FieldTextures.WarpGas);
+				Self->VolumeMaterial->SetTextureParameterValue(FName("WarpTexDisc"), FieldTextures.WarpDisc);
 			}
 			if (FieldTextures.WarpHalo)
 			{
 				Self->VolumeMaterial->SetTextureParameterValue(FName("WarpTexHalo"), FieldTextures.WarpHalo);
 			}
-			if (FieldTextures.NoiseGas)
+			if (FieldTextures.NoiseDisc)
 			{
-				Self->VolumeMaterial->SetTextureParameterValue(FName("NoiseTexGas"), FieldTextures.NoiseGas);
+				Self->VolumeMaterial->SetTextureParameterValue(FName("NoiseTexDisc"), FieldTextures.NoiseDisc);
 			}
 			if (FieldTextures.NoiseHalo)
 			{
