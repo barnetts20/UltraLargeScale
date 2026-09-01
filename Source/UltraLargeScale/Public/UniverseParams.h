@@ -1158,18 +1158,44 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 	 *  larger features a lower tiling interval gives at the same resolution. The variance
 	 *  fetches run at scales two orders of magnitude coarser -- 19 and 41 against 409 and
 	 *  3079 per 4096 cells -- so their features are enormous in cell terms either way and a
-	 *  higher interval costs them nothing visible. */
+	 *  higher interval costs them nothing visible.
+	 *
+	 *  THE RESOLUTION SPLIT IS THE /256 AND /128 IN THESE PATHS, and it follows the same
+	 *  logic one level down. The variance volumes take 256^3 and the warp volumes 128^3,
+	 *  which is the right way round for what each fetch does with its result:
+	 *
+	 *    - a VARIANCE fetch resolves four region axes from four channels and those axes are
+	 *      read as VALUES, straight into VarianceT as lerp factors. Quantization there lands
+	 *      directly on the parameter -- a coarse volume makes provinces step between
+	 *      discrete-looking settings rather than drift, and it is a fetch per sample either
+	 *      way, so the resolution buys smoothness in the thing most visible per byte.
+	 *    - a WARP fetch is read as a DISPLACEMENT and then filtered by everything downstream:
+	 *      the trilinear tap, the amplitude, the lattice blend, and the density falloff the
+	 *      displaced position lands in. Detail below the feature width cannot survive that
+	 *      chain, so 128^3 spends nothing on structure the field cannot express.
+	 *
+	 *  IT ALSO COSTS FAR LESS THAN THE OTHER WAY ROUND. A 256^3 volume is eight times the
+	 *  texels of a 128^3 one, so at RGBA8 the two variance volumes are 64 MB each against
+	 *  8 MB for each warp volume -- around 144 MB resident for the set, and around 160 MB
+	 *  if the warp volumes need a 16-bit float format to carry their sign. Putting the high
+	 *  resolution on the warp pair instead would have cost the same and bought less.
+	 *
+	 *  BOTH WarpTexGradient PINS ARE NOW WRONG BY A FURTHER FACTOR. Gradient is measured per
+	 *  UV, so halving a volume's resolution roughly halves the largest |dTex/dUV| it can
+	 *  reach for the same content. Those pins already held a value measured on a different
+	 *  asset with a different decode; the resolution change is a third independent reason
+	 *  they need re-measuring rather than adjusting. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	FString VarianceVolumeA = "/UniverseNoisePack/VT_MultiNoise_1_S8.VT_MultiNoise_1_S8";
+	FString VarianceVolumeA = "/UniverseNoisePack/256/VT_MultiNoise_1_S8.VT_MultiNoise_1_S8";
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	FString VarianceVolumeB = "/UniverseNoisePack/VT_MultiNoise_2_S8.VT_MultiNoise_2_S8";
+	FString VarianceVolumeB = "/UniverseNoisePack/256/VT_MultiNoise_2_S8.VT_MultiNoise_2_S8";
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	FString WarpVolumeLarge = "/UniverseNoisePack/VT_PerlinVector_S4.VT_PerlinVector_S4";
+	FString WarpVolumeLarge = "/UniverseNoisePack/128/VT_PerlinVector_S4.VT_PerlinVector_S4";
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	FString WarpVolumeSmall = "/UniverseNoisePack/VT_PerlinCurl_S4.VT_PerlinCurl_S4";
+	FString WarpVolumeSmall = "/UniverseNoisePack/128/VT_PerlinCurl_S4.VT_PerlinCurl_S4";
 
 	/** Steps the march will actually take, as opposed to the budget it was given. The two
 	 *  diverge fast: at growth 4 a budget of 32 resolves to about 13. Diagnostic rather
