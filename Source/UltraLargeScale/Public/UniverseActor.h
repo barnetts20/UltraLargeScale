@@ -151,6 +151,18 @@ public:
 	 *  CheckOctreeBounds triggers a rebase at 75% of that. */
 	static constexpr double PersistentTreeMultiplier = 128.0;
 
+	/** THE OCTREE ROOT'S HALF-EXTENT, and the one place the product is taken.
+	 *
+	 *  The constructor's tree and the rebase's replacement must be the SAME SIZE. The bounds
+	 *  test measures the player against a fraction of the live tree's extent, so a rebase
+	 *  that built a different size would silently change how often it fires -- and if it
+	 *  built a smaller one, each rebase would bring the next one closer until they ran every
+	 *  tick. Two spellings of one product is how that arrives. */
+	double GetPersistentTreeExtent() const
+	{
+		return UniverseParams.Extent * PersistentTreeMultiplier;
+	}
+
 #pragma endregion
 
 #pragma region Galaxy Spawn Hooks
@@ -318,6 +330,17 @@ protected:
 	 *  Reads UniverseParams.LargeTier rather than LargeTierConfig, because InitializeVolumetric
 	 *  runs before BuildTierConfigs has populated the latter. */
 	double GetVolumetricProxyExtent() const;
+
+	/** ONE FIELD CELL IN CALLER UNITS: the proxy half-extent times the authored small cell
+	 *  size, which is the unit ComputeFieldOffset counts in.
+	 *
+	 *  UniverseDataGenerator::FieldCellSize IS THE SAME QUANTITY on the other side of the
+	 *  handoff -- the actor sets the generator's FieldExtent from GetVolumetricProxyExtent
+	 *  in InitializeData, so the two agree by construction rather than by inspection. If
+	 *  that handoff ever stops happening, this is the pair that parts company, and the
+	 *  symptom is entities placed against a field a fraction of a cell away from the one
+	 *  being drawn. */
+	double GetFieldCellSize() const;
 
 	/** VirtualTraversal expressed as an exact small-cell count plus a fraction.
 	 *

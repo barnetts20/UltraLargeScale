@@ -37,7 +37,7 @@ AUniverseActor::AUniverseActor()
 	GalaxyActorClass = AGalaxyActor::StaticClass();
 	StarSystemActorClass = AStarSystemActor::StaticClass();
 	ProxyActorClass = AParallaxProxyActor::StaticClass();
-	Octree = MakeShared<FOctree>(UniverseParams.Extent * PersistentTreeMultiplier, FVector::ZeroVector);
+	Octree = MakeShared<FOctree>(GetPersistentTreeExtent(), FVector::ZeroVector);
 
 	// Backdrop capture: renders the virtual stack into an HDR target that gets
 	// composited behind the main scene. Config happens in InitializeBackdropCapture
@@ -311,6 +311,14 @@ int32 AUniverseActor::GetFieldCellPeriod() const
 	return UniverseCellWrap::FieldCellPeriod(UniverseParams.DensityParams.Lattice);
 }
 
+double AUniverseActor::GetFieldCellSize() const
+{
+	// The division guard is on the cell size alone. The proxy extent has its own floor in
+	// GetVolumetricProxyExtent, so the product cannot reach zero from either side.
+	return GetVolumetricProxyExtent()
+		* FMath::Max(static_cast<double>(UniverseParams.DensityParams.Lattice.CellSizeSmall), 1e-6);
+}
+
 double AUniverseActor::GetVolumetricProxyExtent() const
 {
 	// (2R + 1) cells across, half-extent per cell, so this is the half-span of the
@@ -329,28 +337,18 @@ FUniverseFieldOffset AUniverseActor::ComputeFieldOffset() const
 	// every frame -- pushing that would make the field track the player's absolute
 	// coordinates in the level, which is not a thing the field has any relationship to.
 	//
-	// Two divisions, in this order: into proxy-normalized space where the box spans -1 to
-	// 1, then into small cells. THE FIRST DIVISOR IS THE PROXY'S OWN HALF-EXTENT and has
-	// to stay that way -- the shader marches a position in [-1,1] and adds this offset to
-	// it, so if the two disagree the field scrolls at the wrong rate relative to the
-	// geometry it is drawn on, which reads as the web sliding under the camera rather than
-	// as a scale error.
+	// DIVIDED BY THE FIELD CELL, which is the proxy half-extent times the small cell size
+	// and nothing else. Both factors have to be the ones the shader uses: it marches a
+	// position in [-1,1] across a box of that half-extent and decomposes it with its own
+	// CellSizeRange.x, which PushDensityParams writes from this same struct. If either
+	// factor came from somewhere else the field would SCROLL at the wrong rate -- the web
+	// sliding under the camera, which reads as anything but a scale disagreement.
 	//
 	// DOUBLE THROUGHOUT, and that is the whole reason this happens here rather than in the
 	// shader. VirtualTraversal is the quantity that reaches the magnitudes the cell/frac
 	// formulation exists for, so the split has to happen while the value still has
 	// fractional precision left to split.
-	// THE SAME CellSizeSmall THE SHADER DECOMPOSES WITH. The offset is a count of small
-	// cells and the shader adds it to a position it splits using its own CellSizeRange.x,
-	// which PushDensityParams writes from this struct. If the two ever came from different
-	// sources the field would SCROLL at the wrong rate -- the web sliding under the camera,
-	// which reads as anything but a cell size disagreement.
-	const double Ext = GetVolumetricProxyExtent();
-	const double CellSmall = FMath::Max(
-		static_cast<double>(UniverseParams.DensityParams.Lattice.CellSizeSmall), 1e-6);
-	const double InvCell = 1.0 / CellSmall;
-
-	const FVector CellPos = (VirtualTraversal / Ext) * InvCell;
+	const FVector CellPos = VirtualTraversal / GetFieldCellSize();
 
 	// REDUCED BEFORE IT NARROWS, and that ordering is the whole point. The split above runs
 	// in double and is exact at any traversal; the pin it is headed for is a float3 and stops
@@ -1511,7 +1509,7 @@ void AUniverseActor::CheckOctreeBounds()
 
 	bRebaseInProgress.store(true);
 	const FVector RebaseOrigin = VirtualTraversal;
-	const double  TreeExtent = UniverseParams.Extent * PersistentTreeMultiplier;
+	const double  TreeExtent = GetPersistentTreeExtent();
 
 	TWeakObjectPtr<AUniverseActor> WeakThis(this);
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, RebaseOrigin, TreeExtent]()

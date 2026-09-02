@@ -90,6 +90,17 @@ public:
 		return UniverseCellWrap::FieldCellPeriod(Params.DensityParams.Lattice);
 	}
 
+	/** The dispatch's InvFieldExtent uniform: what converts a caller-space offset into the
+	 *  field's normalized frame.
+	 *
+	 *  NARROWED HERE AND NOWHERE ELSE. It reaches the shader as a float, and the guard is
+	 *  the division guard rather than a range limit -- an unset FieldExtent is zero, which
+	 *  every GPU path rejects before reaching this. */
+	float InvFieldExtent() const
+	{
+		return static_cast<float>(1.0 / FMath::Max(FieldExtent, 1e-9));
+	}
+
 	/** One cell of a tier's generation grid.
 	 *
 	 *  THE CENTRE IS SUPPLIED, not derived. Grid-coord-to-centre lives on the actor, which
@@ -126,6 +137,20 @@ public:
 	 *  culling void children at the cost of their probes. */
 	static void SubdivideCells(const TArray<FTierBatchCell>& InCells, int32 InLevels,
 		TArray<FTierBatchCell>& OutCells);
+
+	/** Marshals a tier's cells into the dispatch's FUniverseGenCell records.
+	 *
+	 *  ONE BUILDER FOR CALIBRATION AND GENERATION, and that is the point rather than a
+	 *  convenience. A cell's centre is split into an exact field cell plus a fraction, and a
+	 *  calibration that split its cells differently from generation would solve the tier's
+	 *  constant against a field offset by a fraction of a cell from the one entities land
+	 *  in. The two paths differ in which cells they pass and in nothing else.
+	 *
+	 *  The slot travels from the cell. Calibration parents are built at slot 0 and children
+	 *  inherit their parent's, so the calibration path carries a single token slot without
+	 *  needing to say so here. */
+	void BuildGenCells(const TArray<FTierBatchCell>& InCells,
+		TArray<FUniverseGenCell>& OutCells) const;
 
 	/** A representative block of the field, for calibration.
 	 *

@@ -447,7 +447,20 @@ struct ULTRALARGESCALE_API FUniverseRegionParams
  *
  *  THE RATIO MUST COME FROM THE SAME CELL SIZES THE CORE RECEIVES. Both reach the core
  *  through FUniverseDensityParams::Pack, so FieldCellPeriod below takes the lattice group
- *  whole and every consumer calls it. */
+ *  whole and every consumer calls it.
+ *
+ *  WHAT HAS TO STAY IN STEP, expression by expression, against MakeUniverseDensityParams:
+ *
+ *    ExactMax    UNIVERSE_CELL_EXACT_MAX      1 << 24
+ *    WrapAlign   UNIVERSE_CELL_WRAP_ALIGN     1 << UNIVERSE_WARP_WRAP_SHIFT
+ *    DeriveRatio floor(large / max(small, 1e-6) + 0.5), floored at 1
+ *    DerivePeriod  block = WrapAlign * ratio; block * max(ExactMax / block, 1)
+ *
+ *  THE ONE DIFFERENCE IS THE ARITHMETIC TYPE and it is deliberate: the core rounds the
+ *  ratio in float, this rounds it in double from the same float inputs. They can only
+ *  disagree where the quotient sits on a half boundary, which is the hazard
+ *  FUniverseLatticeParams::CellSizeLarge already warns to keep clear of -- so a ratio that
+ *  breaks this mirror is a ratio the two lattices were going to disagree about anyway. */
 namespace UniverseCellWrap
 {
 	/** Mirror of UNIVERSE_CELL_EXACT_MAX and UNIVERSE_CELL_WRAP_ALIGN in the core. The

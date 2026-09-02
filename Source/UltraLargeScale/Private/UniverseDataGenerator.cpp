@@ -119,6 +119,38 @@ void UniverseDataGenerator::SubdivideCells(
 	}
 }
 
+void UniverseDataGenerator::BuildGenCells(
+	const TArray<FTierBatchCell>& InCells,
+	TArray<FUniverseGenCell>& OutCells) const
+{
+	OutCells.Reset();
+	OutCells.Reserve(InCells.Num());
+
+	// Hoisted, not because the divide is expensive but because both are properties of the
+	// batch rather than of a cell: reading them per cell would let a caller believe they
+	// could vary within one dispatch, and they cannot -- the shader derives its own period
+	// from one parameter set for the whole draw.
+	const double InvFieldCell = 1.0 / FMath::Max(FieldCellSize(), UE_DOUBLE_SMALL_NUMBER);
+	const int32 CellPeriod = FieldCellPeriod();
+
+	for (const FTierBatchCell& In : InCells)
+	{
+		FUniverseGenCell Cell;
+
+		SplitCellCentre(In.Centre, InvFieldCell, CellPeriod, Cell.CentreCell, Cell.CentreFrac);
+
+		Cell.HalfExtent = static_cast<float>(In.HalfExtent);
+		Cell.Coord = FIntVector3(In.Coord.X, In.Coord.Y, In.Coord.Z);
+
+		// THE SHADER CAPS PER SLOT, so it needs to know which one. Every child of a
+		// subdivided streamed cell carries its parent's.
+		Cell.SlotIndex = static_cast<uint32>(FMath::Max(In.SlotIndex, 0));
+
+		OutCells.Add(Cell);
+	}
+}
+
+
 void UniverseDataGenerator::BuildCalibrationGrid(
 	const FTierParams& InTierParams,
 	double InCellHalfExtent,
@@ -246,28 +278,12 @@ float UniverseDataGenerator::GetTierBudgetScale(
 		return 0.0f;
 	}
 
-	// The same split the runtime batch does. Calibration coords are drawn near the origin,
-	// so this path was never the one that lost precision -- it shares the conversion anyway,
-	// because a calibration that decomposed its cells differently from generation would
-	// calibrate against a field offset by a fraction of a cell from the one being placed in.
-	const double InvFieldCell = 1.0 / FMath::Max(FieldCellSize(), UE_DOUBLE_SMALL_NUMBER);
-	const int32 CellPeriod = FieldCellPeriod();
-
+	// THE SAME BUILDER GENERATION USES. Calibration coords are drawn near the origin, so
+	// this path was never the one that lost precision -- it shares the split anyway, because
+	// a calibration that decomposed its cells differently from generation would solve the
+	// constant against a field offset by a fraction of a cell from the one entities land in.
 	TArray<FUniverseGenCell> Cells;
-	Cells.Reserve(AllCells.Num());
-
-	for (const FTierBatchCell& In : AllCells)
-	{
-		FUniverseGenCell Cell;
-		SplitCellCentre(In.Centre, InvFieldCell, CellPeriod, Cell.CentreCell, Cell.CentreFrac);
-		Cell.HalfExtent = static_cast<float>(In.HalfExtent);
-		Cell.Coord = FIntVector3(In.Coord.X, In.Coord.Y, In.Coord.Z);
-		Cell.SlotIndex = 0; // one token slot; the generate pass never runs here
-		Cells.Add(Cell);
-	}
-
-	const float InvFieldExtent =
-		static_cast<float>(1.0 / FMath::Max(FieldExtent, 1e-9));
+	BuildGenCells(AllCells, Cells);
 
 	TArray<float> CellMass;
 
@@ -277,7 +293,7 @@ float UniverseDataGenerator::GetTierBudgetScale(
 
 	if (UniverseEntityGen::CalibrateBlocking(
 		Params, InTierParams, Cells, TierKeySeed(InSeedOffset),
-		InvFieldExtent, FieldTextures, CellMass)
+		InvFieldExtent(), FieldTextures, CellMass)
 		&& CellMass.Num() == AllCells.Num())
 	{
 		// REDUCED HERE, NOT ON THE GPU, and in double.
@@ -463,33 +479,13 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 		return FailBatch();
 	}
 
-	const double InvFieldCell = 1.0 / FMath::Max(FieldCellSize(), UE_DOUBLE_SMALL_NUMBER);
-	const int32 CellPeriod = FieldCellPeriod();
-
 	TArray<FUniverseGenCell> Cells;
-	Cells.Reserve(Subdivided.Num());
-
-	for (const FTierBatchCell& In : Subdivided)
-	{
-		FUniverseGenCell Cell;
-		SplitCellCentre(In.Centre, InvFieldCell, CellPeriod, Cell.CentreCell, Cell.CentreFrac);
-		Cell.HalfExtent = static_cast<float>(In.HalfExtent);
-		Cell.Coord = FIntVector3(In.Coord.X, In.Coord.Y, In.Coord.Z);
-
-		// THE SHADER CAPS PER SLOT, so it needs to know which one. Every child of a
-		// subdivided streamed cell carries its parent's.
-		Cell.SlotIndex = static_cast<uint32>(In.SlotIndex);
-
-		Cells.Add(Cell);
-	}
+	BuildGenCells(Subdivided, Cells);
 
 	// ONE SHARED BUFFER, sized on what the SLOTS can hold rather than on cells times a
 	// worst case. Every queued cell owns one slot, so this is exactly what the batch can
 	// possibly keep.
 	const int32 EntityCapacity = InQueuedCells.Num() * InBuffer.SlotCapacity;
-
-	const float InvFieldExtent =
-		static_cast<float>(1.0 / FMath::Max(FieldExtent, 1e-9));
 
 	TArray<FUniverseEntityOut> Entities;
 	TArray<uint32> Counts;
@@ -497,7 +493,7 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 	if (!UniverseEntityGen::GenerateBatchBlocking(
 		Params, InTierParams, Cells, EntityCapacity,
 		InBuffer.SlotCoord.Num(), InBuffer.SlotCapacity,
-		TierKeySeed(InSeedOffset), InvFieldExtent, FieldTextures,
+		TierKeySeed(InSeedOffset), InvFieldExtent(), FieldTextures,
 		BudgetScale, Entities, Counts))
 	{
 		return FailBatch();
