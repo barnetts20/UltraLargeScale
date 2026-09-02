@@ -1,7 +1,19 @@
 #pragma once
 
-// UniverseDensity.ush
-// The ray march, and nothing else. Everything that touches a texture -- warp,
+// UniverseDensityRaymarch.ush
+// The ray march, and nothing else.
+
+// RENAMED FROM UniverseDensity.ush, to match GalaxyDensityRaymarch.ush. The four files
+// per layer now carry the same four names: DensityCore is the field, DensityRaymarch is
+// the view of it, Placement is the keys and draws, EntityGen is the dispatch. The old
+// name predated the split that moved the field out of this file and read as though it
+// were the field itself.
+//
+// THE ONLY CALLER IS A MATERIAL. Nothing in C++ or in another .ush includes this file --
+// the Custom node inside the volumetric material does, by path, and a Custom node fails
+// at SHADER compile rather than at build. Renaming the file without editing that include
+// is a red material with nothing pointing at the cause. The galaxy layer's equivalent
+// node is the one to compare against. Everything that touches a texture -- warp,
 // regional variance, the analytic web, the cluster/gas composition -- now lives in
 // UniverseDensityCore.ush's SampleAtPosition, which returns a single finished density
 // per sample. This file's job is purely the sphere-bounded march: step sizing,

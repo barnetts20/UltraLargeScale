@@ -16,8 +16,10 @@
 // at most WarpAmount cells, it affects nothing that is currently consuming the CPU
 // field, and entity generation for this layer lands on the compute harness the galaxy
 // layer already uses, which samples the same four textures the shader does.
-// UniverseDensity.ush is now the ray march and nothing else -- warp, regional variance,
-// the analytic web, and the density composition all live here, in SampleAtPosition.
+// The ray march lives in UniverseDensityRaymarch.ush, which includes this file, and is the
+// ray march and nothing else -- warp, regional variance, the analytic web and the density
+// composition all live here, in SampleAtPosition. Entity generation lives in
+// UniverseEntityGen.usf, which includes UniversePlacement.ush, which includes this file.
 //
 // PARITY RULES -- both compilers see this file:
 //   - Suffix every float literal (0.5f, not 0.5). C++ types an unsuffixed literal as
