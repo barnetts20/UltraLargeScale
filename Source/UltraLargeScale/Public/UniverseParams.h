@@ -593,9 +593,14 @@ struct ULTRALARGESCALE_API FUniverseFieldOffset
 
 	/** Splits a small-cell position into the exact cell/frac pair the core wants.
 	 *
-	 *  UNGUARDED ABOVE 2.1e9 CELLS -- the cast is undefined there. Prefer
-	 *  FromCellPositionWrapped anywhere a period is available; this is the fallback it
-	 *  degrades to when one is not.
+	 *  SATURATING, NOT WRAPPING, past 2.1e9 cells. An unclamped cast of an out-of-range
+	 *  double is undefined behaviour and yields INT32_MIN on x86 -- every position past the
+	 *  limit collapsing onto one cell, which reads as the field snapping to a single point.
+	 *  Clamping costs two comparisons and makes the far behaviour "stops advancing" instead.
+	 *
+	 *  IT IS STILL THE WRONG FUNCTION OUT THERE. Saturation is a defined failure, not a
+	 *  correct answer; anywhere a period is available, FromCellPositionWrapped reduces
+	 *  first and stays exact. This is the fallback that runs when one is not.
 	 *
 	 *  FLOOR, NOT TRUNCATION, matching SampleAtPosition: truncation folds the cell boundary
 	 *  at zero and mirrors the field through the origin on every axis. */
@@ -607,10 +612,13 @@ struct ULTRALARGESCALE_API FUniverseFieldOffset
 			FMath::Floor(InCellPos.Y),
 			FMath::Floor(InCellPos.Z));
 
-		Out.Cell = FIntVector(
-			static_cast<int32>(Floored.X),
-			static_cast<int32>(Floored.Y),
-			static_cast<int32>(Floored.Z));
+		auto Narrow = [](double InValue) -> int32
+			{
+				return static_cast<int32>(
+					FMath::Clamp(InValue, -2147483648.0, 2147483647.0));
+			};
+
+		Out.Cell = FIntVector(Narrow(Floored.X), Narrow(Floored.Y), Narrow(Floored.Z));
 		Out.Frac = InCellPos - Floored;
 		return Out;
 	}

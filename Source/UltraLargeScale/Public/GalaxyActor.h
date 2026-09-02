@@ -37,13 +37,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Galaxy Parent Actor")
 	AUniverseActor* Universe;
 
-	/** Fallback for Params.Procedural.NoiseTexture, resolved in the constructor and
-	 *  applied in InitializeData.
+	/** Fallbacks for the four field textures, resolved in the constructor and applied
+	 *  through ResolveFieldTextures.
 	 *
 	 *  ON THE ACTOR, NOT IN PARAMS, and that is the whole point. ReInit assigns Params
 	 *  WHOLESALE, so anything the constructor writes into Params is overwritten before
 	 *  a pooled galaxy ever generates -- which is every galaxy that is not level
-	 *  placed. Held here, it survives the assignment and can be applied afterwards.
+	 *  placed. Held here, they survive the assignment and can be applied afterwards.
 	 *
 	 *  ConstructorHelpers only runs during UObject construction, so the reference has
 	 *  to be acquired there; keeping it also means the asset is cooked rather than
@@ -66,10 +66,10 @@ public:
 	 *  ONE SOURCE, ORDER-INDEPENDENT. The compute path and the material must sample the
 	 *  IDENTICAL assets or placement and render disagree -- the warp pair drives positional
 	 *  displacement, so a mismatch shows up as stars sitting beside the field they were
-	 *  placed in rather than as anything that looks like an error. This used to hold by
-	 *  luck, because the material loaded FGalaxyMaterialParams::VolumeNoise by path and both
-	 *  happened to name the same asset. Once the texture became procedural and rollable that
-	 *  stopped being true, so VolumeNoise went and both paths call this.
+	 *  placed in rather than as anything that looks like an error. NEITHER PATH MAY NAME AN
+	 *  ASSET INDEPENDENTLY -- a path on one side and an object reference on the other agree
+	 *  only by coincidence, and the textures are rollable per archetype, so the coincidence
+	 *  does not survive a roll. Both paths call this.
 	 *
 	 *  PER TEXTURE, NOT ALL OR NOTHING. Each falls back independently, so an archetype that
 	 *  curates only its disc bags still gets working halo textures from the defaults.

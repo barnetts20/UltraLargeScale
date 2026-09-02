@@ -1511,14 +1511,18 @@ void AUniverseActor::CheckOctreeBounds()
 	const FVector RebaseOrigin = VirtualTraversal;
 	const double  TreeExtent = GetPersistentTreeExtent();
 
+	// THE WHOLE OPERATION IS TIMED IN THREE PARTS, because they fail differently and only
+	// one of them is a frame cost. The BUILD runs off the game thread but holds every tier
+	// frozen while it runs, so its cost is streaming latency -- cells stop entering and
+	// leaving, which reads as pop-in if the player is moving. The SWAP and the RELEASE are
+	// game-thread work and are frame time directly.
+	const double RebaseStart = FPlatformTime::Seconds();
+
 	TWeakObjectPtr<AUniverseActor> WeakThis(this);
-	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, RebaseOrigin, TreeExtent]()
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, RebaseOrigin, TreeExtent, RebaseStart]()
 		{
 			AUniverseActor* Self = WeakThis.Get();
 			if (!Self) return;
-
-			UE_LOG(LogTemp, Warning, TEXT("AUniverseActor::RebaseOctree -> (%.1f, %.1f, %.1f)"),
-				RebaseOrigin.X, RebaseOrigin.Y, RebaseOrigin.Z);
 
 			// Build + populate the new tree in a LOCAL ptr off the game thread, then
 			// hand the finished tree back for the actual swap. This removes the
@@ -1541,10 +1545,14 @@ void AUniverseActor::CheckOctreeBounds()
 			FTierStreamingSystem::InsertTierIntoOctree(Ctx, Self->SmallTierConfig,
 				Self->SmallTierState);
 
-			AsyncTask(ENamedThreads::GameThread, [WeakThis, NewTree]()
+			const double BuildSeconds = FPlatformTime::Seconds() - RebaseStart;
+
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, NewTree, RebaseOrigin, BuildSeconds]()
 				{
 					AUniverseActor* S = WeakThis.Get();
 					if (!S) return;
+
+					const double SwapStart = FPlatformTime::Seconds();
 
 					// REMAP live spawn bookkeeping onto the new tree BEFORE
 					// clearing bRebaseInProgress. SpawnedGalaxies and
@@ -1575,6 +1583,16 @@ void AUniverseActor::CheckOctreeBounds()
 								? Candidate : nullptr;
 						};
 
+					// THE REMAP HAS NO OTHER OBSERVER, and a miss is silent by design: the
+					// entry keeps its old key, that node is not in the new tree, and the
+					// next scan despawns and re-inits one galaxy. One miss is invisible;
+					// a remap that has quietly stopped matching anything is a full despawn
+					// and respawn of every live galaxy on one frame, which reads as a pool
+					// or spawn fault. The counts below are the difference between those two
+					// readings.
+					int32 GalaxyHits = 0;
+					int32 TrackedHits = 0;
+
 					TMap<TSharedPtr<FOctreeNode>, TWeakObjectPtr<AGalaxyActor>> RemappedGalaxies;
 					RemappedGalaxies.Reserve(S->SpawnedGalaxies.Num());
 					for (auto& Pair : S->SpawnedGalaxies)
@@ -1583,6 +1601,7 @@ void AUniverseActor::CheckOctreeBounds()
 						// Fall back to the old key on a miss: that one galaxy
 						// despawns on the next scan (pre-remap behavior for a
 						// single entry), nothing worse.
+						GalaxyHits += NewNode.IsValid() ? 1 : 0;
 						RemappedGalaxies.Add(NewNode.IsValid() ? NewNode : Pair.Key, Pair.Value);
 					}
 
@@ -1591,8 +1610,12 @@ void AUniverseActor::CheckOctreeBounds()
 					for (const TSharedPtr<FOctreeNode>& Old : S->TrackedSpawnNodes)
 					{
 						TSharedPtr<FOctreeNode> NewNode = FindCounterpart(Old);
+						TrackedHits += NewNode.IsValid() ? 1 : 0;
 						RemappedTracked.Add(NewNode.IsValid() ? NewNode : Old);
 					}
+
+					const int32 GalaxyTotal = S->SpawnedGalaxies.Num();
+					const int32 TrackedTotal = S->TrackedSpawnNodes.Num();
 
 					S->SpawnedGalaxies = MoveTemp(RemappedGalaxies);
 					S->TrackedSpawnNodes = MoveTemp(RemappedTracked);
@@ -1605,8 +1628,44 @@ void AUniverseActor::CheckOctreeBounds()
 					S->bHasPendingScanResults = false;
 					S->PendingScanResults.Empty();
 
+					// THE OLD TREE IS HANDED OFF, NOT DROPPED HERE.
+					//
+					// FOctreeNode owns its children through TSharedPtr, so releasing the
+					// last reference to the root destroys the entire tree recursively and
+					// synchronously, wherever that release happens. At the shipped tier
+					// capacities that is on the order of sixteen thousand leaves plus every
+					// interior node above them -- tens of thousands of frees in one frame,
+					// on the game thread, for a tree nothing is going to read again.
+					//
+					// Keeping a reference across the swap and releasing it on a worker moves
+					// that cost off the frame entirely. TSharedPtr's refcount is atomic and
+					// FOctreeNode owns no UObject, so the destruction has no thread affinity.
+					//
+					// IT MUST OUTLIVE THE REMAP ABOVE. Entries that missed still hold old
+					// nodes, and those nodes have to stay alive until this reference goes.
+					TSharedPtr<FOctree> OldTree = S->Octree;
+
 					S->Octree = NewTree;                  // swap on game thread
 					S->bRebaseInProgress.store(false);
+
+					const double SwapMs = (FPlatformTime::Seconds() - SwapStart) * 1000.0;
+
+					AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
+						[OldTree = MoveTemp(OldTree)]() mutable
+						{
+							OldTree.Reset();
+						});
+
+					// ONE LINE PER REBASE, at Warning, because a rebase is rare and every
+					// term here is one nobody can see any other way. A hit rate below 100%
+					// is the interesting one; see the note on the remap.
+					UE_LOG(LogTemp, Warning,
+						TEXT("AUniverseActor::RebaseOctree -> (%.1f, %.1f, %.1f); build %.1f ms ")
+						TEXT("(tiers frozen), swap %.2f ms, galaxies remapped %d/%d, tracked ")
+						TEXT("%d/%d."),
+						RebaseOrigin.X, RebaseOrigin.Y, RebaseOrigin.Z,
+						BuildSeconds * 1000.0, SwapMs,
+						GalaxyHits, GalaxyTotal, TrackedHits, TrackedTotal);
 				});
 		});
 }

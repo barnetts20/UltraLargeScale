@@ -20,11 +20,11 @@ AGalaxyActor::AGalaxyActor()
 	SetActorTickEnabled(false);
 	Octree = MakeShared<FOctree>(Params.Extent);
 
-	// Acquire the fallback placement noise texture -- the same asset the material
-	// samples. APPLIED IN InitializeData, NOT HERE.
+	// Acquire the fallback field textures -- the same assets the material samples.
+	// APPLIED THROUGH ResolveFieldTextures, NOT HERE.
 	//
-	// NOT a convenience. Placement is GPU-only and the dispatch samples this texture,
-	// so an unset NoiseTexture means the galaxy generates nothing at all, silently.
+	// NOT a convenience. Placement is GPU-only and the dispatch samples all four, so an
+	// unresolved texture means the galaxy generates nothing at all, silently.
 	//
 	// Writing it into Params here would accomplish nothing for a POOLED galaxy:
 	// ReInit assigns Params wholesale from the universe's resolved params, so the

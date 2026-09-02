@@ -179,8 +179,15 @@ void UniverseDataGenerator::BuildCalibrationGrid(
 	// How many tier cells fit across that span. The scatter picks coords in this range, so
 	// a fine tier draws its sample from a much wider coord range than a coarse one -- which
 	// is exactly the point, since their cells differ in size but the field does not.
-	const int32 HalfRange = FMath::Max(
-		FMath::RoundToInt(Span / (2.0 * CellFull)), 1);
+	// CLAMPED IN DOUBLE BEFORE THE NARROW. Span is measured in field cells and CellFull in
+	// tier cells, so the quotient grows by four per grid depth with nothing in FTierParams
+	// bounding the depth. RoundToInt on a double past 2.1e9 is undefined, and the value it
+	// yields on x86 is INT32_MIN -- a negative range makes RandRange draw from an inverted
+	// interval and the whole tier calibrates against garbage coords. The ceiling is far
+	// above any workable configuration; it exists so the failure is "sample too wide"
+	// rather than undefined.
+	const int32 HalfRange = static_cast<int32>(FMath::Clamp(
+		FMath::RoundToDouble(Span / (2.0 * CellFull)), 1.0, 1048576.0));
 
 	// SCATTERED, AND DETERMINISTIC. A fixed stream, so the sample is a property of the tier
 	// rather than of when it first streamed -- the result is cached for the session and two

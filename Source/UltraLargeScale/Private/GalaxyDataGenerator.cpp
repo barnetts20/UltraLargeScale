@@ -672,6 +672,12 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	int32 LiveCells = 0;
 	int32 ExceededCells = 0;
 
+	// THE TARGET THIS BATCH WAS SOLVED FOR, summed from the same counter calibration
+	// reduced. accepted_i is BudgetScale x mass_i by construction, so BudgetScale times the
+	// batch's own mass is what the batch is supposed to land on -- and it works for a
+	// partial neighbourhood as well as a full grid, which a flat SlotCapacity would not.
+	double BatchMass = 0.0;
+
 	auto AsFloat = [](uint32 InBits) { return *reinterpret_cast<const float*>(&InBits); };
 
 	for (int32 i = 0; i < InCells.Num(); ++i)
@@ -685,6 +691,7 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 		TotalAccepted += Accepted;
 		TotalEvaluated += Counts[Base + 1];
 		MaxEnvelope = FMath::Max(MaxEnvelope, Envelope);
+		BatchMass += static_cast<double>(AsFloat(Counts[Base + 4]));
 
 		if (Envelope <= 0.0f)
 		{
@@ -710,8 +717,26 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	// which is exactly the case where the CPU needs to know by how much.
 	const uint32 GlobalAccepted =
 		Counts[GalaxyEntityGen::GlobalCursorIndex(InCells.Num())];
-	const int32 Landed = FMath::Min(static_cast<int32>(GlobalAccepted), EntityCapacity);
-	const bool bOverflowed = static_cast<int32>(GlobalAccepted) > EntityCapacity;
+
+	// REDUCED IN uint32 BEFORE IT NARROWS. This counter is deliberately un-clamped by the
+	// shader so it reports the true total even when the buffer overflowed, which is the one
+	// case where a value past INT32_MAX is reachable -- and narrowing first makes it
+	// NEGATIVE, so Landed goes negative and the overflow test reports no overflow. The
+	// scatter would then write nothing and the warning would not fire, on the exact input
+	// the counter exists to report. The universe path reduces in the wider type for the
+	// same reason.
+	const int32 Landed = static_cast<int32>(
+		FMath::Min<uint32>(GlobalAccepted, static_cast<uint32>(EntityCapacity)));
+	const bool bOverflowed = GlobalAccepted > static_cast<uint32>(EntityCapacity);
+
+	const double CalibratedTarget = static_cast<double>(BudgetScale) * BatchMass;
+
+	// Below one expected entity the ratio is shot noise rather than a measurement.
+	const bool bTargetMeaningful = CalibratedTarget >= 1.0;
+
+	const double DeliveryRatio = bTargetMeaningful
+		? static_cast<double>(GlobalAccepted) / CalibratedTarget
+		: 1.0;
 
 	// ATOMIC, because this runs on background workers for several galaxies at once.
 	// A plain bool here is a data race -- benign in effect, since the worst outcome is a
@@ -736,12 +761,43 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 			TEXT("GalaxyEntityGen: tier +%d, %d queued -> %d cells (%d live) -> ")
 			TEXT("%lld probes + %lld candidates (C/P %.2f) -> %u accepted ")
 			TEXT("(%d landed, %d capacity, %d envelope exceeded, scale %.1f, ")
-			TEXT("max envelope %.5f)."),
+			TEXT("max envelope %.5f, delivered %.0f%% of target)."),
 			InSeedOffset, InQueuedCells.Num(), InCells.Num(), LiveCells,
 			TotalProbes, TotalEvaluated,
 			TotalProbes > 0 ? static_cast<double>(TotalEvaluated) / static_cast<double>(TotalProbes) : 0.0,
 			GlobalAccepted, Landed, EntityCapacity,
-			ExceededCells, BudgetScale, MaxEnvelope);
+			ExceededCells, BudgetScale, MaxEnvelope, DeliveryRatio * 100.0);
+	}
+
+	// THE IDENTITY THIS TIER RESTS ON, CHECKED RATHER THAN ASSUMED.
+	//
+	// A cell draws BudgetScale x (envelope/anchor)^g candidates and keeps each with
+	// probability p, and the envelope divides out, so the batch is supposed to land on the
+	// number calibration solved BudgetScale for. Nothing observed that. A batch delivering
+	// half its target looked exactly like a batch delivering all of it, and the shortfall
+	// was only visible as missing stars.
+	//
+	// THE RATIO IS NOT THE SAME QUESTION AS THE COUNTERS BESIDE IT. Envelope-exceeded says
+	// the probes under-weighed a CELL; this says the tier as a whole is off, which is a
+	// calibration fault rather than a sampling one. Both can be clean while the other is not.
+	//
+	// Wide band, because the realised count varies around the target by roughly its square
+	// root and a partial neighbourhood legitimately delivers less than a full one. It is
+	// looking for a factor, not a few percent.
+	if (bTargetMeaningful && (DeliveryRatio < 0.6 || DeliveryRatio > 1.6))
+	{
+		static std::atomic<bool> bWarnedDelivery{ false };
+		if (!bWarnedDelivery.exchange(true))
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("GalaxyEntityGen: tier +%d delivered %u entities against a calibrated ")
+				TEXT("target of %.0f (%.0f%%). BudgetScale is solved so this lands on the ")
+				TEXT("target, so a factor here means calibration and generation are ")
+				TEXT("measuring different things -- check the envelope-exceeded count first, ")
+				TEXT("then whether the two dispatches were handed the same EnvelopePad and ")
+				TEXT("the same GenerationSubdivision."),
+				InSeedOffset, GlobalAccepted, CalibratedTarget, DeliveryRatio * 100.0);
+		}
 	}
 
 	// The one remaining path where entities are dropped by ARRIVAL ORDER rather than

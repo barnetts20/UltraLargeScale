@@ -77,6 +77,22 @@ static_assert(sizeof(FGalaxyEntityOut) == 32, "FGalaxyEntityOut must match the .
  *  sixteen-byte boundary. */
 struct FGalaxyGenCell
 {
+	/** AN ABSOLUTE POSITION, which the universe's equivalent deliberately is not.
+	 *
+	 *  FUniverseGenCell carries a cell index plus a fraction because universe caller space
+	 *  tracks VirtualTraversal without bound: a float32 centre out there has an ulp wider
+	 *  than the cell, every probe collapses onto one point, and the tier places nothing.
+	 *
+	 *  THE GALAXY IS A BOUNDED FIELD and cannot reach that. AGalaxyActor builds its octree
+	 *  at Params.Extent and never rebases, and IsPlayerInsideBounds despawns the actor once
+	 *  VirtualTraversal leaves that box, so a cell centre stays within a small multiple of
+	 *  Extent -- around 7e8 at the shipped scale, where float32's ulp is about 64 against a
+	 *  subdivided cell half-extent of 4e7. Six orders of margin.
+	 *
+	 *  THE EXEMPTION IS THE BOUND, NOT THE TYPE. Give a galaxy an unbounded traversal -- a
+	 *  rebase, or bounds that stop despawning -- and this becomes the universe's bug with
+	 *  the universe's symptom: generation stops silently while the raymarch carries on
+	 *  drawing the field. */
 	FVector3f Centre = FVector3f::ZeroVector;
 	float HalfExtent = 0.0f;
 	FIntVector3 Coord = FIntVector3(0, 0, 0);

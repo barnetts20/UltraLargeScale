@@ -48,10 +48,10 @@ namespace GalaxySeed
 	 *  the full product, and adding an entry to one bag leaves the other three rolls
 	 *  undisturbed.
 	 *
-	 *  Galaxy.NoiseTexture was the single channel these replace. The name is retired rather
-	 *  than reused for one of them: a reused ChannelId would silently carry the old stream
-	 *  into a new meaning, so every existing galaxy would keep its old index for one of the
-	 *  four bags and roll fresh for the rest. Retiring it rerolls all four cleanly. */
+	 *  ADD A CHANNEL, NEVER REPURPOSE ONE. A ChannelId carries its stream with it, so
+	 *  pointing an existing name at a new meaning leaves every galaxy holding its old index
+	 *  for that one draw while everything around it rerolls -- a population that is
+	 *  half-old and half-new with nothing saying so. A fresh name rerolls cleanly. */
 	inline constexpr uint32 WarpTexDisc = ProcSeed::ChannelId("Galaxy.WarpTexDisc");
 	inline constexpr uint32 WarpTexHalo = ProcSeed::ChannelId("Galaxy.WarpTexHalo");
 	inline constexpr uint32 NoiseTexDisc = ProcSeed::ChannelId("Galaxy.NoiseTexDisc");
@@ -856,10 +856,11 @@ struct ULTRALARGESCALE_API FGalaxyMaterialParams
 		return VolumeStepBudget * FMath::Loge(1.0f + G) / G;
 	}
 
-	// VolumeNoise REMOVED. It named the material's noise texture by path while the
-	// compute path held an object reference, so "they must be the same texture" was an
-	// invariant nothing enforced -- and became unholdable once NoiseTexture turned
-	// procedural and rollable. Both paths now call AGalaxyActor::ResolveNoiseTexture.
+	// NO TEXTURE PATHS HERE. The material and the compute dispatch must sample the
+	// IDENTICAL assets, and a path on this struct beside an object reference on the other
+	// path is an invariant nothing can enforce -- doubly so once the textures became
+	// rollable per archetype. Both paths take the bundle
+	// AGalaxyActor::ResolveFieldTextures returns.
 };
 
 
@@ -881,7 +882,12 @@ struct ULTRALARGESCALE_API FGalaxyConfigParams
 {
 	GENERATED_BODY()
 
-	// TODO: SEE IF WE CAN BRIDGE THE GAP TO REAL WORLD SCALE HERE, I THINK WE HIT PRECISION ISSUES THOUGH... UNIT SCALE AND POTENTIALLY STAR SYSTEM SCALES/PARAMS MAY NEED TO SHIFT
+	// TODO: the star-system scale range below is roughly three orders under real scale --
+	// see the references on MaxEntityScale. Closing that gap is not a matter of raising the
+	// number: UnitScale and the star-system layer's own extents move with it, and the
+	// coordinate chain has to be re-checked at the new magnitudes before anything is
+	// authored. Trigger to close: the star-system layer getting its own entity-gen pass,
+	// which is where the precision question has to be answered anyway.
 
 #pragma region Tier Scale Derivation
 	/** Fixed absolute largest star-system scale in world cm.
