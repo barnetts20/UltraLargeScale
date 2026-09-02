@@ -754,12 +754,12 @@ AUniverseActor::MakeTierBatchCallback(
 			// else entirely, and the batch would come back with nothing accepted.
 			const double CellExt = GetGridCellExtent(InConfig.GridDepth);
 
-			TArray<UniverseDataGenerator::FTierBatchCell> Cells;
+			TArray<FTierBatchCell> Cells;
 			Cells.Reserve(Slots.Num());
 
 			for (const TPair<FIntVector, int32>& Slot : Slots)
 			{
-				UniverseDataGenerator::FTierBatchCell Cell;
+				FTierBatchCell Cell;
 				Cell.Coord = Slot.Key;
 				Cell.SlotIndex = Slot.Value;
 				Cell.Centre = GridCoordToCenter(Slot.Key, InConfig.GridDepth);

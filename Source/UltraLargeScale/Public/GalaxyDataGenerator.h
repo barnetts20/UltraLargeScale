@@ -95,70 +95,33 @@ public:
 	 *  The other two layers still bind GenerateCallback, so it stays on the config. */
 
 public:
-	/** A cell handed to the dispatch. GEOMETRY ONLY.
+	/** THE CELL TYPE AND THE SUBDIVISION ARE SHARED. Both live on FTierStreamingSystem
+	 *  because every layer needs the same ones, and a per-layer copy of either is a place the
+	 *  child COORD -- the placement key -- can drift between layers. See FTierBatchCell.
 	 *
-	 *  It carried a DensityReference and a Candidates count until the prepass moved to
-	 *  the GPU. Both are now derived by the cell's own thread group, from probes that
-	 *  sample the TEXTURED field rather than an analytic stand-in for it.
+	 *  THIS LAYER PASSES MakeSphereBoundsCull. The field is zero outside its unit sphere, so
+	 *  a child whose nearest point already lies past it can hold nothing, and a sphere fills
+	 *  only pi/6 of its bounding cube -- one dot product against a whole thread group's worth
+	 *  of field evaluations.
 	 *
-	 *  THE CENTRE IS SUPPLIED, not derived. Grid-coord-to-centre lives on the actor,
-	 *  which owns the grid; the generator inferring it from a buffer's slot centres put
-	 *  every candidate somewhere else entirely and every batch came back with nothing
-	 *  accepted. It is also what lets a streamed neighbourhood and a whole bounding grid
-	 *  be the same dispatch with different contents. */
-	struct FTierBatchCell
-	{
-		FIntVector Coord = FIntVector::ZeroValue;
-		int32 SlotIndex = 0;
+	 *  Centred coords, not Ascending. Switching would reroll every star this layer places;
+	 *  see ETierChildCoords. */
 
-		/** Index into the array this cell was subdivided FROM, or its own index when
-		 *  nothing was subdivided.
-		 *
-		 *  Calibration needs it and generation does not. A tier with one cell per slot
-		 *  is calibrated against the largest STREAMED cell, which after subdivision is
-		 *  the largest sum over one parent's children -- so the children have to say
-		 *  which parent they belong to. SlotIndex cannot answer that: a batch of
-		 *  neighbouring cells shares no slot, and the whole-grid calibration pass has no
-		 *  slots at all. */
-		int32 ParentIndex = 0;
-
-		FVector Centre = FVector::ZeroVector;
-		double HalfExtent = 0.0;
-	};
-
-	/** The tier's placement constant: accepted count per cell is this times cell mass.
-	 *
-	 *  Measured ONCE per tier, lazily, by probing its whole grid -- SUBDIVIDED EXACTLY AS
-	 *  GENERATION WILL SUBDIVIDE IT -- and reducing on the CPU. Cached against the tier's
-	 *  seed offset, which is what distinguishes the three.
-	 *
-	 *  Which reduction divides the capacity depends on how the tier maps cells to slots:
-	 *  the total when they share one, the largest per-parent sum when each streamed cell
-	 *  owns its own. Getting that wrong is what made a void neighbourhood come back as
-	 *  densely populated as an arm.
-	 *
-	 *  Returns 0 if calibration could not run, which the caller treats as a failed
-	 *  batch rather than generating with a meaningless constant. */
+	 /** The tier's placement constant: accepted count per cell is this times cell mass.
+	  *
+	  *  Measured ONCE per tier, lazily, by probing its whole grid -- SUBDIVIDED EXACTLY AS
+	  *  GENERATION WILL SUBDIVIDE IT -- and reducing on the CPU. Cached against the tier's
+	  *  seed offset, which is what distinguishes the three.
+	  *
+	  *  Which reduction divides the capacity depends on how the tier maps cells to slots:
+	  *  the total when they share one, the largest per-parent sum when each streamed cell
+	  *  owns its own. Getting that wrong is what makes a void neighbourhood come back as
+	  *  densely populated as an arm.
+	  *
+	  *  Returns 0 if calibration could not run, which the caller treats as a failed
+	  *  batch rather than generating with a meaningless constant. */
 	float GetTierBudgetScale(const FTierParams& InTierParams, int32 InSeedOffset,
 		bool bInCellsShareSlot) const;
-
-	/** Split each cell into 8^Levels children, in place of it.
-	 *
-	 *  Deriving geometry FROM a supplied cell, not inferring it: the actor still says
-	 *  where its cells are and this only descends inside them, which is what keeps the
-	 *  grid the actor's business.
-	 *
-	 *  Child coords are ParentCoord * 2^Levels + an offset, so they are unique across
-	 *  parents and depend on nothing but the parent -- the placement key and the probe
-	 *  jitter both read them, and a child whose coord shifted with the batch would
-	 *  regenerate differently. They do NOT correspond to positions on the streaming grid
-	 *  at the deeper level, and nothing requires them to.
-	 *
-	 *  Children whose nearest point lies outside the field are dropped here rather than
-	 *  discovered by their thread group, which costs one dot product against sixty-four
-	 *  field evaluations. */
-	static void SubdivideCells(const TArray<FTierBatchCell>& InCells, int32 InLevels,
-		double InExtent, TArray<FTierBatchCell>& OutCells);
 
 	/** Every cell of a streamed tier's grid, enumerated exhaustively.
 	 *

@@ -43,82 +43,6 @@ namespace
 
 #pragma region GPU Entity Generation
 
-void UniverseDataGenerator::SubdivideCells(
-	const TArray<FTierBatchCell>& InCells,
-	int32 InLevels,
-	TArray<FTierBatchCell>& OutCells)
-{
-	OutCells.Reset();
-
-	if (InLevels <= 0)
-	{
-		OutCells = InCells;
-
-		// Every cell is its own parent, so a caller that groups by ParentIndex gets the
-		// same answer whether or not the tier subdivides.
-		for (int32 i = 0; i < OutCells.Num(); ++i)
-		{
-			OutCells[i].ParentIndex = i;
-		}
-
-		return;
-	}
-
-	const int32 Side = 1 << InLevels;
-	const int32 PerCell = Side * Side * Side;
-
-	OutCells.Reserve(InCells.Num() * PerCell);
-
-	for (int32 ParentIndex = 0; ParentIndex < InCells.Num(); ++ParentIndex)
-	{
-		const FTierBatchCell& Parent = InCells[ParentIndex];
-
-		const double SubHalf = Parent.HalfExtent / static_cast<double>(Side);
-		const double SubFull = SubHalf * 2.0;
-
-		// Children tile the parent exactly, which is what keeps the sum of their masses
-		// equal to 8^Levels times the parent's -- the relation the tier's calibrated
-		// constant is scaled by.
-		const double Origin = -(static_cast<double>(Side) - 1.0) * 0.5;
-
-		for (int32 iz = 0; iz < Side; ++iz)
-		{
-			for (int32 iy = 0; iy < Side; ++iy)
-			{
-				for (int32 ix = 0; ix < Side; ++ix)
-				{
-					FTierBatchCell Child;
-
-					Child.Centre = Parent.Centre + FVector(
-						(Origin + static_cast<double>(ix)) * SubFull,
-						(Origin + static_cast<double>(iy)) * SubFull,
-						(Origin + static_cast<double>(iz)) * SubFull);
-
-					Child.HalfExtent = SubHalf;
-
-					// UNIQUE ACROSS PARENTS and a pure function of the parent, so a child
-					// regenerates identically however the batch was assembled. These do NOT
-					// correspond to positions on the streaming grid at the deeper level, and
-					// nothing requires them to -- they are placement keys, not grid coords.
-					Child.Coord = FIntVector(
-						Parent.Coord.X * Side + ix,
-						Parent.Coord.Y * Side + iy,
-						Parent.Coord.Z * Side + iz);
-
-					// EVERY CHILD KEEPS ITS PARENT'S SLOT. The buffer still holds one region
-					// per streamed cell; only the generation grid got finer.
-					Child.SlotIndex = Parent.SlotIndex;
-					Child.ParentIndex = ParentIndex;
-
-					// NO BOUNDS CULL. See the header: this field has no outside, so a child
-					// past any boundary is still a child that can hold structure.
-					OutCells.Add(Child);
-				}
-			}
-		}
-	}
-}
-
 void UniverseDataGenerator::BuildGenCells(
 	const TArray<FTierBatchCell>& InCells,
 	TArray<FUniverseGenCell>& OutCells) const
@@ -225,10 +149,10 @@ void UniverseDataGenerator::BuildCalibrationGrid(
 	// volume, so probing an undivided parent reports a mean that is too low by a factor
 	// growing with the subdivision depth -- which comes back as a constant that is too high
 	// and a tier that over-delivers.
-	SubdivideCells(Parents,
+	FTierStreamingSystem::SubdivideCells(Parents,
 		FMath::Clamp(InTierParams.GenerationSubdivision, 0,
 			FTierParams::MaxGenerationSubdivision),
-		OutCells);
+		ETierChildCoords::Ascending, OutCells);
 }
 
 float UniverseDataGenerator::GetTierBudgetScale(
@@ -463,10 +387,10 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 	// to their own mean -- which is what keeps the accepted fraction high enough that the
 	// candidate budget is not mostly waste.
 	TArray<FTierBatchCell> Subdivided;
-	SubdivideCells(InQueuedCells,
+	FTierStreamingSystem::SubdivideCells(InQueuedCells,
 		FMath::Clamp(InTierParams.GenerationSubdivision, 0,
 			FTierParams::MaxGenerationSubdivision),
-		Subdivided);
+		ETierChildCoords::Ascending, Subdivided);
 
 	if (Subdivided.Num() == 0)
 	{

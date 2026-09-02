@@ -557,12 +557,12 @@ void AGalaxyActor::BuildTierConfigs()
 		{
 			const double CellExt = GetGridCellExtent(LargeTierConfig.GridDepth);
 
-			TArray<GalaxyDataGenerator::FTierBatchCell> Cells;
+			TArray<FTierBatchCell> Cells;
 			Cells.Reserve(Slots.Num());
 
 			for (const TPair<FIntVector, int32>& Slot : Slots)
 			{
-				GalaxyDataGenerator::FTierBatchCell Cell;
+				FTierBatchCell Cell;
 				Cell.Coord = Slot.Key;
 				Cell.SlotIndex = Slot.Value;
 				Cell.Centre = GridCoordToCenter(Slot.Key, LargeTierConfig.GridDepth);
@@ -604,12 +604,12 @@ void AGalaxyActor::BuildTierConfigs()
 			// to the actor, so the actor states where each cell is.
 			const double CellExt = GetGridCellExtent(MidTierConfig.GridDepth);
 
-			TArray<GalaxyDataGenerator::FTierBatchCell> Cells;
+			TArray<FTierBatchCell> Cells;
 			Cells.Reserve(Slots.Num());
 
 			for (const TPair<FIntVector, int32>& Slot : Slots)
 			{
-				GalaxyDataGenerator::FTierBatchCell Cell;
+				FTierBatchCell Cell;
 				Cell.Coord = Slot.Key;
 				Cell.SlotIndex = Slot.Value;
 				Cell.Centre = GridCoordToCenter(Slot.Key, MidTierConfig.GridDepth);
@@ -654,12 +654,12 @@ void AGalaxyActor::BuildTierConfigs()
 			// to the actor, so the actor states where each cell is.
 			const double CellExt = GetGridCellExtent(SmallTierConfig.GridDepth);
 
-			TArray<GalaxyDataGenerator::FTierBatchCell> Cells;
+			TArray<FTierBatchCell> Cells;
 			Cells.Reserve(Slots.Num());
 
 			for (const TPair<FIntVector, int32>& Slot : Slots)
 			{
-				GalaxyDataGenerator::FTierBatchCell Cell;
+				FTierBatchCell Cell;
 				Cell.Coord = Slot.Key;
 				Cell.SlotIndex = Slot.Value;
 				Cell.Centre = GridCoordToCenter(Slot.Key, SmallTierConfig.GridDepth);

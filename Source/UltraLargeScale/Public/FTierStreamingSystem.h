@@ -8,7 +8,6 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Curves/CurveFloat.h"
 #include "DataTypes.h"
 #include "FNiagaraParticleBuffer.h"
 #include "FOctree.h"
@@ -92,10 +91,13 @@ struct ULTRALARGESCALE_API FTierParams
 	/** Shapes the tier's particle size distribution between MinScale and MaxScale.
 	 *  Below 1 biases toward MinScale, above 1 toward MaxScale, 1 is uniform.
 	 *
-	 *  Replaces the ScaleDistribution curve. A UCurveFloat is an authored asset no
-	 *  shader can evaluate, and placement now lives in GalaxyDensityCore.ush so that
-	 *  both sides read the same rule. Placeholder until each layer gets a size
-	 *  distribution with a physical basis; a shaped uniform is honest until then. */
+	 *  AN EXPONENT RATHER THAN A CURVE, and it has to be. Placement runs on the GPU, and no
+	 *  shader can evaluate a UCurveFloat -- an authored curve asset has to be applied on the
+	 *  CPU, which puts the size rule somewhere the placement dispatch cannot reach and gives
+	 *  the two sides different answers.
+	 *
+	 *  A PLACEHOLDER, not a model. A shaped uniform is honest until each layer has a size
+	 *  distribution with a physical basis behind it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distribution",
 		meta = (ClampMin = "0.01"))
 	float ExtentExponent = 1.0f;
@@ -104,40 +106,17 @@ struct ULTRALARGESCALE_API FTierParams
 	 *  Above 1 concentrates entities into the dense regions, below 1 lifts the faint
 	 *  ones, 1 is the raw response.
 	 *
-	 *  Replaces the DensityResponse curve, for the same reason. */
+	 *  An exponent rather than a curve, for the reason above: the rejection gate is in the
+	 *  shader, so the rule has to be something the shader can evaluate. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distribution",
 		meta = (ClampMin = "0.01"))
 	float SpawnExponent = 1.0f;
-
-	// TRANSITIONAL. FTierParams is shared, and UniverseDataGenerator still reads both
-	// curves; the galaxy layer no longer does. They go when the universe layer moves
-	// its placement into UniverseDensityCore.ush as well. Until then a tier authored
-	// for the galaxy configures the exponents and a tier authored for the universe
-	// configures the curves, and neither reads the other's.
-
-	/** UNIVERSE LAYER ONLY. Superseded by ExtentExponent for the galaxy. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distribution|Legacy")
-	FRuntimeFloatCurve ScaleDistribution;
-
-	/** UNIVERSE LAYER ONLY. Superseded by SpawnExponent for the galaxy. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Distribution|Legacy")
-	FRuntimeFloatCurve DensityResponse;
 
 	/** Largest entity scale this tier represents. Derived by DeriveTierScaleRanges. */
 	double MaxScale = 0.0;
 
 	/** Smallest entity scale this tier represents. Derived by DeriveTierScaleRanges. */
 	double MinScale = 0.0;
-
-	/** Initializes the legacy curves to identity: f(x) = x. */
-	FTierParams()
-	{
-		ScaleDistribution.GetRichCurve()->AddKey(0.0f, 0.0f);
-		ScaleDistribution.GetRichCurve()->AddKey(1.0f, 1.0f);
-
-		DensityResponse.GetRichCurve()->AddKey(0.0f, 0.0f);
-		DensityResponse.GetRichCurve()->AddKey(1.0f, 1.0f);
-	}
 
 	/** Derives MinScale/MaxScale for an ordered (shallowest-first: Large, Mid,
 	 *  Small) tier array from one MaxEntityScale and the inter-tier depth
@@ -455,6 +434,66 @@ struct FTierStreamingContext
 
 #pragma endregion
 
+#pragma region Generation Grid
+
+/** One cell of a tier's GENERATION grid, as the entity-gen dispatches consume it.
+ *
+ *  SHARED BY EVERY LAYER, and that is the point. Each layer's data generator held its own
+ *  copy of this, member for member identical, and each held its own subdivision routine to
+ *  go with it -- so a third layer meant a third copy of both. What a copy costs is not the
+ *  lines: the child COORD is the placement key, and a layer whose copy drifted in how it
+ *  labels children would regenerate its entities somewhere else with nothing to compare
+ *  against.
+ *
+ *  THE CENTRE IS SUPPLIED, not derived. Grid-coord-to-centre lives on the actor, which owns
+ *  the grid; a generator inferring it from a buffer's slot centres puts every candidate
+ *  somewhere else entirely and every batch comes back with nothing accepted. It is also
+ *  what lets a streamed neighbourhood and a whole calibration grid be the same dispatch
+ *  with different contents.
+ *
+ *  DOUBLE, AND IT STAYS DOUBLE HERE. Narrowing belongs at the marshal into the layer's own
+ *  gen-cell record, where the layer knows whether its caller space is bounded -- see
+ *  FGalaxyGenCell::Centre against FUniverseGenCell::CentreCell for the two answers. */
+struct FTierBatchCell
+{
+	FIntVector Coord = FIntVector::ZeroValue;
+	int32 SlotIndex = 0;
+
+	/** Index into the array this cell was subdivided FROM, or its own index when nothing
+	 *  was subdivided.
+	 *
+	 *  Calibration needs it and generation does not. A tier with one cell per slot is
+	 *  calibrated against the largest STREAMED cell, which after subdivision is the largest
+	 *  sum over one parent's children -- so the children have to say which parent they
+	 *  belong to. SlotIndex cannot answer that: a batch of neighbouring cells shares no
+	 *  slot, and a whole-grid calibration pass has no slots at all. */
+	int32 ParentIndex = 0;
+
+	FVector Centre = FVector::ZeroVector;
+	double HalfExtent = 0.0;
+};
+
+/** How a subdivision labels its children's coords.
+ *
+ *  BOTH ARE UNIQUE ACROSS PARENTS, which is the only property the placement key needs:
+ *  parent P's children occupy a contiguous run of Side values and P+1's occupy the next,
+ *  either way. They differ only in where that run sits relative to the parent's own index.
+ *
+ *  IT IS NOT A FREE CHOICE ONCE A LAYER HAS SHIPPED. The coord seeds every probe, every
+ *  candidate and every accept draw, so switching a layer between these rerolls every entity
+ *  it places. */
+enum class ETierChildCoords : uint8
+{
+	/** ParentCoord * Side + i, so a parent's children run upward from ParentCoord * Side. */
+	Ascending,
+
+	/** ParentCoord * Side + i - Side/2, centring the run on the parent's own scaled index.
+	 *  Produces coords symmetric about the origin for a grid centred there. */
+	Centred
+};
+
+#pragma endregion
+
 #pragma region Stateless Pipeline
 
 /** Stateless utility implementing the entire tier streaming pipeline: grid
@@ -465,6 +504,148 @@ struct FTierStreamingContext
  *  FTierStreamingContext. See FParticleTierState for the threading contract. */
 struct FTierStreamingSystem
 {
+#pragma region Generation Grid
+
+	/** Splits each cell into 8^Levels children that tile it exactly, in place of it.
+	 *
+	 *  EXACT TILING IS LOAD-BEARING. The sum of the children's masses is what the tier's
+	 *  calibrated constant is scaled against, so children that overlapped or left gaps would
+	 *  make calibration solve for a different volume from the one generation fills.
+	 *
+	 *  CHILD COORDS DEPEND ON THE PARENT AND NOTHING ELSE -- not on the batch, not on the
+	 *  order cells arrived in. The coord is the placement key: the probe jitter, every
+	 *  candidate position and every accept draw hash it, so a child whose coord shifted with
+	 *  the batch would regenerate differently on the next visit. They do NOT correspond to
+	 *  positions on the streaming grid at the deeper level, and nothing requires them to.
+	 *
+	 *  THE CULL IS THE ONLY THING THAT VARIES BETWEEN LAYERS, which is why it is a parameter
+	 *  rather than a second function. A BOUNDED field is zero outside its own volume, so a
+	 *  child whose nearest point already lies past it can hold nothing and is worth dropping
+	 *  for one dot product against a whole thread group's field evaluations. AN UNBOUNDED
+	 *  field has no outside: every child can hold structure, and a cull there deletes cells
+	 *  that belong. The probe pass's envelope test does the equivalent job for those, at the
+	 *  cost of their probes.
+	 *
+	 *  A TEMPLATE so the predicate inlines. It is called once per child -- tens of thousands
+	 *  per batch at the deeper subdivisions -- and an indirect call per child would be the
+	 *  only cost in a loop that is otherwise arithmetic.
+	 *
+	 *  InKeepChild receives the child's centre in the caller's units and its half extent,
+	 *  and returns whether to keep it. */
+	template <typename TKeepChild>
+	static void SubdivideCells(
+		const TArray<FTierBatchCell>& InCells,
+		int32 InLevels,
+		ETierChildCoords InCoordMode,
+		TArray<FTierBatchCell>& OutCells,
+		TKeepChild&& InKeepChild)
+	{
+		OutCells.Reset();
+
+		if (InLevels <= 0)
+		{
+			OutCells = InCells;
+
+			// Every cell is its own parent, so a caller that groups by ParentIndex gets the
+			// same answer whether or not the tier subdivides.
+			for (int32 i = 0; i < OutCells.Num(); ++i)
+			{
+				OutCells[i].ParentIndex = i;
+			}
+
+			return;
+		}
+
+		const int32 Side = 1 << InLevels;
+		const int32 PerCell = Side * Side * Side;
+
+		// THE UNCULLED COUNT, deliberately. A cull only ever removes, so this is an upper
+		// bound rather than an estimate, and over-reserving a transient array beats
+		// reallocating inside the loop.
+		OutCells.Reserve(InCells.Num() * PerCell);
+
+		// The coord offset that distinguishes the two labellings; see ETierChildCoords.
+		const int32 CoordBias = (InCoordMode == ETierChildCoords::Centred) ? (Side / 2) : 0;
+
+		for (int32 ParentIndex = 0; ParentIndex < InCells.Num(); ++ParentIndex)
+		{
+			const FTierBatchCell& Parent = InCells[ParentIndex];
+
+			const double SubHalf = Parent.HalfExtent / static_cast<double>(Side);
+			const double SubFull = SubHalf * 2.0;
+
+			// Centres the run of children on the parent, so they tile it exactly.
+			const double Origin = -(static_cast<double>(Side) - 1.0) * 0.5;
+
+			for (int32 iz = 0; iz < Side; ++iz)
+			{
+				for (int32 iy = 0; iy < Side; ++iy)
+				{
+					for (int32 ix = 0; ix < Side; ++ix)
+					{
+						const FVector Centre = Parent.Centre + FVector(
+							(Origin + static_cast<double>(ix)) * SubFull,
+							(Origin + static_cast<double>(iy)) * SubFull,
+							(Origin + static_cast<double>(iz)) * SubFull);
+
+						if (!InKeepChild(Centre, SubHalf))
+						{
+							continue;
+						}
+
+						FTierBatchCell Child;
+
+						// THE SLOT IS THE PARENT'S. Children are a generation detail; the
+						// buffer still holds one region per streamed cell.
+						Child.SlotIndex = Parent.SlotIndex;
+						Child.ParentIndex = ParentIndex;
+
+						Child.Coord = FIntVector(
+							Parent.Coord.X * Side + ix - CoordBias,
+							Parent.Coord.Y * Side + iy - CoordBias,
+							Parent.Coord.Z * Side + iz - CoordBias);
+
+						Child.Centre = Centre;
+						Child.HalfExtent = SubHalf;
+
+						OutCells.Add(Child);
+					}
+				}
+			}
+		}
+	}
+
+	/** The uncalled-cull form, for a field with no outside. */
+	static void SubdivideCells(
+		const TArray<FTierBatchCell>& InCells,
+		int32 InLevels,
+		ETierChildCoords InCoordMode,
+		TArray<FTierBatchCell>& OutCells)
+	{
+		SubdivideCells(InCells, InLevels, InCoordMode, OutCells,
+			[](const FVector&, double) { return true; });
+	}
+
+	/** The cull a SPHERE-BOUNDED field wants: drop a child whose nearest point already lies
+	 *  outside the unit sphere of radius InExtent. A sphere fills pi/6 of its bounding cube,
+	 *  so this removes about a fifth of a full grid before any of it reaches the GPU. */
+	static auto MakeSphereBoundsCull(double InExtent)
+	{
+		const double InvExtent = 1.0 / FMath::Max(InExtent, 1e-9);
+
+		return [InvExtent](const FVector& InCentre, double InHalfExtent) -> bool
+			{
+				const FVector Nearest(
+					FMath::Max(FMath::Abs(InCentre.X) - InHalfExtent, 0.0) * InvExtent,
+					FMath::Max(FMath::Abs(InCentre.Y) - InHalfExtent, 0.0) * InvExtent,
+					FMath::Max(FMath::Abs(InCentre.Z) - InHalfExtent, 0.0) * InvExtent);
+
+				return Nearest.SizeSquared() < 1.0;
+			};
+	}
+
+#pragma endregion
+
 #pragma region Grid Coord Helpers
 
 	/** Narrows a grid coordinate to int32 with a DEFINED result at any magnitude.

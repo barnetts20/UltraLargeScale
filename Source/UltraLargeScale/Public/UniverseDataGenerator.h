@@ -101,54 +101,28 @@ public:
 		return static_cast<float>(1.0 / FMath::Max(FieldExtent, 1e-9));
 	}
 
-	/** One cell of a tier's generation grid.
+	/** THE CELL TYPE AND THE SUBDIVISION ARE SHARED. Both live on FTierStreamingSystem
+	 *  because every layer needs the same ones and a per-layer copy of either is a place the
+	 *  child COORD -- the placement key -- can drift between layers. See FTierBatchCell.
 	 *
-	 *  THE CENTRE IS SUPPLIED, not derived. Grid-coord-to-centre lives on the actor, which
-	 *  owns the grid; a generator inferring it from a buffer's slot centres puts every
-	 *  candidate somewhere else entirely. It is also what lets a streamed neighbourhood and
-	 *  a calibration block be the same dispatch with different contents. */
-	struct FTierBatchCell
-	{
-		FIntVector Coord = FIntVector::ZeroValue;
-		int32 SlotIndex = 0;
+	 *  THIS LAYER PASSES NO CULL. The cosmic web has no outside: every child can hold
+	 *  structure, and dropping one on geometry would delete a cell that belongs. The probe
+	 *  pass's envelope test culls void children instead, at the cost of their probes.
+	 *
+	 *  Ascending coords, not Centred. Switching would reroll every entity this layer
+	 *  places; see ETierChildCoords. */
 
-		/** Index into the array this cell was subdivided FROM, or its own index when
-		 *  nothing was subdivided. Calibration needs it and generation does not: a tier
-		 *  with one cell per slot is calibrated against the largest STREAMED cell, which
-		 *  after subdivision is the largest sum over one parent's children. */
-		int32 ParentIndex = 0;
-
-		FVector Centre = FVector::ZeroVector;
-		double HalfExtent = 0.0;
-	};
-
-	/** Split each cell into 8^Levels children, in place of it.
-	 *
-	 *  Child coords are ParentCoord * 2^Levels + an offset, so they are unique across
-	 *  parents and depend on nothing but the parent -- the placement key and the probe
-	 *  jitter both read them, and a child whose coord shifted with the batch would
-	 *  regenerate differently.
-	 *
-	 *  NO BOUNDS CULL, the one substantive difference from the galaxy's version. That field
-	 *  is zero outside its unit sphere, so a child past the boundary can be dropped for one
-	 *  dot product instead of a full cell's worth of field evaluations. THIS FIELD IS
-	 *  UNBOUNDED: there is no outside, every child can hold structure, and a cull here would
-	 *  delete cells that belong. The probe pass's own envelope test does the equivalent job,
-	 *  culling void children at the cost of their probes. */
-	static void SubdivideCells(const TArray<FTierBatchCell>& InCells, int32 InLevels,
-		TArray<FTierBatchCell>& OutCells);
-
-	/** Marshals a tier's cells into the dispatch's FUniverseGenCell records.
-	 *
-	 *  ONE BUILDER FOR CALIBRATION AND GENERATION, and that is the point rather than a
-	 *  convenience. A cell's centre is split into an exact field cell plus a fraction, and a
-	 *  calibration that split its cells differently from generation would solve the tier's
-	 *  constant against a field offset by a fraction of a cell from the one entities land
-	 *  in. The two paths differ in which cells they pass and in nothing else.
-	 *
-	 *  The slot travels from the cell. Calibration parents are built at slot 0 and children
-	 *  inherit their parent's, so the calibration path carries a single token slot without
-	 *  needing to say so here. */
+	 /** Marshals a tier's cells into the dispatch's FUniverseGenCell records.
+	  *
+	  *  ONE BUILDER FOR CALIBRATION AND GENERATION, and that is the point rather than a
+	  *  convenience. A cell's centre is split into an exact field cell plus a fraction, and a
+	  *  calibration that split its cells differently from generation would solve the tier's
+	  *  constant against a field offset by a fraction of a cell from the one entities land
+	  *  in. The two paths differ in which cells they pass and in nothing else.
+	  *
+	  *  The slot travels from the cell. Calibration parents are built at slot 0 and children
+	  *  inherit their parent's, so the calibration path carries a single token slot without
+	  *  needing to say so here. */
 	void BuildGenCells(const TArray<FTierBatchCell>& InCells,
 		TArray<FUniverseGenCell>& OutCells) const;
 

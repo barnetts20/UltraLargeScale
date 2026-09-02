@@ -144,94 +144,6 @@ void GalaxyDataGenerator::Initialize()
 
 #pragma region Tier Generation Callbacks
 
-void GalaxyDataGenerator::SubdivideCells(
-	const TArray<FTierBatchCell>& InCells,
-	int32 InLevels,
-	double InExtent,
-	TArray<FTierBatchCell>& OutCells)
-{
-	OutCells.Reset();
-
-	if (InLevels <= 0)
-	{
-		OutCells = InCells;
-
-		// Every cell is its own parent, so a caller that groups by ParentIndex gets the
-		// same answer whether or not the tier subdivides.
-		for (int32 i = 0; i < OutCells.Num(); ++i)
-		{
-			OutCells[i].ParentIndex = i;
-		}
-
-		return;
-	}
-
-	const double InvExtent = 1.0 / FMath::Max(InExtent, 1e-9);
-	const int32 Side = 1 << InLevels;
-	const int32 PerCell = Side * Side * Side;
-
-	OutCells.Reserve(InCells.Num() * PerCell / 2);
-
-	for (int32 ParentIndex = 0; ParentIndex < InCells.Num(); ++ParentIndex)
-	{
-		const FTierBatchCell& Parent = InCells[ParentIndex];
-
-		const double SubHalf = Parent.HalfExtent / static_cast<double>(Side);
-		const double SubFull = SubHalf * 2.0;
-
-		// Children tile the parent exactly, which is what keeps the sum of their masses
-		// equal to 8^Levels times the parent's -- the relation the tier's calibrated
-		// constant is scaled by.
-		const double Origin = -(static_cast<double>(Side) - 1.0) * 0.5;
-
-		for (int32 iz = 0; iz < Side; ++iz)
-		{
-			for (int32 iy = 0; iy < Side; ++iy)
-			{
-				for (int32 ix = 0; ix < Side; ++ix)
-				{
-					const FVector Centre = Parent.Centre + FVector(
-						(Origin + static_cast<double>(ix)) * SubFull,
-						(Origin + static_cast<double>(iy)) * SubFull,
-						(Origin + static_cast<double>(iz)) * SubFull);
-
-					// BOUNDS CULL, on geometry alone. The field is zero outside the unit
-					// sphere, so a child whose nearest point already lies past it can
-					// hold nothing -- and a sphere fills only pi/6 of its bounding cube.
-					// One dot product here against sixty-four field evaluations if the
-					// child's thread group has to discover it instead.
-					const FVector Nearest(
-						FMath::Max(FMath::Abs(Centre.X) - SubHalf, 0.0) * InvExtent,
-						FMath::Max(FMath::Abs(Centre.Y) - SubHalf, 0.0) * InvExtent,
-						FMath::Max(FMath::Abs(Centre.Z) - SubHalf, 0.0) * InvExtent);
-
-					if (Nearest.SizeSquared() >= 1.0)
-					{
-						continue;
-					}
-
-					FTierBatchCell Child;
-
-					// The SLOT is the parent's. Children are a generation detail; the
-					// buffer still holds one region per streamed cell.
-					Child.SlotIndex = Parent.SlotIndex;
-					Child.ParentIndex = ParentIndex;
-
-					Child.Coord = FIntVector(
-						Parent.Coord.X * Side + ix - Side / 2,
-						Parent.Coord.Y * Side + iy - Side / 2,
-						Parent.Coord.Z * Side + iz - Side / 2);
-
-					Child.Centre = Centre;
-					Child.HalfExtent = SubHalf;
-
-					OutCells.Add(Child);
-				}
-			}
-		}
-	}
-}
-
 float GalaxyDataGenerator::GetTierBudgetScale(
 	const FTierParams& InTierParams,
 	int32 InSeedOffset,
@@ -288,7 +200,9 @@ float GalaxyDataGenerator::GetTierBudgetScale(
 	BuildFullTierGrid(InTierParams.GridDepth, Parents);
 
 	TArray<FTierBatchCell> AllCells;
-	SubdivideCells(Parents, Subdivision, static_cast<double>(Params.Extent), AllCells);
+	FTierStreamingSystem::SubdivideCells(Parents, Subdivision,
+		ETierChildCoords::Centred, AllCells,
+		FTierStreamingSystem::MakeSphereBoundsCull(static_cast<double>(Params.Extent)));
 
 	float Scale = 0.0f;
 
@@ -490,10 +404,11 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	// Every child keeps its PARENT'S SLOT. The buffer still holds one region per
 	// streamed cell; only the generation grid got finer.
 	TArray<FTierBatchCell> Subdivided;
-	SubdivideCells(InQueuedCells,
+	FTierStreamingSystem::SubdivideCells(InQueuedCells,
 		FMath::Clamp(InTierParams.GenerationSubdivision, 0,
 			FTierParams::MaxGenerationSubdivision),
-		static_cast<double>(Params.Extent), Subdivided);
+		ETierChildCoords::Centred, Subdivided,
+		FTierStreamingSystem::MakeSphereBoundsCull(static_cast<double>(Params.Extent)));
 
 	const TArray<FTierBatchCell>& InCells = Subdivided;
 
