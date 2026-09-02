@@ -5,7 +5,6 @@
 #include "CoreMinimal.h"
 #include "DataTypes.h"
 #include "ProceduralSpaceActor.h"
-#include "FVolumeTextureUtils.h"
 #include "FNiagaraParticleBuffer.h"
 #include "UniverseParams.h"
 #include "UniverseEntityGen.h"
@@ -72,30 +71,23 @@ public:
 
 	/** ONE FIELD CELL IN CALLER UNITS: FieldExtent * CellSizeSmall.
 	 *
-	 *  Already used inline by BuildCalibrationGrid; named here because the gen-cell split
-	 *  needs the same number and a second spelling of it is exactly the kind of duplicate
-	 *  derivation that puts calibration and generation on fields a fraction of a cell apart.
-	 *
-	 *  Reads the AUTHORED CellSizeSmall, not the material instance's. The actor's
-	 *  GetEffectiveCellSizeSmall exists because the instance may own that pin while
-	 *  bPushDensityParams is false -- but this class never sees the instance, and the compute
-	 *  dispatch is handed the authored value through Params either way, so authored is what
-	 *  the dispatch will actually use. If that ever stops being true, this is where the two
-	 *  would diverge. */
+	 *  NAMED RATHER THAN SPELLED AT EACH SITE. Calibration and the gen-cell split both need
+	 *  this number, and two spellings of it put them on fields a fraction of a cell apart --
+	 *  which shows as entities sitting beside the structure rather than as anything
+	 *  obviously wrong. */
 	double FieldCellSize() const
 	{
 		return FieldExtent
 			* FMath::Max(static_cast<double>(Params.DensityParams.Lattice.CellSizeSmall), 1e-6);
 	}
 
-	/** The field's repeat period in small cells, derived exactly as the core derives it.
-	 *  Gen cell indices cross to the shader through a float3 and must be reduced by THIS
-	 *  period, not another -- see SplitCellCentre and UniverseCellWrap. */
+	/** The field's repeat period in small cells. Gen cell indices cross to the shader
+	 *  through a float3 and must be reduced by the period the CORE derives, never another;
+	 *  reducing by a different one puts placement and the render on wraps that disagree, a
+	 *  long way out, with nothing logging it. See SplitCellCentre. */
 	int32 FieldCellPeriod() const
 	{
-		return UniverseCellWrap::DerivePeriod(UniverseCellWrap::DeriveRatio(
-			static_cast<double>(Params.DensityParams.Lattice.CellSizeSmall),
-			static_cast<double>(Params.DensityParams.Lattice.CellSizeLarge)));
+		return UniverseCellWrap::FieldCellPeriod(Params.DensityParams.Lattice);
 	}
 
 	/** One cell of a tier's generation grid.

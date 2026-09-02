@@ -4,7 +4,6 @@
 #include "UltraLargeScale.h"
 #include "FTierStreamingSystem.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
-#include "FVolumeTextureUtils.h"
 #include <Kismet/GameplayStatics.h>
 #include <GalaxyActor.h>
 #include <StarSystemActor.h>
@@ -321,54 +320,9 @@ void AUniverseActor::InitializeData()
 
 #pragma region Volumetric
 
-float AUniverseActor::GetEffectiveCellSizeSmall() const
-{
-	const float Authored = UniverseParams.DensityParams.Lattice.CellSizeSmall;
-
-	// Only when the instance is authoritative. Reading it back while we are the ones
-	// pushing would be a round trip through the MID for a value we just wrote, and would
-	// quietly mask a pin-name mismatch by handing us back our own number.
-	if (!UniverseParams.MaterialParams.bPushDensityParams && VolumeMaterial)
-	{
-		const FLinearColor Live = VolumeMaterial->K2_GetVectorParameterValue(TEXT("CellSizeRange"));
-
-		// An absent pin returns zero rather than failing, so the guard is the value itself.
-		if (Live.R > 0.0f)
-		{
-			return Live.R;
-		}
-	}
-
-	return FMath::Max(Authored, 1e-6f);
-}
-
-float AUniverseActor::GetEffectiveCellSizeLarge() const
-{
-	const float Authored = UniverseParams.DensityParams.Lattice.CellSizeLarge;
-
-	if (!UniverseParams.MaterialParams.bPushDensityParams && VolumeMaterial)
-	{
-		const FLinearColor Live = VolumeMaterial->K2_GetVectorParameterValue(TEXT("CellSizeRange"));
-
-		// GUARDED ON .R, NOT .G, and deliberately. .G is legitimately allowed to be zero or
-		// below .R -- that is how a single-lattice field is authored -- so it cannot tell an
-		// authored zero from an absent pin the way the small size can. .R being positive is
-		// what says the pin resolved, and both components come out of the same fetch, so the
-		// pair is always consistent.
-		if (Live.R > 0.0f)
-		{
-			return Live.G;
-		}
-	}
-
-	return FMath::Max(Authored, 0.0f);
-}
-
 int32 AUniverseActor::GetFieldCellPeriod() const
 {
-	return UniverseCellWrap::DerivePeriod(UniverseCellWrap::DeriveRatio(
-		static_cast<double>(GetEffectiveCellSizeSmall()),
-		static_cast<double>(GetEffectiveCellSizeLarge())));
+	return UniverseCellWrap::FieldCellPeriod(UniverseParams.DensityParams.Lattice);
 }
 
 double AUniverseActor::GetVolumetricProxyExtent() const
@@ -400,9 +354,14 @@ FUniverseFieldOffset AUniverseActor::ComputeFieldOffset() const
 	// shader. VirtualTraversal is the quantity that reaches the magnitudes the cell/frac
 	// formulation exists for, so the split has to happen while the value still has
 	// fractional precision left to split.
+	// THE SAME CellSizeSmall THE SHADER DECOMPOSES WITH. The offset is a count of small
+	// cells and the shader adds it to a position it splits using its own CellSizeRange.x,
+	// which PushDensityParams writes from this struct. If the two ever came from different
+	// sources the field would SCROLL at the wrong rate -- the web sliding under the camera,
+	// which reads as anything but a cell size disagreement.
 	const double Ext = GetVolumetricProxyExtent();
 	const double CellSmall = FMath::Max(
-		static_cast<double>(GetEffectiveCellSizeSmall()), 1e-6);
+		static_cast<double>(UniverseParams.DensityParams.Lattice.CellSizeSmall), 1e-6);
 	const double InvCell = 1.0 / CellSmall;
 
 	const FVector CellPos = (VirtualTraversal / Ext) * InvCell;
@@ -421,9 +380,8 @@ FUniverseFieldOffset AUniverseActor::ComputeFieldOffset() const
 	//
 	// THE CORE REDUCES AGAIN, with a period it derives itself, and that redundancy is
 	// deliberate: this reduction is about float exactness, the core's is what defines the
-	// field's periodicity. If the two ever disagree -- a stale cell size, a material instance
-	// owning CellSizeRange -- the field still wraps cleanly and only the offset loses
-	// precision. See UniverseCellWrap.
+	// field's periodicity. If a stale cell size ever puts the two periods apart, the field
+	// still wraps cleanly and only the offset loses precision. See UniverseCellWrap.
 	return FUniverseFieldOffset::FromCellPositionWrapped(CellPos, GetFieldCellPeriod());
 }
 
@@ -453,8 +411,6 @@ void AUniverseActor::PushFieldOffset(UMaterialInstanceDynamic* InMID) const
 void AUniverseActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
 {
 	if (!InMID) return;
-
-	const FUniverseMaterialParams& M = UniverseParams.MaterialParams;
 
 	// ONE PACK, and every pin below reads it. The four .w passengers -- skew, both warp
 	// scales, the large octave's lattice-follow -- are already loaded by Pack, so there is
@@ -497,15 +453,10 @@ void AUniverseActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
 	SetVec(TEXT("RegionScale"), A.RegionScales);
 
 	// --- BOUNDS ---
-	// Pushed rather than left to the material's own default. The fade is applied by the
-	// march and not by the field, so this is the one parameter in the set that describes
-	// how the field is being VIEWED -- but it still travels through the same derivation,
-	// and leaving it to the asset would let the render disagree with the code about where
-	// the horizon is.
-	// A REAL PARAMETER NOW. The march applies the fade rather than the field, so this is
-	// the one value in the set that describes how the field is being VIEWED -- but it
-	// travels through the same derivation, and leaving it to the asset would let the render
-	// disagree with the code about where the horizon is.
+	// The march applies the fade rather than the field, so this is the one value in the set
+	// that describes how the field is being VIEWED. It travels through the same derivation
+	// anyway, and leaving it to the asset would let the render disagree with the code about
+	// where the horizon is.
 	InMID->SetScalarParameterValue(TEXT("BoundsFadeStart"), A.BoundsFadeStart);
 
 	// --- MARCH --- NOT PUSHED HERE. See PushMarchParams; it runs unconditionally.
@@ -637,24 +588,15 @@ void AUniverseActor::InitializeVolumetric()
 					FName("WarpTexSmall"), Self->FieldWarpTexSmall);
 			}
 
-			// THE OFFSET ALWAYS. It is runtime state with no authored counterpart on the
-			// instance, so there is nothing for it to clobber and nothing else can supply it.
+			// ALL THREE, UNCONDITIONALLY. The instance is a starting point for the asset,
+			// never a source of truth: the compute path places against
+			// FUniverseDensityParams, so any pin the instance were allowed to keep would
+			// put the render and placement on different universes.
+			//
+			// Offset first because it is the only one that is also re-pushed per frame.
 			Self->PushFieldOffset(Self->VolumeMaterial);
-
-			// THE MARCH ALWAYS. Performance controls, not look controls; nothing on the
-			// instance is worth protecting from them.
 			Self->PushMarchParams(Self->VolumeMaterial);
-
-			// THE FIELD ONLY WHEN ASKED. See bPushDensityParams -- while the instance is
-			// authoritative, pushing would overwrite tuned values with struct defaults.
-			if (Self->UniverseParams.MaterialParams.bPushDensityParams)
-			{
-				Self->PushDensityParams(Self->VolumeMaterial);
-			}
-			else
-			{
-				UE_LOG(LogTemp, Log, TEXT("AUniverseActor::InitializeVolumetric - field parameters left to the material instance ") TEXT("(bPushDensityParams is false). FUniverseDensityParams is not driving the render; ") TEXT("transcribe the tuned instance values into it before entity generation lands."));
-			}
+			Self->PushDensityParams(Self->VolumeMaterial);
 
 			Self->VolumetricComponent = NewObject<UStaticMeshComponent>(Self);
 			Self->VolumetricComponent->SetVisibility(false);
@@ -678,19 +620,14 @@ void AUniverseActor::InitializeVolumetric()
 			// eight cells across, a cosmic web reads as a web, and at forty it reads as
 			// foam and drives transmittance to zero whatever the density is set to.
 			//
-			// Also the check that the offset and the shader agree. This is the resolved
-			// cell size -- read off the instance while it owns the field -- so a number
-			// here that does not match FUniverseDensityParams means the authored struct is
-			// stale rather than that anything is broken.
-			const float ResolvedCell = Self->GetEffectiveCellSizeSmall();
+			const float CellSmall = FMath::Max(
+				Self->UniverseParams.DensityParams.Lattice.CellSizeSmall, 1e-6f);
 			const FUniverseMaterialParams& MP = Self->UniverseParams.MaterialParams;
 			UE_LOG(LogTemp, Log,
 				TEXT("AUniverseActor::InitializeVolumetric - proxy spans %.1f small cells ")
-				TEXT("(resolved CellSizeSmall %.4f, authored %.4f); march budget %.0f at ")
-				TEXT("growth %.2f resolves to ~%.0f actual steps."),
-				2.0f / FMath::Max(ResolvedCell, 1e-6f),
-				ResolvedCell,
-				Self->UniverseParams.DensityParams.Lattice.CellSizeSmall,
+				TEXT("(CellSizeSmall %.4f); march budget %.0f at growth %.2f resolves to ")
+				TEXT("~%.0f actual steps."),
+				2.0f / CellSmall, CellSmall,
 				MP.VolumeStepBudget, MP.VolumeStepGrowth,
 				MP.GetEffectiveStepCount());
 

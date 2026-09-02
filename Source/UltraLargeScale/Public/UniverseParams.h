@@ -7,10 +7,6 @@
 #include "FTierStreamingSystem.h"
 #include "UniverseParams.generated.h"
 
-/** Seed channels for the universe layer, mirroring GalaxySeed.
- *
- *  ADD, NEVER REUSE. A channel is free; sharing one between two consumers reintroduces
- *  exactly the aliasing ProcSeed exists to prevent. */
 class UTexture;
 
 /** The field's four volume textures, RESOLVED. One bundle rather than four loose pointers,
@@ -69,6 +65,10 @@ struct FUniverseFieldTextures
 	}
 };
 
+/** Seed channels for the universe layer, mirroring GalaxySeed.
+ *
+ *  ADD, NEVER REUSE. Channels are free; sharing one between two consumers reintroduces
+ *  exactly the aliasing ProcSeed exists to prevent. */
 namespace UniverseSeed
 {
 	/** The GPU placement key. One channel for all three tiers -- the tier index enters
@@ -76,57 +76,6 @@ namespace UniverseSeed
 	 *  each, and adding a fourth tier needs no new constant. */
 	inline constexpr uint32 Placement = ProcSeed::ChannelId("Universe.Placement");
 }
-
-
-/** LEGACY. The FastNoise graph that predates the cosmic-web field.
- *
- *  RENAMED, not retired. UniverseDataGenerator::BuildNoise() still builds this graph and
- *  all three tiers still rejection-sample it for cluster placement, so it cannot come out
- *  until entity generation lands on the web field. The rename exists because
- *  FUniverseDensityParams now names the field the shader actually draws, and having two
- *  unrelated things called "the density params" is how the render and placement quietly
- *  end up reading different fields.
- *
- *  Nothing here feeds UniverseDensityCore.ush. When the web field takes over placement,
- *  this struct, BuildNoise, EncodedTree and DensityNoise come out together. */
-USTRUCT(BlueprintType)
-struct ULTRALARGESCALE_API FUniverseNoiseGraphParams
-{
-	GENERATED_BODY()
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float MasterScale = 1.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float ClusterFalloff = 32.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float ClusterScale = 3.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float ClusterMulti = 50.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float ClusterRemapMax = 1.001f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float ClusterRemapMin = 0.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float WebFalloff = 3.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float WebRemapMin = -0.1f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float WebRemapMax = 1.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float WarpAmp = 0.25f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	float WarpFreq = 1.0f;
-};
 
 
 // =============================================================================
@@ -227,13 +176,13 @@ struct ULTRALARGESCALE_API FUniverseLatticeParams
 	 *  coarse lattice shift bodily and discontinuously as the player moves. A tear, not a
 	 *  drift.
 	 *
-	 *  KEEP THE RATIO OFF A HALF. 1.4 against a small cell of 0.4 was exactly 3.5, sitting
-	 *  precisely on the rounding boundary the derivation quantizes across -- and HLSL rounds
-	 *  halves away from zero while the C++ shim's round defers to nearbyint, which rounds to
-	 *  even. Both happen to land on 4 today, but the value is one ulp of tuning away from
-	 *  the two sides disagreeing, and the failure is the coarse lattice coming out a
-	 *  different size in the render than in placement. 0.9 against 0.3 gives an unambiguous
-	 *  ratio of 3, with the nearest half boundary a long way off in either direction.
+	 *  KEEP THE RATIO CLEAR OF A HALF. The derivation rounds CellSizeLarge / CellSizeSmall,
+	 *  and HLSL rounds halves away from zero while the C++ shim's round defers to nearbyint,
+	 *  which rounds to even. A ratio landing on x.5 is therefore free to quantize
+	 *  differently on the two sides, and the failure is the coarse lattice coming out a
+	 *  different size in the render than in placement. 0.9 against 0.3 gives 3 exactly, with
+	 *  the nearest half boundary far off in both directions; 1.4 against 0.4 gives 3.5 and
+	 *  sits on it.
 	 *
 	 *  At or below CellSizeSmall this collapses to a single lattice and skips the second
 	 *  neighbourhood walk entirely, which is roughly half the cost of a sample. */
@@ -244,13 +193,12 @@ struct ULTRALARGESCALE_API FUniverseLatticeParams
 	 *  extremes it interpolates are the lattices themselves, so it has no min/max of its
 	 *  own and never passes through the variance remap.
 	 *
-	 *  THE BLEND CANNOT BE PINNED OR CLAMPED at present. Every value in [0,1] is reachable
-	 *  somewhere and there is no way to author "30% coarse everywhere" or "never enter the
-	 *  mixed band". The useful band is compressed -- 0.4 to 0.8 is where both lattices
-	 *  compete, and mean density peaks around 0.30 there against 0.06 at either end -- so
-	 *  this will want a real override. CellSizeRange.w is free and is the natural host for
-	 *  one; it is packed as 0 and the core ignores it, so claiming it is a change in the
-	 *  core first and here second. */
+	 *  THERE IS NO WAY TO PIN OR CLAMP THE BLEND. Every value in [0,1] is reachable
+	 *  somewhere, so "30% coarse everywhere" and "never enter the mixed band" are both
+	 *  unauthorable. The useful band is narrow -- 0.4 to 0.8 is where both lattices compete,
+	 *  and mean density peaks near 0.30 there against 0.06 at either end. CellSizeRange.w is
+	 *  the free slot an override would ride; it is packed as 0 and the core ignores it, so
+	 *  claiming it is a change in the core first and here second. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lattice")
 	float CellSizeBias = 1.0f;
 };
@@ -319,9 +267,8 @@ struct ULTRALARGESCALE_API FUniverseVoidParams
 	/** Ambient density everywhere.
 	 *
 	 *  BELOW ZERO IS NOT A DARKER VOID. The march's exp(-density) turns negative density
-	 *  into unbounded gain rather than opacity. Both ends matter now that it is a range: a
-	 *  range spanning zero puts the negative end somewhere, and a noise channel decides
-	 *  where. */
+	 *  into unbounded gain rather than opacity. BOTH ENDS OF THE RANGE MATTER: a range
+	 *  spanning zero puts the negative end somewhere, and a noise channel decides where. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Void")
 	FUniverseVarianceRange Floor = FUniverseVarianceRange(0.0f, 0.5f, 8.0f);
 
@@ -329,32 +276,32 @@ struct ULTRALARGESCALE_API FUniverseVoidParams
 	 *  scale.
 	 *
 	 *  SQUARED CELL UNITS, not cells. It is subtracted from the squared distance, which is
-	 *  the space the weight wanted anyway and is what removed 27 square roots from the
-	 *  walk. A node out-reaches an unoffset neighbour by this much in squared distance --
-	 *  about the same in linear distance at a typical half-cell separation, shrinking as
-	 *  the separation grows. Values carried over from the old additive form do not mean
-	 *  what they used to.
+	 *  the space the weight works in and is what keeps 27 square roots out of the walk. A
+	 *  node out-reaches an unoffset neighbour by this much in squared distance -- about the
+	 *  same in linear distance at a typical half-cell separation, shrinking as the
+	 *  separation grows.
 	 *
-	 *  THIS IS WHAT ERODES THE 27-CELL SEARCH. The window is sound while the offset stays
-	 *  well under 1.0 minus the dominant candidate's own power distance, and the bound
-	 *  degrades with WIDE features as well as with large offsets. The 0.80 that shipped
-	 *  against a form with no bound at all is very likely too large here -- start an order
-	 *  lower and come up. */
+	 *  THIS IS WHAT ERODES THE 27-CELL SEARCH. The window holds while the offset stays well
+	 *  under 1.0 minus the dominant candidate's own power distance, and the bound degrades
+	 *  with WIDE features as well as with large offsets -- so the safe value depends on
+	 *  FeatureWidth, not on this pin alone. Past it, a node outside the searched
+	 *  neighbourhood wins and the cell it should have claimed is drawn by the wrong one.
+	 *  Tune upward from an order below the default rather than downward. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Void")
 	FUniverseVarianceRange SizeSpread = FUniverseVarianceRange(0.0f, 0.5f, 2.0f);
 
 	/** Rides SizeSpread's own .w. Above 1 makes large voids rare and small ones common.
 	 *
-	 *  IT RIDES THAT SLOT BECAUSE IT IS A FUNCTION OF THAT RANGE. Skew already used the
-	 *  spread's bias-shaped interpolant as a derived multiplier, so the two were coupled
-	 *  in the field before they were coupled in the packing.
+	 *  IT RIDES THAT SLOT BECAUSE IT IS A FUNCTION OF THAT RANGE: skew multiplies the
+	 *  spread's own bias-shaped interpolant, so the two are one setting in the field before
+	 *  they are one pin in the packing.
 	 *
-	 *  INERT AT THE SHIPPED SETTING. UNIVERSE_SKEW_FIXED is 4, so the core's SkewPow
-	 *  ignores its exponent argument and this pin, the per-candidate product it feeds and
-	 *  the .w slot it rides are all dead. Exposed anyway because a claimed slot with a
-	 *  hidden pin is worse than an inert one -- but do not tune against it expecting a
-	 *  result. Restoring the general path costs 54 pow calls per sample, which is a bad
-	 *  trade; the cheap version is a lerp between the fixed exponents 2 and 4. */
+	 *  INERT. UNIVERSE_SKEW_FIXED is 4, so the core's SkewPow ignores its exponent argument
+	 *  and this pin, the per-candidate product it feeds and the .w slot it rides do nothing.
+	 *  Tuning against it produces no change of any kind. The general path costs 54 pow calls
+	 *  per sample and is not worth restoring; a lerp between the fixed exponents 2 and 4 is
+	 *  the affordable version. Retire the pin or implement the lerp -- an authored control
+	 *  that cannot move anything is worse than no control. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Void", meta = (ClampMin = "0.0"))
 	float SizeSkew = 1.0f;
 };
@@ -370,24 +317,18 @@ struct ULTRALARGESCALE_API FUniverseWarpOctaveParams
 
 	/** Peak displacement in SMALL cells.
 	 *
-	 *  NOT THE CONVENTION THE RETIRED LATTICE PATH USED -- that one centred and doubled,
-	 *  so a value carried over from it must be doubled to displace the same distance.
-	 *
-	 *  IT IS DENOMINATED IN THE ASSET'S VALUE SCALE, not in an absolute one, which is what
-	 *  makes it move whenever this octave's warp volume is swapped. The core decodes a
-	 *  displacement from the fetched channels and multiplies by this; a volume whose
-	 *  channels swing half as far needs twice the amount for the same bend. The defaults
-	 *  RE-TUNED FOR THE SIGNED VECTOR ASSET, in the material and transcribed here. It was
-	 *  (0.5 .. 2.5); the signed volume needs roughly two thirds of that for the same bend,
-	 *  which is what a decode losing its centring step does to a value scale. Re-tune the
-	 *  pair (this and this octave's WarpTexGradient) together whenever the asset changes,
-	 *  and read PredictedFoldShear rather than the picture while doing it. Each octave now
-	 *  has its own asset and its own gradient, so the two are re-tuned independently.
+	 *  DENOMINATED IN THE ASSET'S VALUE SCALE, not an absolute one. The core decodes a
+	 *  displacement from the fetched channels and multiplies by this, so a volume whose
+	 *  channels swing half as far needs twice the amount for the same bend. SWAPPING AN
+	 *  ASSET SILENTLY RETUNES THE GEOMETRY: re-tune this and the octave's WarpTexGradient
+	 *  together whenever the volume changes, and judge it by PredictedFoldShear rather than
+	 *  by the picture. Each octave carries its own asset and its own gradient, so the two
+	 *  octaves re-tune independently.
 	 *
 	 *  THE RANGE IS A 4x SPREAD around a linear bias, so a region can resolve anywhere from
-	 *  a barely-bent web to a strongly-bent one. That is wider than the small octave's in
-	 *  ratio terms and much narrower in shear terms, because the coarse lattice divides
-	 *  this octave's contribution by the lattice ratio. */
+	 *  a barely-bent web to a strongly-bent one. Wider than the small octave's in ratio
+	 *  terms and much narrower in shear terms, because the coarse lattice divides this
+	 *  octave's contribution by the lattice ratio. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Warp")
 	FUniverseVarianceRange Amount = FUniverseVarianceRange(0.333f, 1.333f, 1.0f);
 
@@ -403,22 +344,19 @@ struct ULTRALARGESCALE_API FUniverseWarpOctaveParams
 	 *  whole number. Otherwise there is a hard seam every 4096 cells that no amount of
 	 *  amplitude tuning will hide.
 	 *
-	 *  FIXED ACROSS THE DRAW, not ranged. That was tried and rolled back.
+	 *  FIXED ACROSS THE DRAW, never ranged. A scale that varies by region puts a different
+	 *  texture frequency on each side of a province boundary, which the wrap cannot close.
 	 *
-	 *  409/4096 RATHER THAN A ROUND 0.1, and the difference is 0.15% of the value and the
-	 *  whole of the repeat behaviour. 0.1 quantizes to 410, which shares a factor of 41
-	 *  with Region.ScaleAppearance's 41 and re-aligns every ninety-nine cells -- twenty
-	 *  proxy widths, the worst pairing in the set. That is what this value was moved off
-	 *  410 to avoid; see the note on Region.ScaleAppearance. Author 0.1 in the details
-	 *  panel and the grid comes back.
+	 *  THE NUMERATOR MUST BE COPRIME WITH THE OTHER THREE SCALES. 409 is prime. A round 0.1
+	 *  quantizes to 410, which shares a factor of 41 with Region.ScaleAppearance and
+	 *  re-aligns every ninety-nine cells -- twenty proxy widths, and visible as a grid.
+	 *  Author 0.1 in the details panel and that grid appears.
 	 *
 	 *  ANYTHING IN [0.09984, 0.10008] IS THIS SAME NUMBER. The quantum is 1/4096, about
-	 *  0.000244, so an edit smaller than that lands back on 409 and changes nothing at all
-	 *  -- the material shows the authored value while the field uses the quantized one, and
-	 *  the two only agree by accident. A material tweak of 0.099787 was measured resolving
-	 *  to 409 exactly as 0.099854 does, which is why this default did not move with the
-	 *  rest of the warp retune. To actually shift this scale, move by at least one quantum
-	 *  and check the new numerator against the coprimality table in Validate(). */
+	 *  0.000244, so a smaller edit lands back on 409 and changes nothing: the details panel
+	 *  shows the authored value while the field uses the quantized one. To move this scale
+	 *  at all, move by at least one quantum, and check the new numerator against the
+	 *  coprimality report in Validate(). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Warp", meta = (ClampMin = "0.0"))
 	float Scale = 0.099854f;
 
@@ -429,14 +367,14 @@ struct ULTRALARGESCALE_API FUniverseWarpOctaveParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Warp")
 	FVector Weights = FVector(1.0, 1.0, 1.0);
 
-	/** LARGE OCTAVE ONLY. Rides the weights vector's .w, where there was no fourth axis to
-	 *  steer, and is saturated by the core.
+	/** LARGE OCTAVE ONLY. Rides the weights vector's .w -- there is no fourth axis to steer
+	 *  -- and is saturated by the core.
 	 *
 	 *  How much of the cell size ratio this octave's amplitude follows on the coarse
 	 *  lattice: 0 gives the same physical displacement on both tiers, 1 gives the same
-	 *  displacement measured in each tier's own cells. The small octave is pinned at full
-	 *  follow -- that is what "scales its amount" means for it -- so this is ignored
-	 *  there. */
+	 *  displacement measured in each tier's own cells. THE SMALL OCTAVE IGNORES THIS; it is
+	 *  pinned at full follow, which is what scaling its amount against a fixed wavelength
+	 *  amounts to. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Warp", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float LatticeFollow = 1.0f;
 };
@@ -461,29 +399,28 @@ struct ULTRALARGESCALE_API FUniverseRegionParams
 	 *  -- everything that decides what SHAPE the web has, which changes over provinces
 	 *  rather than patches.
 	 *
-	 *  Default 19/4096, nudged off the authored 0.005 which quantizes to 20 and shares a
-	 *  factor of 10 with the large warp octave's 410 -- those two re-align every 409 cells,
-	 *  and at five cells per proxy that is eighty proxy widths, reachable in one session.
+	 *  19/4096, AND PRIME FOR A REASON. A round 0.005 quantizes to 20, which shares a factor
+	 *  of 10 with a large warp octave at 410 and re-aligns every 409 cells -- eighty proxy
+	 *  widths, reachable in one session.
 	 *
-	 *  ODD IS NOT SUFFICIENT, which is what 21 got wrong: 21 is 3x7 and the small warp
-	 *  octave's 3072 is 2^10x3, so they still share a 3 and repeat every 1365 cells. 19 is
-	 *  prime and divides none of the others. The visual difference between 0.005 and
-	 *  0.004639 is nothing; the difference between a repeating field and one that does not
-	 *  repeat is not. */
+	 *  ODD IS NOT SUFFICIENT. 21 is 3x7 against a small warp octave of 3072 = 2^10x3, still
+	 *  sharing a 3 and repeating every 1365 cells. Only a prime numerator is coprime with
+	 *  the rest by construction. The visual difference between 0.005 and 0.004639 is
+	 *  nothing; the difference between a repeating field and one that does not is not. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Region", meta = (ClampMin = "0.0"))
 	float ScaleStructure = 0.004639f;
 
 	/** Repeats per small cell for the APPEARANCE field. Drives wall density and falloff,
 	 *  filament density, void floor, and the small warp octave.
 	 *
-	 *  Default 41/4096, which is what the authored 0.010 already quantizes to, and odd, so
-	 *  it stays. Note the pairing it was in: 41 against the large warp octave's 410 is a
-	 *  shared factor of 41, re-aligning every NINETY-NINE CELLS -- twenty proxy widths, the
-	 *  worst repeat in the set, and the reason that warp scale moved to 409/4096.
+	 *  41/4096, prime, which is what a round 0.010 quantizes to anyway. WATCH IT AGAINST THE
+	 *  WARP SCALES: a large warp octave at 410 shares a factor of 41 with this and re-aligns
+	 *  every ninety-nine cells, twenty proxy widths, the tightest repeat the set can
+	 *  produce. See the coprimality note on FUniverseWarpOctaveParams::Scale.
 	 *
-	 *  IT CURRENTLY REUSES THE STRUCTURE FIELD'S FOUR ARCHETYPES at a different frequency.
-	 *  A second asset with four different ones would remove the last correlation the
-	 *  channel reallocation could not. */
+	 *  IT READS THE SAME FOUR ARCHETYPES AS THE STRUCTURE FIELD, at a different frequency. A
+	 *  second asset with four different ones removes the last correlation between the two
+	 *  region fetches. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Region", meta = (ClampMin = "0.0"))
 	float ScaleAppearance = 0.010010f;
 };
@@ -493,49 +430,24 @@ struct ULTRALARGESCALE_API FUniverseRegionParams
 // THE FIELD OFFSET
 // =============================================================================
 
-/** The player's position in the field, split the way UniverseDensityCore.ush wants it:
- *  an exact integer cell count plus a fraction in [0,1). Runtime state rather than
- *  authored, which is why it is a Pack() argument instead of a member -- it changes every
- *  frame and nothing else in the set does.
+/** THE FIELD PERIOD, MIRRORED FROM THE CORE. MakeUniverseDensityParams holds the
+ *  authoritative derivation; this is the CPU copy, needed to reduce a cell index BEFORE it
+ *  narrows to a float3 pin.
  *
- *  THE CELL COUNT IS REDUCED MODULO THE FIELD PERIOD, which is what keeps the float3 pin
- *  exact rather than merely distant. A float32 has no unit ulp above 2^24, so an
- *  unreduced index quantizes there: the field stops advancing smoothly and then stalls on
- *  whichever axis saturated first, with both paths reading the same wrong value so
- *  nothing disagrees and nothing complains. The period sits just under 2^24, so a reduced
- *  index always round-trips.
+ *  A MIRROR IS NOT THE PREFERENCE. UniverseDensityCore.ush compiles for C++ behind
+ *  GalaxyHLSLShim.h, so this could in principle call the real thing -- but no universe
+ *  translation unit includes the core, and pulling the whole field surface into
+ *  UniverseActor.cpp to share four lines of integer arithmetic is the worse trade.
  *
- *  The cost is that the field repeats -- at about 3.7 million Gly, four thousand times
- *  further out than the warp and region textures already repeat. See THE FIELD PERIOD in
- *  UniverseDensityCore.ush for the two divisors the period has to carry, and for why this
- *  is not the situation ScaleStructure's coprime scales exist to avoid.
+ *  WHAT A DISAGREEMENT COSTS IS BOUNDED, which is why the mirror is tolerable at all: the
+ *  core reduces AGAIN with its own period, so a mismatch here cannot seam the field. It can
+ *  only leave the index above 2^24 when it reaches the pin, costing exactness and nothing
+ *  else. Keeping the core's reduction decomposes the failure into "less precise" rather
+ *  than "wrong".
  *
- *  THE REDUCTION IS THE CALLER'S, because the period is not known here. Callers that have
- *  one use FromCellPositionWrapped, which reduces in double BEFORE narrowing to int32 --
- *  splitting first and wrapping the int afterwards works only until the cell position
- *  passes 2.1e9, where the cast is undefined and the offset collapses toward zero.
- *
- *  An unreduced offset arriving here is not an error -- the core reduces again with its
- *  own period -- it just wastes the exactness the reduction exists to preserve. */
- /** THE FIELD PERIOD, MIRRORED. The authoritative derivation is in
-  *  MakeUniverseDensityParams; this is the copy AUniverseActor::ComputeFieldOffset needs in
-  *  order to reduce the offset BEFORE it narrows to the float3 pin.
-  *
-  *  A MIRROR IS NOT THE PREFERENCE. UniverseDensityCore.ush compiles for C++ behind
-  *  GalaxyHLSLShim.h, so in principle this could call the real thing -- but no universe
-  *  translation unit currently includes the core, and pulling the whole field surface into
-  *  UniverseActor.cpp to share four lines of integer arithmetic is a worse trade than the
-  *  duplication.
-  *
-  *  WHAT A DISAGREEMENT COSTS, and it is deliberately bounded: the core reduces AGAIN with
-  *  its own period, so a mismatch here cannot seam the field. It can only leave the offset
-  *  above 2^24 when it reaches the pin, which costs exactness in the offset and nothing
-  *  else. That is the whole reason the core's reduction was kept rather than trusting this
-  *  one -- it decomposes the failure into "less precise" instead of "wrong".
-  *
-  *  The ratio must be derived from the SAME cell sizes the core will receive. See
-  *  AUniverseActor::GetEffectiveCellSizeSmall / GetEffectiveCellSizeLarge for why those are
-  *  not unconditionally the authored values. */
+ *  THE RATIO MUST COME FROM THE SAME CELL SIZES THE CORE RECEIVES. Both reach the core
+ *  through FUniverseDensityParams::Pack, so FieldCellPeriod below takes the lattice group
+ *  whole and every consumer calls it. */
 namespace UniverseCellWrap
 {
 	/** Mirror of UNIVERSE_CELL_EXACT_MAX and UNIVERSE_CELL_WRAP_ALIGN in the core. The
@@ -561,6 +473,22 @@ namespace UniverseCellWrap
 		const int32 Ratio = FMath::Max(InRatio, 1);
 		const int32 Block = WrapAlign * Ratio;
 		return Block * FMath::Max(ExactMax / Block, 1);
+	}
+
+	/** THE ONE CALL EVERY CONSUMER MAKES. Both sides of the field reduce a cell index by
+	 *  this period before it crosses to the shader -- the actor for the material offset,
+	 *  the data generator for each gen cell's centre -- and reducing by two different
+	 *  periods puts placement and the render on wraps that disagree, which shows up only a
+	 *  long way out and logs nothing.
+	 *
+	 *  Taking the lattice group rather than two floats is what makes that hard to get
+	 *  wrong: there is no call shape that passes a small cell size from one source and a
+	 *  large one from another. */
+	inline int32 FieldCellPeriod(const FUniverseLatticeParams& InLattice)
+	{
+		return DerivePeriod(DeriveRatio(
+			static_cast<double>(InLattice.CellSizeSmall),
+			static_cast<double>(InLattice.CellSizeLarge)));
 	}
 
 	/** Reduces into [0, InPeriod). FLOORED, not truncated: C++ and HLSL both truncate
@@ -599,6 +527,30 @@ namespace UniverseCellWrap
 }
 
 
+/** The player's position in the field, split the way UniverseDensityCore.ush wants it: an
+ *  exact integer cell count plus a fraction in [0,1). Runtime state rather than authored,
+ *  which is why it is a Pack() argument instead of a member -- it changes every frame and
+ *  nothing else in the set does.
+ *
+ *  THE CELL COUNT IS REDUCED MODULO THE FIELD PERIOD, which is what keeps the float3 pin
+ *  exact rather than merely distant. A float32 has no unit ulp above 2^24, so an unreduced
+ *  index quantizes there: the field stops advancing smoothly and then stalls on whichever
+ *  axis saturated first, with both paths reading the same wrong value so nothing disagrees
+ *  and nothing complains. The period sits just under 2^24, so a reduced index always
+ *  round-trips.
+ *
+ *  The cost is that the field repeats, at about 3.7 million Gly -- four thousand times
+ *  further out than the warp and region textures repeat. See THE FIELD PERIOD in
+ *  UniverseDensityCore.ush for the two divisors the period carries, and for why this is not
+ *  the situation ScaleStructure's coprime scales exist to avoid.
+ *
+ *  THE REDUCTION IS THE CALLER'S, because the period is not known here. A caller that has
+ *  one uses FromCellPositionWrapped, which reduces in double BEFORE narrowing to int32;
+ *  splitting first and wrapping the int afterwards holds only to 2.1e9 cells, past which
+ *  the cast is undefined and the offset collapses toward zero.
+ *
+ *  An unreduced offset arriving here is not an error -- the core reduces again with its own
+ *  period -- it just wastes the exactness the reduction exists to preserve. */
 USTRUCT(BlueprintType)
 struct ULTRALARGESCALE_API FUniverseFieldOffset
 {
@@ -620,22 +572,20 @@ struct ULTRALARGESCALE_API FUniverseFieldOffset
 	 *  produced here because FromCellPositionWrapped computes it anyway to do the reduction,
 	 *  and thrown away it would have to be recomputed by anything that wanted it.
 	 *
-	 *  WHAT IT IS FOR TODAY is reading the wrap. Cross the origin on an axis and Cell jumps
-	 *  from 0 to period-1 with nothing saying why; this is the term that says why, and it
-	 *  moves by exactly one when it happens.
-	 *
-	 *  IT IS NOT AUniverseActor::CellCoord. That is the sector lattice ConfigureCell writes,
-	 *  spaced at 2 * Extent -- about 730 Mly -- and it exists for tiling universe actors.
-	 *  This is spaced at the field period, about five million times further apart. Two
-	 *  lattices, unrelated scales; do not let the word "sector" merge them. */
+	 *  WHAT IT IS FOR is reading the wrap. Cross the origin on an axis and Cell jumps from 0
+	 *  to period-1 with nothing saying why; this is the term that says why, and it moves by
+	 *  exactly one when it happens. */
 	UPROPERTY(BlueprintReadWrite, Category = "Field Offset")
 	FIntVector Period = FIntVector::ZeroValue;
 
 	/** Splits a small-cell position into the exact cell/frac pair the core wants.
 	 *
-	 *  FLOOR, NOT TRUNCATION, for the same reason SampleAtPosition uses floor: truncation
-	 *  folds the cell boundary at zero and mirrors the field through the origin on every
-	 *  axis. */
+	 *  UNGUARDED ABOVE 2.1e9 CELLS -- the cast is undefined there. Prefer
+	 *  FromCellPositionWrapped anywhere a period is available; this is the fallback it
+	 *  degrades to when one is not.
+	 *
+	 *  FLOOR, NOT TRUNCATION, matching SampleAtPosition: truncation folds the cell boundary
+	 *  at zero and mirrors the field through the origin on every axis. */
 	static FUniverseFieldOffset FromCellPosition(const FVector& InCellPos)
 	{
 		FUniverseFieldOffset Out;
@@ -652,14 +602,14 @@ struct ULTRALARGESCALE_API FUniverseFieldOffset
 		return Out;
 	}
 
-	/** The split and the wrap in one, with the reduction taken IN DOUBLE before the cast
-	 *  to int32 -- which is the only ordering that survives an arbitrary traversal.
+	/** The split and the wrap in one, with the reduction taken IN DOUBLE before the cast to
+	 *  int32 -- the only ordering that survives an arbitrary traversal.
 	 *
 	 *  FromCellPosition alone casts a floored double straight to int32, so a cell position
-	 *  past 2.1e9 is undefined behaviour. In practice it wraps, the reduction that follows
-	 *  then operates on a number that no longer means anything, and the field offset
-	 *  collapses toward zero -- which is reachable in seconds at a high enough compression
-	 *  factor and looks exactly like the field snapping back to the origin.
+	 *  past 2.1e9 is undefined behaviour. It wraps in practice, any reduction applied after
+	 *  it operates on a number that means nothing, and the field offset collapses toward
+	 *  zero -- reachable in seconds at a high compression factor, and looking exactly like
+	 *  the field snapping back to the origin.
 	 *
 	 *  FLOOR FIRST, REDUCE SECOND, and that order matters too. Flooring is exact in double
 	 *  at any magnitude, so Frac comes out with the full precision the position had;
@@ -689,9 +639,10 @@ struct ULTRALARGESCALE_API FUniverseFieldOffset
 		// Floored modulo, matching WrapCell in the core and Wrap in UniverseCellWrap: the
 		// result is in [0, Period) for negative inputs too, so a cell left of the origin
 		// hashes as the counterpart it should rather than as its own negative mirror.
-		// THE QUOTIENT IS KEPT, not discarded. It is the repeat index, it costs nothing here,
-		// and recovering it later would mean redoing this division against a cell index that
-		// no longer carries the magnitude it was taken from.
+		//
+		// THE QUOTIENT IS KEPT. It is the repeat index, it is free here, and recovering it
+		// afterwards would mean redoing this division against a reduced cell index, which
+		// does not carry the magnitude the quotient was taken from.
 		auto Split = [Period](double InValue, int32& OutRepeat) -> int32
 			{
 				const double Q = FMath::Floor(InValue / Period);
@@ -717,14 +668,16 @@ struct ULTRALARGESCALE_API FUniverseFieldOffset
 
 /** The sixteen arguments of MakeUniverseDensityParams, in order, packed.
  *
- *  ONE MARSHAL SITE, and that is why it exists. The galaxy layer packs its equivalent in
- *  three independent places -- the CPU derivation, the compute parameter fill, and the
- *  material's Custom node body -- and its own header warns that the third fails at SHADER
- *  compile rather than at build, so a missed parameter surfaces as a red material with no
- *  build error. Here everything downstream reads this struct instead: the compute fill
- *  copies it member for member, the material push sets it member for member, and a future
- *  CPU derivation hands it straight over. Adding a parameter to the derivation breaks
- *  Pack() at compile time, which is the only place the packing decisions live.
+ *  ONE MARSHAL SITE, and that is why it exists. Everything downstream reads this struct:
+ *  the compute fill copies it member for member, the material push sets it member for
+ *  member, and a CPU derivation would hand it straight over. Adding a parameter to the
+ *  derivation breaks Pack() at compile time, and Pack() is the only place the packing
+ *  decisions live.
+ *
+ *  THE ALTERNATIVE IS THE GALAXY LAYER'S, which packs its equivalent in three independent
+ *  places -- CPU derivation, compute parameter fill, and the material's Custom node body.
+ *  The third fails at SHADER compile rather than at build, so a parameter missed there
+ *  surfaces as a red material with no build error and nothing pointing at the cause.
  *
  *  NOT UPLOADED AS A CONSTANT BUFFER. That would require HLSL's cbuffer packing to agree
  *  with the C++ layout member for member, and one float3 straddling a 16-byte boundary
@@ -771,8 +724,8 @@ struct FUniverseDensityArgs
  *
  *  GROUPED RATHER THAN FLAT, following FGalaxyParams. Each group's comment block carries
  *  the argument for that group once instead of repeating it per scalar, and the eight
- *  regionally-varying quantities share one range type rather than twenty-four loose
- *  scalars whose .z slots all had to be remembered separately.
+ *  regionally-varying quantities share one range type rather than being twenty-four loose
+ *  scalars with a .z slot each to remember.
  *
  *  NOTHING IS COMBINED OR CORRELATED HERE. The lattice ratio rounding, the four scale
  *  quantizations, the offset re-split, the lambda derivation and the two region-fetch
@@ -786,9 +739,9 @@ struct FUniverseDensityArgs
  *  variation: the two region fetches ARE the archetype system, and they resolve per sample
  *  rather than per instance. Direct configuration plus a seed is the whole input.
  *
- *  That simplifies the compute path as much as it does this struct -- entity generation
- *  needs one parameter set for the layer rather than a per-cell archetype lookup, and the
- *  constant buffer is the same sixteen values for every dispatch.
+ *  That simplifies the compute path as much as it does this struct: entity generation needs
+ *  one parameter set for the layer rather than a per-cell archetype lookup, and the constant
+ *  buffer is the same sixteen values for every dispatch.
  *
  *  NO CLAMPING beyond the UPROPERTY meta on obvious division guards. Every value passes
  *  through at whatever it is given so that pushing one past its sensible range is visible
@@ -814,13 +767,13 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 
 	/** THE ONE WIDTH, in small cells, serving walls and filaments alike -- which is why it
 	 *  sits here rather than inside either group. Both features read the same participation
-	 *  count off the same weights, so a second width would need a second set of
-	 *  exponentials over the whole neighbourhood, 27 more exp2 and 54 more madds, to shift
-	 *  a threshold the wall term reaches through its falloff exponent for two instructions.
+	 *  count off the same weights, so a second width would cost a second set of exponentials
+	 *  over the whole neighbourhood -- 27 more exp2 and 54 more madds -- to shift a threshold
+	 *  the wall term reaches through its falloff exponent for two instructions.
 	 *
-	 *  IT IS A FALLOFF RATE, NOT A BAND EDGE. It is the distance at which a competing
-	 *  node's weight has halved. There is no cutoff at all -- the tail is exponential
-	 *  rather than absent, which is what the wall falloff exponent exists to control.
+	 *  A FALLOFF RATE, NOT A BAND EDGE: the distance at which a competing node's weight has
+	 *  halved. There is no cutoff anywhere -- the tail is exponential rather than absent,
+	 *  which is what the wall falloff exponent controls.
 	 *
 	 *  It also floors the march's step size through MinFeatureStep, half the narrowest wall
 	 *  the parameters can produce, derived from this and the small cell size together.
@@ -858,42 +811,39 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 	 *  player was standing when the cell was generated. It still travels through this
 	 *  derivation because the march reads it off the params struct.
 	 *
-	 *  ZERO IS NOT "NO FADE" -- it is the MOST fade. The span is 1 - start, so at 0 the
-	 *  attenuation runs across the whole volume and the field is a soft ball centred on the
-	 *  camera rather than a window with a horizon. That is what the instance was tuned at
-	 *  and it is very likely part of why the march is not saturating: it is thinning
-	 *  everything past the near field. Kept as the default so the tuned look survives the
-	 *  push, but it is a look decision standing in for a bounds control, and raising it
-	 *  will make the distance dense again. 1 and above is the disable. */
+	 *  ZERO IS NOT "NO FADE" -- it is the MOST fade, and 1 and above is the disable. The
+	 *  span is 1 - start, so at 0 the attenuation runs across the whole volume and the field
+	 *  is a soft ball centred on the camera rather than a window with a horizon.
+	 *
+	 *  A LOOK DECISION STANDING IN FOR A BOUNDS CONTROL at the default. Sitting at 0 thins
+	 *  everything past the near field, which is the first thing to suspect when the march
+	 *  will not saturate; raising it makes the distance dense again. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Bounds", meta = (ClampMin = "0.0"))
 	float BoundsFadeStart = 0.0f;
 
 	/** The largest |dTex/dUV| each filtered WARP volume reaches. A property of the ASSET,
-	 *  measured rather than chosen, and NOT one of the derivation inputs -- used only to
-	 *  predict the fold ceiling.
+	 *  measured rather than chosen, and NOT a derivation input -- it only predicts the fold
+	 *  ceiling.
 	 *
-	 *  TWO OF THEM NOW, ONE PER OCTAVE, because the octaves read separate assets. This was
-	 *  a single pin when every fetch shared one volume, and a single pin is now actively
-	 *  misleading: a bake that sharpens the small octave would move the large octave's
-	 *  predicted term too, so the two halves of the ceiling sum have to be checked
-	 *  separately. Splitting it is what makes PredictedFoldShear arithmetic on the right
-	 *  constants rather than on an average of two.
+	 *  ONE PER OCTAVE, because the octaves read separate assets. A single shared pin would
+	 *  make a bake that sharpens one octave move the other's predicted term as well, so the
+	 *  two halves of the ceiling sum have to carry their own constants.
 	 *
 	 *  THE VARIANCE VOLUMES NEED NO EQUIVALENT. Their channels feed VarianceT as lerp
 	 *  factors, never as displacements, so their gradient cannot fold anything.
 	 *
-	 *  BOTH ARE STALE AND KNOWINGLY SO. 14.09 was measured on VT_PerlinWorley_Balanced, and
-	 *  neither warp octave reads that asset any more -- they read purpose-baked signed
-	 *  vector volumes whose value scale is different again, and whose decode no longer
-	 *  centres. Until each is re-measured on its own bake, PredictedFoldShear and everything
-	 *  Validate() says about the fold ceiling are arithmetic on the wrong constants -- treat
-	 *  a ceiling warning as unproven rather than as a reading, in either direction.
+	 *  MEASUREMENT CONDITIONS: 14.09 holds for VT_PerlinWorley_Balanced at 256^3 with a
+	 *  centring decode. A value is only valid for the asset, resolution and decode it was
+	 *  taken on -- gradient is per UV, so halving a volume's resolution roughly halves the
+	 *  largest |dTex/dUV| the same content reaches.
 	 *
-	 *  WRONG IN BOTH DIRECTIONS. If the amplitudes look right but the predicted shear is
-	 *  far above one, these are the numbers that disagree, and the ratio between where the
-	 *  web actually tears and the prediction is the factor to correct by. Each becomes 1 and
-	 *  drops out entirely once its volume is gradient-normalized at bake time -- which the
-	 *  authoring tool can now do, and doing it for both retires this pair. */
+	 *  TODO: NEITHER PIN MATCHES ITS ASSET. The octaves read purpose-baked signed vector
+	 *  volumes at 128^3 with a non-centring decode -- three conditions different from the
+	 *  ones above. Until each is re-measured on its own bake, PredictedFoldShear and every
+	 *  fold-ceiling line Validate() emits are arithmetic on constants that do not describe
+	 *  the assets, in an unknown direction. Read a ceiling warning as unproven rather than
+	 *  as a reading. Trigger to close: a re-measure, or a gradient-normalized bake of both
+	 *  volumes, which sets each pin to 1 and drops the term out entirely. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density|Asset", meta = (ClampMin = "0.0"))
 	float WarpTexGradientLarge = 14.09f;
 
@@ -904,49 +854,42 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 	{
 		// THE SMALL OCTAVE IS NOT A COPY OF THE LARGE ONE, so its defaults are set here
 		// rather than left to FUniverseWarpOctaveParams's own. Lower amplitude and a scale
-		// seven times higher: fine grain against coarse bend. See the fold ceiling note on
-		// the member.
+		// seven times higher: fine grain against coarse bend.
 		//
-		// THE AMOUNT SURVIVED THE ASSET SWAP UNCHANGED, which is worth stating because the
-		// large octave's did not. The spread is wide (0.05..0.3, biased hard to the low end)
-		// because this octave is the one the appearance fetch varies most visibly: it is the
-		// difference between a province of clean sheets and one of broken filament. That
-		// shape held up against the curl volume without retuning.
+		// The spread is wide and biased hard to the low end because this octave is what the
+		// appearance fetch varies most visibly -- the difference between a province of clean
+		// sheets and one of broken filament.
 		//
-		// IT IS ALSO ESSENTIALLY THE WHOLE FOLD CEILING. The coarse lattice multiplies this
-		// octave by the lattice ratio and divides the large one by it, so at the shipped
-		// defaults this term is about 94% of predicted shear. Raising this max is the single
-		// most dangerous edit in the warp block, and it is the reason the curl volume is on
-		// this octave rather than the other one -- see the asset paths in
-		// FUniverseMaterialParams.
+		// THIS MAX IS ESSENTIALLY THE WHOLE FOLD CEILING. The coarse lattice multiplies this
+		// octave by the lattice ratio and divides the large one by it, so this term carries
+		// about 94% of predicted shear at these defaults. Raising it is the most dangerous
+		// edit in the warp block, and it is why the curl volume belongs on this octave -- see
+		// the asset paths in FUniverseMaterialParams.
 		WarpSmall.Amount = FUniverseVarianceRange(0.05f, 0.3f, 2.0f);
 
-		// 3079/4096, MOVED OFF 0.75 DELIBERATELY. 0.75 quantizes to 3072, which is
-		// 2^10 * 3 -- composite, and the only composite numerator in the set. It happened
-		// to stay coprime with the other three (19, 41 and 409 are all prime and none
-		// divides 3072), so nothing was visibly wrong, but it was one badly-chosen
-		// neighbouring scale away from a re-alignment. 3079 is prime, which makes this
-		// scale coprime with ANY other numerator by construction rather than by luck.
-		//
-		// The value moved by 0.23%, far below anything the eye reads as a frequency change.
+		// 3079/4096, AND PRIME. A round 0.75 quantizes to 3072 = 2^10 * 3, the one composite
+		// numerator the set can produce; it happens to stay coprime with 19, 41 and 409, but
+		// only by luck, and one badly-chosen neighbouring scale would re-align against it. A
+		// prime numerator is coprime with any other by construction. The difference between
+		// the two values is 0.23%, well below what the eye reads as a frequency change.
 		WarpSmall.Scale = 0.751730f;
 		WarpSmall.LatticeFollow = 0.0f; // ignored; the small octave is pinned at full follow
 	}
 
 #pragma region Derivation
 	/** THE ONLY PLACE THE PACKING DECISIONS LIVE. Every downstream consumer -- the material
-	 *  push, the compute parameter fill, and a future CPU derivation -- reads this rather
-	 *  than packing again.
+	 *  push, the compute parameter fill, a CPU derivation -- reads this rather than packing
+	 *  again.
 	 *
-	 *  Pure packing plus the four .w passengers. Each passenger belongs to the SAME FIELD
-	 *  as its host: skew already rode the spread's interpolant, each warp scale multiplies
-	 *  its own octave's amount in the shear product, and the lattice-follow steers the same
-	 *  octave the weights vector gains. A pin carrying both is one setting rather than two
-	 *  unrelated ones sharing a wire, and that is the test the next claim should pass.
+	 *  Pure packing plus the four .w passengers. EACH PASSENGER BELONGS TO THE SAME FIELD AS
+	 *  ITS HOST: skew multiplies the spread's own interpolant, each warp scale multiplies its
+	 *  own octave's amount in the shear product, and the lattice-follow steers the octave the
+	 *  weights vector gains. A pin carrying both is one setting, not two unrelated ones
+	 *  sharing a wire -- the test any further claim on a free slot has to pass.
 	 *
-	 *  THE SEED IS AN ARGUMENT, not a member, because FUniverseParams::Seed is the
-	 *  authoritative one and a second copy here would be free to disagree with it. The
-	 *  offset is an argument because it is per-frame runtime state. */
+	 *  THE SEED IS AN ARGUMENT, not a member: FUniverseParams::Seed is the authoritative one
+	 *  and a second copy here would be free to disagree with it. The offset is an argument
+	 *  because it is per-frame runtime state. */
 	FUniverseDensityArgs Pack(int32 InSeed, const FUniverseFieldOffset& InOffset) const
 	{
 		FUniverseDensityArgs Out;
@@ -1028,32 +971,22 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 		Out.InBoundsFadeStart = A.BoundsFadeStart;
 	}
 
-	/** NO CPU DERIVATION YET, and the omission is deliberate rather than pending.
+	/** THERE IS NO CPU DERIVATION, and adding one would not give this layer a CPU placement
+	 *  path. The galaxy layer has one -- it compiles its core into C++ behind
+	 *  GalaxyHLSLShim.h and returns a constructed params struct -- and the same construction
+	 *  here would be three lines against this struct.
 	 *
-	 *  The galaxy layer compiles its core into C++ behind GalaxyHLSLShim.h and returns a
-	 *  constructed params struct. The universe core did not, for three reasons, and the
-	 *  texture split closed all three as a side effect rather than as a goal:
-	 *  WeightedVector3 returned c.xyz against a shim float4 with no .xyz accessor (it now
-	 *  builds the float3 componentwise, which is what this file's own parity rules always
-	 *  required); it needed float4 * float4, which the shim now has; and the weighted-scalar
-	 *  path needed float4 - float, which no longer exists at all -- it went out with the
-	 *  cluster/gas stage that was its only consumer.
+	 *  IT WOULD SAMPLE A DIFFERENT FIELD. The shim stubs every Texture3D fetch to a neutral
+	 *  0.5, so a C++ evaluation reduces to the unwarped analytic web. This field is more
+	 *  texture-dependent than the galaxy's, not less -- two region fetches and three warp
+	 *  fetches -- and turning them all neutral changes the GEOMETRY, not the shading. See
+	 *  the same warning in GalaxyHLSLShim.h: the shim path must never place entities.
 	 *
-	 *  Verified only to the extent that the decode and both texture neutrals compile and
-	 *  reduce correctly. The rest of the core has not been built on this side, so treat a
-	 *  first compile as likely to surface more gaps of the same kind.
-	 *
-	 *  CLOSING THEM WOULD NOT MAKE A CPU PLACEMENT PATH CORRECT. The shim stubs Texture3D
-	 *  fetches to a neutral 0.5, so the C++ field reduces to the unwarped analytic web --
-	 *  and this field is more texture-dependent than the galaxy's, not less: two region
-	 *  fetches and three warp fetches, and turning them all neutral changes the GEOMETRY,
-	 *  not just the shading. GalaxyHLSLShim.h already says in bold that the shim path must
-	 *  never place entities for exactly that reason.
-	 *
-	 *  So entity generation lands on the compute harness, which samples the same volume the
-	 *  material does, and FillShaderParameters is how it gets its inputs. If a CPU probe is
-	 *  ever wanted for debugging rather than placement, close the shim gaps then and add a
-	 *  derivation beside Pack -- it is three lines against this struct. */
+	 *  So placement lands on the compute harness, which samples the same volumes the
+	 *  material does, and FillShaderParameters is how it gets its inputs. A CPU probe for
+	 *  DEBUGGING is a reasonable thing to want; expect a first compile against the shim to
+	 *  surface missing operators, since only the decode and the texture neutrals have been
+	 *  built on that side. */
 #pragma endregion
 
 #pragma region Validation
@@ -1063,26 +996,25 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 	  *    + AmountSmall * ScaleSmall * ratio * GradientSmall
 	  *
 	  *  At or below 1 the web bends. Above it the displacement folds, neighbouring samples
-	  *  cross over, and the web TEARS -- and only in the regions the blend has handed to the
+	  *  cross over, and the web TEARS -- only in the regions the blend has handed to the
 	  *  coarse lattice, so region-dependent tearing reads as a lot of other things before it
 	  *  reads as a warp amplitude problem.
 	  *
-	  *  Each amount is that octave's MAX, since that is what a region can actually resolve
-	  *  to, and each octave carries its OWN gradient because the two read different assets.
+	  *  Each amount is that octave's MAX, since that is what a region can resolve to, and each
+	  *  octave carries its OWN gradient because the two read different assets.
 	  *
-	  *  BOTH OCTAVES ARE DIVERGENCE-FREE AGAIN, now that each reads a curl volume rather
-	  *  than a slice of one generic packed field, so there is real headroom above 1 rather
-	  *  than a bound sitting on the tear point -- a curl field folds only at second order.
-	  *  A prediction slightly over 1 is therefore no longer the emergency it was. Practical
-	  *  tuning is unchanged -- fix the scales, raise one amplitude until the web visibly
-	  *  tears, back off about thirty percent. */
+	  *  A DIVERGENCE-FREE OCTAVE FOLDS ONLY AT SECOND ORDER, so a curl volume leaves real
+	  *  headroom above 1 rather than putting the bound on the tear point -- a prediction
+	  *  slightly over 1 is not an emergency while both octaves read curl. Tune by fixing the
+	  *  scales, raising one amplitude until the web visibly tears, then backing off about
+	  *  thirty percent; this number is the check, not the target. */
 	float PredictedFoldShear() const
 	{
 		const float Ratio = FMath::Max(FMath::RoundToFloat(
 			FMath::Max(Lattice.CellSizeLarge, 0.0f) / FMath::Max(Lattice.CellSizeSmall, 1e-6f)), 1.0f);
 
 		// EACH TERM CARRIES ITS OWN ASSET'S GRADIENT. Factoring one gradient out of the sum
-		// is only valid while both octaves read the same volume, which they no longer do.
+		// is valid only if both octaves read the same volume; they read separate ones.
 		const float LargeTerm =
 			WarpLarge.Amount.Max * WarpLarge.Scale / Ratio * WarpTexGradientLarge;
 		const float SmallTerm =
@@ -1129,21 +1061,19 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
  *      baseStep = chord / StepCount
  *      h        = baseStep * (1 + StepGrowth * t01)
  *
- *  The reason is the near field. A camera-distance step goes to ZERO at the camera, and
- *  the camera is normally inside this volume since the proxy is centred on it, so
- *  successive samples landed inside a single cell -- each paying a full fifty-four
- *  candidate neighbourhood walk to re-derive a field that had not changed between them. A
- *  step derived from the chord cannot collapse that way, because it does not know where
- *  the camera is. */
+ *  THE NEAR FIELD IS WHY. A camera-distance step goes to ZERO at the camera, and the camera
+ *  is normally inside this volume since the proxy is centred on it -- so successive samples
+ *  land inside a single cell, each paying a full fifty-four candidate neighbourhood walk to
+ *  re-derive a field that has not changed between them. A step derived from the chord cannot
+ *  collapse that way, because it does not know where the camera is. */
 USTRUCT(BlueprintType)
 struct ULTRALARGESCALE_API FUniverseMaterialParams
 {
 	GENERATED_BODY()
 
-	/** A CEILING ON THE STEP COUNT, NOT A FLOOR, which is what the material's old
-	 *  MinSamples name had backwards. Growth only ever lengthens steps, so every step is
-	 *  at least span / StepBudget and the actual count is StepBudget * ln(1+g)/g -- equal
-	 *  to the budget only at growth 0, 0.69 of it at growth 1, 0.46 at growth 3. See
+	/** A CEILING ON THE STEP COUNT, NOT A FLOOR. Growth only ever lengthens steps, so every
+	 *  step is at least span / StepBudget and the actual count is StepBudget * ln(1+g)/g --
+	 *  equal to the budget only at growth 0, 0.69 of it at growth 1, 0.46 at growth 3. See
 	 *  GetEffectiveStepCount. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
 		meta = (ClampMin = "8.0", ClampMax = "1024.0"))
@@ -1156,31 +1086,29 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 		meta = (ClampMin = "0.0", ClampMax = "8.0"))
 	float VolumeStepGrowth = 4.0f;
 
-	// NO STEP CEILING AND NO ITERATION BOUND HERE, and both were removed rather than
-	// forgotten. The march's step floor is P.MinFeatureStep -- half the narrowest wall the
-	// parameters can produce, derived in the core from FeatureWidth and CellSizeSmall
-	// together -- and an authored absolute cannot compete with a floor that knows the cell
-	// size. The loop bound is derived in the Custom node from StepBudget, because the
-	// budget already bounds the count and an authored bound could therefore only truncate:
-	// a truncated march looks identical to one that finished, minus the far half of the
-	// volume.
+	// NO STEP CEILING AND NO ITERATION BOUND HERE, deliberately. The step floor is
+	// P.MinFeatureStep -- half the narrowest wall the parameters can produce, derived in the
+	// core from FeatureWidth and CellSizeSmall together -- and an authored absolute cannot
+	// compete with a floor that knows the cell size. The loop bound is derived in the Custom
+	// node from StepBudget, since the budget already bounds the count and an authored bound
+	// could therefore only truncate: a truncated march looks identical to one that finished,
+	// minus the far half of the volume.
 
 	/** Multiplier on density before the march's exp(-density * scale * h) -- how opaque the
 	 *  result is, and nothing else. The field's own densities set the RATIO between walls,
 	 *  filaments and the floor.
 	 *
-	 *  KEEP IT AT 1 UNLESS THERE IS A REASON. It is tempting as a brightness control,
-	 *  because it is the last multiplier before the accumulation, but driving the look from
-	 *  here scales the apparent field several times over its authored range -- and then
-	 *  every judgement made against the picture is made against a field that does not exist.
-	 *  The exponents stop reading as falloff curves because the values they shape are off
-	 *  their intended scale, and the void floor stops looking like a floor.
+	 *  KEEP IT AT 1 UNLESS THERE IS A REASON. It is tempting as a brightness control, being
+	 *  the last multiplier before the accumulation, but driving the look from here scales the
+	 *  apparent field several times over its authored range -- and every judgement made
+	 *  against the picture is then made against a field that does not exist. The exponents
+	 *  stop reading as falloff curves because the values they shape are off their intended
+	 *  scale, and the void floor stops looking like a floor.
 	 *
-	 *  Output brightness belongs after the march, on the material's own intensity
-	 *  multiplier, where it cannot be mistaken for a property of the field. Note that this
-	 *  never reached placement either way: acceptance normalises against each cell's own
-	 *  probed envelope, so nothing here has ever changed where an entity lands -- only what
-	 *  the field looked like while it was being tuned. */
+	 *  Output brightness belongs after the march, on the material's own intensity multiplier,
+	 *  where it cannot be mistaken for a property of the field. IT NEVER REACHES PLACEMENT
+	 *  either way: acceptance normalises against each cell's own probed envelope, so this
+	 *  changes what the field looks like and not where an entity lands. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
 		meta = (ClampMin = "0.0"))
 	float VolumeDensityScale = 1.0f;
@@ -1195,31 +1123,19 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 
 	// NO DITHER PIN. It is computed per pixel inside the Custom node, from SvPosition and
 	// the frame index, because Parameters and View exist only inside the generated material
-	// function -- and there is no case for disabling it in a shipped material. A debug
+	// function -- and there is no case for disabling it in a release build. A debug
 	// toggle would be lerp(1, jitter, k) in the node with a new pin, not a value pushed
 	// from here.
 
-	/** WHO OWNS THE FIELD PARAMETERS: FUniverseDensityParams, or the material instance.
-	 *
-	 *  FALSE for as long as look development is happening in the material.
-	 *  MT_UniverseRaymarchAnalytic_Inst already carries a tuned set, and pushing would
-	 *  overwrite every one of them with defaults reasoned from the core's commentary rather
-	 *  than measured against a picture. The field offset is pushed either way -- it is
-	 *  runtime state with no authored counterpart, so there is nothing for it to clobber.
-	 *
-	 *  IT MUST BE TRUE BEFORE ENTITY GENERATION LANDS. The compute path reads
-	 *  FUniverseDensityParams, so from the moment anything is placed against the field, a
-	 *  material tuned independently of that struct means the render and the placement are
-	 *  two different universes -- and the failure is silent, because both look plausible.
-	 *  Transcribe the instance's tuned values into this struct's defaults and set this, in
-	 *  that order, as one step.
-	 *
-	 *  A MID SILENTLY IGNORES A NAME THE MATERIAL DOES NOT HAVE, which is the other reason
-	 *  to flip this deliberately: the first push is where a mismatched pin name surfaces,
-	 *  and it surfaces as a parameter that keeps its authored value with no warning
-	 *  anywhere. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
-	bool bPushDensityParams = true;
+	// NO OWNERSHIP TOGGLE. FUniverseDensityParams is the field, and the push is
+	// unconditional. The compute path reads this struct, so a material instance tuned
+	// independently of it would put the render and placement on two different universes --
+	// silently, since both look plausible. Look development belongs in this struct's
+	// values, not in a mode that lets the asset win.
+	//
+	// A MID SILENTLY IGNORES A NAME THE MATERIAL DOES NOT HAVE, so a mismatched pin name
+	// surfaces as a parameter sitting at its authored value with no warning anywhere. The
+	// push is where that would be caught; skipping it means it never is.
 
 	/** DEBUG: write each entity's SAMPLED DENSITY into its colour instead of its decoratives.
 	 *
@@ -1244,16 +1160,15 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material|Debug")
 	bool bDebugColorByDensity = false;
 
-	/** THE FOUR FIELD VOLUMES. One packed asset used to serve every fetch; the field now
-	 *  takes a purpose-baked volume per site, because the two families want opposite things
-	 *  from a texture and one asset could only be a compromise between them. The mapping is
-	 *  in the fetch table at the top of UniverseDensityCore.ush.
+	/** THE FOUR FIELD VOLUMES, one purpose-baked per fetch site: the variance family and the
+	 *  warp family want opposite things from a texture, and a shared asset can only be a
+	 *  compromise between them. The mapping is in the fetch table at the top of
+	 *  UniverseDensityCore.ush.
 	 *
 	 *  ALL FOUR MUST REACH THE COMPUTE PATH. Placement and render sample one field or they
-	 *  are not one field, and that is now four correspondences to keep rather than one. The
-	 *  actor resolves all four in LoadRuntimeAssets and hands the same pointers to the
-	 *  material instance and to the dispatch, so the correspondence stays structural rather
-	 *  than becoming four things to remember.
+	 *  are not one field, which is four correspondences to keep. The actor resolves all four
+	 *  in LoadRuntimeAssets and hands the same pointers to the material instance and to the
+	 *  dispatch, so the correspondence is structural rather than four things to remember.
 	 *
 	 *  VARIANCE VOLUMES -- the two region-axis fetches. Periodic, so repeat addressing
 	 *  closes the 4096-cell wrap. UNORM, per-channel normalized to 0.5 with comparable
@@ -1262,11 +1177,10 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 	 *  they were authored. A distinct archetype per channel.
 	 *
 	 *  THE TWO MUST BE DIFFERENT MULTINOISE VARIANTS, not the same asset twice. A is the
-	 *  structure field and B is the appearance field, and the whole point of separating them
-	 *  is that a province's shape and its painting change in different places. Two fetches
-	 *  into one asset share all four generators and put the boundaries back together at a
-	 *  scale offset -- the correlation this layer has now removed twice, once between
-	 *  channels and once between fields. LoadRuntimeAssets warns if they resolve equal.
+	 *  structure field and B is the appearance field, and separating them is what lets a
+	 *  province's shape and its painting change in different places. Two fetches into one
+	 *  asset share all four generators and put the boundaries back together at a scale
+	 *  offset. LoadRuntimeAssets warns if they resolve equal.
 	 *
 	 *  WARP VOLUMES -- the two domain-warp octaves. Periodic for the same reason. SIGNED,
 	 *  values in [-1,1], because the shader applies them as displacements with NO centring
@@ -1274,9 +1188,9 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 	 *  written out. And a coherent VECTOR field across xyz rather than three unrelated
 	 *  scalar archetypes, or the warp is axis-coupled and the swizzle test shows it.
 	 *
-	 *  CURL FOR PREFERENCE. Divergence-free warp folds only at second order, which is worth
-	 *  a factor of several in usable amplitude and hands void-size variation back to
-	 *  VoidSizeSpread alone. Gradient fields work and are not divergence-free.
+	 *  CURL FOR PREFERENCE. Divergence-free warp folds only at second order, worth a factor
+	 *  of several in usable amplitude, and it hands void-size variation back to VoidSizeSpread
+	 *  alone. Gradient fields work and are not divergence-free.
 	 *
 	 *  GRADIENT-NORMALIZED AT BAKE IF POSSIBLE, for both warp volumes: that sets the
 	 *  matching WarpTexGradient pin to 1 and reduces the fold ceiling to amounts and scales
@@ -1292,10 +1206,9 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 	 *  packaged build loses structure the editor keeps.
 	 *
 	 *  FULL Package.Object FORM, not the package path alone. LoadObject can often infer the
-	 *  object name from the package, but "often" is doing real work in that sentence -- it
-	 *  is the form that is least reliable in a packaged build, and it is what the previous
-	 *  single path used. The mesh and material loads elsewhere in this actor already spell
-	 *  the object out; these now match.
+	 *  object name from the package, and "often" is the problem: inference is least reliable
+	 *  in a packaged build, which is where a failed load is hardest to see. The mesh and
+	 *  material loads elsewhere in this actor spell the object out for the same reason.
 	 *
 	 *  THE WARP AMOUNTS AND BOTH WarpTexGradient PINS BELONG TO WHATEVER THESE NAME.
 	 *  Changing an asset without re-tuning its octave's pair is a silent retune of the
@@ -1306,28 +1219,25 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 	 *  arguments point opposite ways:
 	 *
 	 *    - the FOLD BUDGET wants curl on the SMALL octave. On the coarse lattice the small
-	 *      term carries a factor of ratio while the large term is divided by it, so the
-	 *      small octave is essentially the entire ceiling -- around 94% of predicted shear
-	 *      at the shipped defaults. Divergence-free warp folds only at second order, so
-	 *      curl buys headroom exactly where all the risk is concentrated.
+	 *      term carries a factor of ratio while the large term is divided by it, so the small
+	 *      octave is essentially the entire ceiling -- around 94% of predicted shear at the
+	 *      defaults. Divergence-free warp folds only at second order, so curl buys headroom
+	 *      exactly where the risk is concentrated.
 	 *    - VOID SIZE wants curl on the LARGE octave. A divergence-free warp cannot vary void
-	 *      size; a generic one can, and when both octaves were generic some of what read as
-	 *      size variation was coming from the large octave rather than from VoidSizeSpread,
-	 *      the parameter that names the effect.
+	 *      size and a generic one can, so a generic large octave contributes size variation
+	 *      that reads as VoidSizeSpread's and is not.
 	 *
-	 *  THE FOLD BUDGET WINS, ON MEASUREMENT RATHER THAN ON ARGUMENT -- this was tried the
-	 *  other way round first and swapped after looking at it. The arithmetic backs up what
-	 *  the eye picked: 94% of the ceiling sitting on one octave makes that octave the only
-	 *  one worth protecting, and the void-size contamination on the large octave is a
-	 *  second-order authoring annoyance by comparison. If void size ever needs to be tuned
-	 *  cleanly against VoidSizeSpread alone, that is the reason to revisit, not tearing.
+	 *  THE FOLD BUDGET WINS. 94% of the ceiling on one octave makes that octave the only one
+	 *  worth protecting; void-size contamination on the large octave is a second-order
+	 *  authoring annoyance beside it. Revisit only if void size needs tuning cleanly against
+	 *  VoidSizeSpread -- not because of tearing.
 	 *
-	 *  BOTH WARP ASSETS ARE S4 and both variance assets are S8. The warps came down from S8
-	 *  deliberately: they are what the eye reads as structure, so they benefit most from the
-	 *  larger features a lower tiling interval gives at the same resolution. The variance
-	 *  fetches run at scales two orders of magnitude coarser -- 19 and 41 against 409 and
-	 *  3079 per 4096 cells -- so their features are enormous in cell terms either way and a
-	 *  higher interval costs them nothing visible.
+	 *  BOTH WARP ASSETS ARE S4 and both variance assets are S8. The warps are what the eye
+	 *  reads as structure, so they benefit most from the larger features a lower tiling
+	 *  interval gives at the same resolution. The variance fetches run two orders of
+	 *  magnitude coarser -- 19 and 41 against 409 and 3079 per 4096 cells -- so their
+	 *  features are enormous in cell terms either way and the higher interval costs nothing
+	 *  visible.
 	 *
 	 *  THE RESOLUTION SPLIT IS THE /256 AND /128 IN THESE PATHS, and it follows the same
 	 *  logic one level down. The variance volumes take 256^3 and the warp volumes 128^3,
@@ -1343,17 +1253,15 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 	 *      displaced position lands in. Detail below the feature width cannot survive that
 	 *      chain, so 128^3 spends nothing on structure the field cannot express.
 	 *
-	 *  IT ALSO COSTS FAR LESS THAN THE OTHER WAY ROUND. A 256^3 volume is eight times the
-	 *  texels of a 128^3 one, so at RGBA8 the two variance volumes are 64 MB each against
-	 *  8 MB for each warp volume -- around 144 MB resident for the set, and around 160 MB
-	 *  if the warp volumes need a 16-bit float format to carry their sign. Putting the high
-	 *  resolution on the warp pair instead would have cost the same and bought less.
+	 *  IT ALSO COSTS LESS THAN THE OTHER WAY ROUND. A 256^3 volume is eight times the texels
+	 *  of a 128^3 one, so at RGBA8 the two variance volumes are 64 MB each against 8 MB for
+	 *  each warp volume -- around 144 MB resident for the set, and around 160 MB if the warp
+	 *  volumes need a 16-bit float format to carry their sign. The high resolution on the
+	 *  warp pair instead would cost the same and buy less.
 	 *
-	 *  BOTH WarpTexGradient PINS ARE NOW WRONG BY A FURTHER FACTOR. Gradient is measured per
-	 *  UV, so halving a volume's resolution roughly halves the largest |dTex/dUV| it can
-	 *  reach for the same content. Those pins already held a value measured on a different
-	 *  asset with a different decode; the resolution change is a third independent reason
-	 *  they need re-measuring rather than adjusting. */
+	 *  A RESOLUTION CHANGE INVALIDATES THAT OCTAVE'S WarpTexGradient. Gradient is measured
+	 *  per UV, so halving a volume's resolution roughly halves the largest |dTex/dUV| the
+	 *  same content reaches. See the measurement conditions on those pins. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
 	FString VarianceVolumeA = "/UniverseNoisePack/256/VT_MultiNoise_1_S8.VT_MultiNoise_1_S8";
 
@@ -1381,12 +1289,8 @@ struct ULTRALARGESCALE_API FUniverseMaterialParams
 };
 
 
-/** Universe-layer generation parameters: the cosmic-web density field, the march that
- *  draws it, the legacy noise graph that still drives cluster placement, per-tier
- *  streaming configs, and scale derivation.
- *
- *  THE GAS LAYER IS GONE. GasExtentMinMultiplier and GasExtentMaxMultiplier sized a
- *  nebula sprite that shared the Large tier's positions; the raymarch replaced it. */
+/** Universe-layer generation parameters: the cosmic-web density field, the march that draws
+ *  it, per-tier streaming configs, and scale derivation. */
 USTRUCT(BlueprintType)
 struct ULTRALARGESCALE_API FUniverseParams : public FBaseParams {
 	GENERATED_BODY()
@@ -1394,28 +1298,16 @@ struct ULTRALARGESCALE_API FUniverseParams : public FBaseParams {
 #pragma region Density Field
 
 	/** The cosmic-web field: what UniverseDensityCore.ush evaluates, what the ray march
-	 *  draws, and what entity generation will place against. */
+	 *  draws, and what entity generation places against. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Density")
 	FUniverseDensityParams DensityParams;
 
 	/** How the field is MARCHED, as opposed to what it contains. Kept apart from
 	 *  DensityParams because none of it reaches MakeUniverseDensityParams: these are the
-	 *  march's own arguments plus the noise asset, and only the render consumes them.
+	 *  march's own arguments plus the volume assets, and only the render consumes them.
 	 *  Entity generation samples the same field with none of this. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material")
 	FUniverseMaterialParams MaterialParams;
-
-#pragma endregion
-
-#pragma region Noise
-
-	/** LEGACY, and a DIFFERENT FIELD from DensityParams above.
-	 *  UniverseDataGenerator::BuildNoise() builds this graph and all three tiers
-	 *  rejection-sample it for cluster placement, so until placement moves across, the
-	 *  sprites and the ray march are showing two unrelated universes. Comes out with
-	 *  BuildNoise and EncodedTree. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
-	FUniverseNoiseGraphParams NoiseGraphParams;
 
 #pragma endregion
 
@@ -1497,16 +1389,14 @@ struct ULTRALARGESCALE_API FUniverseParams : public FBaseParams {
 		SmallTier.NeighborhoodRadius = 1;
 		SmallTier.SlotCapacity = 500;
 
-		// GENERATION SUBDIVISION, sized against the FIELD'S cell rather than left at the
-		// zero default -- which gave nine thread groups per transition batch and left the
-		// GPU essentially idle.
+		// GENERATION SUBDIVISION, sized against the FIELD'S cell rather than the tier's. At
+		// zero a transition batch is nine thread groups, which leaves the GPU idle.
 		//
-		// A field cell is ProxyExtent * CellSizeSmall = 0.9 sector extents at the shipped
-		// values, and a tier cell at depth d is 4/2^d of one. So the Large tier's cell spans
-		// about 2.2 field cells undivided, which is far too coarse for its probes to
-		// describe; two levels bring it to 0.56. Mid and Small are already at or below that
-		// undivided, so they take one level for OCCUPANCY rather than for resolution --
-		// nine groups is not a dispatch.
+		// A field cell is ProxyExtent * CellSizeSmall = 0.9 sector extents at these values,
+		// and a tier cell at depth d is 4/2^d of one. The Large tier's cell therefore spans
+		// about 2.2 field cells undivided, too coarse for its probes to describe; two levels
+		// bring it to 0.56. Mid and Small sit at or below that undivided, so their one level
+		// buys OCCUPANCY rather than resolution -- nine groups is not a dispatch.
 		//
 		// These are a starting point, not a tuning. Read the C/P ratio in the batch log:
 		// below about 1 the probes have overtaken placement and a tier wants one level

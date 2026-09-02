@@ -275,28 +275,24 @@ protected:
 	 *  translucent quads. */
 	FString VolumetricMaterialPath = FString("/UltraLargeScale/Sector/MT_UniverseRaymarchAnalytic_Inst.MT_UniverseRaymarchAnalytic_Inst");
 
-	/** Pushes the field and march parameter set onto a material instance.
-	 *
-	 *  GATED BY MaterialParams.bPushDensityParams, which is false while look development
-	 *  lives in the material instance. The offset is pushed separately and always.
+	/** Pushes the authored field onto a material instance. Draw-constant, so it runs once
+	 *  at material creation; the offset has its own per-frame path.
 	 *
 	 *  THE GRAPH IS A PASS-THROUGH. These are the identical raw values
 	 *  FUniverseDensityParams::Pack hands MakeUniverseDensityParams, and every correlation
 	 *  between them -- the lattice ratio rounding, the four scale quantizations, the offset
 	 *  re-split, the two region-fetch enables -- is resolved inside that shared derivation.
-	 *  Scaling or combining anything here instead would desync the render from placement,
-	 *  which is what the shared field exists to prevent. */
+	 *  Scaling or combining anything here instead desyncs the render from placement, which
+	 *  is what the shared field exists to prevent. */
 	void PushDensityParams(UMaterialInstanceDynamic* InMID) const;
 
-	/** THE MARCH CONTROLS, pushed UNCONDITIONALLY and separately from the field.
+	/** THE MARCH CONTROLS, pushed separately from the field.
 	 *
-	 *  They were briefly folded into PushDensityParams and gated with it, which was wrong:
-	 *  none of them reaches MakeUniverseDensityParams, so the reason to leave the field to
-	 *  the instance -- that the instance carries tuned values the struct's defaults would
-	 *  clobber -- does not apply to them. They are performance controls, they are the
-	 *  first thing reached for when the march chugs, and leaving them on the asset makes
-	 *  the baseline the marcher actually runs at invisible from the code. The galaxy layer
-	 *  pushes all four of its own for the same reason. */
+	 *  Separate because none of them reaches MakeUniverseDensityParams: they are
+	 *  performance controls rather than field parameters, and the entity path samples the
+	 *  same field with none of them. Leaving them on the asset would make the baseline the
+	 *  marcher actually runs at invisible from the code, and they are the first thing
+	 *  reached for when the march chugs. */
 	void PushMarchParams(UMaterialInstanceDynamic* InMID) const;
 
 	/** THE FIELD OFFSET IS THE ONLY PER-FRAME PARAMETER, and it is why this layer needs a
@@ -313,32 +309,9 @@ protected:
 	 *  draw-constant and is not re-pushed. */
 	void PushFieldOffset(UMaterialInstanceDynamic* InMID) const;
 
-	/** THE SMALL CELL SIZE THE OFFSET IS MEASURED IN, which is not unconditionally the
-	 *  authored one.
-	 *
-	 *  The offset is a count of small cells, and the shader adds it to a position it
-	 *  decomposes using ITS OWN CellSizeRange.x. The two have to be the same number. While
-	 *  bPushDensityParams is false the instance owns that value, so taking it from
-	 *  FUniverseDensityParams would give the field two sources of truth for one quantity --
-	 *  and the failure is not a wrong-looking field but a field that SCROLLS at the wrong
-	 *  rate, which reads as the web sliding under the camera rather than as a scale error.
-	 *
-	 *  So this reads the live value back off the material instance and falls back to the
-	 *  authored one only when the instance has no such pin. Once bPushDensityParams is
-	 *  true the two agree by construction and this returns the same number either way. */
-	float GetEffectiveCellSizeSmall() const;
-
-	/** THE LARGE CELL SIZE, ON THE SAME TERMS AS THE SMALL ONE, and read back off the same
-	 *  live pin for the same reason: while bPushDensityParams is false the material instance
-	 *  owns CellSizeRange, and a lattice ratio built from one live component and one authored
-	 *  component is a ratio neither side ever has.
-	 *
-	 *  Only GetFieldCellPeriod needs it, and only to derive the period the offset is reduced
-	 *  by. Nothing renders from it. */
-	float GetEffectiveCellSizeLarge() const;
-
-	/** THE FIELD'S REPEAT PERIOD IN SMALL CELLS, derived from the effective cell sizes
-	 *  exactly as MakeUniverseDensityParams derives it.
+	/** THE FIELD'S REPEAT PERIOD IN SMALL CELLS, from the authored lattice, derived exactly
+	 *  as MakeUniverseDensityParams derives it. Delegates to UniverseCellWrap::FieldCellPeriod
+	 *  so this and UniverseDataGenerator cannot arrive at different periods.
 	 *
 	 *  PUBLIC, in the same narrow island ComputeFieldOffset uses, because a reader needs it
 	 *  to INTERPRET that offset: the cell index comes back in [0, period), so a position one
@@ -346,9 +319,9 @@ protected:
 	 *  ARE the same cell -- but without the period there is no way to fold it back to signed
 	 *  for display. See UniverseCellWrap::ToSigned.
 	 *
-	 *  The two cell-size accessors it derives from stay protected: they are the ingredients,
-	 *  and exposing them is what would let a caller rebuild the period instead of asking for
-	 *  it -- the same rule as GetVolumetricProxyExtent and the field offset. */
+	 *  The lattice it derives from stays where it is rather than gaining an accessor:
+	 *  exposing the ingredients is what lets a caller rebuild the period instead of asking
+	 *  for it -- the same rule as GetVolumetricProxyExtent and the field offset. */
 public:
 	int32 GetFieldCellPeriod() const;
 protected:
@@ -383,9 +356,9 @@ protected:
 	 *  producing a perfectly plausible number on screen, which is the class of mismatch
 	 *  every safeguard around this field exists to make impossible or loud.
 	 *
-	 *  The access island is deliberately narrow -- GetVolumetricProxyExtent and
-	 *  GetEffectiveCellSizeSmall stay protected -- because exposing THOSE is what would let
-	 *  a caller rebuild the offset instead of asking for it. */
+	 *  The access island is deliberately narrow -- GetVolumetricProxyExtent stays protected
+	 *  -- because exposing the ingredients is what lets a caller rebuild the offset instead
+	 *  of asking for it. */
 public:
 	FUniverseFieldOffset ComputeFieldOffset() const;
 protected:
