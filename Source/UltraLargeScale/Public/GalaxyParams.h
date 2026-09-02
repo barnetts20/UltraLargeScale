@@ -508,6 +508,83 @@ struct ULTRALARGESCALE_API FGalaxyMasterParams
  *
  *  RAW POINTERS, not UPROPERTY. Transport only; FGalaxyProceduralParams owns the
  *  TObjectPtr references that keep these alive. */
+ // =============================================================================
+ // THE PACKED ARGUMENT LIST
+ // =============================================================================
+
+ /** The arguments of MakeGalaxyDensityParams, in order, packed.
+  *
+  *  ONE MARSHAL SITE, and that is why it exists. ToDerived and FillShaderParameters each
+  *  listed every parameter independently -- the same thirty values written out twice, kept
+  *  in step by nothing but care. Both read this struct instead, so adding a parameter to the
+  *  derivation breaks Pack() at compile time, and Pack() is the only place the packing
+  *  decisions live.
+  *
+  *  THE MATERIAL'S CUSTOM NODE IS STILL A THIRD LIST, and no C++ change reaches it: a Custom
+  *  node fails at SHADER compile rather than at build, so a parameter missed there surfaces
+  *  as a red material with nothing pointing at the cause. Check it whenever the derivation
+  *  signature changes. What this removes is the two lists that could drift SILENTLY; what
+  *  remains is the one that fails loudly, if late.
+  *
+  *  NOT UPLOADED AS A CONSTANT BUFFER. That would require HLSL's cbuffer packing to agree
+  *  with the C++ layout member for member, and one float3 straddling a 16-byte boundary
+  *  shifts every field after it with no diagnostic at all -- the galaxy would simply come
+  *  out wrong. These are raw inputs and the derivation runs in the shader, costing sixteen
+  *  arm hashes and a tan per thread against a full field evaluation per thread.
+  *
+  *  LEAF NAMES STILL MATCH THE MATERIAL PIN NAMES -- Arms.ArmRadius feeds "ArmRadius" -- so
+  *  grouping the members did not weaken the three-way check. */
+struct FGalaxyDensityArgs
+{
+	// --- LAYER GEOMETRY --- (arms, disc, bulge, background)
+	FVector4f LateralScale = FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
+	FVector4f VerticalScale = FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
+	FVector4f LayerDensity = FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
+	FVector4f NoiseAmount = FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
+	FVector4f WarpAmount = FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
+
+	// --- ARMS ---
+	FVector4f ArmAsym = FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
+	FVector4f SpiralTwist = FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
+
+	// --- VOID ---
+	FVector3f CentralVoid = FVector3f::ZeroVector;
+
+	// --- NOISE FRAME ---
+	FVector4f NoiseScale = FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
+	FVector4f WarpScale = FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
+	FVector4f NoiseChannelWeights = FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
+	FVector3f NoiseOffset = FVector3f::ZeroVector;
+
+	// --- SCALARS, in derivation order ---
+	float BoundsFadeStart = 0.0f;
+	float DiscScaleLengthRatio = 0.0f;
+	float DiscVerticalFalloff = 0.0f;
+	float DiscFlare = 0.0f;
+	float DiscWarpAmplitude = 0.0f;
+	float DiscWarpPhase = 0.0f;
+	float DiscWarpTwist = 0.0f;
+	float DiscLopsidedAmount = 0.0f;
+	float DiscLopsidedPhase = 0.0f;
+	float ArmCount = 0.0f;
+	float ArmAsymSeed = 0.0f;
+	float ArmProfileExponent = 0.0f;
+	float ArmRadialGrowth = 0.0f;
+	float ArmHostFalloff = 0.0f;
+	float BulgeConcentration = 0.0f;
+	float BackgroundConcentration = 0.0f;
+
+	/** ALWAYS 1. Placement samples the volume textures unconditionally -- that is the whole
+	 *  point of the GPU path -- and a switch that turned it off here would make the placed
+	 *  field differ from the drawn one with nothing to say so. The material's EnableNoise
+	 *  static switch controls the RENDER only and is a visualisation aid. */
+	float NoiseEnable = 1.0f;
+
+	// --- ORIENTATION --- (normal xyz, spin w)
+	FVector4f FieldOrientation = FVector4f(0.0f, 0.0f, 1.0f, 0.0f);
+};
+
+
 struct FGalaxyFieldTextures
 {
 	UTexture* WarpDisc = nullptr;
@@ -668,111 +745,130 @@ struct ULTRALARGESCALE_API FGalaxyProceduralParams
 	FGalaxyMasterParams Master;
 #pragma endregion
 
-	/** Pack into the shared derivation. Defined in GalaxyDataGenerator.cpp, the one
-	 *  translation unit that compiles the shim and the .ush. */
-	GalaxyHLSL::GalaxyDensityParams ToDerived() const;
-
-	/** Fills a compute shader parameter struct with the same raw values ToDerived
-	 *  passes to MakeGalaxyDensityParams, in the same order.
-	 *
-	 *  THREE PLACES MARSHAL THESE: ToDerived, this, and the material's Custom node body.
-	 *  Adding a parameter to MakeGalaxyDensityParams breaks the first two at compile
-	 *  time. THE CUSTOM NODE WILL NOT -- a Custom node fails at shader compile rather
-	 *  than at build, so a missed parameter shows up as a red material. Check it
-	 *  whenever the derivation signature changes.
-	 *
-	 *  A TEMPLATE on purpose. Taking FGalaxyEntityGenCS::FParameters& directly would
-	 *  make this header depend on GalaxyEntityGen.h, which depends on this one -- a
-	 *  cycle, and one that drags RenderCore into every translation unit that only wanted
-	 *  the authored struct.
-	 *
-	 *  Raw rather than derived on purpose. Uploading a packed GalaxyDensityParams
-	 *  would require HLSL's constant buffer packing to agree with the C++ layout
-	 *  member for member, and a single float3 straddling a 16-byte boundary shifts
-	 *  every field after it with no diagnostic at all -- the galaxy would simply come
-	 *  out wrong. Passing raw inputs and deriving in the shader costs sixteen arm
-	 *  hashes and a tan per thread, against a full field evaluation per thread, and
-	 *  it cannot drift.
-	 *
-	 *  Leaf names still match the material pin names exactly -- Arms.ArmRadius feeds
-	 *  "ArmRadius" -- so grouping the members did not weaken the three-way check above.
-	 *
-	 *  InNoiseEnable is hard-wired to 1. Placement is always textured; the material's
-	 *  EnableNoise static switch controls the RENDER only, and is a visualisation aid
-	 *  rather than a field parameter. */
-	template <typename TShaderParams>
-	void FillShaderParameters(TShaderParams& Out) const
+	/** THE ONLY PLACE THE PACKING DECISIONS LIVE. Both consumers -- the CPU derivation and
+	 *  the compute parameter fill -- read this rather than packing again. */
+	FGalaxyDensityArgs Pack() const
 	{
-		Out.InLateralScale = FVector4f(
-			Arms.ArmRadius, Disc.DiscRadius, Bulge.BulgeRadius, FGalaxyBackgroundParams::BackgroundRadius);
+		FGalaxyDensityArgs Out;
 
-		Out.InVerticalScale = FVector4f(
+		Out.LateralScale = FVector4f(
+			Arms.ArmRadius, Disc.DiscRadius, Bulge.BulgeRadius,
+			FGalaxyBackgroundParams::BackgroundRadius);
+
+		Out.VerticalScale = FVector4f(
 			Arms.ArmVerticalRatio, Disc.DiscVerticalRatio,
 			Bulge.BulgeVerticalRatio, Background.BackgroundVerticalRatio);
 
-		Out.InLayerDensity = FVector4f(
+		Out.LayerDensity = FVector4f(
 			Arms.ArmDensity, Disc.DiscDensity, Bulge.BulgeDensity, Background.BackgroundDensity);
 
-		Out.InNoiseAmount = FVector4f(
+		Out.NoiseAmount = FVector4f(
 			Arms.ArmNoiseAmount, Disc.DiscNoiseAmount,
 			Bulge.BulgeNoiseAmount, Background.BackgroundNoiseAmount);
 
-		Out.InWarpAmount = FVector4f(
+		Out.WarpAmount = FVector4f(
 			Arms.WarpAmountArms, Disc.WarpAmountDisc,
 			Bulge.WarpAmountBulge, Background.WarpAmountBackground);
 
-		Out.InArmAsym = FVector4f(
+		Out.ArmAsym = FVector4f(
 			Arms.ArmAsymPitch, Arms.ArmAsymPhase, Arms.ArmAsymDensity, Arms.ArmAsymLength);
 
-		Out.InSpiralTwist = FVector4f(
-			Arms.ArmPitchAngle, Arms.ArmPitchTightening, Arms.ArmPhaseOffset, Noise.HaloTwistInherit);
+		Out.SpiralTwist = FVector4f(
+			Arms.ArmPitchAngle, Arms.ArmPitchTightening, Arms.ArmPhaseOffset,
+			Noise.HaloTwistInherit);
 
-		Out.InCentralVoid = FVector3f(
+		Out.CentralVoid = FVector3f(
 			Void.CentralVoidRadius, Void.CentralVoidAmount, Void.CentralVoidExponent);
 
-		Out.InNoiseScale = FVector4f(
+		Out.NoiseScale = FVector4f(
 			Noise.NoiseDiscLateralScale, Noise.NoiseDiscVerticalScale,
 			Noise.NoiseHaloLateralScale, Noise.NoiseHaloVerticalScale);
 
-		Out.InWarpScale = FVector4f(
+		Out.WarpScale = FVector4f(
 			Noise.WarpDiscLateralScale, Noise.WarpDiscVerticalScale,
 			Noise.WarpHaloLateralScale, Noise.WarpHaloVerticalScale);
 
 		// FLinearColor is RGBA in memory but the shader reads it as xyzw against
 		// Noise.NoiseChannelWeights, so the component order is spelled out rather than
 		// relying on a reinterpret that would silently reorder if the type changed.
-		Out.InNoiseChannelWeights = FVector4f(
+		Out.NoiseChannelWeights = FVector4f(
 			Noise.NoiseChannelWeights.R, Noise.NoiseChannelWeights.G,
 			Noise.NoiseChannelWeights.B, Noise.NoiseChannelWeights.A);
 
-		Out.InNoiseOffset = FVector3f(
+		Out.NoiseOffset = FVector3f(
 			Noise.NoiseOffset.X, Noise.NoiseOffset.Y, Noise.NoiseOffset.Z);
 
-		Out.InBoundsFadeStart = Background.BoundsFadeStart;
-		Out.InDiscScaleLengthRatio = Disc.DiscScaleRatio;
-		Out.InDiscVerticalFalloff = Disc.DiscVerticalFalloff;
-		Out.InDiscFlare = Disc.DiscFlare;
-		Out.InDiscWarpAmplitude = Disc.DiscWarpAmplitude;
-		Out.InDiscWarpPhase = Disc.DiscWarpPhase;
-		Out.InDiscWarpTwist = Disc.DiscWarpTwist;
-		Out.InDiscLopsidedAmount = Disc.DiscLopsidedAmount;
-		Out.InDiscLopsidedPhase = Disc.DiscLopsidedPhase;
-		Out.InArmCount = Arms.ArmCount;
-		Out.InArmAsymSeed = Arms.ArmAsymSeed;
-		Out.InArmProfileExponent = Arms.ArmProfileExponent;
-		Out.InArmRadialGrowth = Arms.ArmRadialGrowth;
-		Out.InArmHostFalloff = Arms.ArmHostFalloff;
-		Out.InBulgeConcentration = Bulge.BulgeConcentration;
-		Out.InBackgroundConcentration = Background.BackgroundConcentration;
-		// ALWAYS TEXTURED. Placement samples the volume texture unconditionally --
-		// that is the whole point of the GPU path, and a switch that turned it off
-		// here would make the placed field differ from the drawn one with nothing
-		// to say so.
-		Out.InNoiseEnable = 1.0f;
+		Out.BoundsFadeStart = Background.BoundsFadeStart;
+		Out.DiscScaleLengthRatio = Disc.DiscScaleRatio;
+		Out.DiscVerticalFalloff = Disc.DiscVerticalFalloff;
+		Out.DiscFlare = Disc.DiscFlare;
+		Out.DiscWarpAmplitude = Disc.DiscWarpAmplitude;
+		Out.DiscWarpPhase = Disc.DiscWarpPhase;
+		Out.DiscWarpTwist = Disc.DiscWarpTwist;
+		Out.DiscLopsidedAmount = Disc.DiscLopsidedAmount;
+		Out.DiscLopsidedPhase = Disc.DiscLopsidedPhase;
+		Out.ArmCount = Arms.ArmCount;
+		Out.ArmAsymSeed = Arms.ArmAsymSeed;
+		Out.ArmProfileExponent = Arms.ArmProfileExponent;
+		Out.ArmRadialGrowth = Arms.ArmRadialGrowth;
+		Out.ArmHostFalloff = Arms.ArmHostFalloff;
+		Out.BulgeConcentration = Bulge.BulgeConcentration;
+		Out.BackgroundConcentration = Background.BackgroundConcentration;
 
-		Out.InFieldOrientation = FVector4f(
+		Out.FieldOrientation = FVector4f(
 			Orientation.FieldNormal.X, Orientation.FieldNormal.Y,
 			Orientation.FieldNormal.Z, Orientation.FieldSpin);
+
+		return Out;
+	}
+
+	/** The CPU derivation, from the packed arguments. Defined in GalaxyDataGenerator.cpp,
+	 *  the one translation unit that compiles the shim and the .ush. */
+	GalaxyHLSL::GalaxyDensityParams ToDerived() const;
+
+	/** Fills a compute shader parameter struct from the packed arguments, member for
+	 *  member. The shader-side names match MakeGalaxyDensityParams's parameter names, so a
+	 *  parameter added to the derivation breaks this at compile time on both sides.
+	 *
+	 *  A TEMPLATE on purpose. Taking FGalaxyEntityGenCS::FParameters& directly would make
+	 *  this header depend on GalaxyEntityGen.h, which depends on this one -- a cycle, and
+	 *  one that drags RenderCore into every translation unit that only wanted the authored
+	 *  struct. */
+	template <typename TShaderParams>
+	void FillShaderParameters(TShaderParams& Out) const
+	{
+		const FGalaxyDensityArgs A = Pack();
+
+		Out.InLateralScale = A.LateralScale;
+		Out.InVerticalScale = A.VerticalScale;
+		Out.InLayerDensity = A.LayerDensity;
+		Out.InNoiseAmount = A.NoiseAmount;
+		Out.InWarpAmount = A.WarpAmount;
+		Out.InArmAsym = A.ArmAsym;
+		Out.InSpiralTwist = A.SpiralTwist;
+		Out.InCentralVoid = A.CentralVoid;
+		Out.InNoiseScale = A.NoiseScale;
+		Out.InWarpScale = A.WarpScale;
+		Out.InNoiseChannelWeights = A.NoiseChannelWeights;
+		Out.InNoiseOffset = A.NoiseOffset;
+		Out.InBoundsFadeStart = A.BoundsFadeStart;
+		Out.InDiscScaleLengthRatio = A.DiscScaleLengthRatio;
+		Out.InDiscVerticalFalloff = A.DiscVerticalFalloff;
+		Out.InDiscFlare = A.DiscFlare;
+		Out.InDiscWarpAmplitude = A.DiscWarpAmplitude;
+		Out.InDiscWarpPhase = A.DiscWarpPhase;
+		Out.InDiscWarpTwist = A.DiscWarpTwist;
+		Out.InDiscLopsidedAmount = A.DiscLopsidedAmount;
+		Out.InDiscLopsidedPhase = A.DiscLopsidedPhase;
+		Out.InArmCount = A.ArmCount;
+		Out.InArmAsymSeed = A.ArmAsymSeed;
+		Out.InArmProfileExponent = A.ArmProfileExponent;
+		Out.InArmRadialGrowth = A.ArmRadialGrowth;
+		Out.InArmHostFalloff = A.ArmHostFalloff;
+		Out.InBulgeConcentration = A.BulgeConcentration;
+		Out.InBackgroundConcentration = A.BackgroundConcentration;
+		Out.InNoiseEnable = A.NoiseEnable;
+		Out.InFieldOrientation = A.FieldOrientation;
 	}
 };
 

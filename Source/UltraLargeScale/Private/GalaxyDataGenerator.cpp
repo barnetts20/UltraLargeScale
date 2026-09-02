@@ -43,50 +43,76 @@ GalaxyDataGenerator& GalaxyDataGenerator::operator=(GalaxyDataGenerator&&) noexc
 
 #pragma region Parameter Derivation
 
+namespace
+{
+	// THE ONLY CONVERSION BETWEEN THE TWO VECTOR WORLDS, and it lives here because this is
+	// the one translation unit where both exist. FGalaxyDensityArgs is engine types so the
+	// header stays free of the shim; MakeGalaxyDensityParams takes the shim's, so the
+	// crossing happens once, componentwise, rather than at thirty call sites.
+	//
+	// COMPONENTWISE, NOT A REINTERPRET. The two layouts happen to agree today and a cast
+	// would compile; it would also silently reorder the moment either type gained a member
+	// or changed alignment, and the symptom would be a galaxy whose every parameter is one
+	// slot out.
+	GalaxyHLSL::float4 ToShim(const FVector4f& InV)
+	{
+		return GalaxyHLSL::float4(InV.X, InV.Y, InV.Z, InV.W);
+	}
+
+	GalaxyHLSL::float3 ToShim(const FVector3f& InV)
+	{
+		return GalaxyHLSL::float3(InV.X, InV.Y, InV.Z);
+	}
+}
+
 GalaxyHLSL::GalaxyDensityParams FGalaxyProceduralParams::ToDerived() const
 {
-	// Pure packing. Every correlation -- arm width from the disc scale height, bulge
-	// and void radii from the disc radius, arm growth from the disc flare -- is
-	// resolved inside MakeGalaxyDensityParams, which the material also calls. That is
-	// what lets this struct and the material's pin set be the same list of raw
+	// PURE PASS-THROUGH FROM Pack(). Every correlation -- arm width from the disc scale
+	// height, bulge and void radii from the disc radius, arm growth from the disc flare --
+	// is resolved inside MakeGalaxyDensityParams, which the material also calls. That is
+	// what lets the authored struct and the material's pin set be the same list of raw
 	// values, so neither side can drift from the other.
+	//
+	// THE ARGUMENT ORDER IS THE DERIVATION'S. MakeGalaxyDensityParams is called
+	// positionally and the material's Custom node calls it positionally too, so a parameter
+	// is only ever APPENDED -- inserting one shifts every argument after it, and the
+	// material fails at shader compile rather than at build.
+	const FGalaxyDensityArgs A = Pack();
+
 	return MakeGalaxyDensityParams(
-		float4(Arms.ArmRadius, Disc.DiscRadius, Bulge.BulgeRadius, FGalaxyBackgroundParams::BackgroundRadius),
-		float4(Arms.ArmVerticalRatio, Disc.DiscVerticalRatio, Bulge.BulgeVerticalRatio, Background.BackgroundVerticalRatio),
-		float4(Arms.ArmDensity, Disc.DiscDensity, Bulge.BulgeDensity, Background.BackgroundDensity),
-		float4(Arms.ArmNoiseAmount, Disc.DiscNoiseAmount, Bulge.BulgeNoiseAmount, Background.BackgroundNoiseAmount),
-		float4(Arms.WarpAmountArms, Disc.WarpAmountDisc, Bulge.WarpAmountBulge, Background.WarpAmountBackground),
-		float4(Arms.ArmAsymPitch, Arms.ArmAsymPhase, Arms.ArmAsymDensity, Arms.ArmAsymLength),
-		float4(Arms.ArmPitchAngle, Arms.ArmPitchTightening, Arms.ArmPhaseOffset, Noise.HaloTwistInherit),
-		float3(Void.CentralVoidRadius, Void.CentralVoidAmount, Void.CentralVoidExponent),
-		float4(Noise.NoiseDiscLateralScale, Noise.NoiseDiscVerticalScale, Noise.NoiseHaloLateralScale, Noise.NoiseHaloVerticalScale),
-		float4(Noise.WarpDiscLateralScale, Noise.WarpDiscVerticalScale, Noise.WarpHaloLateralScale, Noise.WarpHaloVerticalScale),
-		float4(Noise.NoiseChannelWeights.R, Noise.NoiseChannelWeights.G, Noise.NoiseChannelWeights.B, Noise.NoiseChannelWeights.A),
-		float3(Noise.NoiseOffset.X, Noise.NoiseOffset.Y, Noise.NoiseOffset.Z),
-		Background.BoundsFadeStart,
-		Disc.DiscScaleRatio,
-		Disc.DiscVerticalFalloff,
-		Disc.DiscFlare,
-		Disc.DiscWarpAmplitude,
-		Disc.DiscWarpPhase,
-		Disc.DiscWarpTwist,
-		Disc.DiscLopsidedAmount,
-		Disc.DiscLopsidedPhase,
-		Arms.ArmCount,
-		Arms.ArmAsymSeed,
-		Arms.ArmProfileExponent,
-		Arms.ArmRadialGrowth,
-		Arms.ArmHostFalloff,
-		Bulge.BulgeConcentration,
-		Background.BackgroundConcentration,
-		// The shim's Texture3D returns the neutral 0.5, so every noise term is zero
-		// and this field reduces to the analytic one whatever is passed here. Kept at
-		// 1 to match the compute path rather than describing a mode nothing uses.
-		1.0f,
-		// APPENDED. See the note on MakeGalaxyDensityParams: the material calls it
-		// positionally and fails only at shader compile, so nothing is ever inserted.
-		float4(Orientation.FieldNormal.X, Orientation.FieldNormal.Y,
-			Orientation.FieldNormal.Z, Orientation.FieldSpin));
+		ToShim(A.LateralScale),
+		ToShim(A.VerticalScale),
+		ToShim(A.LayerDensity),
+		ToShim(A.NoiseAmount),
+		ToShim(A.WarpAmount),
+		ToShim(A.ArmAsym),
+		ToShim(A.SpiralTwist),
+		ToShim(A.CentralVoid),
+		ToShim(A.NoiseScale),
+		ToShim(A.WarpScale),
+		ToShim(A.NoiseChannelWeights),
+		ToShim(A.NoiseOffset),
+		A.BoundsFadeStart,
+		A.DiscScaleLengthRatio,
+		A.DiscVerticalFalloff,
+		A.DiscFlare,
+		A.DiscWarpAmplitude,
+		A.DiscWarpPhase,
+		A.DiscWarpTwist,
+		A.DiscLopsidedAmount,
+		A.DiscLopsidedPhase,
+		A.ArmCount,
+		A.ArmAsymSeed,
+		A.ArmProfileExponent,
+		A.ArmRadialGrowth,
+		A.ArmHostFalloff,
+		A.BulgeConcentration,
+		A.BackgroundConcentration,
+		// THE SHIM'S TEXTURE FETCHES RETURN A NEUTRAL 0.5, so every noise term is zero here
+		// whatever this is set to and the C++ field reduces to the analytic one. Kept at the
+		// compute path's value rather than describing a mode nothing uses.
+		A.NoiseEnable,
+		ToShim(A.FieldOrientation));
 }
 
 #pragma endregion
@@ -185,6 +211,28 @@ float GalaxyDataGenerator::GetTierBudgetScale(
 
 	const int32 Subdivision = FMath::Clamp(InTierParams.GenerationSubdivision, 0,
 		FTierParams::MaxGenerationSubdivision);
+
+	// THE PARAMETERS THIS TIER IS ACTUALLY RUNNING WITH, logged before anything is measured
+	// against them.
+	//
+	// NOT INSTRUMENTATION FOR ITS OWN SAKE. A tier parameter that fails to arrive looks
+	// exactly like a tier parameter that has no effect, and a generator holds a COPY of the
+	// params taken at InitializeData -- so an edit can land on a struct nothing reads while
+	// every symptom points at the field.
+	//
+	// THE SUBDIVISION IS LOGGED CLAMPED, not authored, because the clamp is silent: a value
+	// above MaxGenerationSubdivision comes back as the ceiling with nothing saying so, and a
+	// tier that appears not to respond to the setting is the result.
+	//
+	// Read these before concluding anything about a parameter's effect.
+	UE_LOG(LogTemp, Log,
+		TEXT("GalaxyEntityGen: tier +%d effective params -- GridDepth %d, ")
+		TEXT("NeighborhoodRadius %d, SlotCapacity %d, GenerationSubdivision %d, ")
+		TEXT("SpawnExponent %.4f, ExtentExponent %.4f, MinScale %.4g, MaxScale %.4g."),
+		InSeedOffset, InTierParams.GridDepth, InTierParams.NeighborhoodRadius,
+		InTierParams.SlotCapacity, Subdivision,
+		InTierParams.SpawnExponent, InTierParams.ExtentExponent,
+		InTierParams.MinScale, InTierParams.MaxScale);
 
 	// MEASURE THE CELLS GENERATION WILL ACTUALLY USE.
 	//

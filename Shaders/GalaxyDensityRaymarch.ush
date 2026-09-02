@@ -4,82 +4,70 @@
 //
 // The proxy mesh decides which pixels run; the unit sphere decides where to march.
 //
-// THE RAY IS BUILT FROM THE CAMERA, NOT FROM THE SHADED SURFACE.
+// THE RAY IS BUILT FROM THE CAMERA, NOT FROM THE SHADED SURFACE. The march needs a ray,
+// and the camera position plus the view direction already are one. Anchoring at the shaded
+// position instead needs a box-intersect node in the material graph to produce it, a
+// signed-t special case because an inverted-normal proxy shades the FAR face so the chord
+// lies at negative t, and a correction to recover camera distance from a surface-relative
+// parameter -- three pieces of machinery to rebuild something the view already has.
 //
-// This used to take the proxy's shaded position and intersect from there, which dragged
-// in three things that have all now gone: a box-intersect node in the material graph to
-// produce it, a signed-t special case because an INVERTED-NORMAL proxy shades the FAR
-// face so the chord lay at negative t, and a dCam correction to recover camera distance
-// from a surface-relative parameter. The march never needed the surface -- it needed a
-// ray, and the camera position plus the view direction already are one.
+// InViewVec is the LOCAL camera vector, SURFACE TOWARD CAMERA: CameraVector through
+// TransformVector [World -> Local]. Direction only; normalized or not makes no difference.
 //
-// InViewVec is the LOCAL camera vector, SURFACE TOWARD CAMERA -- unchanged, still
-// CameraVector through TransformVector [World -> Local]. Direction only; normalized or
-// not makes no difference.
-//
-// InCamPosN is the camera in NORMALIZED space, the box spanning -1 to 1. NO REMAP IS
-// APPLIED TO IT HERE. It is the ray ORIGIN rather than only a distance reference, so a
-// wrong value does not merely bias step sizes -- it moves the ray. That is a promotion
-// in consequence: the old failure was a plausible image at the wrong cost, the new one
-// is visibly wrong geometry, which is the better way round.
+// InCamPosN is the camera in NORMALIZED space, the box spanning -1 to 1, with NO REMAP
+// APPLIED. It is the ray ORIGIN rather than only a distance reference, so a wrong value
+// does not bias step sizes -- it MOVES THE RAY, and the result is visibly wrong geometry
+// rather than a plausible image at the wrong cost.
 //
 // RETURNS (emission, steps taken, 0, transmittance).
 //
-// The step count rides in G because cost has no other observer: a march that truncates
+// THE STEP COUNT RIDES IN G because cost has no other observer: a march that truncates
 // looks identical to one that finished, except that the far half of the volume is not
-// there. RAW COUNT, not normalized -- the material divides by whatever range it wants,
-// and normalizing here would be one more number to keep in agreement with the loop bound.
+// there. RAW COUNT, not normalized -- the material divides by whatever range it wants, and
+// normalizing here would be one more number to keep in agreement with the loop bound.
 //
 // ==========================================================================
-// THE STEPPING RULE IS THE UNIVERSE LAYER'S. THE INTERSECTION IS STILL THE GALAXY'S.
+// THE STEPPING RULE
 // ==========================================================================
-// Everything below -- b, c, disc, tEnter, tExit, the behind-camera early out, the
-// camera-inside case falling out of max(tEnter, 0) -- is unchanged and was never in
-// question. Only the STEP SIZING moved:
 //
 //     baseStep = span / StepBudget
 //     h        = baseStep * (1 + StepGrowth * t01)
 //
-// where t01 is progress along the marched span, not distance from the camera.
+// where t01 is progress along the marched span, NOT distance from the camera.
 //
-// WHAT WAS GIVEN UP, stated plainly, because it was a real property: sizing each step as
-// a fraction of camera distance keeps every step the same size ON SCREEN, which is
-// genuinely better for a proxy viewed from outside, and the old comments were right that
-// the two bounds rather than the ratio dominated the cost.
+// COST THAT CAN BE SET RATHER THAN DISCOVERED, and that is the whole reason for it. Sizing
+// each step as a fraction of camera distance keeps every step the same size ON SCREEN,
+// which is genuinely better for a proxy viewed from outside -- but it makes the step count
+// depend on where the camera is, collapsing toward chord/floor on close approach, so every
+// close pass runs the ceiling budget. With four marchers able to be on screen at once,
+// per-layer cost has to be a number chosen up front. This rule gives the same count
+// whatever the viewer is doing.
 //
-// WHAT WAS BOUGHT: a cost that can be SET rather than DISCOVERED. Under the old rule the
-// step count depended on where the camera was, collapsing toward chord/MinStep on close
-// approach -- at the shipped defaults the floor took over just outside the volume, so
-// every close pass ran the ceiling budget. With four marchers able to be on screen at
-// once, per-layer cost has to be a number chosen up front. This rule makes the count
-// StepBudget * ln(1+g)/g whatever the viewer is doing.
+// The two rules agree about the far field. They differ near the entry face, where a
+// camera-relative step goes toward zero and this one does not.
 //
-// The two rules still agree about the far field. They disagree near the entry face,
-// where the camera-relative step went toward zero and this one does not.
-//
-// STEPBUDGET IS A BUDGET, NOT A COUNT. Growth means the steps overshoot the span before
-// the budget is spent, so the loop finishes early: the actual count is
+// STEPBUDGET IS A BUDGET, NOT A COUNT. Growth means the steps overshoot the span before the
+// budget is spent, so the loop finishes early: the actual count is
 // StepBudget * ln(1 + growth) / growth -- the budget itself at growth 0, 0.69 of it at
-// growth 1, 0.55 at growth 2. See FGalaxyMaterialParams::GetEffectiveStepCount, which is
-// the same expression on the C++ side.
+// growth 1, 0.55 at growth 2. FGalaxyMaterialParams::GetEffectiveStepCount is the same
+// expression on the C++ side.
 //
 // THE FLOOR IS THE FIELD'S, NOT AN AUTHORED PIN. P.MinFeatureStep is half the narrowest
-// thing the parameters can produce -- see GALAXY_MIN_STEP_FRACTION in the core. The
-// authored MinStep it replaced was an absolute distance derived from a NearSteps budget,
-// so it knew the chord but not the field, and could not be right for a thin disc and a
-// thick one at once. A floor can only ever LENGTHEN a step, so this is a pure cost
-// saving: it binds when the budget is set fine enough to resolve detail the field does
+// thing the parameters can produce -- see GALAXY_MIN_STEP_FRACTION in the core. An authored
+// absolute distance knows the chord but not the field, so it cannot be right for a thin
+// disc and a thick one at once. A floor can only ever LENGTHEN a step, so this is a pure
+// cost saving: it binds when the budget is set fine enough to resolve detail the field does
 // not contain, which is exactly when it should.
 //
-// NO MINSAMPLES, and nothing replaces it. It capped the step at span/MinSamples so a
-// distant galaxy could not resolve to a handful of samples; the first step is now
-// span/StepBudget by construction and growth only ever lengthens from there, so coverage
-// of the chord is structural rather than clamped.
+// NOTHING CAPS THE STEP FROM ABOVE, and nothing needs to. The first step is span/StepBudget
+// by construction and growth only lengthens from there, so coverage of the chord is
+// structural rather than clamped.
 //
-// ARGUMENT ORDER CHANGED. The Custom node calls this positionally and a Custom node fails
-// at SHADER compile rather than at build, so the node's pins must be rebuilt: StepRatio,
-// MinStep and MinSamples are gone, StepBudget and StepGrowth are new, and MaxSteps is now
-// derived in the node body as int(StepBudget) + 8 rather than pushed.
+// THE CUSTOM NODE CALLS THIS POSITIONALLY and fails at SHADER compile rather than at build,
+// so a parameter is only ever APPENDED. Inserting one shifts every argument after it and
+// the material goes red with nothing pointing at the cause. MaxSteps is derived in the node
+// body as int(StepBudget) + 8 rather than pushed.
+//
 // FOUR TEXTURE PAIRS, held and never read -- this file marches, the core fetches. See the
 // table at the top of GalaxyDensityCore.ush for which asset serves which fetch.
 float4 GalaxyRayMarch(GalaxyDensityParams P,
@@ -91,9 +79,9 @@ float4 GalaxyRayMarch(GalaxyDensityParams P,
                       float InStepBudget, float InStepGrowth, int InMaxSteps,
                       float InDensityScale, float InJitter, float InNoisePower)
 {
-    // THE CAMERA IS THE ORIGIN, so t IS the distance from the camera. Nothing downstream
-    // reads that any more -- the step no longer does -- but the parameterisation is still
-    // what makes the near clamp below a clamp rather than a reconstruction.
+    // THE CAMERA IS THE ORIGIN, so t IS the distance from the camera. The step sizing does
+    // not read that, but the parameterisation is what makes the near clamp below a clamp
+    // rather than a reconstruction.
     float3 o = InCamPosN;
     float3 dir = normalize(-InViewVec);
 
@@ -110,25 +98,24 @@ float4 GalaxyRayMarch(GalaxyDensityParams P,
     float tEnter = -b - sq;
     float tExit = -b + sq;
 
-    // BEHIND THE CAMERA. With the ray anchored at the camera this is a real case rather
-    // than an impossible one: the proxy is drawn with inverted normals, so its far face
-    // can be rasterized while the volume itself is behind the viewer. The old
-    // surface-anchored form could not express this and had no test for it.
+    // BEHIND THE CAMERA, which is a real case rather than an impossible one: the proxy is
+    // drawn with inverted normals, so its far face can be rasterized while the volume itself
+    // is behind the viewer. A surface-anchored ray cannot express this and needs no test for
+    // it; a camera-anchored one must have this one.
     if (tExit <= 0.0)
     {
         return float4(0.0, 0.0, 0.0, 1.0);
     }
 
     // CAMERA INSIDE THE VOLUME falls out of the same clamp rather than needing its own
-    // branch: tEnter is negative there, so starting at zero starts at the camera. That
-    // replaces the guarded dCam trim, which existed only to reconstruct this from a
-    // surface-anchored parameterisation and could fail open to the full chord.
+    // branch: tEnter is negative there, so starting at zero starts at the camera. A
+    // surface-anchored ray has to reconstruct that case from a guarded trim, which can fail
+    // open to the full chord; here there is nothing to fail.
     //
-    // IT MATTERS MORE UNDER THIS RULE THAN THE OLD ONE. A camera-relative step collapsed
-    // to nothing over the stretch behind the viewer, so marching it was merely wasteful;
-    // a span-relative step sizes that stretch as if it were part of the visible one, so
-    // failing to trim it would spend budget on geometry nobody can see AND coarsen
-    // everything that is visible.
+    // THE SPAN-RELATIVE STEP MAKES THIS EXPENSIVE TO GET WRONG. Step size is a fraction of
+    // the marched span, so an untrimmed stretch behind the viewer is sized as though it were
+    // part of the visible one: budget is spent on geometry nobody can see AND everything
+    // that is visible is coarsened. A camera-relative step would merely waste the stretch.
     float tStart = max(tEnter, 0.0);
     if (tExit <= tStart)
     {

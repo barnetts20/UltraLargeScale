@@ -150,7 +150,12 @@ namespace GalaxyEntityGen
 			float BudgetScale = 0.0f;
 			bool bCalibrateOnly = false;
 			float BudgetAnchor = 1.0f;
-			float EnvelopePad = 1.0f;
+			// Overwritten from the single constant below before the dispatch is enqueued;
+			// this initialiser exists only so a payload built and abandoned carries a
+			// harmless value. Calibration and generation MUST be handed the same pad --
+			// the mass is defined through the envelope, so two pads would solve the tier's
+			// constant against one field and spend it against another.
+			float EnvelopePad = 0.0f;
 			float InvGalaxyExtent = 0.0f;
 			float PlaceSpawnExponent = 0.0f;
 			float PlaceExtentMin = 0.0f;
