@@ -75,6 +75,12 @@ AGalaxyActor::AGalaxyActor()
 
 AGalaxyActor::~AGalaxyActor()
 {
+	// THE RESET IS REDUNDANT and is kept only because it is explicit: the member's own
+	// destructor releases the reference on the next line either way, and this is the one
+	// tree teardown in the stack that CANNOT be moved to a worker -- an actor destructor
+	// has already committed to the thread it runs on. It is not a cost worth chasing:
+	// ResetForPool has already returned every star system and, since a pooled galaxy's
+	// tree is replaced on return, the tree standing here is empty.
 	if (Octree.IsValid()) Octree.Reset();
 }
 #pragma endregion
@@ -203,6 +209,30 @@ void AGalaxyActor::InitializeData()
 {
 	double StartTime = FPlatformTime::Seconds();
 
+	// REBUILT AGAINST THE CURRENT Params.Extent, as AStarSystemActor::InitializeData
+	// already did and this layer did not.
+	//
+	// Nothing else sizes this tree to the galaxy it belongs to. The constructor builds it
+	// from the DEFAULT Extent, 2^31, and AUniverseActor::FinishGalaxyPoolReturn rebuilds it
+	// from the extent of the occupant being RETIRED -- so on every acquire after the first,
+	// the tree was sized for the previous galaxy. Extent is derived per galaxy from its
+	// parent particle and clamped to [MinDerivedExtent, MaxDerivedExtent], 2048 to 4.4e12,
+	// which is thirty-one octaves: MaxDepth is floor(log2(Extent)), so a mismatched tree
+	// quantizes at the wrong depth entirely.
+	//
+	// WHAT THAT LOOKS LIKE, since none of it names the octree. A tree too COARSE drops star
+	// systems to first-writer-wins collisions at nodes far larger than intended. A tree too
+	// SMALL takes particles outside its root cube, which InsertPosition does not check for
+	// -- they descend into the outermost octant repeatedly and land in a node whose cube
+	// does not contain them. IsPlayerInsideBounds measures against Octree->Extent too, so
+	// the scan hand-off in AUniverseActor::DetermineAndDispatchScan uses the wrong radius.
+	//
+	// HERE rather than in ReInit because this is the first phase of the init chain that
+	// runs with Params assigned, and it is upstream of every insert: the tiers do not
+	// generate until InitializeNiagara. Nothing on the game thread reads the pointer
+	// meanwhile -- every reader gates on InitializationState reaching Ready.
+	Octree = MakeShared<FOctree>(Params.Extent);
+
 	// Bake the resolved texture back into Params so the generator, which only sees
 	// Params, samples exactly what the material samples. HERE rather than in the
 	// constructor because ReInit assigns Params wholesale.
@@ -257,6 +287,11 @@ void AGalaxyActor::InitializeData()
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::InitializeData took: %.3f seconds"), FPlatformTime::Seconds() - StartTime);
 }
 
+// MUST NOT BE CALLED ON THE GAME THREAD. The body dispatches to the game thread and then
+// blocks on the future, so a game-thread caller waits on work that cannot start until it
+// returns -- a hard deadlock, not a stall. AProceduralSpaceActor::Initialize reaches this
+// from its async chain, which is why it is safe today; the constraint is on the caller and
+// is invisible from the signature.
 void AGalaxyActor::InitializeVolumetric()
 {
 	double StartTime = FPlatformTime::Seconds();
@@ -625,6 +660,15 @@ void AGalaxyActor::BuildTierConfigs()
 				Cells, MidTierState.Buffers[0], Params.Config.MidTier, 7, false, OutCounts);
 		};
 
+	// THE MID AND SMALL CALLBACKS BELOW ARE THE SAME FUNCTION TWICE, and the copy has
+	// already drifted -- compare the comment indentation inside each. AUniverseActor
+	// builds its three through MakeTierBatchCallback for exactly this reason, and its
+	// note there predicts this: "the galaxy layer writes its two out separately and they
+	// have already drifted in whitespace". The factory takes a config, a state, a tier
+	// params and a seed offset; the only thing blocking the same treatment here is that
+	// the Large tier passes bCellsShareSlot true where the other two pass false, which is
+	// one more argument rather than a second code path.
+
 	// --- Small tier: neighborhood streaming ---
 	SmallTierConfig.TierName = TEXT("Small");
 	SmallTierConfig.GridDepth = Params.Config.SmallTier.GridDepth;
@@ -669,8 +713,8 @@ void AGalaxyActor::BuildTierConfigs()
 			}
 
 			// ONE CELL PER SLOT, so the tier's constant is calibrated against the
-// largest single cell. Subdivision does not change that: the children of a
-// streamed cell all write to its slot.
+			// largest single cell. Subdivision does not change that: the children of a
+			// streamed cell all write to its slot.
 			return GalaxyGenerator.GenerateTierBatchGPU(
 				Cells, SmallTierState.Buffers[0], Params.Config.SmallTier, 13, false, OutCounts);
 		};
@@ -750,6 +794,16 @@ void AGalaxyActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 }
 
 // Coalesced, single-flight per-frame push (see AUniverseActor::SchedulePush).
+//
+// NOTHING CALLS THIS, here or in either of the other two layers that define it.
+// ApplyParallaxOffset pushes directly on the game thread above, which is what the race
+// against the game thread's own Niagara tick forced. The spin on bPushWorkerLive in
+// ResetForPool is therefore waiting on a worker that never starts -- harmless, and
+// describing behaviour that does not happen.
+//
+// IT CAPTURES RAW `this`, unlike every other AsyncTask in this file. The loop can outlive
+// the actor while dereferencing actor members; anything reviving this converts the capture
+// first. The pattern to copy is in RequestScan.
 void AGalaxyActor::SchedulePush()
 {
 	bPushDirty.store(true, std::memory_order_release);
@@ -874,11 +928,26 @@ void AGalaxyActor::ProcessPendingScanResults()
 
 	for (const TSharedPtr<FOctreeNode>& Node : NearbySet)
 	{
+		// Log on first view-entry only, which avoids per-scan spam on retries.
 		if (!TrackedSpawnNodes.Contains(Node))
 		{
 			LogSpawnNodeEnter(Node);
+		}
+
+		// GATE THE SPAWN ON WHETHER IT SPAWNED, not on whether it has been seen. The two
+		// were one test, so a first attempt that early-returned -- pool exhausted, the
+		// galaxy not yet Ready, no pool manager -- still latched the node into
+		// TrackedSpawnNodes at the bottom of this function and was never retried while it
+		// stayed in view. That system simply never appeared, and only leaving and
+		// re-entering the node's range would try again.
+		//
+		// AUniverseActor::ProcessPendingScanResults already separates these; this is the
+		// same fix one layer down.
+		if (!SpawnedStarSystems.Contains(Node))
+		{
 			SpawnStarSystemFromPool(Node);
 		}
+
 		if (bDebugDrawSpawnNodes) DebugDrawSpawnNode(Node);
 	}
 
@@ -940,9 +1009,16 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 	const int32 AbsIdx = InNode->Data.ParticleIndex;
 	if (AbsIdx >= 0 && MatchedState.Buffers.Num() > 0 && !MatchedState.bUpdateInProgress.load())
 	{
+		// INDEX-CHECKED. The transition guard says no worker is mid-write; it says nothing
+		// about the array being long enough for an index the NODE is carrying, and a node
+		// outlives the buffer contents it was inserted from. Same guard as
+		// AUniverseActor::SpawnGalaxyFromPool.
 		const FNiagaraParticleBuffer& Buf = MatchedState.Buffers[0];
-		ParticlePos = Buf.Positions[AbsIdx];
-		ParticleExtent = Buf.Extents[AbsIdx];
+		if (Buf.Positions.IsValidIndex(AbsIdx) && Buf.Extents.IsValidIndex(AbsIdx))
+		{
+			ParticlePos = Buf.Positions[AbsIdx];
+			ParticleExtent = Buf.Extents[AbsIdx];
+		}
 	}
 
 	// Config: bounds (owned by the Universe) -> Generate -> context overlay (Seed, ParentColor). Universe is guaranteed non-null here (GetPoolManager resolved it).
@@ -1043,7 +1119,7 @@ void AGalaxyActor::FinishStarSystemPoolReturn(TWeakObjectPtr<AStarSystemActor> W
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, WeakSystem]()
 		{
 			AStarSystemActor* AsyncSystem = WeakSystem.Get();
-			if (!AsyncSystem) return;
+			if (!AsyncSystem || !AsyncSystem->Octree.IsValid()) return;
 			AsyncSystem->Octree->bIsResetting.store(true);
 			FPlatformProcess::Yield();
 			// BUILT IN A LOCAL, SWAPPED ON THE GAME THREAD BELOW. Assigning the member from a
@@ -1056,7 +1132,25 @@ void AGalaxyActor::FinishStarSystemPoolReturn(TWeakObjectPtr<AStarSystemActor> W
 					AGalaxyActor* Self = WeakThis.Get();
 					AStarSystemActor* InnerSystem = WeakSystem.Get();
 					if (!InnerSystem) return;
+
+					// THE OLD TREE IS HANDED OFF, NOT DROPPED HERE. Assigning over the member
+					// releases the last reference to the outgoing tree, and FOctreeNode owns
+					// its children through TSharedPtr, so that release destroys every node
+					// recursively and synchronously on whichever thread performs it -- here,
+					// the game thread, on a pool return. The refcount is atomic and
+					// FOctreeNode owns no UObject, so the destruction has no thread affinity.
+					// Same three lines as the rebase swap in AUniverseActor::CheckOctreeBounds
+					// and as AUniverseActor::FinishGalaxyPoolReturn.
+					TSharedPtr<FOctree> OldTree = InnerSystem->Octree;
+
 					InnerSystem->Octree = FreshTree;
+
+					AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
+						[OldTree = MoveTemp(OldTree)]() mutable
+						{
+							OldTree.Reset();
+						});
+
 					if (Self) { if (UActorPoolManager* PM = Self->GetPoolManager()) PM->ReturnPrepared(InnerSystem); }
 				});
 		});
