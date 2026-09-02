@@ -1,13 +1,6 @@
 ﻿#pragma once
 
 #include <DataTypes.h>
-#include "UObject/SavePackage.h"
-#include "RHICommandList.h"
-#include "RenderResource.h"
-#include "RHIResources.h"       // For FRHITexture3D
-#include "RHIUtilities.h"   
-#include "AssetRegistry/AssetRegistryModule.h"
-#include "Engine/VolumeTexture.h"
 #include "CoreMinimal.h"
 
 /** One node in the sparse octree: its child-index path from root, cached depth,
@@ -58,10 +51,22 @@ public:
 };
 
 /** Sparse octree over a bounded cube of half-extent Extent, subdividing to
- *  MaxDepth = floor(log2(Extent)). Inserts are first-writer-wins per quantized
- *  node. BulkInsertPositions runs chunk inserts in parallel; Reset flips
- *  bIsResetting so in-flight inserts and queries early-out. Streaming code
- *  rebuilds the whole tree each boundary cross (insert-first pipeline). */
+ *  MaxDepth = floor(log2(Extent)). Inserts are first-writer-wins per quantized node.
+ *
+ *  WHAT IS ACTUALLY CALLED, because most of this class is not. Live from outside the
+ *  header: InsertPosition (FTierStreamingSystem and AStarSystemActor),
+ *  GetNodesByScreenSpace (every layer's spawn scan), FindNodeAtPosition (the universe
+ *  rebase), and the Root / Extent / MaxDepth / bIsResetting members. Everything else --
+ *  the whole BulkInsertPositions path, Reset, SampleDensityAtPosition, GetLeafNodes,
+ *  GetPopulatedNodes, GetNodesAtDepth and GetNodesInRange -- has no caller anywhere in
+ *  the module. They are a generic-SVO surface kept against a future need, not a
+ *  description of how the trees are used.
+ *
+ *  A TREE IS REPLACED, NOT RESET. Streaming rebuilds by constructing a fresh FOctree and
+ *  swapping the shared pointer, raising bIsResetting on the outgoing tree so in-flight
+ *  scans early-out; the old tree then dies with its last reference, on whichever thread
+ *  drops it. Reset() below is the other way of doing the same thing and is not the one
+ *  taken -- see the note there for why that matters. */
 class ULTRALARGESCALE_API FOctree : public TSharedFromThis<FOctree>
 {
 public:
@@ -97,7 +102,7 @@ public:
 	 *  chunk's points in parallel, and recombines them into OutInsertedNodes;
 	 *  OutVolumeChunks receives the chunk layer. Early-outs at every stage while
 	 *  bIsResetting. */
-	void BulkInsertPositions(TArray<FPointData> InPointData, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes, TArray<TSharedPtr<FOctreeNode>>& OutVolumeChunks) {
+	void BulkInsertPositions(const TArray<FPointData>& InPointData, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes, TArray<TSharedPtr<FOctreeNode>>& OutVolumeChunks) {
 		if (bIsResetting.load()) {
 			return; // Early exit if shutting down
 		}
@@ -110,7 +115,7 @@ public:
 
 		// Point distribution
 		for (const FPointData& Point : InPointData) {
-			int ChunkIndex = FindChunkIndexForPosition(Point.GetPosition(), OutVolumeChunks);
+			const int64 ChunkIndex = FindChunkIndexForPosition(Point.GetPosition(), OutVolumeChunks);
 			if (ChunkIndex >= 0 && ChunkIndex < ChunkPointData.Num()) {
 				ChunkPointData[ChunkIndex].Add(Point);
 			}
@@ -164,8 +169,16 @@ public:
 		UE_LOG(LogTemp, Log, TEXT("BulkInsert: Total duration %.3f sec"), EndTime - StartTime);
 	}
 
-	/** Flat chunk index on the 1 << VolumeDepth grid for Position, clamped to
-	 *  grid bounds. */
+	/** Flat chunk index on the 1 << VolumeDepth grid for Position, clamped to grid bounds.
+	 *
+	 *  ASSUMES THE ROOT IS AT THE ORIGIN. The grid is laid out as (Position + Extent) /
+	 *  ChunkSize, which is only the tree's own grid when Root->Center is zero.
+	 *  FOctree(InExtent, InCenter) exists precisely so it need not be -- the universe
+	 *  rebase re-centres the root on the player's traversal -- and on such a tree this maps
+	 *  a point to a chunk that does not contain it. InsertPosition does not check that its
+	 *  position lies inside InCurrent, so the point would simply land in the wrong place
+	 *  with nothing reporting it. Fix this and PrePopulateVolumeLayer together, against
+	 *  Root->Center, before the bulk path is revived. */
 	int64 FindChunkIndexForPosition(FVector Position, const TArray<TSharedPtr<FOctreeNode>>& VolumeChunks) const {
 		const int NodesPerSide = 1 << VolumeDepth;
 		const double ChunkSize = (Extent * 2.0) / NodesPerSide;
@@ -183,8 +196,12 @@ public:
 		return (int64)iGridX + (int64)iGridY * NodesPerSide + (int64)iGridZ * NodesPerSide * NodesPerSide;
 	}
 
-	/** Builds the VolumeDepth chunk layer: inserts one typeless node per grid
-	 *  cell and sizes the parallel OutChunkPointData buckets. */
+	/** Builds the VolumeDepth chunk layer: inserts one typeless node per grid cell and
+	 *  sizes the parallel OutChunkPointData buckets.
+	 *
+	 *  ORIGIN-RELATIVE, the same assumption FindChunkIndexForPosition carries and with the
+	 *  same consequence on a re-centred tree: the chunk centres are computed about zero, so
+	 *  they can fall outside the root cube entirely. */
 	void PrePopulateVolumeLayer(TArray<TSharedPtr<FOctreeNode>>& OutVolumeChunks, TArray<TArray<FPointData>>& OutChunkPointData) {
 		const int NodesPerSide = 1 << VolumeDepth;
 		const double ChunkExtent = Extent / (1 << VolumeDepth);
@@ -334,7 +351,12 @@ public:
 
 	//TODO: THIS SVO WAS DEVELOPED WITH A GENERIC INTENT... SOME OF THE LOGIC MAY NOT BE NEEDED FOR OUR PURPOSES ANY LONGER WITH A DENSITY FIRST GENERATION PARADIGM AT THIS POINT WE COULD POTENTIALLY START *SPECIALIZING* 
 	/** Accumulates Density from Root down to the deepest existing node containing
-	 *  InPosition. Returns 0 outside the tree bounds or with no root. */
+	 *  InPosition. Returns 0 outside the tree bounds or with no root.
+	 *
+	 *  THE BOUNDS TEST IS ORIGIN-RELATIVE and the descent is not, so on a tree built with
+	 *  FOctree(InExtent, InCenter) the two disagree: positions inside the root cube are
+	 *  rejected and positions outside it are walked. No caller today; worth fixing against
+	 *  Root->Center before there is one. */
 	float SampleDensityAtPosition(const FVector& InPosition) const
 	{
 		if (!Root.IsValid()) return 0.0f;
@@ -484,7 +506,7 @@ public:
 			if (MinPossibleDist > 0.0)
 			{
 				const double MaxSubtreeExtent = 2.0 * InNode->Extent;
-				if (MaxSubtreeExtent* MaxSubtreeExtent < ScreenSpaceThresholdSq* MinPossibleDist* MinPossibleDist) return;
+				if (MaxSubtreeExtent * MaxSubtreeExtent < ScreenSpaceThresholdSq * MinPossibleDist * MinPossibleDist) return;
 			}
 		}
 
@@ -501,11 +523,24 @@ public:
 		// 1:1 to the sprite the material renders. Fallback for nodes without
 		// captured data (ParticleExtent == 0): the quantized-node approximation,
 		// Extent * (1 + ScaleFactor) against the node center.
+		//
+		// THE TEST IS THE POINT OF THE FUNCTION, and it was computed into
+		// TestExtent/TestDistSq and then never read -- the filter below tested only depth
+		// and TypeId. What survived was the SUBTREE PRUNE above, which is deliberately
+		// optimistic: it bounds a whole subtree by 2 * Extent taken at its nearest corner,
+		// so it discards only subtrees that cannot possibly contain a passing node. Every
+		// payload node inside an unpruned region was then emitted whatever its own
+		// projected size, and the threshold pin did almost nothing.
+		//
+		// A NODE AT ZERO DISTANCE PASSES. TestDistSq of zero means the viewer is inside the
+		// node, which is the largest a thing can project, so the comparison is written as a
+		// product rather than a ratio and needs no division guard.
 		const bool bHasParticle = InNode->Data.ParticleExtent > 0.0f;
 		const double TestExtent = bHasParticle ? static_cast<double>(InNode->Data.ParticleExtent) : InNode->Extent * (1.0 + InNode->Data.ScaleFactor);
 		const double TestDistSq = bHasParticle ? FVector::DistSquared(InNode->Data.ParticlePosition, InCenter) : DistSq;
 
 		bool bPassesFilter = true;
+		if (TestExtent * TestExtent < ScreenSpaceThresholdSq * TestDistSq) bPassesFilter = false;
 		if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
 		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) bPassesFilter = false;
 		if (InTypeIdFilter == -1) { if (InNode->Data.TypeId < 0) bPassesFilter = false; }
@@ -545,10 +580,20 @@ public:
 #pragma endregion
 
 #pragma region Constructor/Destructor
+	/** floor(log2(InExtent)) -- the depth at which a node's extent reaches one tree-local
+	 *  unit. FLOOR RATHER THAN A CAST: a cast truncates toward zero, so the two agree only
+	 *  for InExtent >= 1 and a sub-unit tree would report depth 0 where it has none. Log2
+	 *  of zero or a negative is -inf or NaN and narrows to an undefined int, so the
+	 *  argument is floored at 1 first -- a tree that small has no subdivision to offer
+	 *  either way. */
+	static int DeriveMaxDepth(double InExtent) {
+		return FMath::FloorToInt(FMath::Log2(FMath::Max(InExtent, 1.0)));
+	}
+
 	/** Builds an empty tree of half-extent InExtent centered on the origin. */
 	FOctree(double InExtent) {
 		Extent = InExtent;
-		MaxDepth = static_cast<int>(FMath::Log2(Extent));
+		MaxDepth = DeriveMaxDepth(InExtent);
 		Root = MakeShared<FOctreeNode>(FVector::ZeroVector, Extent, TArray<uint8>(), nullptr);
 	}
 
@@ -557,15 +602,22 @@ public:
 	 *  VirtualTraversal) and initial universe-tree construction. */
 	FOctree(double InExtent, FVector InCenter) {
 		Extent = InExtent;
-		MaxDepth = static_cast<int>(FMath::Log2(Extent));
+		MaxDepth = DeriveMaxDepth(InExtent);
 		Root = MakeShared<FOctreeNode>(InCenter, Extent, TArray<uint8>(), nullptr);
 	}
 
 	/** Drops all nodes and rebuilds an empty root, preserving the root center.
 	 *  bIsResetting is set across the swap so in-flight BulkInsert / GetNodesInRange
-	 *  calls early-out instead of touching half-detached nodes. Used by streaming
-	 *  code that rebuilds the spatial index each boundary cross via
-	 *  BulkInsertPositions (insert-first pipeline). */
+	 *  calls early-out instead of touching half-detached nodes.
+	 *
+	 *  NOT USED BY STREAMING, and the doc here used to say it was. Streaming constructs a
+	 *  fresh tree and swaps the pointer instead. That is not a cosmetic difference: the
+	 *  Root.Reset() below releases every node SYNCHRONOUSLY, on the calling thread, inside
+	 *  the lock -- FOctreeNode owns its children through TSharedPtr, so a full universe
+	 *  tree frees on the order of sixteen thousand leaves plus every interior node in one
+	 *  go. That cost on the game thread is exactly the stall the swap-and-release-on-a-
+	 *  worker arrangement in AUniverseActor exists to avoid. Anything reaching for this
+	 *  function should hand the outgoing Root to a worker first. */
 	void Reset() {
 		bIsResetting.store(true);
 		{
