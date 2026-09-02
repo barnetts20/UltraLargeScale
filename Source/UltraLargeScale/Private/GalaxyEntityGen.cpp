@@ -35,6 +35,11 @@ namespace GalaxyEntityGen
 			return;
 		}
 
+		// WRITTEN AND NEVER READ, here and in the universe layer. Both blocking entry points
+		// hand AwaitReadback the same counts as arguments instead, so these three carry the
+		// dispatch's shape for a reader and nothing else. Kept because a request that cannot
+		// describe itself is worse to debug than three unused ints, but a future consumer
+		// should take them from here rather than adding a fourth argument.
 		OutRequest->NumCells = NumCells;
 		OutRequest->EntityCapacity = InEntityCapacity;
 
@@ -74,10 +79,17 @@ namespace GalaxyEntityGen
 		// raymarch still drawing structure through them. It reads as a placement or hash
 		// fault long before it reads as a sampling one.
 		//
-		// 1.15 IS NOT ENOUGH. Measured on the Large tier: a quarter of live cells reported a
-		// candidate denser than their own envelope. Counter [3] against [2] is the observer
-		// -- see GalaxyDataGenerator's envelope-exceeded count -- and this wants raising
-		// until that is a few percent rather than a quarter.
+		// TWO, AND THE HISTORY IS THE ARGUMENT FOR IT. At 1.15 a quarter of live cells on the
+		// Large tier reported a candidate denser than their own envelope; counter [3] against
+		// [2] is the observer -- see GalaxyDataGenerator's envelope-exceeded count. Raising
+		// it here, together with GenerationSubdivision 3, is what stopped the cell-shaped
+		// holes in practice.
+		//
+		// IT DOES NOT REMOVE THE CASE. The mechanism is a probe set missing a cell's peak,
+		// and no pad removes that -- it only makes the miss less likely to bite. Expect the
+		// symptom back on an archetype that rolls a tighter core or thinner arms, and reach
+		// for GALAXY_ENTITYGEN_PROBE_ROUNDS rather than this number when it returns: the
+		// probe count is linear where this is exponential.
 		//
 		// IT COSTS CANDIDATES QUADRATICALLY and accepted entities not at all, since the
 		// envelope cancels: a cell draws pad^g times as many candidates and keeps the same
@@ -150,7 +162,7 @@ namespace GalaxyEntityGen
 			float BudgetScale = 0.0f;
 			bool bCalibrateOnly = false;
 			float BudgetAnchor = 1.0f;
-			// Overwritten from the single constant below before the dispatch is enqueued;
+			// Overwritten from the single constant above before the dispatch is enqueued;
 			// this initialiser exists only so a payload built and abandoned carries a
 			// harmless value. Calibration and generation MUST be handed the same pad --
 			// the mass is defined through the envelope, so two pads would solve the tier's

@@ -38,6 +38,11 @@ namespace UniverseEntityGen
 			return;
 		}
 
+		// WRITTEN AND NEVER READ, here and in the galaxy layer. Both blocking entry points
+		// hand AwaitReadback the same counts as arguments instead, so these carry the
+		// dispatch's shape for a reader and nothing else. Kept because a request that cannot
+		// describe itself is worse to debug than three unused ints, but a future consumer
+		// should take them from here rather than adding a fourth argument.
 		OutRequest->NumCells = NumCells;
 		OutRequest->NumSlots = InNumSlots;
 		OutRequest->EntityCapacity = InEntityCapacity;
@@ -424,6 +429,11 @@ namespace UniverseEntityGen
 
 						// Two dimensions carry 65535^2 cells, which is four billion. If this
 						// ever fires the cell count is the problem, not the layout.
+						// NOTE: this returns with a clear pass already recorded on the graph and no
+						// Execute. bAborted covers the caller -- IsReady returns true on it, so the
+						// worker does not wait out the timeout -- but the builder is abandoned
+						// mid-construction, which is the one path in this function that does that.
+						// Worth confirming against the RDG version in use if it ever fires.
 						if (GroupsY > MaxGroupsPerDim)
 						{
 							UE_LOG(LogTemp, Warning,

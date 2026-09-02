@@ -333,7 +333,22 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
             Sum += GroupMass[l];
         }
 
-        const float Envelope = asfloat(GroupEnvelopeBits) * EnvelopePad;
+        float Envelope = asfloat(GroupEnvelopeBits) * EnvelopePad;
+
+        // CLAMPED TO THE ANALYTIC CEILING, which is a safety valve rather than a
+        // correction, and the same one UniverseEntityGen.usf applies. Compose takes the max
+        // of four layers and every layer is bounded above by an expression in its own
+        // resolved pins, so an envelope past that bound is impossible with an intact
+        // derivation -- see GalaxyAnalyticCeiling.
+        //
+        // It is clamped rather than merely reported because the envelope raised to the
+        // spawn exponent IS the candidate budget: a garbage envelope does not produce a
+        // wrong picture, it produces a dispatch that draws millions of candidates per cell.
+        //
+        // The clamp firing is itself the signal. If cells sit pinned at exactly this value
+        // the probes are not the problem and the field parameters are -- which is precisely
+        // the distinction the probe-versus-envelope counters cannot make on their own.
+        Envelope = min(Envelope, GalaxyAnalyticCeiling(P) * EnvelopePad);
 
         // Written before any early-out, so a culled cell is DISTINGUISHABLE from a group
         // that never ran: an envelope of zero is an empty cell, which is expected and
