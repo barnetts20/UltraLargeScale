@@ -790,7 +790,7 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 			InSeedOffset, DemandRatio);
 	}
 
-	// A FEW PERCENT IS NORMAL -- sixty-four probes cannot find every peak, which is what
+	// A FEW PERCENT IS NORMAL -- a finite probe set cannot find every peak, which is what
 	// EnvelopePad exists to absorb. A large fraction means acceptance is saturating across
 	// the batch and the placement gradient is being flattened cell by cell, which is a
 	// SAMPLING problem rather than a tuning one: raise EnvelopePad, or lower the spawn

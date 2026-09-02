@@ -118,12 +118,12 @@ public:
 	 *  jitter both read them, and a child whose coord shifted with the batch would
 	 *  regenerate differently.
 	 *
-	 *  NO BOUNDS CULL, and that is the one substantive difference from the galaxy's
-	 *  version. That field is zero outside its unit sphere, so a child past the boundary
-	 *  can be dropped for one dot product instead of sixty-four field evaluations. THIS
-	 *  FIELD IS UNBOUNDED: there is no outside, every child can hold structure, and a cull
-	 *  here would be deleting cells that belong. What replaces it is the probe pass's own
-	 *  envelope test, which culls void children at the cost of their probes. */
+	 *  NO BOUNDS CULL, the one substantive difference from the galaxy's version. That field
+	 *  is zero outside its unit sphere, so a child past the boundary can be dropped for one
+	 *  dot product instead of a full cell's worth of field evaluations. THIS FIELD IS
+	 *  UNBOUNDED: there is no outside, every child can hold structure, and a cull here would
+	 *  delete cells that belong. The probe pass's own envelope test does the equivalent job,
+	 *  culling void children at the cost of their probes. */
 	static void SubdivideCells(const TArray<FTierBatchCell>& InCells, int32 InLevels,
 		TArray<FTierBatchCell>& OutCells);
 

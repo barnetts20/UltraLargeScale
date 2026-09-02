@@ -12,14 +12,14 @@
 //
 // WHAT IS GENUINELY DIFFERENT, and worth knowing before reading it as a copy:
 //   - Placement lives in UniversePlacement.ush, not in the field core.
-//   - There is no field offset. The proxy's offset is a property of the VIEW; the field
-//     is static in caller space and placement needs none. See InvFieldExtent in the .usf.
+//   - There is no VIEW offset. The proxy's offset is a property of the view and the field
+//     is static in caller space, so the uniform offset pins are zero here; each group still
+//     passes its own cell as the offset. See InvFieldExtent in the .usf.
 //   - A field sample here is a fifty-four candidate walk across two lattices plus five
 //     texture fetches across FOUR distinct volumes, roughly fifteen to twenty-five times a
 //     galaxy sample. Probe cost therefore dominates far sooner, and GenerationSubdivision
-//     wants to sit lower. Splitting the assets did not change the fetch count -- it was
-//     five before, into one texture -- so this cost estimate is unchanged; what it changed
-//     is cache behaviour, since five fetches now touch four working sets rather than one.
+//     wants to sit lower. The five fetches touch four working sets, so cache behaviour is
+//     worse than the fetch count alone suggests.
 
 #pragma once
 
@@ -51,11 +51,10 @@ struct FUniverseEntityOut
 {
 	/** CALLER UNITS, RELATIVE TO THE OWNING CELL'S CENTRE -- not an absolute position.
 	 *
-	 *  Absolute is what this used to be, and it narrowed a coordinate that tracks
-	 *  VirtualTraversal into a float32 on the way back. The CPU then folded it to cell-local
-	 *  anyway (FNiagaraParticleBuffer::MakeCellLocalPositions does exactly that at push time),
-	 *  so the fold was already happening -- one step too late to matter, after the precision
-	 *  was gone. Doing it in the shader costs nothing and bounds this value by the cell.
+	 *  AN ABSOLUTE POSITION HERE WOULD NARROW A COORDINATE THAT TRACKS VirtualTraversal into
+	 *  a float32 on the way back, losing precision the CPU cannot recover. The push folds
+	 *  positions to cell-local anyway -- FNiagaraParticleBuffer::MakeCellLocalPositions --
+	 *  so folding in the shader instead costs nothing and bounds this value by the cell.
 	 *
 	 *  The scatter adds the cell's own double-precision centre back. See FUniverseGenCell. */
 	FVector3f Pos = FVector3f::ZeroVector;
@@ -70,9 +69,9 @@ struct FUniverseEntityOut
 	 *  while the set, and each entity's identity within it, is not. */
 	uint32 Slot = 0;
 
-	/** Index into the batch's cell array. Required, not diagnostic: entities are appended
-	 *  to one shared buffer, so position no longer says which cell -- and therefore which
-	 *  SLOT -- an entity belongs to. */
+	/** Index into the batch's cell array. Required, not diagnostic: entities are appended to
+	 *  one shared buffer, so an entity's position in that buffer says nothing about which
+	 *  cell -- and therefore which SLOT -- it belongs to. */
 	uint32 CellIndex = 0;
 
 	/** Raw field value where the entity landed, before any spawn shaping.
@@ -103,30 +102,27 @@ static_assert(sizeof(FUniverseEntityOut) == 32, "FUniverseEntityOut must match t
  *  back onto this side -- which for this layer means onto a path that cannot reach the
  *  volume texture at all.
  *
- *  THE CENTRE IS A CELL AND A FRACTION, NOT A POSITION, and that is the whole reason this
- *  struct changed shape.
+ *  THE CENTRE IS A CELL AND A FRACTION, NOT A POSITION, and it must stay that way.
  *
- *  It used to be an absolute caller-space FVector3f. Caller space tracks VirtualTraversal --
- *  the octree rebases AROUND the player rather than renumbering under them, so these
- *  coordinates grow without bound -- and a float32 holding 5e13 has a unit of last place of
- *  about 4e6. The failure that produces is not a wrong position. It is that MakeUniverseProbe
- *  builds its probes as centre +/- extent, so once the extent falls below the centre's own
- *  ulp EVERY PROBE IN THE CELL COLLAPSES ONTO THE SAME FLOAT. The envelope is then a
- *  single-point estimate of a field that is mostly void, the cell reports no mass, and the
- *  tier places nothing at all. A quantised grid of galaxies would have been the gentle
- *  version; what actually happens is that generation stops, silently, with the raymarch
- *  still drawing the field perfectly.
+ *  Caller space tracks VirtualTraversal without bound -- the octree rebases AROUND the player
+ *  rather than renumbering under them -- and a float32 holding 5e13 has a unit of last place
+ *  of about 4e6. AN ABSOLUTE CENTRE HERE DOES NOT PRODUCE A WRONG POSITION. It produces a
+ *  dead tier: MakeUniverseProbe builds its probes as centre +/- extent, so once the extent
+ *  falls below the centre's own ulp EVERY PROBE IN THE CELL COLLAPSES ONTO THE SAME FLOAT.
+ *  The envelope becomes a single-point estimate of a mostly-void field, the cell reports no
+ *  mass, and the tier places nothing at all -- silently, with the raymarch still drawing the
+ *  field perfectly. A quantised grid of galaxies would be the gentle version.
  *
- *  Splitting the centre into a whole field cell plus a fraction fixes it at the root: the
- *  integer carries the magnitude exactly, and everything the shader computes from it is a
- *  small offset inside one cell where float32 has all its precision. The cell index is fed
- *  to MakeUniverseDensityParams as that group's field offset, so the sample point is
- *  reconstructed by exactly the mechanism the material already uses.
+ *  Splitting it fixes that at the root: the integer carries the magnitude exactly, and
+ *  everything the shader computes from it is a small offset inside one cell where float32 has
+ *  all its precision. The cell index is fed to MakeUniverseDensityParams as that group's
+ *  field offset, so the sample point is reconstructed by the same mechanism the material
+ *  uses.
  *
  *  CentreCell IS REDUCED MODULO THE FIELD PERIOD by the caller, for the same reason
  *  AUniverseActor::ComputeFieldOffset reduces: it crosses to the shader through a float3.
- *  Reducing by a DIFFERENT period from the one the core derives would put placement and the
- *  material on wraps that disagree -- see UniverseCellWrap.
+ *  Reducing by a DIFFERENT period from the one the core derives puts placement and the
+ *  material on wraps that disagree -- see UniverseCellWrap::FieldCellPeriod.
  *
  *  The padding holds the record at 48 bytes and splits it so no vector straddles a
  *  sixteen-byte boundary; HalfExtent sits between the two vectors to keep that true. */
@@ -265,15 +261,14 @@ public:
 	static constexpr int32 PassProbe = 0;
 	static constexpr int32 PassGenerate = 1;
 
-	/** Probes per cell: sixty-four lanes over four rounds. MUST equal
+	/** Probes per cell: ThreadGroupSize lanes over two rounds. MUST equal
 	 *  UNIVERSE_ENTITYGEN_PROBES in the .usf, which has no way to share this.
 	 *
 	 *  TWO ROUNDS RATHER THAN ONE because this field's peaks are thin filaments in a
-	 *  mostly-empty volume and a single round misses them at any cell size -- measured, not
-	 *  assumed: cells a seventh of a field cell across were still under-estimating their
-	 *  peak by an order of magnitude. Four rounds drove clipping down to about one cell in a
-	 *  hundred but left ninety percent of the dispatch probing, which is the wrong balance;
-	 *  two is the current compromise and the C/P ratio is how to judge it.
+	 *  mostly-empty volume and a single round misses them at any cell size: cells a seventh
+	 *  of a field cell across still under-estimate their peak by an order of magnitude. Four
+	 *  rounds drives clipping to about one cell in a hundred and leaves ninety percent of the
+	 *  dispatch probing, which is the wrong balance; judge any change by the C/P ratio.
 	 *
 	 *  Also the divisor the CPU uses to turn the evaluated-candidate counter into the
 	 *  candidates-per-probe ratio.
@@ -287,12 +282,11 @@ public:
 
 /** One in-flight dispatch. Owns its readback fence and its result.
  *
- *  ASYNCHRONOUS BY CONSTRUCTION. The tier callbacks used to fill a particle buffer and
- *  return a count in the same call; that is no longer possible, because the answer does
- *  not exist until the GPU has run and the copy has landed. Poll IsReady() over subsequent
- *  frames and never block on it: a synchronous readback stalls the render thread for the
- *  entire pipeline depth, which is precisely the cost this path is supposed to be buying
- *  us out of. */
+ *  ASYNCHRONOUS BY CONSTRUCTION. A tier callback cannot fill a particle buffer and return a
+ *  count in one call, because the answer does not exist until the GPU has run and the copy
+ *  has landed. Poll IsReady() over subsequent frames and NEVER BLOCK ON IT: a synchronous
+ *  readback stalls the render thread for the entire pipeline depth, which is precisely the
+ *  cost this path exists to avoid. */
 class FUniverseEntityGenRequest
 {
 public:
@@ -395,10 +389,10 @@ namespace UniverseEntityGen
 	 *  cell is unchanged. Only the logged scale moves.
 	 *
 	 *  It survives as a NUMERICAL NORMALISER, and this layer wants a different value from
-	 *  the galaxy's. That field peaks in the high hundreds; this one is bounded by the sum
-	 *  of its three resolved maxima -- about 3 at the shipped ranges -- so an anchor of ten
-	 *  would push every mass to a small fraction and, raised to a spawn exponent above 1,
-	 *  toward denormals. One keeps the masses near unity, which is all the anchor is for. */
+	 *  the galaxy's. That field peaks in the high hundreds; this one is bounded by the sum of
+	 *  its three resolved maxima -- about 3 at the default ranges -- so an anchor of ten would
+	 *  push every mass to a small fraction and, raised to a spawn exponent above 1, toward
+	 *  denormals. One keeps the masses near unity, which is all the anchor is for. */
 	inline constexpr float kBudgetAnchor = 1.0f;
 
 	/** How the calibration sample is drawn. All three are about the SAMPLE, not the field.
@@ -440,8 +434,8 @@ namespace UniverseEntityGen
 		return InNumCells * CountersPerCell + CountGlobals + InNumSlots;
 	}
 
-	/** Entities actually WRITTEN. Bounded by capacity now that the shader caps per slot, so
-	 *  it is the count to read the entity array against. */
+	/** Entities actually WRITTEN, and the count to read the entity array against. Bounded by
+	 *  capacity, because the shader caps each slot and the per-slot ceilings sum to it. */
 	inline constexpr int32 GlobalCursorIndex(int32 InNumCells)
 	{
 		return InNumCells * CountersPerCell;

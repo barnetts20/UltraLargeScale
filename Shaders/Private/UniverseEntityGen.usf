@@ -13,9 +13,9 @@
 // ONE GROUP PER CELL, not one thread per candidate.
 //
 // A cell has to be culled and given a rejection envelope before any of its candidates can
-// be drawn, and that envelope is a max over sixty-four probes -- a reduction, which a lone
-// thread can only do serially. A group runs the probes in parallel, reduces through group
-// memory, then spends itself on that cell's candidates.
+// be drawn, and that envelope is a max over UNIVERSE_ENTITYGEN_PROBES samples -- a
+// reduction, which a lone thread can only do serially. A group runs the probes in parallel,
+// reduces through group memory, then spends itself on that cell's candidates.
 //
 // DO NOT SPLIT IT INTO CULL + INDIRECT DISPATCH. That needs a compacted cell list, and
 // compaction by atomic append makes a cell's output offset depend on scheduling. Identity
@@ -154,8 +154,8 @@ int KeySeed; // universe seed folded with the tier's seed offset
 // about this tier's grid. The material marches a box of that size, so that is the size one
 // unit of normalized space means.
 //
-// THE FIELD OFFSET IS DELIBERATELY ABSENT, and this is the one place the reasoning is worth
-// spelling out because its absence looks like an omission.
+// THERE IS NO TRAVERSAL TERM IN THIS PATH, and the absence is worth spelling out because it
+// looks like an omission beside the material's per-frame offset push.
 //
 // The proxy is pegged to the camera, so a marched point at normalized p sits at caller-space
 // VirtualTraversal + p * ProxyExtent, and the material adds an offset of
@@ -165,13 +165,15 @@ int KeySeed; // universe seed folded with the tier's seed offset
 //     X / (ProxyExtent * CellSizeSmall)
 //
 // with the traversal terms cancelling exactly -- as they must, since the field is STATIC in
-// caller space and only the view moves through it. So placement passes a zero offset and
-// multiplies by this reciprocal, and the point it samples is bit-for-bit the point the
-// material would march at the same place.
+// caller space and only the view moves through it. So the uniform offset pins are zero on
+// this path, and a point multiplied by this reciprocal is bit-for-bit the point the material
+// would march at the same place.
 //
-// It also means the precision ceiling on the offset pin does not reach this path: caller
-// space is bounded by the octree, so the cell counts here stay in the single digits rather
-// than the 1e11 the offset formulation exists to survive.
+// THE OFFSET PINS BEING ZERO DOES NOT MEAN THE DERIVATION RECEIVES ZERO. Each group hands
+// MakeUniverseDensityParams its own cell's CentreCell and CentreFrac as the offset -- see
+// MainCS. Caller-space cell centres reach magnitudes a float32 cannot hold to unit
+// precision, so the centre travels as an integer cell plus a fraction rather than as a
+// position, and the integer part is added inside the derivation where it stays exact.
 float InvFieldExtent;
 
 // A NUMERICAL NORMALISER, not a tuning knob: it divides the mass in pass 0 and the envelope
@@ -180,9 +182,9 @@ float InvFieldExtent;
 float BudgetAnchor;
 
 // Turns the probed peak into an envelope the field will not exceed. Covers the SAMPLING miss
-// only: sixty-four points under-shoot a sharp peak that falls between them, and a cellular
-// field's peaks are surfaces between nodes that sit at no particular place relative to this
-// grid. Watch counter [3] against [2] to see how often it still happens.
+// only: a finite probe set under-shoots a sharp peak that falls between its samples, and a
+// cellular field's peaks are surfaces between nodes sitting at no particular place relative
+// to this grid. Watch counter [3] against [2] for how often it still happens.
 float EnvelopePad;
 
 // --- placement, per dispatch; the per-cell envelope overrides Q.InvDensityReference
@@ -239,24 +241,22 @@ float InBoundsFadeStart;
 // and both reductions iterate to it; there is deliberately no second constant.
 #define UNIVERSE_ENTITYGEN_GROUP 64u
 
-// PROBES PER LANE. The envelope is a MAX over the cell, and this field's features are thin
-// bright filaments in a mostly-empty volume -- the participation count only approaches 3
-// on a near-exact three-way tie, so the structure occupies a small fraction of any cell at
-// any subdivision. One probe per lane misses them at every cell size, which the clipping
-// counter showed directly: cells a seventh of a field cell across still under-estimated
-// their peak by an order of magnitude.
+// PROBES PER LANE, so 2 x 64 = 128 probes per cell. The envelope is a MAX over the cell, and
+// this field's features are thin bright filaments in a mostly-empty volume -- the
+// participation count only approaches 3 on a near-exact three-way tie, so the structure
+// occupies a small fraction of any cell at any subdivision. A SINGLE ROUND MISSES THEM AT
+// EVERY CELL SIZE: cells a seventh of a field cell across still under-estimate their peak by
+// an order of magnitude, which the clipping counter shows directly.
 //
 // SUBDIVISION IS NOT THE LEVER FOR THIS. Shrinking cells raises the probe DENSITY but also
 // multiplies the group count, so total probe cost rises the same way while occupancy and
-// scheduling get worse. Adding rounds raises density at constant group count, which is the
-// cheaper axis when the group count is already adequate.
+// scheduling get worse. Adding rounds raises density at constant group count, the cheaper
+// axis whenever the group count is already adequate.
 //
-// TWO ROUNDS, 128 PROBES, and the count was measured down from four rather than guessed.
-// At four rounds the clipping it exists to prevent had fallen to about one cell in a
-// hundred, while the C/P ratio sat near 0.1 -- ninety percent of the dispatch was probing.
-// Probes and candidates are both field evaluations, so that ratio is the whole cost
-// argument: read it after changing this, and move the count until clipping and C/P are
-// both tolerable rather than optimising either alone.
+// TUNE AGAINST BOTH COUNTERS, NEVER ONE. Four rounds drives clipping to about one cell in a
+// hundred and leaves the C/P ratio near 0.1 -- ninety percent of the dispatch probing.
+// Probes and candidates are both field evaluations, so C/P is the whole cost argument: read
+// it after changing this and move the count until clipping and C/P are both tolerable.
 #define UNIVERSE_ENTITYGEN_PROBE_ROUNDS 2u
 #define UNIVERSE_ENTITYGEN_PROBES (UNIVERSE_ENTITYGEN_GROUP * UNIVERSE_ENTITYGEN_PROBE_ROUNDS)
 
@@ -283,24 +283,25 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
     FUniverseGenCell Cell = InCells[CellIndex];
 
-    // THE CELL'S OWN FIELD OFFSET, which is what replaced the zero this used to pass.
-    //
-    // The uniform pins are still zero -- placement has no view to scroll under it, and the
-    // derivation at InvFieldExtent showing the traversal terms cancelling still holds. What
-    // changed is that the cell no longer carries an absolute caller-space centre for the
-    // probe to offset from. It carries the field cell it sits in and the fraction within,
-    // and THAT is handed to the derivation as this group's offset -- so a sample point is
+    // THE CELL'S OWN FIELD OFFSET. The cell carries the field cell its centre sits in plus
+    // the fraction within, and that pair IS this group's offset -- so a sample point is
     // reconstructed exactly the way the material reconstructs one, integer plus fraction,
-    // and every float the shader touches is a small offset inside one cell.
+    // and every float the shader touches afterwards is a small offset inside one cell.
     //
-    // ADDING THE UNIFORM RATHER THAN REPLACING IT keeps both paths passing the same
-    // argument list, and leaves the pins meaningful if placement ever does acquire a
-    // draw-wide offset. Both are exact: CentreCell is wrapped below 2^24 and the uniform is
-    // zero.
+    // THE ALTERNATIVE IS AN ABSOLUTE CENTRE, and it fails silently. Caller space tracks
+    // VirtualTraversal without bound, so a float32 centre at 5e13 has an ulp of about 4e6;
+    // once the cell's extent falls below that, every probe in the cell collapses onto one
+    // float. The envelope becomes a single-point estimate of a mostly-void field, the cell
+    // reports no mass, and the tier places nothing -- while the raymarch keeps drawing the
+    // field perfectly.
     //
-    // THE FRACTION SUM IS NOT NORMALISED, and does not need to be. SampleAtPosition adds
-    // OffsetFrac before it floors, so a component at or above one simply carries into the
-    // integer cell out of the same floor that decomposes the position.
+    // ADDING THE UNIFORM RATHER THAN REPLACING IT keeps both passes on the same argument
+    // list and leaves the pins meaningful if placement ever acquires a draw-wide offset.
+    // Both terms are exact: CentreCell is wrapped below 2^24 and the uniform is zero.
+    //
+    // THE FRACTION SUM NEED NOT BE NORMALISED. SampleAtPosition adds OffsetFrac before it
+    // floors, so a component at or above one carries into the integer cell out of the same
+    // floor that decomposes the position.
     UniverseDensityParams P = MakeUniverseDensityParams(
         InCellSizeRange,
         InSeed,
@@ -326,7 +327,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     // -----------------------------------------------------------------------
     // PASS 0 -- PROBE. Cull the cell, envelope it, and weigh it.
     //
-    // ONE PROBE PER LANE, so sixty-four per cell, and identical for calibration and for
+    // UNIVERSE_ENTITYGEN_PROBE_ROUNDS probes per lane, and identical for calibration and for
     // generation -- both descend to the same grid, so a cell's measured mass is the estimate
     // its own thread group would produce.
     //
@@ -356,13 +357,12 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
         const uint ProbeIndex = Round * UNIVERSE_ENTITYGEN_GROUP + GroupIndex;
 
         // A ZERO CENTRE, so this is the probe's offset FROM the cell centre in caller units
-        // rather than its absolute position. The centre it used to be added to now lives in
-        // the density params as an exact integer cell, so the addition happens there, in the
-        // one place that can do it without a float32 carrying 1e13.
+        // rather than its absolute position. The centre lives in the density params as an
+        // exact integer cell, which is the one place the addition can happen without a
+        // float32 carrying 1e13.
         //
-        // THE HASH INPUTS ARE UNCHANGED -- Coord and KeySeed -- so every probe and candidate
-        // lands where it always did relative to its cell. This is a precision change, not a
-        // content change.
+        // THE HASH INPUTS ARE Coord AND KeySeed, never the centre, so a cell's probe pattern
+        // is a function of its key alone and is reproduced identically on every visit.
         const float3 ProbePos = MakeUniverseProbe(
             float3(0.0f, 0.0f, 0.0f), Cell.HalfExtent,
             Cell.Coord.x, Cell.Coord.y, Cell.Coord.z,
@@ -387,9 +387,9 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
         //
         // The first eight probes are the cell's vertices. They belong in a MAX -- a wall
         // sitting on a corner is exactly what jitter alone would miss -- and they are the
-        // worst possible points for a MEAN, because they are the cell's extremes. Eight of
-        // sixty-four samples pinned at the extremes biases the mass estimate systematically,
-        // and the mass is what the tier's whole budget divides by.
+        // worst possible points for a MEAN, because they are the cell's extremes. Samples
+        // pinned at the extremes bias the mass estimate systematically, and the mass is what
+        // the tier's whole budget divides by.
         if (ProbeIndex >= 8u)
         {
             LocalMass += pow(ProbeDensity * InvAnchor, Exponent);
@@ -486,8 +486,8 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     for (uint Slot = GroupIndex; Slot < Candidates; Slot += UNIVERSE_ENTITYGEN_GROUP)
     {
         // ZERO CENTRE, as in the probe pass: C.Pos comes back in caller units relative to the
-        // cell centre and C.Norm is that same offset normalised, which is exactly what
-        // SampleAtPosition now wants given the group's field offset. C.Pos is also what gets
+        // cell centre and C.Norm is that same offset normalised, which is what
+        // SampleAtPosition wants given the group's field offset. C.Pos is also what gets
         // written out, so the entity record is cell-relative too -- see FUniverseEntityOut.
         UniverseCandidate C = MakeUniverseCandidate(
             float3(0.0f, 0.0f, 0.0f), Cell.HalfExtent, InvFieldExtent,
@@ -531,8 +531,8 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
             continue;
         }
 
-        // The GLOBAL claim, which is now a formality: the per-slot ceilings sum to exactly
-        // EntityCapacity, so this cannot overflow unless the two disagree. Kept as the
+        // THE GLOBAL CLAIM IS A FORMALITY: the per-slot ceilings sum to exactly
+        // EntityCapacity, so this cannot overflow unless the two disagree. It stays as the
         // bounds test on the write, because a UAV write past the end is undefined rather
         // than clamped.
         uint Global;
