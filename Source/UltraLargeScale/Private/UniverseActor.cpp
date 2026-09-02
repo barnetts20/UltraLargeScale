@@ -403,6 +403,12 @@ void AUniverseActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
 	// VoidSpreadRange's .w IS UNCLAIMED and Pack sends zero. It carried a size-skew pin the
 	// core stopped reading; the pin is retired and the pin name is gone, but the PARAMETER
 	// is a float4 either way, so no material pin, node argument or parameter name moved.
+	// THE OFFSET IS PACKED AND DISCARDED HERE. Pack takes one because the compute path's
+	// argument list needs it, and this function deliberately does not push it -- see the
+	// FIELD OFFSET note below. The ComputeFieldOffset call is therefore a division and a
+	// wrap whose result is thrown away; it stays because a zero placeholder would read as a
+	// field centred on the origin, which is a claim, where this is plainly the real offset
+	// going unused.
 	const FUniverseDensityArgs A = UniverseParams.DensityParams.Pack(
 		UniverseParams.Seed, ComputeFieldOffset());
 
@@ -467,6 +473,11 @@ void AUniverseActor::PushMarchParams(UMaterialInstanceDynamic* InMID) const
 	InMID->SetScalarParameterValue(TEXT("NoisePower"), M.VolumeNoisePower);
 }
 
+// MUST NOT BE CALLED ON THE GAME THREAD. The body below dispatches to the game thread and
+// then blocks on the future, so a game-thread caller waits on work that cannot start until
+// it returns -- a hard deadlock, not a stall. AProceduralSpaceActor::Initialize reaches
+// this from its async chain, which is why it is safe today; the constraint is on the
+// caller and is invisible from the signature.
 void AUniverseActor::InitializeVolumetric()
 {
 	double StartTime = FPlatformTime::Seconds();
@@ -937,6 +948,17 @@ void AUniverseActor::ApplyParallaxOffset(const FVector& InPlayerPos)
 // Coalesced, single-flight per-frame push. Producers raise bPushDirty; at most one
 // worker drains, re-reading the freshest VT under each tier's PushCS every pass, so
 // out-of-order scheduling is harmless -- the last write always wins with current VT.
+//
+// NOTHING CALLS THIS, in any of the three layers that define it. ApplyParallaxOffset
+// pushes directly on the game thread instead, above, and the note there explains why: one
+// FVector uniform per component is trivially cheap, and SetVariable* has no internal lock,
+// so racing the game thread's own Niagara tick trips FMTAccessDetector. This worker was the
+// arrangement that race retired.
+//
+// IT CAPTURES RAW `this`, unlike every other AsyncTask in this file, all of which hold a
+// TWeakObjectPtr. The loop can outlive the actor, and the tier states it dereferences are
+// actor members. Anything reviving this has to convert the capture first -- the dispatch
+// pattern to copy is in RequestScan.
 void AUniverseActor::SchedulePush()
 {
 	bPushDirty.store(true, std::memory_order_release);
@@ -1124,9 +1146,18 @@ void AUniverseActor::SpawnGalaxyFromPool(TSharedPtr<FOctreeNode> InNode)
 	if (AbsIdx >= 0 && MatchedState.Buffers.Num() > 0 &&
 		!MatchedState.bUpdateInProgress.load())
 	{
+		// INDEX-CHECKED, as the orientation read below already was. The transition guard
+		// says no worker is mid-write; it says nothing about the array being long enough
+		// for an index the NODE is carrying. A node outlives the buffer contents it was
+		// inserted from -- a tier re-initialised at a smaller SlotCapacity, or a rebase
+		// remap that matched on seed -- and the read would then run off the end while the
+		// two-line rotation block twenty lines down guarded the identical index.
 		const FNiagaraParticleBuffer& Buf = MatchedState.Buffers[0];
-		ParticlePos = Buf.Positions[AbsIdx];
-		ParticleExtent = Buf.Extents[AbsIdx];
+		if (Buf.Positions.IsValidIndex(AbsIdx) && Buf.Extents.IsValidIndex(AbsIdx))
+		{
+			ParticlePos = Buf.Positions[AbsIdx];
+			ParticleExtent = Buf.Extents[AbsIdx];
+		}
 	}
 
 	// Config -> Generate -> resolved params. Generate sets Seed and ParentColor from
@@ -1292,7 +1323,7 @@ void AUniverseActor::FinishGalaxyPoolReturn(TWeakObjectPtr<AGalaxyActor> WeakGal
 	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis, WeakGalaxy]()
 		{
 			AGalaxyActor* AsyncGalaxy = WeakGalaxy.Get();
-			if (!AsyncGalaxy) return;
+			if (!AsyncGalaxy || !AsyncGalaxy->Octree.IsValid()) return;
 			double StartTime = FPlatformTime::Seconds();
 			AsyncGalaxy->Octree->bIsResetting.store(true);
 			FPlatformProcess::Yield();  // Let in-flight octree ops see the flag and bail.
@@ -1306,7 +1337,28 @@ void AUniverseActor::FinishGalaxyPoolReturn(TWeakObjectPtr<AGalaxyActor> WeakGal
 					AUniverseActor* Self = WeakThis.Get();
 					AGalaxyActor* InnerGalaxy = WeakGalaxy.Get();
 					if (!InnerGalaxy) return;
+
+					// THE OLD TREE IS HANDED OFF, NOT DROPPED HERE -- the same reasoning
+					// as the rebase swap in CheckOctreeBounds, and the same three lines.
+					// Assigning over InnerGalaxy->Octree releases the last reference to
+					// the outgoing tree, and FOctreeNode owns its children through
+					// TSharedPtr, so that release destroys every node recursively and
+					// synchronously on whichever thread performs it -- here, the game
+					// thread. A galaxy's tree carries its star systems, so this is a
+					// pool return paying a full recursive teardown on one frame.
+					//
+					// The refcount is atomic and FOctreeNode owns no UObject, so the
+					// destruction has no thread affinity and moves off the frame whole.
+					TSharedPtr<FOctree> OldTree = InnerGalaxy->Octree;
+
 					InnerGalaxy->Octree = FreshTree;   // swap on game thread
+
+					AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
+						[OldTree = MoveTemp(OldTree)]() mutable
+						{
+							OldTree.Reset();
+						});
+
 					if (Self) { if (UActorPoolManager* PM = Self->GetPoolManager()) PM->ReturnPrepared(InnerGalaxy); }
 				});
 		});
@@ -1460,10 +1512,14 @@ void AUniverseActor::LogSpawnNodeEnter(const TSharedPtr<FOctreeNode>& InNode) co
 			const int32 SlotId = AbsIdx / Config->SlotCapacity;
 			const FNiagaraParticleBuffer& Buf = State->Buffers[0];
 			const int32 Start = SlotId * Config->SlotCapacity;
+			// BOUNDED BY THE ARRAY, not by the config. Same reasoning as the guarded read
+			// in SpawnGalaxyFromPool: the slot index comes from a node, the extent comes
+			// from a buffer, and nothing keeps the two in step across a tier re-init.
+			const int32 End = FMath::Min(Start + Config->SlotCapacity, Buf.Extents.Num());
 			int32 LiveCount = 0;
-			for (int32 i = 0; i < Config->SlotCapacity; ++i)
+			for (int32 i = Start; i < End; ++i)
 			{
-				if (Buf.Extents[Start + i] > 0.0f) ++LiveCount;
+				if (Buf.Extents[i] > 0.0f) ++LiveCount;
 			}
 			UE_LOG(LogTemp, Log, TEXT("  %s slot %d: %d live particles of %d capacity"), TierLabel, SlotId, LiveCount, Config->SlotCapacity);
 		}
