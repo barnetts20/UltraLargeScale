@@ -1,7 +1,14 @@
 ﻿#pragma once
 
-#include <DataTypes.h>
+// TRIMMED TO WHAT THIS HEADER USES. It previously pulled in SavePackage, the asset
+// registry, VolumeTexture and four RHI headers, none of which appear anywhere below --
+// the RHIResources include even carried a "For FRHITexture3D" comment naming a type this
+// file never mentions. FOctree.h is included by ProceduralSpaceActor.h,
+// FTierStreamingSystem.h and others, so each of those translation units was compiling the
+// asset registry and the RHI to get a node struct. Anything added here that needs more
+// should include it here rather than leaning on a consumer.
 #include "CoreMinimal.h"
+#include <DataTypes.h>
 
 /** One node in the sparse octree: its child-index path from root, cached depth,
  *  parent and child links, cube center and half-extent, and the FVoxelData
@@ -53,20 +60,29 @@ public:
 /** Sparse octree over a bounded cube of half-extent Extent, subdividing to
  *  MaxDepth = floor(log2(Extent)). Inserts are first-writer-wins per quantized node.
  *
- *  WHAT IS ACTUALLY CALLED, because most of this class is not. Live from outside the
- *  header: InsertPosition (FTierStreamingSystem and AStarSystemActor),
- *  GetNodesByScreenSpace (every layer's spawn scan), FindNodeAtPosition (the universe
- *  rebase), and the Root / Extent / MaxDepth / bIsResetting members. Everything else --
- *  the whole BulkInsertPositions path, Reset, SampleDensityAtPosition, GetLeafNodes,
- *  GetPopulatedNodes, GetNodesAtDepth and GetNodesInRange -- has no caller anywhere in
- *  the module. They are a generic-SVO surface kept against a future need, not a
- *  description of how the trees are used.
+ *  FOUR ENTRY POINTS, and that is the whole class. InsertPosition (FTierStreamingSystem
+ *  and AStarSystemActor), GetNodesByScreenSpace (every layer's spawn scan),
+ *  FindNodeAtPosition (the universe rebase), and the two constructors -- plus the Root /
+ *  Extent / MaxDepth / bIsResetting members that consumers read directly.
  *
  *  A TREE IS REPLACED, NOT RESET. Streaming rebuilds by constructing a fresh FOctree and
  *  swapping the shared pointer, raising bIsResetting on the outgoing tree so in-flight
- *  scans early-out; the old tree then dies with its last reference, on whichever thread
- *  drops it. Reset() below is the other way of doing the same thing and is not the one
- *  taken -- see the note there for why that matters. */
+ *  work early-outs; the outgoing tree is then handed to a worker and released there,
+ *  because FOctreeNode owns its children through TSharedPtr and dropping the root
+ *  destroys every node recursively and synchronously on whichever thread drops it.
+ *
+ *  WHAT WAS REMOVED, so it is not looked for. This began as a generic SVO and carried a
+ *  parallel chunked bulk-insert path (BulkInsertPositions, PrePopulateVolumeLayer,
+ *  FindChunkIndexForPosition, VolumeDepth), a Reset that cleared in place, and four query
+ *  families beyond the screen-space one -- SampleDensityAtPosition, GetLeafNodes,
+ *  GetPopulatedNodes, GetNodesAtDepth and GetNodesInRange with their Collect helpers.
+ *  None had a caller anywhere in the module, and three carried live traps: the bulk path
+ *  laid its chunk grid out about the ORIGIN while FOctree(InExtent, InCenter) exists so
+ *  the root need not be there, SampleDensityAtPosition's bounds test had the same
+ *  mismatch, and Reset released the whole tree synchronously under a lock on the calling
+ *  thread -- the exact game-thread cost the swap-and-release arrangement above exists to
+ *  avoid. Anything reinstated from history has to be read against those three before it
+ *  is wired up. */
 class ULTRALARGESCALE_API FOctree : public TSharedFromThis<FOctree>
 {
 public:
@@ -74,161 +90,27 @@ public:
 	/** Half-extent of the root cube in tree-local units. */
 	double Extent;
 
-	/** Root node; re-created by Reset and the constructors. */
+	/** Root node, created by the constructors and never replaced in place. */
 	TSharedPtr<FOctreeNode> Root;
 
 	/** Deepest representable depth, floor(log2(Extent)); inserts clamp to it. */
 	int MaxDepth;
 
-	/** Depth at which BulkInsertPositions pre-populates the chunk grid for parallel
-	 *  insert distribution. 2 -> (1<<2)^3 = 4^3 = 64 chunks, balancing parallel
-	 *  granularity against per-cross prepopulate cost. Streaming boundary crosses
-	 *  admit only a handful of cells, so deeper grids (e.g. 5 -> 32^3 = 32,768,
-	 *  suited to one-shot full-volume loads) are far too heavy. */
-	int VolumeDepth = 2;
 #pragma endregion
 
 #pragma region Locks
-	/** Guards Root swaps in Reset against concurrent access. */
-	mutable FCriticalSection OctreeMutex;
-
-	/** True during Reset; in-flight BulkInsert and query calls early-out while set. */
+	/** Raised on a tree that is being retired, so an in-flight InsertPosition on a worker
+	 *  bails instead of populating a tree nothing will read.
+	 *
+	 *  SET FROM OUTSIDE, never from in here. A tree is REPLACED rather than cleared --
+	 *  AGalaxyActor::FinishStarSystemPoolReturn and AUniverseActor::FinishGalaxyPoolReturn
+	 *  raise this, build a fresh tree, swap the shared pointer on the game thread and hand
+	 *  the outgoing one to a worker to release. It is never lowered: the tree it belongs to
+	 *  is on its way out. */
 	std::atomic<bool> bIsResetting{ false };
 #pragma endregion
 
-#pragma region BulkInsert
-	//TODO: WITH SOME MODIFICATION, WE MAY BE ABLE TO USE THE BULK INSERT PATH WHEN REGENERATING A SET OF CELLS... CHUNK DEPTH WOULD HAVE TO BE ADAPTIVE INSTEAD OF STATIC, AND IT WOULD HAVE TO OPERATE FROM A GIVEN NODE INSTEAD OF ROOT BUT WE MAY GET A PERF IMPROVEMENT ON OCTREE INSERTION SO WORTH THINKING ABOUT
-	/** Distributes InPointData into the pre-populated chunk grid, inserts each
-	 *  chunk's points in parallel, and recombines them into OutInsertedNodes;
-	 *  OutVolumeChunks receives the chunk layer. Early-outs at every stage while
-	 *  bIsResetting. */
-	void BulkInsertPositions(const TArray<FPointData>& InPointData, TArray<TSharedPtr<FOctreeNode>>& OutInsertedNodes, TArray<TSharedPtr<FOctreeNode>>& OutVolumeChunks) {
-		if (bIsResetting.load()) {
-			return; // Early exit if shutting down
-		}
-
-		double StartTime = FPlatformTime::Seconds();
-
-		// Prepopulation
-		TArray<TArray<FPointData>> ChunkPointData;
-		PrePopulateVolumeLayer(OutVolumeChunks, ChunkPointData);
-
-		// Point distribution
-		for (const FPointData& Point : InPointData) {
-			const int64 ChunkIndex = FindChunkIndexForPosition(Point.GetPosition(), OutVolumeChunks);
-			if (ChunkIndex >= 0 && ChunkIndex < ChunkPointData.Num()) {
-				ChunkPointData[ChunkIndex].Add(Point);
-			}
-		}
-
-		// Parallel chunk inserts
-		const int NumChunks = OutVolumeChunks.Num();
-		TArray<TArray<TSharedPtr<FOctreeNode>>> PerChunkResults;
-		PerChunkResults.SetNum(NumChunks);
-
-		ParallelFor(NumChunks, [&](int i) {
-			if (bIsResetting.load()) {
-				return; // Early exit if shutting down
-			}
-
-			TSharedPtr<FOctreeNode> Chunk = OutVolumeChunks[i];
-			TArray<TSharedPtr<FOctreeNode>> ChunkResults;
-			ChunkResults.Reserve(ChunkPointData[i].Num());
-
-			for (const FPointData& Point : ChunkPointData[i]) {
-				if (bIsResetting.load()) {
-					return; // Early exit if shutting down
-				}
-
-				TSharedPtr<FOctreeNode> Result = InsertPosition(Point.GetPosition(), Point.InsertDepth, Point.Data, Chunk);
-				if (Result.IsValid()) {
-					ChunkResults.Add(Result);
-				}
-			}
-
-			PerChunkResults[i] = MoveTemp(ChunkResults);
-			}, EParallelForFlags::BackgroundPriority);
-
-		// Recombine results
-		OutInsertedNodes.Empty();
-
-		int TotalResults = 0;
-		for (const auto& Arr : PerChunkResults) {
-			TotalResults += Arr.Num();
-		}
-		OutInsertedNodes.Reserve(TotalResults);
-
-		for (int i = 0; i < NumChunks; ++i) {
-			if (PerChunkResults[i].Num() > 0) {
-				OutInsertedNodes.Append(PerChunkResults[i]);
-			}
-		}
-
-		// Total
-		double EndTime = FPlatformTime::Seconds();
-		UE_LOG(LogTemp, Log, TEXT("BulkInsert: Total duration %.3f sec"), EndTime - StartTime);
-	}
-
-	/** Flat chunk index on the 1 << VolumeDepth grid for Position, clamped to grid bounds.
-	 *
-	 *  ASSUMES THE ROOT IS AT THE ORIGIN. The grid is laid out as (Position + Extent) /
-	 *  ChunkSize, which is only the tree's own grid when Root->Center is zero.
-	 *  FOctree(InExtent, InCenter) exists precisely so it need not be -- the universe
-	 *  rebase re-centres the root on the player's traversal -- and on such a tree this maps
-	 *  a point to a chunk that does not contain it. InsertPosition does not check that its
-	 *  position lies inside InCurrent, so the point would simply land in the wrong place
-	 *  with nothing reporting it. Fix this and PrePopulateVolumeLayer together, against
-	 *  Root->Center, before the bulk path is revived. */
-	int64 FindChunkIndexForPosition(FVector Position, const TArray<TSharedPtr<FOctreeNode>>& VolumeChunks) const {
-		const int NodesPerSide = 1 << VolumeDepth;
-		const double ChunkSize = (Extent * 2.0) / NodesPerSide;
-		const double HalfExtent = Extent;
-
-		const double GridX = (Position.X + HalfExtent) / ChunkSize;
-		const double GridY = (Position.Y + HalfExtent) / ChunkSize;
-		const double GridZ = (Position.Z + HalfExtent) / ChunkSize;
-
-		// Convert to int and clamp
-		const int iGridX = FMath::Clamp(FMath::FloorToInt(GridX), 0, NodesPerSide - 1);
-		const int iGridY = FMath::Clamp(FMath::FloorToInt(GridY), 0, NodesPerSide - 1);
-		const int iGridZ = FMath::Clamp(FMath::FloorToInt(GridZ), 0, NodesPerSide - 1);
-
-		return (int64)iGridX + (int64)iGridY * NodesPerSide + (int64)iGridZ * NodesPerSide * NodesPerSide;
-	}
-
-	/** Builds the VolumeDepth chunk layer: inserts one typeless node per grid cell and
-	 *  sizes the parallel OutChunkPointData buckets.
-	 *
-	 *  ORIGIN-RELATIVE, the same assumption FindChunkIndexForPosition carries and with the
-	 *  same consequence on a re-centred tree: the chunk centres are computed about zero, so
-	 *  they can fall outside the root cube entirely. */
-	void PrePopulateVolumeLayer(TArray<TSharedPtr<FOctreeNode>>& OutVolumeChunks, TArray<TArray<FPointData>>& OutChunkPointData) {
-		const int NodesPerSide = 1 << VolumeDepth;
-		const double ChunkExtent = Extent / (1 << VolumeDepth);
-		const int TotalNodeCount = NodesPerSide * NodesPerSide * NodesPerSide;
-		OutVolumeChunks.SetNum(TotalNodeCount);
-		OutChunkPointData.SetNum(TotalNodeCount);
-
-		for (int x = 0; x < NodesPerSide; ++x) {
-			for (int y = 0; y < NodesPerSide; ++y) {
-				for (int z = 0; z < NodesPerSide; ++z) {
-					int idx = x + y * NodesPerSide + z * NodesPerSide * NodesPerSide;
-
-					FVector ChunkCenter = FVector(
-						(x - NodesPerSide / 2) * ChunkExtent * 2.0 + ChunkExtent,
-						(y - NodesPerSide / 2) * ChunkExtent * 2.0 + ChunkExtent,
-						(z - NodesPerSide / 2) * ChunkExtent * 2.0 + ChunkExtent
-					);
-
-					TSharedPtr<FOctreeNode> ChunkNode = InsertPosition(ChunkCenter, VolumeDepth, FVoxelData(0, 0, FVector::ZeroVector, -1, -1));
-
-					OutVolumeChunks[idx] = ChunkNode;
-					OutChunkPointData[idx] = TArray<FPointData>();
-				}
-			}
-		}
-	}
-
+#pragma region Insert
 	/** Descends from Root (or InCurrent), creating child nodes to ClampedDepth =
 	 *  min(InDepth, MaxDepth), and claims the target node's payload first-writer-
 	 *  wins. Returns the target node, or null while resetting or for a typeless
@@ -299,199 +181,6 @@ public:
 #pragma endregion
 
 #pragma region Fetch Operations
-	/** Recursively gathers leaf nodes under InNode into OutNodes, applying the
-	 *  depth and TypeId filters (InTypeIdFilter == -1 accepts any typed node).
-	 *  Nodes at InMaxDepth are treated as leaves. */
-	void CollectLeafNodes(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
-		if (!InNode.IsValid()) return;
-
-		// At or past max depth: this node is effectively a leaf for this query.
-		// Don't recurse into children; fall through to the filter test below.
-		if (InMaxDepth >= 0 && InNode->Depth >= InMaxDepth) {
-			bool bPassesFilter = true;
-			if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
-			if (InNode->Depth > InMaxDepth) bPassesFilter = false;
-			if (InTypeIdFilter == -1) { if (InNode->Data.TypeId < 0) bPassesFilter = false; }
-			else { if (InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false; }
-			if (bPassesFilter) OutNodes.Add(InNode);
-			return;
-		}
-
-		bool bIsLeaf = true;
-		for (const TSharedPtr<FOctreeNode>& Child : InNode->Children) {
-			if (Child.IsValid()) {
-				bIsLeaf = false;
-				CollectLeafNodes(Child, OutNodes, InMinDepth, InMaxDepth, InTypeIdFilter);
-			}
-		}
-
-		bool bPassesFilter = true;
-		if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
-		if (InTypeIdFilter == -1) { if (InNode->Data.TypeId < 0) bPassesFilter = false; }
-		else { if (InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false; }
-
-		if (bIsLeaf && bPassesFilter) {
-			OutNodes.Add(InNode);
-		}
-	}
-
-	/** Recursively gathers all nodes at exactly InTargetDepth under InNode. */
-	void CollectNodesAtDepth(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, int InTargetDepth) const {
-		if (!InNode.IsValid()) return;
-		if (InNode->Depth == InTargetDepth) {
-			OutNodes.Add(InNode);
-			return; // Don't recurse deeper
-		}
-		for (const TSharedPtr<FOctreeNode>& Child : InNode->Children) {
-			if (Child.IsValid()) {
-				CollectNodesAtDepth(Child, OutNodes, InTargetDepth);
-			}
-		}
-	}
-
-	//TODO: THIS SVO WAS DEVELOPED WITH A GENERIC INTENT... SOME OF THE LOGIC MAY NOT BE NEEDED FOR OUR PURPOSES ANY LONGER WITH A DENSITY FIRST GENERATION PARADIGM AT THIS POINT WE COULD POTENTIALLY START *SPECIALIZING* 
-	/** Accumulates Density from Root down to the deepest existing node containing
-	 *  InPosition. Returns 0 outside the tree bounds or with no root.
-	 *
-	 *  THE BOUNDS TEST IS ORIGIN-RELATIVE and the descent is not, so on a tree built with
-	 *  FOctree(InExtent, InCenter) the two disagree: positions inside the root cube are
-	 *  rejected and positions outside it are walked. No caller today; worth fixing against
-	 *  Root->Center before there is one. */
-	float SampleDensityAtPosition(const FVector& InPosition) const
-	{
-		if (!Root.IsValid()) return 0.0f;
-
-		// Optional: Quick bounds check
-		if (FMath::Abs(InPosition.X) > Extent ||
-			FMath::Abs(InPosition.Y) > Extent ||
-			FMath::Abs(InPosition.Z) > Extent)
-		{
-			return 0.0f;
-		}
-
-		float AccumulatedDensity = 0.0f;
-		TSharedPtr<FOctreeNode> Current = Root;
-
-		// Traverse down the tree
-		while (Current.IsValid())
-		{
-			// Accumulate density from this level
-			AccumulatedDensity += Current->Data.Density;
-
-			// Determine which child contains the position
-			uint8 ChildIndex = 0;
-			if (InPosition.X >= Current->Center.X) ChildIndex |= 1;
-			if (InPosition.Y >= Current->Center.Y) ChildIndex |= 2;
-			if (InPosition.Z >= Current->Center.Z) ChildIndex |= 4;
-
-			if (Current->Children[ChildIndex].IsValid())
-			{
-				Current = Current->Children[ChildIndex];
-			}
-			else
-			{
-				// Reached the deepest existing node for this position
-				break;
-			}
-		}
-
-		return AccumulatedDensity;
-	}
-
-	/** All nodes at exactly InTargetDepth. */
-	TArray<TSharedPtr<FOctreeNode>> GetNodesAtDepth(int InTargetDepth) const {
-		TArray<TSharedPtr<FOctreeNode>> Nodes;
-		if (Root.IsValid()) {
-			CollectNodesAtDepth(Root, Nodes, InTargetDepth);
-		}
-		return Nodes;
-	}
-
-	/** Recursively gathers nodes with Density > 0 under InNode, applying the depth
-	 *  and TypeId filters. */
-	void CollectPopulatedNodes(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
-		if (!InNode.IsValid()) return;
-		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) return;
-		for (const TSharedPtr<FOctreeNode>& Child : InNode->Children) {
-			if (Child.IsValid()) {
-				CollectPopulatedNodes(Child, OutNodes, InMinDepth, InMaxDepth, InTypeIdFilter);
-			}
-		}
-
-		bool bPassesFilter = true;
-		if (InNode->Data.Density <= 0) bPassesFilter = false;
-		if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
-		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) bPassesFilter = false;
-		if (InTypeIdFilter == -1) { if (InNode->Data.TypeId < 0) bPassesFilter = false; }
-		else { if (InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false; }
-
-		if (bPassesFilter) {
-			OutNodes.Add(InNode);
-		}
-	}
-
-	/** Leaf nodes matching the depth and TypeId filters. */
-	TArray<TSharedPtr<FOctreeNode>> GetLeafNodes(int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
-		TArray<TSharedPtr<FOctreeNode>> Leaves;
-		if (Root.IsValid()) {
-			CollectLeafNodes(Root, Leaves, InMinDepth, InMaxDepth, InTypeIdFilter);
-		}
-		return Leaves;
-	}
-
-	/** Nodes with Density > 0 matching the depth and TypeId filters. */
-	TArray<TSharedPtr<FOctreeNode>> GetPopulatedNodes(int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
-		TArray<TSharedPtr<FOctreeNode>> Nodes;
-		if (Root.IsValid()) {
-			CollectPopulatedNodes(Root, Nodes, InMinDepth, InMaxDepth, InTypeIdFilter);
-		}
-		return Nodes;
-	}
-
-	/** Recursively gathers nodes whose cube overlaps the InCenter +/- InExtent
-	 *  AABB, applying the depth and TypeId filters. */
-	void CollectNodesInRange(const TSharedPtr<FOctreeNode>& InNode, TArray<TSharedPtr<FOctreeNode>>& OutNodes, const FVector& InCenter, const double InExtent, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
-		if (!InNode.IsValid()) return;
-		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) return;
-
-		const FVector QueryMin = InCenter - FVector(InExtent, InExtent, InExtent);
-		const FVector QueryMax = InCenter + FVector(InExtent, InExtent, InExtent);
-		const FVector NodeMin = InNode->Center - FVector(InNode->Extent, InNode->Extent, InNode->Extent);
-		const FVector NodeMax = InNode->Center + FVector(InNode->Extent, InNode->Extent, InNode->Extent);
-
-		const bool bIntersects = NodeMin.X <= QueryMax.X && NodeMax.X >= QueryMin.X && NodeMin.Y <= QueryMax.Y && NodeMax.Y >= QueryMin.Y && NodeMin.Z <= QueryMax.Z && NodeMax.Z >= QueryMin.Z;
-		if (!bIntersects) return;
-
-		for (const TSharedPtr<FOctreeNode>& Child : InNode->Children)
-		{
-			if (Child.IsValid())
-			{
-				CollectNodesInRange(Child, OutNodes, InCenter, InExtent, InMinDepth, InMaxDepth, InTypeIdFilter);
-			}
-		}
-
-		bool bPassesFilter = true;
-		if (InMinDepth >= 0 && InNode->Depth < InMinDepth) bPassesFilter = false;
-		if (InMaxDepth >= 0 && InNode->Depth > InMaxDepth) bPassesFilter = false;
-		if (InTypeIdFilter == -1) { if (InNode->Data.TypeId < 0) bPassesFilter = false; }
-		else { if (InNode->Data.TypeId != InTypeIdFilter) bPassesFilter = false; }
-
-		if (bPassesFilter)
-		{
-			OutNodes.Add(InNode);
-		}
-	}
-
-	/** Nodes whose cube overlaps the InCenter +/- InExtent AABB, matching the filters. */
-	TArray<TSharedPtr<FOctreeNode>> GetNodesInRange(FVector InCenter, double InExtent, int InMinDepth = -1, int InMaxDepth = -1, int InTypeIdFilter = -1) const {
-		TArray<TSharedPtr<FOctreeNode>> Nodes;
-		if (Root.IsValid())
-		{
-			CollectNodesInRange(Root, Nodes, InCenter, InExtent, InMinDepth, InMaxDepth, InTypeIdFilter);
-		}
-		return Nodes;
-	}
-
 	/** Recursively gathers nodes whose projected size exceeds ScreenSpaceThresholdSq,
 	 *  pruning subtrees that cannot pass, and applying the depth and TypeId filters.
 	 *  See the per-node test in the body. */
@@ -606,27 +295,5 @@ public:
 		Root = MakeShared<FOctreeNode>(InCenter, Extent, TArray<uint8>(), nullptr);
 	}
 
-	/** Drops all nodes and rebuilds an empty root, preserving the root center.
-	 *  bIsResetting is set across the swap so in-flight BulkInsert / GetNodesInRange
-	 *  calls early-out instead of touching half-detached nodes.
-	 *
-	 *  NOT USED BY STREAMING, and the doc here used to say it was. Streaming constructs a
-	 *  fresh tree and swaps the pointer instead. That is not a cosmetic difference: the
-	 *  Root.Reset() below releases every node SYNCHRONOUSLY, on the calling thread, inside
-	 *  the lock -- FOctreeNode owns its children through TSharedPtr, so a full universe
-	 *  tree frees on the order of sixteen thousand leaves plus every interior node in one
-	 *  go. That cost on the game thread is exactly the stall the swap-and-release-on-a-
-	 *  worker arrangement in AUniverseActor exists to avoid. Anything reaching for this
-	 *  function should hand the outgoing Root to a worker first. */
-	void Reset() {
-		bIsResetting.store(true);
-		{
-			FScopeLock Lock(&OctreeMutex);
-			const FVector CenterToKeep = Root.IsValid() ? Root->Center : FVector::ZeroVector;
-			Root.Reset();
-			Root = MakeShared<FOctreeNode>(CenterToKeep, Extent, TArray<uint8>(), nullptr);
-		}
-		bIsResetting.store(false);
-	}
 #pragma endregion
 };
