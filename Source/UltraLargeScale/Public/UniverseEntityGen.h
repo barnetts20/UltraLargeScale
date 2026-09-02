@@ -49,6 +49,15 @@
  *  flat multiple of 16 with no implicit tail padding removes the question. */
 struct FUniverseEntityOut
 {
+	/** CALLER UNITS, RELATIVE TO THE OWNING CELL'S CENTRE -- not an absolute position.
+	 *
+	 *  Absolute is what this used to be, and it narrowed a coordinate that tracks
+	 *  VirtualTraversal into a float32 on the way back. The CPU then folded it to cell-local
+	 *  anyway (FNiagaraParticleBuffer::MakeCellLocalPositions does exactly that at push time),
+	 *  so the fold was already happening -- one step too late to matter, after the precision
+	 *  was gone. Doing it in the shader costs nothing and bounds this value by the cell.
+	 *
+	 *  The scatter adds the cell's own double-precision centre back. See FUniverseGenCell. */
 	FVector3f Pos = FVector3f::ZeroVector;
 	float Extent = 0.0f;
 
@@ -94,23 +103,63 @@ static_assert(sizeof(FUniverseEntityOut) == 32, "FUniverseEntityOut must match t
  *  back onto this side -- which for this layer means onto a path that cannot reach the
  *  volume texture at all.
  *
+ *  THE CENTRE IS A CELL AND A FRACTION, NOT A POSITION, and that is the whole reason this
+ *  struct changed shape.
+ *
+ *  It used to be an absolute caller-space FVector3f. Caller space tracks VirtualTraversal --
+ *  the octree rebases AROUND the player rather than renumbering under them, so these
+ *  coordinates grow without bound -- and a float32 holding 5e13 has a unit of last place of
+ *  about 4e6. The failure that produces is not a wrong position. It is that MakeUniverseProbe
+ *  builds its probes as centre +/- extent, so once the extent falls below the centre's own
+ *  ulp EVERY PROBE IN THE CELL COLLAPSES ONTO THE SAME FLOAT. The envelope is then a
+ *  single-point estimate of a field that is mostly void, the cell reports no mass, and the
+ *  tier places nothing at all. A quantised grid of galaxies would have been the gentle
+ *  version; what actually happens is that generation stops, silently, with the raymarch
+ *  still drawing the field perfectly.
+ *
+ *  Splitting the centre into a whole field cell plus a fraction fixes it at the root: the
+ *  integer carries the magnitude exactly, and everything the shader computes from it is a
+ *  small offset inside one cell where float32 has all its precision. The cell index is fed
+ *  to MakeUniverseDensityParams as that group's field offset, so the sample point is
+ *  reconstructed by exactly the mechanism the material already uses.
+ *
+ *  CentreCell IS REDUCED MODULO THE FIELD PERIOD by the caller, for the same reason
+ *  AUniverseActor::ComputeFieldOffset reduces: it crosses to the shader through a float3.
+ *  Reducing by a DIFFERENT period from the one the core derives would put placement and the
+ *  material on wraps that disagree -- see UniverseCellWrap.
+ *
  *  The padding holds the record at 48 bytes and splits it so no vector straddles a
- *  sixteen-byte boundary. */
+ *  sixteen-byte boundary; HalfExtent sits between the two vectors to keep that true. */
 struct FUniverseGenCell
 {
-	FVector3f Centre = FVector3f::ZeroVector;
+	/** Whole field cells containing this cell's centre, wrapped into [0, period). */
+	FIntVector3 CentreCell = FIntVector3(0, 0, 0);
+
+	/** Half extent in CALLER units, unchanged. Bounded by the grid cell size, so it never
+	 *  had a precision problem of its own -- only the centre it was added to did. */
 	float HalfExtent = 0.0f;
-	FIntVector3 Coord = FIntVector3(0, 0, 0);
+
+	/** Remainder of the centre within CentreCell, per axis, in [0,1). */
+	FVector3f CentreFrac = FVector3f::ZeroVector;
 
 	/** Which slot region of the particle buffer this cell's entities belong to. Every child
 	 *  of a subdivided streamed cell carries its parent's.
 	 *
 	 *  THE SHADER NEEDS IT, not just the CPU. Without it the dispatch can only compact
 	 *  globally, and a batch that accepts more than it can hold then keeps whichever
-	 *  entities arrived first -- scheduling order, not field order. */
+	 *  entities arrived first -- scheduling order, not field order.
+	 *
+	 *  SITS BETWEEN THE TWO VECTORS, like HalfExtent above, and for the same reason: with
+	 *  Coord immediately after CentreFrac the third vector lands at offset 28 and straddles
+	 *  the 16-byte boundary at 32. */
 	uint32 SlotIndex = 0;
 
-	uint32 Pad[4] = { 0, 0, 0, 0 };
+	/** The placement key, and the ONE coordinate here that is not wrapped. It seeds every
+	 *  candidate draw and, through FVoxelData::ComposeSeed, every entity -- so generation
+	 *  stays aperiodic while the density field repeats. */
+	FIntVector3 Coord = FIntVector3(0, 0, 0);
+
+	uint32 Pad = 0;
 };
 static_assert(sizeof(FUniverseGenCell) == 48, "FUniverseGenCell must match the .usf layout");
 

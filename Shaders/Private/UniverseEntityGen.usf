@@ -105,11 +105,12 @@ RWBuffer<uint> OutCounts;
 // shifted -- silently.
 struct FUniverseGenCell
 {
-    float3 Centre; // caller's units
-    float HalfExtent;
-    int3 Coord; // the placement key; NOT the dispatch index
+    int3 CentreCell; // whole field cells, wrapped into [0, period) by the caller
+    float HalfExtent; // caller's units
+    float3 CentreFrac; // remainder of the centre within CentreCell, [0,1)
     uint SlotIndex; // which buffer region this cell's entities belong to
-    uint4 Pad1; // 48 bytes total, matching the C++ mirror without packing rules
+    int3 Coord; // the placement key; NOT the dispatch index, and NOT wrapped
+    uint Pad1; // 48 bytes total, matching the C++ mirror without packing rules
 };
 
 StructuredBuffer<FUniverseGenCell> InCells;
@@ -282,13 +283,29 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
     FUniverseGenCell Cell = InCells[CellIndex];
 
-    // A ZERO OFFSET, and it is passed rather than omitted so the derivation's argument list
-    // stays the same on both paths. See InvFieldExtent for why placement needs none.
+    // THE CELL'S OWN FIELD OFFSET, which is what replaced the zero this used to pass.
+    //
+    // The uniform pins are still zero -- placement has no view to scroll under it, and the
+    // derivation at InvFieldExtent showing the traversal terms cancelling still holds. What
+    // changed is that the cell no longer carries an absolute caller-space centre for the
+    // probe to offset from. It carries the field cell it sits in and the fraction within,
+    // and THAT is handed to the derivation as this group's offset -- so a sample point is
+    // reconstructed exactly the way the material reconstructs one, integer plus fraction,
+    // and every float the shader touches is a small offset inside one cell.
+    //
+    // ADDING THE UNIFORM RATHER THAN REPLACING IT keeps both paths passing the same
+    // argument list, and leaves the pins meaningful if placement ever does acquire a
+    // draw-wide offset. Both are exact: CentreCell is wrapped below 2^24 and the uniform is
+    // zero.
+    //
+    // THE FRACTION SUM IS NOT NORMALISED, and does not need to be. SampleAtPosition adds
+    // OffsetFrac before it floors, so a component at or above one simply carries into the
+    // integer cell out of the same floor that decomposes the position.
     UniverseDensityParams P = MakeUniverseDensityParams(
         InCellSizeRange,
         InSeed,
-        InOffsetCell,
-        InOffsetFrac,
+        InOffsetCell + float3(Cell.CentreCell),
+        InOffsetFrac + Cell.CentreFrac,
         InWallDensityRange,
         InWallFalloffRange,
         InFilamentDensityRange,
@@ -338,8 +355,16 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     {
         const uint ProbeIndex = Round * UNIVERSE_ENTITYGEN_GROUP + GroupIndex;
 
+        // A ZERO CENTRE, so this is the probe's offset FROM the cell centre in caller units
+        // rather than its absolute position. The centre it used to be added to now lives in
+        // the density params as an exact integer cell, so the addition happens there, in the
+        // one place that can do it without a float32 carrying 1e13.
+        //
+        // THE HASH INPUTS ARE UNCHANGED -- Coord and KeySeed -- so every probe and candidate
+        // lands where it always did relative to its cell. This is a precision change, not a
+        // content change.
         const float3 ProbePos = MakeUniverseProbe(
-            Cell.Centre, Cell.HalfExtent,
+            float3(0.0f, 0.0f, 0.0f), Cell.HalfExtent,
             Cell.Coord.x, Cell.Coord.y, Cell.Coord.z,
             KeySeed, ProbeIndex);
 
@@ -460,8 +485,12 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     // budget.
     for (uint Slot = GroupIndex; Slot < Candidates; Slot += UNIVERSE_ENTITYGEN_GROUP)
     {
+        // ZERO CENTRE, as in the probe pass: C.Pos comes back in caller units relative to the
+        // cell centre and C.Norm is that same offset normalised, which is exactly what
+        // SampleAtPosition now wants given the group's field offset. C.Pos is also what gets
+        // written out, so the entity record is cell-relative too -- see FUniverseEntityOut.
         UniverseCandidate C = MakeUniverseCandidate(
-            Cell.Centre, Cell.HalfExtent, InvFieldExtent,
+            float3(0.0f, 0.0f, 0.0f), Cell.HalfExtent, InvFieldExtent,
             Cell.Coord.x, Cell.Coord.y, Cell.Coord.z,
             (int) Slot * UNIVERSE_SLOT_STRIDE + KeySeed);
 

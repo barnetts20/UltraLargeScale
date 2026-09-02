@@ -1,5 +1,46 @@
 ﻿#include "UniverseDataGenerator.h"
 
+namespace
+{
+	/** Splits a caller-space cell centre into the exact field cell containing it plus the
+	 *  remainder, wrapped into the field period.
+	 *
+	 *  THE SPLIT RUNS IN DOUBLE AND THE NARROWING HAPPENS AFTER IT, which is the entire
+	 *  point. Caller space tracks VirtualTraversal without bound, so an FVector3f built from
+	 *  one of these centres directly has a unit of last place of several million caller units
+	 *  at long traversals -- and MakeUniverseProbe builds its probes as centre +/- extent, so
+	 *  once the extent falls below that ulp every probe in the cell collapses onto one point,
+	 *  the envelope reads a single sample of a mostly-empty field, and the tier places
+	 *  nothing. Generation stops while the raymarch carries on drawing the field correctly,
+	 *  which is about the least helpful pair of symptoms available.
+	 *
+	 *  Reuses FUniverseFieldOffset::FromCellPosition rather than flooring here, so the cell
+	 *  boundary is placed by the same code the material offset uses -- floor, not truncation.
+	 *
+	 *  WRAPPED WITH THE SAME PERIOD THE CORE DERIVES. The cell index crosses to the shader
+	 *  through a float3, so it has to be reduced for the same reason the material offset does;
+	 *  reducing by a DIFFERENT period would put placement and the render on wraps that
+	 *  disagree, and the two would sample different fields a long way out with nothing
+	 *  logging anything. See UniverseCellWrap. */
+	void SplitCellCentre(const FVector& InCentreCaller, double InInvFieldCell, int32 InPeriod,
+		FIntVector3& OutCell, FVector3f& OutFrac)
+	{
+		const FUniverseFieldOffset Split =
+			FUniverseFieldOffset::FromCellPosition(InCentreCaller * InInvFieldCell);
+
+		OutCell = FIntVector3(
+			UniverseCellWrap::Wrap(Split.Cell.X, InPeriod),
+			UniverseCellWrap::Wrap(Split.Cell.Y, InPeriod),
+			UniverseCellWrap::Wrap(Split.Cell.Z, InPeriod));
+
+		OutFrac = FVector3f(
+			static_cast<float>(Split.Frac.X),
+			static_cast<float>(Split.Frac.Y),
+			static_cast<float>(Split.Frac.Z));
+	}
+}
+
+
 #pragma region GPU Entity Generation
 
 void UniverseDataGenerator::SubdivideCells(
@@ -99,8 +140,7 @@ void UniverseDataGenerator::BuildCalibrationGrid(
 	// per grid depth, so sizing the sample in tier cells made the fine tiers sample a
 	// vanishing fraction of the field -- the Small tier was measuring four tenths of one
 	// field cell and calibrating the whole universe against it.
-	const double FieldCell = FieldExtent
-		* FMath::Max(static_cast<double>(Params.DensityParams.Lattice.CellSizeSmall), 1e-6);
+	const double FieldCell = FieldCellSize();
 
 	const double Span = FieldCell * UniverseEntityGen::kCalibrationSpanFieldCells;
 
@@ -206,16 +246,20 @@ float UniverseDataGenerator::GetTierBudgetScale(
 		return 0.0f;
 	}
 
+	// The same split the runtime batch does. Calibration coords are drawn near the origin,
+	// so this path was never the one that lost precision -- it shares the conversion anyway,
+	// because a calibration that decomposed its cells differently from generation would
+	// calibrate against a field offset by a fraction of a cell from the one being placed in.
+	const double InvFieldCell = 1.0 / FMath::Max(FieldCellSize(), UE_DOUBLE_SMALL_NUMBER);
+	const int32 CellPeriod = FieldCellPeriod();
+
 	TArray<FUniverseGenCell> Cells;
 	Cells.Reserve(AllCells.Num());
 
 	for (const FTierBatchCell& In : AllCells)
 	{
 		FUniverseGenCell Cell;
-		Cell.Centre = FVector3f(
-			static_cast<float>(In.Centre.X),
-			static_cast<float>(In.Centre.Y),
-			static_cast<float>(In.Centre.Z));
+		SplitCellCentre(In.Centre, InvFieldCell, CellPeriod, Cell.CentreCell, Cell.CentreFrac);
 		Cell.HalfExtent = static_cast<float>(In.HalfExtent);
 		Cell.Coord = FIntVector3(In.Coord.X, In.Coord.Y, In.Coord.Z);
 		Cell.SlotIndex = 0; // one token slot; the generate pass never runs here
@@ -419,16 +463,16 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 		return FailBatch();
 	}
 
+	const double InvFieldCell = 1.0 / FMath::Max(FieldCellSize(), UE_DOUBLE_SMALL_NUMBER);
+	const int32 CellPeriod = FieldCellPeriod();
+
 	TArray<FUniverseGenCell> Cells;
 	Cells.Reserve(Subdivided.Num());
 
 	for (const FTierBatchCell& In : Subdivided)
 	{
 		FUniverseGenCell Cell;
-		Cell.Centre = FVector3f(
-			static_cast<float>(In.Centre.X),
-			static_cast<float>(In.Centre.Y),
-			static_cast<float>(In.Centre.Z));
+		SplitCellCentre(In.Centre, InvFieldCell, CellPeriod, Cell.CentreCell, Cell.CentreFrac);
 		Cell.HalfExtent = static_cast<float>(In.HalfExtent);
 		Cell.Coord = FIntVector3(In.Coord.X, In.Coord.Y, In.Coord.Z);
 
@@ -542,7 +586,12 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 			continue;
 		}
 
-		const FVector Pos(E.Pos.X, E.Pos.Y, E.Pos.Z);
+		// THE CELL'S CENTRE IS ADDED BACK HERE, IN DOUBLE. E.Pos is the entity's offset from
+		// its cell centre in caller units -- bounded by the cell -- so the sum is exact where
+		// the shader returning an absolute float32 was not. SourceCell.Centre is the same
+		// double the split above consumed, so this is the inverse of that split and not a
+		// reconstruction of it.
+		const FVector Pos = SourceCell.Centre + FVector(E.Pos.X, E.Pos.Y, E.Pos.Z);
 
 		// BELT AND BRACES, and it should never fire now that the cursor bounds the loop.
 		// It stays because the consumer is the octree, whose child-index arithmetic on a
