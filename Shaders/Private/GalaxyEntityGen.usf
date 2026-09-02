@@ -1,150 +1,88 @@
 // GalaxyEntityGen.usf
-// Entity placement on the GPU, so the generator sees the SAME field the material draws
-// -- warp and texture modulation included. Placement that cannot reach the volume
-// texture has to pay for every feature analytically, which is a constraint on what the
-// field can reasonably contain, not just a parity problem.
+// Entity placement on the GPU, so the generator samples the SAME field the material draws,
+// warp and texture modulation included.
 //
-// ONE GROUP PER CELL, not one thread per candidate.
+// ONE GROUP PER CELL, not one thread per candidate: a cell needs a rejection envelope before
+// any candidate exists, and that envelope is a max over GALAXY_ENTITYGEN_PROBES samples. The
+// group id IS the cell index, so identity is stable -- do not split into cull + indirect
+// dispatch, since compaction by atomic append would make a cell's offset scheduling-dependent.
 //
-// A cell has to be culled and given a rejection envelope before any of its candidates
-// can be drawn, and that envelope is a max over GALAXY_ENTITYGEN_PROBES samples -- a
-// reduction, which a lone thread can only do serially. A group runs the probes in parallel, reduces
-// through group memory, then spends itself on that cell's candidates.
-//
-// DO NOT SPLIT IT INTO CULL + INDIRECT DISPATCH. That needs a compacted cell list, and
-// compaction by atomic append makes a cell's output offset depend on scheduling.
-// Identity has to be (cell, slot); here the group id IS the cell index, and it is stable.
+// TWO PASSES over one dispatch on GALAXY_ENTITYGEN_PASS: 0 probes and weighs each cell, 1
+// draws and accepts its candidates.
 
 #include "/Engine/Public/Platform.ush"
 #include "/UltraLargeScale/GalaxyPlacement.ush"
 
-// ---------------------------------------------------------------------------
-// OUTPUT
-//
-// COMPACTED GLOBALLY: one atomic cursor for the whole dispatch, entities appended in
-// arrival order, and the buffer sized on what the slots can hold rather than on
-// cells x worst case.
-//
-// Reserving a fixed run per cell instead costs either the readback or the picture. The
-// run has to be wide enough for the densest cell and every cell pays for it, so a grid
-// of a few thousand cells wants hundreds of megabytes; size the run to what fits and the
-// dense cells clip against it, emitting an identical count whatever they hold. A
-// cell-constant count is a cubic lattice in the sky, and the cells that clip hardest are
-// the arms.
-//
-// SO IDENTITY TRAVELS IN THE RECORD. Identity is (cell, slot), never position in the
-// output, or a region regenerates with its entities shuffled between visits. Storage
-// order is scheduling-dependent and NOTHING DOWNSTREAM MAY KEY OFF IT; the set, and each
-// entity's identity within it, is not.
-//
-// Two uint4s per entity, matching FGalaxyEntityOut in GalaxyEntityGen.h so the readback
-// memcpys straight into it:
+// Two uint4 per entity, matching FGalaxyEntityOut so the readback memcpys straight in:
 //   [0] asuint(Pos.xyz), asuint(Extent)
 //   [1] PackGalaxyDecor(Decor), Slot, CellIndex, asuint(Density)
-// ---------------------------------------------------------------------------
-// TYPED, not structured, for both buffers. A structured UAV has no format, and RDG's
-// clear path needs one -- AddClearUAVPass over a structured UAV leaves the buffer at
-// whatever the allocator handed back. Uncleared, InterlockedAdd returns a huge index,
-// every entity fails the bounds test below, and the cell writes nothing at all while
-// looking entirely healthy.
+// COMPACTED GLOBALLY through one atomic cursor, so storage order is scheduling-dependent and
+// NOTHING DOWNSTREAM MAY KEY OFF IT -- identity is (cell, slot) and travels in the record. A
+// fixed run per cell instead costs either hundreds of megabytes or a cell-constant clipped
+// count, which is a visible cubic lattice.
+//
+// TYPED, NOT STRUCTURED, for both: a structured UAV has no format and RDG's clear path needs
+// one. Uncleared, InterlockedAdd returns a huge index and the cell writes nothing while
+// looking healthy.
 RWBuffer<uint4> OutEntities;
-// FIVE slots per cell, plus ONE global past the end:
-//   [0] accepted
-//   [1] candidates evaluated
-//   [2] the cell's ENVELOPE, as asuint
-//   [3] the largest density any CANDIDATE saw, as asuint
-//   [4] the cell's MASS -- mean of (density/anchor)^exponent over its probes, as asuint
+// Five slots per cell plus one global past the end:
+//   [0] accepted   [1] candidates evaluated   [2] envelope   [3] max candidate density
+//   [4] mass -- mean of (density/anchor)^exponent over the jittered probes
+//   [NumCells*5] the global entity append cursor
+// [4] IS NOT A DIAGNOSTIC: accepted_i = BudgetScale x mass_i exactly, so the CPU reduces these
+// masses into the one per-tier constant that sets every cell's count. Nothing here reduces.
 //
-//   [NumCells*5 + 0] the global entity append cursor
-//
-// [4] is not a diagnostic. It is how the candidate budget stops being an authored
-// number: accepted_i works out to BudgetScale x mass_i exactly, so one per-tier constant
-// sets every cell's count. The CPU reduces these masses and hands the answer back as
-// BudgetScale -- see GalaxyDataGenerator::GetTierBudgetScale for which reduction. Nothing
-// here reduces anything.
-//
-// The other three answer questions with no other observer:
-//
-//   [1] candidates evaluated. Against the probe count -- cells x GALAXY_ENTITYGEN_PROBES
-//       -- it gives the ratio that says whether GenerationSubdivision is on the right side
-//       of its crossover, since probes and candidates are both field evaluations.
-//   [2] against the anchor -- is the normaliser in a sane numeric range?
-//   [3] against [2] -- THE ENVELOPE CHECK. A candidate density above the envelope means
-//       the probes under-estimated this cell, the ratio clipped at 1, and the peak was
-//       flattened. Cell-quantised, so it shows as grid artifacts.
-//
-// asuint is monotonic for non-negative floats, so InterlockedMax over the bit pattern
-// orders exactly as the float does. The masses are read back as floats and never
-// atomically combined, so no ordering question arises.
+// [1] against cells x PROBES is the C/P ratio saying whether GenerationSubdivision is on the
+// right side of its crossover. [3] against [2] IS THE ENVELOPE CHECK: a candidate denser than
+// the envelope means the probes under-estimated the cell and flattened its peak, cell-quantised
+// into grid artifacts. asuint is monotonic for non-negative floats, so InterlockedMax orders as
+// the float does.
 RWBuffer<uint> OutCounts;
 
-// ---------------------------------------------------------------------------
-// DISPATCH
-//
-// A batch of cells, one group each, SUPPLIED rather than derived from the group id:
-// which cells exist is the grid owner's business, so a streamed neighbourhood and a whole
-// culled grid are the same dispatch with different contents. That is data, not a second
-// path.
-// ---------------------------------------------------------------------------
-// GEOMETRY ONLY -- a centre, a half extent, and the grid coord that keys the cell. The
-// shader derives the envelope and the candidate budget itself, so nothing about the
-// field crosses the boundary.
-//
-// The padding is split so no vector straddles a sixteen-byte boundary: Centre and
-// HalfExtent fill the first register, Coord and Pad0 the second, Pad1 the third. A
-// straddling member packs differently on some backends and every field after it reads
-// shifted -- silently.
+// A batch of cells, one group each, SUPPLIED rather than derived from the group id -- so a
+// streamed neighbourhood and a whole culled grid are the same dispatch. GEOMETRY ONLY. The
+// padding is split so no vector straddles a sixteen-byte boundary; a straddling member
+// packs differently on some backends and shifts every field after it, silently.
 struct FGalaxyGenCell
 {
     float3 Centre; // caller's units
     float HalfExtent;
-    int3 Coord; // the placement key; NOT the dispatch index
+    int3 Coord; // the placement key, NOT the dispatch index
     uint Pad0;
-    uint4 Pad1; // 48 bytes total, matching the C++ mirror without packing rules
+    uint4 Pad1;
 };
 
 StructuredBuffer<FGalaxyGenCell> InCells;
 
 uint NumCells;
-uint EntityCapacity; // records in OutEntities
+uint EntityCapacity;
 
-// Width of the WRAPPED group grid, in groups.
-//
-// One group per cell, and a tier's subdivided grid runs to hundreds of thousands of
-// them -- past the 65535-per-dimension dispatch limit, which RDG catches as an ensure
-// and then dispatches nothing at all. So the groups are laid out two-dimensionally and
-// unwrapped here. The tail of the last row is out of range and returns below.
+// Width of the WRAPPED group grid. A subdivided tier runs past the 65535-per-dimension limit,
+// which RDG catches as an ensure and then dispatches nothing. The last row's tail returns.
 uint DispatchGroupsX;
 
-// The per-tier constant. accepted_i = BudgetScale x mass_i, so this is the whole of the
-// tier's placement tuning. Calibrated once per tier; unused by the probe pass.
+// The per-tier constant, calibrated once: accepted_i = BudgetScale x mass_i. Pass 1 only.
 float BudgetScale;
 
-int KeySeed; // galaxy seed folded with the tier's seed offset
+int KeySeed;
 float InvGalaxyExtent;
 
-// A NUMERICAL NORMALISER, not a tuning knob: it divides the mass in pass 0 and the
-// envelope in pass 1, and cancels out of the result exactly. Keeping the per-cell masses
-// near 1 is all it does. See kBudgetAnchor in GalaxyEntityGen.h.
+// A NUMERICAL NORMALISER, not a knob: it divides the mass in pass 0 and the envelope in pass 1
+// and cancels exactly. Keeping the per-cell masses near 1 is all it does.
 float BudgetAnchor;
 
-// Turns the probed peak into an envelope the field will not exceed. Covers the SAMPLING
-// miss only: a finite probe set under-shoots a sharp peak that falls between its samples.
-// Watch counter [3] against [2] for how often that still happens.
+// Turns the probed peak into an envelope the field will not exceed, covering the SAMPLING miss
+// only. Counter [3] against [2] says how often a peak still falls between probes.
 float EnvelopePad;
 
-// --- placement, per dispatch; the per-cell envelope overrides Q.InvDensityReference
+// Placement, per dispatch; the per-cell envelope overrides Q.InvDensityReference.
 float PlaceSpawnExponent;
 float PlaceExtentMin;
 float PlaceExtentMax;
 float PlaceExtentExponent;
 
-// FOUR FIELD TEXTURES, matching the material's Custom node pin for pin. Two signed vector
-// volumes for the warp fetches, two UNORM multinoise volumes for the modulation fetches,
-// split by family as well as by role. See the table in GalaxyDensityCore.ush.
-//
-// ALL FOUR OR NONE. Placement samples the field the material draws, so a dispatch bound
-// with three of these and a stale fourth places stars against a field nobody renders.
+// FOUR FIELD TEXTURES, matching the material's Custom node pin for pin. ALL FOUR OR NONE: a
+// dispatch bound with three and a stale fourth places stars against a field nobody renders.
 Texture3D WarpTexDisc;
 SamplerState WarpTexDiscSampler;
 Texture3D WarpTexHalo;
@@ -154,11 +92,9 @@ SamplerState NoiseTexDiscSampler;
 Texture3D NoiseTexHalo;
 SamplerState NoiseTexHaloSampler;
 
-// --- field parameters, raw, in the order MakeGalaxyDensityParams takes them -------
-// RAW, NOT PRE-DERIVED. Uploading a derived GalaxyDensityParams as a constant buffer
-// would have to match HLSL's packing rules against the C++ layout member for member, and
-// one straddling float3 silently shifts everything after it. Deriving here costs sixteen
-// arm hashes and a tan per thread, and it cannot drift.
+// Field parameters, RAW and in the order MakeGalaxyDensityParams takes them. A derived struct
+// uploaded as a constant buffer would have to match HLSL packing against the C++ layout member
+// for member. Deriving here costs sixteen arm hashes and a tan per thread, and cannot drift.
 float4 InLateralScale;
 float4 InVerticalScale;
 float4 InLayerDensity;
@@ -190,42 +126,22 @@ float InBackgroundConcentration;
 float InNoiseEnable;
 float4 InFieldOrientation;
 
-// Lanes per group. Both groupshared arrays are sized on it and the mass reduction
-// iterates to it.
-#define GALAXY_ENTITYGEN_GROUP 64u
+#define GALAXY_ENTITYGEN_GROUP 64u // lanes per group; both groupshared arrays size on it
 
-// PROBES PER LANE, so GALAXY_ENTITYGEN_PROBES samples per cell. The envelope is a MAX over
-// the cell, and a galaxy's features are thin: a disc a few percent of the extent thick, and
-// arms narrow in azimuth inside it. So the structure occupies a small fraction of any cell
-// at any subdivision, and ONE PROBE PER LANE MISSES IT.
-//
-// TWO FAILURES, NOT ONE, and they look nothing alike. A cell whose probes all miss reports
-// a zero envelope and returns before drawing anything -- a hard, cell-shaped hole with the
-// raymarch still drawing structure through it. A cell whose probes mostly miss reports a
-// mass near zero and draws almost no candidates, which is the same hole with soft edges.
-// Both are decided by a coin flip per cell, so they land in a pattern with the generation
-// grid's frequency and no relation to the field.
-//
-// SUBDIVISION IS NOT THE LEVER FOR THIS. Shrinking cells raises the probe DENSITY but also
-// multiplies the group count, so total probe cost rises the same way while occupancy and
-// scheduling get worse. Adding rounds raises density at constant group count, the cheaper
-// axis whenever the group count is already adequate.
-//
-// TUNE AGAINST BOTH COUNTERS, NEVER ONE. Probes and candidates are both field evaluations,
-// so the C/P ratio is the whole cost argument; the live-cell count and the envelope-exceeded
-// count are what say whether the probe set is adequate.
+// Probes per lane. The envelope is a MAX and a galaxy's features are thin, so structure fills a
+// small fraction of any cell and ONE PROBE PER LANE MISSES IT. All probes missing gives a zero
+// envelope and a hard cell-shaped hole with the raymarch still drawing through it; most missing
+// gives the same hole with soft edges. Both are a coin flip per cell, landing at the generation
+// grid's frequency. ROUNDS, NOT SUBDIVISION, is the lever: shrinking cells raises probe density but multiplies
+// the group count, so total cost rises the same way while occupancy gets worse.
 #define GALAXY_ENTITYGEN_PROBE_ROUNDS 2u
 #define GALAXY_ENTITYGEN_PROBES (GALAXY_ENTITYGEN_GROUP * GALAXY_ENTITYGEN_PROBE_ROUNDS)
 
-// The probed peak, reduced across the group. asuint is monotonic for non-negative
-// floats, so InterlockedMax over the bit pattern orders exactly as the float does --
-// groupshared memory has no float atomics.
+// The probed peak. InterlockedMax on the bits -- groupshared has no float atomics.
 groupshared uint GroupEnvelopeBits;
 
-// The shaped densities, summed by ONE LANE IN A FIXED ORDER rather than by atomics.
-// This value divides the tier's whole budget, so every cell's contribution has to be
-// reproducible; float addition is not associative, and an atomic would let scheduling
-// decide the low bits. Sixty-four adds on one lane costs nothing.
+// Summed by ONE LANE IN A FIXED ORDER, not by atomics: this divides the tier's whole budget and
+// float addition is not associative, so an atomic would let scheduling decide the low bits.
 groupshared float GroupMass[GALAXY_ENTITYGEN_GROUP];
 
 [numthreads(GALAXY_ENTITYGEN_GROUP, 1, 1)]
@@ -254,22 +170,9 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     const float InvAnchor = 1.0f / max(BudgetAnchor, 1e-6f);
     const float Exponent = max(PlaceSpawnExponent, 1e-3f);
 
+    // PASS 0 -- PROBE: cull the cell, envelope it, weigh it. Identical for calibration and for
+    // generation, so a cell's measured mass is the estimate its own group would produce.
 #if GALAXY_ENTITYGEN_PASS == 0
-    // -----------------------------------------------------------------------
-    // PASS 0 -- PROBE. Cull the cell, envelope it, and weigh it.
-    //
-    // GALAXY_ENTITYGEN_PROBE_ROUNDS probes per lane, and identical for calibration and for
-    // generation -- both descend to the same grid, so a cell's measured mass is the
-    // estimate its own thread group would produce.
-    //
-    // PROBE COUNT MATTERS MORE THAN IT LOOKS. The envelope is a MAX, and structure much
-    // thinner than a cell is only found if a probe lands on it, so a sparse set makes the
-    // estimate a coin flip that varies cell to cell. The envelope normally cancels out of
-    // the result, but it stops cancelling wherever the ratio clips at 1.
-    //
-    // The MEAN comes from the same samples at no extra cost, and is what the budget is
-    // solved from -- but from the jittered ones only. See below.
-    // -----------------------------------------------------------------------
     if (GroupIndex == 0u)
     {
         GroupEnvelopeBits = 0u;
@@ -280,9 +183,8 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     float LocalPeak = 0.0f;
     float LocalMass = 0.0f;
 
-    // STRIDED, so lane n takes probes n, n+64, n+128, ... Consecutive lanes hold consecutive
-    // probe indices within a round, which keeps their hash inputs adjacent in a wave; the
-    // corner cases all land in round 0 and stay wave-uniform.
+    // STRIDED, so consecutive lanes hold consecutive probe indices and their hash inputs stay
+    // adjacent in a wave. The corner cases all land in round 0.
     for (uint Round = 0u; Round < GALAXY_ENTITYGEN_PROBE_ROUNDS; ++Round)
     {
         const uint ProbeIndex = Round * GALAXY_ENTITYGEN_GROUP + GroupIndex;
@@ -292,10 +194,8 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
             Cell.Coord.x, Cell.Coord.y, Cell.Coord.z,
             KeySeed, ProbeIndex);
 
-        // THE SAME FUNCTION ACCEPTANCE USES. Probing the analytic field would
-        // reintroduce exactly the CPU-versus-GPU mismatch this design removed, and
-        // invisibly -- the envelope would simply run small and the ratio would clip
-        // across the peaks.
+        // THE SAME FUNCTION ACCEPTANCE USES. Probing the analytic field instead would run the
+        // envelope small and clip the peaks, invisibly.
         const float ProbeDensity = max(
             GalaxySample(P,
                 WarpTexDisc, WarpTexDiscSampler,
@@ -306,14 +206,9 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
         LocalPeak = max(LocalPeak, ProbeDensity);
 
-        // CORNERS COUNT TOWARD THE PEAK, NOT THE MEAN.
-        //
-        // The first eight probes are the cell's vertices. They belong in a MAX -- a
-        // ridge sitting on a corner is exactly what jitter alone would miss -- and they
-        // are the worst possible points for a MEAN, because they are the cell's extremes
-        // and a disc running through the middle misses every one of them. Samples pinned at
-        // the extremes pull the mass estimate down systematically, and the mass is what the
-        // tier's whole budget divides by.
+        // CORNERS COUNT TOWARD THE PEAK, NOT THE MEAN. The first eight probes are the cell's
+        // vertices: right for a MAX, since a ridge on a corner is what jitter misses, and the
+        // worst points for a MEAN, which the whole budget divides by.
         if (ProbeIndex >= 8u)
         {
             LocalMass += pow(ProbeDensity * InvAnchor, Exponent);
@@ -335,51 +230,28 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
         float Envelope = asfloat(GroupEnvelopeBits) * EnvelopePad;
 
-        // CLAMPED TO THE ANALYTIC CEILING, which is a safety valve rather than a
-        // correction, and the same one UniverseEntityGen.usf applies. Compose takes the max
-        // of four layers and every layer is bounded above by an expression in its own
-        // resolved pins, so an envelope past that bound is impossible with an intact
-        // derivation -- see GalaxyAnalyticCeiling.
-        //
-        // It is clamped rather than merely reported because the envelope raised to the
-        // spawn exponent IS the candidate budget: a garbage envelope does not produce a
-        // wrong picture, it produces a dispatch that draws millions of candidates per cell.
-        //
-        // The clamp firing is itself the signal. If cells sit pinned at exactly this value
-        // the probes are not the problem and the field parameters are -- which is precisely
-        // the distinction the probe-versus-envelope counters cannot make on their own.
+        // CLAMPED TO THE ANALYTIC CEILING, a safety valve: Compose takes the max of four layers,
+        // each bounded by its own resolved pins. Clamped rather than reported because the
+        // envelope raised to the spawn exponent IS the candidate budget -- a garbage envelope
+        // draws millions of candidates rather than a wrong picture. Cells pinned here say the
+        // field parameters are wrong rather than the probes.
         Envelope = min(Envelope, GalaxyAnalyticCeiling(P) * EnvelopePad);
 
-        // Written before any early-out, so a culled cell is DISTINGUISHABLE from a group
-        // that never ran: an envelope of zero is an empty cell, which is expected and
-        // common -- most of a galaxy's bounding grid is void -- while a slot still at the
-        // cleared value means the group never reached here.
+        // Written before any early-out, so a culled cell is DISTINGUISHABLE from a group that
+        // never ran: zero is an empty cell, the cleared value means the group never got here.
         OutCounts[CellIndex * 5u + 2u] = asuint(max(Envelope, 0.0f));
 
-        // Every probe except the eight corners.
         const float MassSamples = float(GALAXY_ENTITYGEN_PROBES - 8u);
 
         OutCounts[CellIndex * 5u + 4u] = asuint(Sum / MassSamples);
     }
 
 #else
-    // -----------------------------------------------------------------------
-    // PASS 1 -- GENERATE.
-    //
-    // The budget is DERIVED, and from a per-tier constant rather than from anything
-    // about this batch: the cell draws BudgetScale x (envelope/anchor)^g candidates.
-    //
-    // Why that expression: acceptance is (d/envelope)^g, so accepted works out to
-    //   BudgetScale x (E/a)^g x mean(d^g)/E^g  =  BudgetScale x mean((d/a)^g)
-    //                                          =  BudgetScale x mass_i
-    // The envelope cancels, which is what makes per-cell normalisation free of grid
-    // artifacts, and the anchor cancels through the calibration, which is why it is not
-    // a tuning knob. A cell's count therefore depends on that cell alone.
-    //
-    // NO FLOOR AND NO CEILING. Both are cell-constant multipliers, and a cell-constant
-    // multiplier is a visible cube. The real-valued budget reaches a whole number
-    // through GalaxyStochasticCount, which preserves the expectation exactly.
-    // -----------------------------------------------------------------------
+    // PASS 1 -- GENERATE. The cell draws BudgetScale x (envelope/anchor)^g candidates, so
+    //   accepted = BudgetScale x (E/a)^g x mean(d^g)/E^g = BudgetScale x mass_i
+    // The envelope cancels, which makes per-cell normalisation free of grid artifacts, and the
+    // anchor cancels through calibration. NO FLOOR AND NO CEILING -- a cell-constant multiplier
+    // is a visible cube. GalaxyStochasticCount reaches a whole number, expectation preserved.
     const float Envelope = asfloat(OutCounts[CellIndex * 5u + 2u]);
 
     if (!(Envelope > 0.0f))
@@ -389,16 +261,13 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
     const float RawCandidates = BudgetScale * pow(Envelope * InvAnchor, Exponent);
 
-    // The ceiling is a RUNAWAY STOP, not a tuning cap: reachable only if calibration
-    // returned a mass near zero, which means the probes found nothing anywhere and the
-    // inputs are wrong. The CPU says so from the counters.
+    // The 4194304 ceiling is a RUNAWAY STOP, not a cap: reachable only if calibration returned
+    // a mass near zero, meaning the probes found nothing anywhere.
     const uint Candidates = GalaxyStochasticCount(
         RawCandidates, Cell.Coord.x, Cell.Coord.y, Cell.Coord.z, KeySeed, 4194304.0f);
 
-    // Zero is ordinary, not an error: most of a galaxy is faint enough that a cell's
-    // budget is a fraction of one candidate and the draw comes up short. The strided
-    // loop below is already a no-op at zero; returning early only skips the placement
-    // setup.
+    // Zero is ordinary -- most of a galaxy is faint enough that a cell's budget is a fraction
+    // of one candidate. The loop is already a no-op; this skips the placement setup.
     if (Candidates == 0u)
     {
         return;
@@ -408,9 +277,8 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
         Envelope, PlaceSpawnExponent,
         PlaceExtentMin, PlaceExtentMax, PlaceExtentExponent);
 
-    // Strided so consecutive lanes take consecutive slots, keeping hash inputs adjacent
-    // within a wave. There is no surplus-thread early-out because the loop bound IS the
-    // budget.
+    // Strided so consecutive lanes take consecutive slots. The loop bound IS the budget, so
+    // there is no surplus-thread early-out.
     for (uint Slot = GroupIndex; Slot < Candidates; Slot += GALAXY_ENTITYGEN_GROUP)
     {
         GalaxyCandidate C = MakeGalaxyCandidate(
@@ -427,9 +295,8 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
         GalaxyEntity E = FinishGalaxyEntity(Q, C, Density);
 
-        // Both counted BEFORE the acceptance test, so they describe what the shader saw
-        // rather than only what it kept. The density max is over every candidate, which
-        // is what makes [3] comparable against the envelope in [2].
+        // Counted BEFORE acceptance, so they describe what the shader saw rather than what it
+        // kept -- which is what makes [3] comparable against the envelope in [2].
         InterlockedAdd(OutCounts[CellIndex * 5u + 1u], 1u);
         InterlockedMax(OutCounts[CellIndex * 5u + 3u], asuint(max(Density, 0.0f)));
 
@@ -438,16 +305,10 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
             continue;
         }
 
-        // Per-cell tally, for the CPU's diagnostics. It bounds nothing.
         InterlockedAdd(OutCounts[CellIndex * 5u], 1u);
 
-        // The GLOBAL claim. One counter for the dispatch, past the per-cell region so it
-        // clears and reads back with everything else.
-        //
-        // Incremented even when the buffer is full, deliberately: the final value is the
-        // TRUE total accepted, which is what the CPU thins against. Clamping would make
-        // an overflowing dispatch report exactly full and the thinning would be silently
-        // wrong.
+        // THE GLOBAL CLAIM, incremented even when the buffer is full: the final value is the
+        // TRUE total accepted, which the CPU thins against. Clamping would report exactly full.
         uint Global;
         InterlockedAdd(OutCounts[NumCells * 5u], 1u, Global);
 
@@ -458,12 +319,9 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
         const uint Base = Global * 2u;
 
-        // AN INTEGER BUFFER carrying the floats as their own bit patterns, not the
-        // reverse. A float buffer holding a packed integer looks equivalent and is not:
-        // an arbitrary bit pattern read as a float can be a denormal or a NaN, and
-        // neither round-trips reliably. A float's bit pattern is always a valid integer,
-        // so this direction has no such case -- and it lets Slot and CellIndex stay
-        // exact at any magnitude rather than only to 2^24.
+        // AN INTEGER BUFFER carrying floats as bit patterns, not the reverse: an arbitrary bit
+        // pattern read as a float can be a denormal or a NaN and does not round-trip, while a
+        // float's bits are always a valid integer. It also keeps Slot and CellIndex exact.
         OutEntities[Base + 0u] = uint4(asuint(E.Pos), asuint(E.Extent));
         OutEntities[Base + 1u] = uint4(PackGalaxyDecor(E.Decor), Slot, CellIndex, asuint(E.Density));
     }
