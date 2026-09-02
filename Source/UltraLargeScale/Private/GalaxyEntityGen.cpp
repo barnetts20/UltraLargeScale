@@ -59,13 +59,31 @@ namespace GalaxyEntityGen
 
 		// The anchor, and the pad that turns a probed peak into an envelope.
 		//
-		// The pad covers the SAMPLING miss only. It was 1.5 and had to cover a
-		// systematic error worth more than twice that, because the probes ran the
-		// analytic field on the CPU while acceptance ran the textured field on the GPU.
-		// Both now run GalaxySample in the same dispatch, so only the finite probe count
-		// is left to insure against.
+		// THE PAD COVERS THE SAMPLING MISS, and it is the only insurance against the one
+		// place the per-cell normalisation stops cancelling. Acceptance is
+		// min(density / envelope, 1) ^ g: below the envelope the envelope divides out of the
+		// result exactly, and a cell's count depends on that cell's field alone. Above it
+		// the ratio saturates and the cancellation fails in the expensive direction -- the
+		// cell drew its candidates against E^g, so a short envelope costs it candidates
+		// QUADRATICALLY while capping the fraction it keeps.
+		//
+		// WHICH CELLS PAY IS THE WHOLE PROBLEM. A short envelope is a probe set that missed
+		// the cell's peak, so it happens where a cell holds the most density range -- the
+		// core and the arms. Those cells under-deliver while the void cells around them do
+		// not, and the result is cell-shaped holes in the brightest regions with the
+		// raymarch still drawing structure through them. It reads as a placement or hash
+		// fault long before it reads as a sampling one.
+		//
+		// 1.15 IS NOT ENOUGH. Measured on the Large tier: a quarter of live cells reported a
+		// candidate denser than their own envelope. Counter [3] against [2] is the observer
+		// -- see GalaxyDataGenerator's envelope-exceeded count -- and this wants raising
+		// until that is a few percent rather than a quarter.
+		//
+		// IT COSTS CANDIDATES QUADRATICALLY and accepted entities not at all, since the
+		// envelope cancels: a cell draws pad^g times as many candidates and keeps the same
+		// number. Read the C/P ratio after changing it.
 		const float BudgetAnchor = kBudgetAnchor;
-		constexpr float EnvelopePad = 1.15f;
+		constexpr float EnvelopePad = 2.0f;
 
 		// The UObject is captured, NOT dereferenced here.
 		//

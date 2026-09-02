@@ -939,18 +939,42 @@ struct ULTRALARGESCALE_API FGalaxyConfigParams
 		// NeighborhoodRadius = 0 -> 1x1x1 = 1 slot, exhaustive single-pass.
 		LargeTier.GridDepth = 1;
 		LargeTier.NeighborhoodRadius = 0;
-		LargeTier.GenerationSubdivision = 3;
 		LargeTier.SlotCapacity = 6000;
 
 		MidTier.GridDepth = 3;
 		MidTier.NeighborhoodRadius = 1;
-		MidTier.GenerationSubdivision = 2;
 		MidTier.SlotCapacity = 8000;
 
 		SmallTier.GridDepth = 5;
 		SmallTier.NeighborhoodRadius = 1;
-		SmallTier.GenerationSubdivision = 2;
 		SmallTier.SlotCapacity = 6000;
+
+		// GENERATION SUBDIVISION, READ OFF THE C/P RATIO IN THE BATCH LOG. Probes and
+		// candidates are both full field evaluations, so their ratio is the whole cost
+		// argument: below about 1 the probes have overtaken placement and the tier wants one
+		// level fewer, above about 9 it wants one more.
+		//
+		// THE TIERS PULL IN OPPOSITE DIRECTIONS because their grids already differ by four
+		// per depth step before any subdivision. The Large tier's parent grid collapses to a
+		// SINGLE cell -- GridDepth 1 against GridExtentMultiplier 4 puts every neighbour
+		// entirely outside the unit sphere -- so its subdivision is the whole generation
+		// grid, and at level 2 that is 64 cells across an entire galaxy, four per axis.
+		// Mid and Small subdivide a grid that is already fine, and over-subdividing them
+		// spends the dispatch on probes: measured C/P 0.02 on the Mid tier at level 2, which
+		// is fifty probes per candidate.
+		//
+		// A CELL TOO LARGE FOR ITS FIELD FAILS QUIETLY. The envelope is a max over the
+		// cell's probes, so the more density range a cell contains the further short that
+		// max falls -- and the acceptance ratio then saturates, which is the one place the
+		// per-cell normalisation stops cancelling. It costs the cell candidates and caps its
+		// acceptance at once, so the brightest cells under-deliver and the arms and core
+		// come out holed while the raymarch still draws structure through them.
+		//
+		// Level 3 is FTierParams::MaxGenerationSubdivision, so the Large tier is at the cap;
+		// a finer grid there needs a deeper GridDepth instead.
+		LargeTier.GenerationSubdivision = 3;
+		MidTier.GenerationSubdivision = 1;
+		SmallTier.GenerationSubdivision = 1;
 
 		DeriveScaleRanges();
 	}

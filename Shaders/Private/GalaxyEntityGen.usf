@@ -7,8 +7,8 @@
 // ONE GROUP PER CELL, not one thread per candidate.
 //
 // A cell has to be culled and given a rejection envelope before any of its candidates
-// can be drawn, and that envelope is a max over sixty-four probes -- a reduction, which
-// a lone thread can only do serially. A group runs the probes in parallel, reduces
+// can be drawn, and that envelope is a max over GALAXY_ENTITYGEN_PROBES samples -- a
+// reduction, which a lone thread can only do serially. A group runs the probes in parallel, reduces
 // through group memory, then spends itself on that cell's candidates.
 //
 // DO NOT SPLIT IT INTO CULL + INDIRECT DISPATCH. That needs a compacted cell list, and
@@ -65,9 +65,9 @@ RWBuffer<uint4> OutEntities;
 //
 // The other three answer questions with no other observer:
 //
-//   [1] candidates evaluated. Against the probe count -- cells x 64 -- it gives the
-//       ratio that says whether GenerationSubdivision is on the right side of its
-//       crossover, since probes and candidates are both field evaluations.
+//   [1] candidates evaluated. Against the probe count -- cells x GALAXY_ENTITYGEN_PROBES
+//       -- it gives the ratio that says whether GenerationSubdivision is on the right side
+//       of its crossover, since probes and candidates are both field evaluations.
 //   [2] against the anchor -- is the normaliser in a sane numeric range?
 //   [3] against [2] -- THE ENVELOPE CHECK. A candidate density above the envelope means
 //       the probes under-estimated this cell, the ratio clipped at 1, and the peak was
@@ -129,8 +129,8 @@ float InvGalaxyExtent;
 float BudgetAnchor;
 
 // Turns the probed peak into an envelope the field will not exceed. Covers the SAMPLING
-// miss only: sixty-four points under-shoot a sharp peak that falls between them. Watch
-// counter [3] against [2] to see how often that still happens.
+// miss only: a finite probe set under-shoots a sharp peak that falls between its samples.
+// Watch counter [3] against [2] for how often that still happens.
 float EnvelopePad;
 
 // --- placement, per dispatch; the per-cell envelope overrides Q.InvDensityReference
@@ -190,9 +190,32 @@ float InBackgroundConcentration;
 float InNoiseEnable;
 float4 InFieldOrientation;
 
-// Lanes per group, and therefore probes per cell. Both groupshared arrays are sized on
-// it and both reductions iterate to it; there is deliberately no second constant.
+// Lanes per group. Both groupshared arrays are sized on it and the mass reduction
+// iterates to it.
 #define GALAXY_ENTITYGEN_GROUP 64u
+
+// PROBES PER LANE, so GALAXY_ENTITYGEN_PROBES samples per cell. The envelope is a MAX over
+// the cell, and a galaxy's features are thin: a disc a few percent of the extent thick, and
+// arms narrow in azimuth inside it. So the structure occupies a small fraction of any cell
+// at any subdivision, and ONE PROBE PER LANE MISSES IT.
+//
+// TWO FAILURES, NOT ONE, and they look nothing alike. A cell whose probes all miss reports
+// a zero envelope and returns before drawing anything -- a hard, cell-shaped hole with the
+// raymarch still drawing structure through it. A cell whose probes mostly miss reports a
+// mass near zero and draws almost no candidates, which is the same hole with soft edges.
+// Both are decided by a coin flip per cell, so they land in a pattern with the generation
+// grid's frequency and no relation to the field.
+//
+// SUBDIVISION IS NOT THE LEVER FOR THIS. Shrinking cells raises the probe DENSITY but also
+// multiplies the group count, so total probe cost rises the same way while occupancy and
+// scheduling get worse. Adding rounds raises density at constant group count, the cheaper
+// axis whenever the group count is already adequate.
+//
+// TUNE AGAINST BOTH COUNTERS, NEVER ONE. Probes and candidates are both field evaluations,
+// so the C/P ratio is the whole cost argument; the live-cell count and the envelope-exceeded
+// count are what say whether the probe set is adequate.
+#define GALAXY_ENTITYGEN_PROBE_ROUNDS 2u
+#define GALAXY_ENTITYGEN_PROBES (GALAXY_ENTITYGEN_GROUP * GALAXY_ENTITYGEN_PROBE_ROUNDS)
 
 // The probed peak, reduced across the group. asuint is monotonic for non-negative
 // floats, so InterlockedMax over the bit pattern orders exactly as the float does --
@@ -235,7 +258,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     // -----------------------------------------------------------------------
     // PASS 0 -- PROBE. Cull the cell, envelope it, and weigh it.
     //
-    // ONE PROBE PER LANE, so sixty-four per cell, and identical for calibration and for
+    // GALAXY_ENTITYGEN_PROBE_ROUNDS probes per lane, and identical for calibration and for
     // generation -- both descend to the same grid, so a cell's measured mass is the
     // estimate its own thread group would produce.
     //
@@ -257,8 +280,12 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     float LocalPeak = 0.0f;
     float LocalMass = 0.0f;
 
+    // STRIDED, so lane n takes probes n, n+64, n+128, ... Consecutive lanes hold consecutive
+    // probe indices within a round, which keeps their hash inputs adjacent in a wave; the
+    // corner cases all land in round 0 and stay wave-uniform.
+    for (uint Round = 0u; Round < GALAXY_ENTITYGEN_PROBE_ROUNDS; ++Round)
     {
-        const uint ProbeIndex = GroupIndex;
+        const uint ProbeIndex = Round * GALAXY_ENTITYGEN_GROUP + GroupIndex;
 
         const float3 ProbePos = P.MakeProbe(
             Cell.Centre, Cell.HalfExtent,
@@ -284,9 +311,9 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
         // The first eight probes are the cell's vertices. They belong in a MAX -- a
         // ridge sitting on a corner is exactly what jitter alone would miss -- and they
         // are the worst possible points for a MEAN, because they are the cell's extremes
-        // and a disc running through the middle misses every one of them. Eight of
-        // sixty-four samples pinned at the extremes pulls the mass estimate down
-        // systematically, and the mass is what the tier's whole budget divides by.
+        // and a disc running through the middle misses every one of them. Samples pinned at
+        // the extremes pull the mass estimate down systematically, and the mass is what the
+        // tier's whole budget divides by.
         if (ProbeIndex >= 8u)
         {
             LocalMass += pow(ProbeDensity * InvAnchor, Exponent);
@@ -315,7 +342,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
         OutCounts[CellIndex * 5u + 2u] = asuint(max(Envelope, 0.0f));
 
         // Every probe except the eight corners.
-        const float MassSamples = float(GALAXY_ENTITYGEN_GROUP - 8u);
+        const float MassSamples = float(GALAXY_ENTITYGEN_PROBES - 8u);
 
         OutCounts[CellIndex * 5u + 4u] = asuint(Sum / MassSamples);
     }

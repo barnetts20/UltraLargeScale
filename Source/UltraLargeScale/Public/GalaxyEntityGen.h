@@ -190,9 +190,19 @@ public:
 	static constexpr int32 PassProbe = 0;
 	static constexpr int32 PassGenerate = 1;
 
-	/** Probes per cell: one per lane, one round. Also the divisor the CPU uses to turn
-	 *  the evaluated-candidate counter into the candidates-per-probe ratio. */
-	static constexpr int32 ProbesPerCell = 64;
+	/** Probes per cell: ThreadGroupSize lanes over two rounds. MUST equal
+	 *  GALAXY_ENTITYGEN_PROBES in the .usf, which has no way to share this.
+	 *
+	 *  TWO ROUNDS RATHER THAN ONE because a galaxy's features are thin -- a disc a few
+	 *  percent of the extent thick, arms narrow in azimuth inside it -- so the structure
+	 *  occupies a small fraction of any cell and a single round misses it. A cell whose
+	 *  probes all miss reports a zero envelope and places nothing, leaving a cell-shaped
+	 *  hole with the raymarch still drawing structure through it.
+	 *
+	 *  Also the divisor the CPU uses to turn the evaluated-candidate counter into the
+	 *  candidates-per-probe ratio; judge any change by that ratio and the live-cell count
+	 *  together. */
+	static constexpr int32 ProbesPerCell = 128;
 };
 
 /** One in-flight dispatch. Owns its readback fence and its result.

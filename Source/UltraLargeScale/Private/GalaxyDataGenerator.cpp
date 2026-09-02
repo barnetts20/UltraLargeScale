@@ -695,8 +695,8 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 
 		++LiveCells;
 
-		// THE ENVELOPE CHECK. A candidate found more density than thirty-two probes
-		// did, so the ratio clipped at 1 and this cell's peak was flattened. Not fatal,
+		// THE ENVELOPE CHECK. A candidate found more density than the cell's whole probe
+		// set did, so the ratio clipped at 1 and this cell's peak was flattened. Not fatal,
 		// but it is what EnvelopePad exists to prevent, and it has no other observer.
 		if (PeakSeen > Envelope)
 		{
