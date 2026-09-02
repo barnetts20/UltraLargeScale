@@ -341,9 +341,7 @@ void UULSNavHudSubsystem::OnDebugDraw(UCanvas* InCanvas, APlayerController* InPC
 		// why, which reads as an overflow. This says why: it moves by exactly one, in the
 		// direction of travel, on the frame the flip happens.
 		//
-		// NOT THE SECTOR LATTICE. AUniverseActor::CellCoord is spaced at 2 * Extent; this is
-		// spaced at the field period, millions of times further apart. See the note on
-		// FUniverseFieldOffset::Period.
+		// See the note on FUniverseFieldOffset::Period.
 		Rows.Add({ TEXT("Field period"), FString::Printf(TEXT("%d, %d, %d"),
 			Sample.FieldOffset.Period.X, Sample.FieldOffset.Period.Y, Sample.FieldOffset.Period.Z),
 			(Sample.FieldCellPeriod > 0)

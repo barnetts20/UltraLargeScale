@@ -211,9 +211,17 @@ public:
     TSharedPtr<FOctree> Octree;
     ELifecycleState InitializationState = ELifecycleState::Uninitialized;
 
-    //TODO: ISDEBUG FLAG AUDIT - MAKE SURE DEBUG STUFF IS GATED, COULD ALSO IMPACT OR BE INCOPRORATED INTO LOGGING
     /** Enables debug drawing and periodic verbose diagnostics on this actor;
-     *  exposed as a UPROPERTY so it is settable in the editor. */
+     *  exposed as a UPROPERTY so it is settable in the editor.
+     *
+     *  IT IS NOT THE ONLY DEBUG GATE, AND IT DOES NOT COVER THE WHOLE HIERARCHY. Only
+     *  AGalaxyActor and AStarSystemActor read it; AUniverseActor never does, and the
+     *  spawn-node debug draw all three share is gated by bDebugDrawSpawnNodes instead. So
+     *  setting this on a universe actor turns nothing on, which is the trap to know about.
+     *
+     *  TODO: fold the per-actor debug flags into one gate, or give each a category that says
+     *  what it covers. Trigger to close: any change that adds a fourth debug flag, or the
+     *  first time a shipped build needs debug output stripped by category. */
     UPROPERTY(EditAnywhere, Category = "Debug")
     bool IsDebug = false;
 

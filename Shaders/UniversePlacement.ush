@@ -76,7 +76,45 @@ float4 UniverseKeyHash4(int InA, int InB, int InC, int InD)
     uint uc = (uint) InC;
     uint ud = (uint) InD;
 
-    uint n = (ua * 73856093u) ^ (ub * 19349663u) ^ (uc * 83492791u) ^ (ud * 2654435761u);
+    // MIXED SEQUENTIALLY, ONE INPUT AT A TIME, and NOT the parallel
+    // (A*p1) ^ (B*p2) ^ (C*p3) ^ (D*p4) the field's CellHash uses. For any v, v ^ -v
+    // depends only on v's trailing zero count, and every multiplier is odd so the product
+    // keeps that count -- so flipping the sign of two axes whose coordinates share a
+    // trailing zero count produces equal XOR deltas that cancel, and a cell hashes
+    // IDENTICALLY to its mirror image through the origin.
+    //
+    // THE FIELD'S HASH IS SAFE FROM THIS AND THIS ONE IS NOT, which is why the two forms
+    // differ. WrapCell reduces field cell indices into [0, period) before they are hashed,
+    // so no negative ever reaches it and the cancellation has nothing to work with. The
+    // placement key is the TIER GRID COORD, which is signed and deliberately never wrapped
+    // -- see FUniverseGenCell::Coord -- so it spans both signs by construction.
+    //
+    // WHAT A COLLISION LOOKS LIKE: two mirrored cells draw the same jitter, the same
+    // candidate positions, the same accept values and the same stochastic rounding, for
+    // every slot. They are the same cell stamped twice, so wherever the shared draw is
+    // unlucky against the local density both thin together, and the artifact is
+    // mirror-symmetric gaps at the generation grid's own frequency.
+    //
+    // A MULTIPLY AND A SHIFT AFTER EVERY TERM is what breaks it: the multiply makes the
+    // fold non-commutative so a later delta cannot cancel an earlier one, and the xorshift
+    // carries high bits down so the next XOR lands on mixed state. Both are required.
+    uint n = 2166136261u;
+
+    n ^= ua * 73856093u;
+    n *= 2246822519u;
+    n ^= n >> 15u;
+
+    n ^= ub * 19349663u;
+    n *= 2246822519u;
+    n ^= n >> 15u;
+
+    n ^= uc * 83492791u;
+    n *= 2246822519u;
+    n ^= n >> 15u;
+
+    n ^= ud * 2654435761u;
+    n *= 2246822519u;
+    n ^= n >> 15u;
 
     // Two LCG rounds per component rather than a bit-mask decode. The field's fast path
     // slices one word into four bytes, which is fine for a node offset that only has to

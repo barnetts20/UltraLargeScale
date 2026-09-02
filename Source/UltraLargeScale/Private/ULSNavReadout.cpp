@@ -107,28 +107,18 @@ FULSNavSample ULSSampleUniverseNav(const AUniverseActor& InUniverse)
 	}
 
 	const double UnitScaleCm = InUniverse.UniverseParams.UnitScale;
-	const double SectorSpan = 2.0 * InUniverse.UniverseParams.Extent;
 
 	Out.bValid = true;
-	Out.Coord.Sector = InUniverse.CellCoord;
 	Out.Coord.Local = InUniverse.VirtualTraversal;
 	Out.Coord.UnitScaleCm = UnitScaleCm;
-	Out.Coord.SectorSpanUnits = SectorSpan;
 
-	// THE ONLY ARITHMETIC IN THIS FILE, and it is the sector fold: local units offset by
-	// whole sectors, then converted to real cm on one line so the UnitScale that was used
-	// is visible next to the multiply. Done in double throughout: at the default extent a
-	// sector step is ~4.3e9 units and UnitScale is 1.6e17, so the product reaches ~7e26 --
-	// well inside double range, and with ~15 significant digits left, which resolves to
-	// roughly half an AU at the far edge of the octree. That is the precision floor of
-	// this coordinate, and it is the reason the layers below it exist rather than a
-	// defect to fix here.
-	const FVector SectorOffsetUnits(
-		static_cast<double>(InUniverse.CellCoord.X) * SectorSpan,
-		static_cast<double>(InUniverse.CellCoord.Y) * SectorSpan,
-		static_cast<double>(InUniverse.CellCoord.Z) * SectorSpan);
-
-	Out.Coord.RealCm = (SectorOffsetUnits + InUniverse.VirtualTraversal) * UnitScaleCm;
+	// THE ONLY ARITHMETIC IN THIS FILE, kept on one line so the UnitScale that was used is
+	// visible next to the multiply. Double throughout: traversal reaches ~4e9 units against
+	// a UnitScale of 1.6e17, so the product reaches ~7e26 -- well inside double range, with
+	// ~15 significant digits left, resolving to roughly half an AU at the far edge of the
+	// octree. THAT IS THIS COORDINATE'S PRECISION FLOOR, and the reason the nested layers
+	// below it exist rather than a defect to fix here.
+	Out.Coord.RealCm = InUniverse.VirtualTraversal * UnitScaleCm;
 
 	// The universe's own derivation, not a copy of it. See the note on FULSNavSample.
 	Out.FieldOffset = InUniverse.ComputeFieldOffset();

@@ -7,13 +7,8 @@
 
 class AUniverseActor;
 
-/** THE UNIVERSE COORDINATE.
- *
- *  A position in this project is (SECTOR, LOCAL): an integer sector on the universe cell
- *  lattice plus the player's VirtualTraversal inside it, in universe-local units. That is
- *  the same cell-plus-fraction shape the field offset and the octree grid already use,
- *  and it is chosen for the same reason -- one exact integer carries the magnitude so the
- *  double only ever has to carry a bounded remainder.
+/** THE UNIVERSE COORDINATE: the player's VirtualTraversal in universe-local units, and the
+ *  real-cm conversion of it.
  *
  *  WHY VirtualTraversal AND NOT THE ACTOR TRANSFORM. AUniverseActor::SetActorLocation is
  *  reassigned to the player's world position every single tick, so the actor transform is
@@ -30,39 +25,22 @@ class AUniverseActor;
  *  renumbers itself mid-flight, and the symptom is that two visits to the same structure
  *  report different positions with nothing else looking wrong.
  *
- *  SECTOR IS READ, NOT DERIVED, AND IS ALWAYS (0,0,0) TODAY -- which is why it is no
- *  longer DISPLAYED. ConfigureCell is the only writer and nothing calls it with a non-zero
- *  coordinate: the universe is level-placed, there is one of it, and nothing hands the
- *  player between sectors. VirtualTraversal runs arbitrarily far past one sector extent
- *  instead, because the octree rebases under it rather than the sector index advancing.
- *
- *  THE FIELD KEPT ITS PLACE IN THE ARITHMETIC ANYWAY. RealCm below offsets by it, so if a
- *  sector lattice ever does go live the coordinate is already correct and only the row has
- *  to come back. What was removed is a HUD line reading 0, 0, 0 forever -- a permanently
- *  constant readout is worse than none, because it teaches you to stop reading the panel
- *  it sits in.
- *
- *  IT IS STILL NOT FOLDED. Deriving a sector index from the traversal overflow would make
- *  this claim a sector the octree, the tier grids and the spawn scan all disagree it is
- *  in, and none of them would complain -- the first symptom would be a written-down
- *  coordinate that does not lead back to the same place. The fold belongs in whatever
- *  implements sector handoff, next to the corresponding octree change. */
+ *  THERE IS ONE UNIVERSE ACTOR AND NO SECTOR INDEX. The universe is level-placed and
+ *  VirtualTraversal runs arbitrarily far without an outer lattice advancing, because the
+ *  octree rebases under it. A sector term derived from traversal overflow would claim a
+ *  sector the octree, the tier grids and the spawn scan all disagree with, and none of them
+ *  would complain -- the first symptom would be a written-down coordinate that does not lead
+ *  back to the same place. Any such term belongs next to the octree change that implements
+ *  sector handoff, not here. */
 struct FULSUniverseCoord
 {
-	/** AUniverseActor::CellCoord, verbatim. */
-	FIntVector Sector = FIntVector::ZeroValue;
-
 	/** AUniverseActor::VirtualTraversal, universe-local units. */
 	FVector Local = FVector::ZeroVector;
 
 	/** Real cm per universe-local unit (UniverseParams.UnitScale) at sample time. */
 	double UnitScaleCm = 1.0;
 
-	/** Full extent of one sector in local units (2 * UniverseParams.Extent). */
-	double SectorSpanUnits = 0.0;
-
-	/** (Sector * SectorSpanUnits + Local) * UnitScaleCm. The one quantity that is
-	 *  comparable across sectors, and the only one the ladder should ever be handed. */
+	/** Local * UnitScaleCm. The only quantity the ladder should ever be handed. */
 	FVector RealCm = FVector::ZeroVector;
 };
 

@@ -280,20 +280,6 @@ void AUniverseActor::BeginPlay()
 	if (bAutoInitializeOnBeginPlay) Initialize();
 }
 
-void AUniverseActor::ConfigureCell(FIntVector InCellCoord)
-{
-	CellCoord = InCellCoord;
-	const double FullCellSize = 2.0 * UniverseParams.Extent;
-	CellOrigin = FVector(
-		CellCoord.X * FullCellSize,
-		CellCoord.Y * FullCellSize,
-		CellCoord.Z * FullCellSize
-	);
-	SetActorLocation(CellOrigin);
-	Octree = MakeShared<FOctree>(UniverseParams.Extent * PersistentTreeMultiplier, FVector::ZeroVector);
-}
-
-
 void AUniverseActor::InitializeData()
 {
 	double StartTime = FPlatformTime::Seconds();

@@ -199,29 +199,6 @@ public:
 
 #pragma endregion
 
-#pragma region Sector Grid Identity
-
-	/** Grid coordinate of this sector within the universe cell lattice.
-	 *  Set once by ConfigureCell before Initialize(). */
-	UPROPERTY(VisibleAnywhere, Category = "Sector Grid")
-	FIntVector CellCoord = FIntVector::ZeroValue;
-
-	/** World-space center of this sector's cell. Derived from CellCoord:
-	 *  CellOrigin = CellCoord * (2 * Params.Extent). Used as the actor's
-	 *  initial placement and as the cross-sector child-spawn origin. */
-	UPROPERTY(VisibleAnywhere, Category = "Sector Grid")
-	FVector CellOrigin = FVector::ZeroVector;
-
-	/**
-	 * Sets CellCoord from InCellCoord (the universe grid coordinate for this
-	 * sector) and derives CellOrigin, then repositions the actor. Also rebuilds
-	 * the octree against the actual Params.Extent in case Params were overridden
-	 * after construction. Must be called before Initialize().
-	 */
-	void ConfigureCell(FIntVector InCellCoord);
-
-#pragma endregion
-
 #pragma region Spawn Range Scanning
 
 	/** When true, logs the live particle count for each entering node's

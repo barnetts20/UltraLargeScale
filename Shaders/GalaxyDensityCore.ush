@@ -368,10 +368,49 @@ struct GalaxyDensityParams
     // after the player leaves and comes back.
     float4 Hash4(int InA, int InB, int InC, int InD)
     {
-        uint n = (uint) InA * 73856093u;
+        // MIXED SEQUENTIALLY, ONE INPUT AT A TIME. Folding the four terms in parallel --
+        // (A*p1) ^ (B*p2) ^ (C*p3) ^ (D*p4) -- is the obvious form and it COLLIDES ON
+        // MIRRORED CELLS. For any v, v ^ -v depends only on v's trailing zero count, and
+        // every multiplier is odd so the product keeps that count. Flip the sign of two
+        // axes whose coordinates have the same trailing zero count and the two XOR deltas
+        // are equal, cancel, and the cell hashes IDENTICALLY to its mirror image.
+        //
+        // WHAT THAT LOOKS LIKE, because it does not look like a hash fault: two cells
+        // reflected through a coordinate plane draw the same jitter, the same candidate
+        // positions, the same accept values and the same stochastic rounding, for every
+        // slot. They are the same cell stamped twice. Wherever the shared draw is unlucky
+        // against the local density, both cells thin together -- so the artifact is
+        // mirror-symmetric gaps on the generation grid, at the grid's own frequency, and
+        // it moves wholesale when the subdivision changes the coordinate range.
+        //
+        // Measured on the large tier's grid: 336 of 512 cells at subdivision 3, and 32 of
+        // 64 at subdivision 2, shared a key with another cell.
+        //
+        // A MULTIPLY AND A SHIFT AFTER EVERY TERM is what breaks it. The multiply makes
+        // the fold non-commutative so a later delta cannot cancel an earlier one, and the
+        // xorshift carries high bits down so the next XOR lands on mixed state rather than
+        // on a raw product. Both are required: with the multiply alone, deltas introduced
+        // by the first two terms still cancel against each other before any mixing has
+        // happened.
+        //
+        // MOVING A TERM'S POSITION RESEEDS EVERYTHING. The order is part of the function.
+        uint n = 2166136261u;
+
+        n ^= (uint) InA * 73856093u;
+        n *= 2246822519u;
+        n ^= n >> 15u;
+
         n ^= (uint) InB * 19349663u;
+        n *= 2246822519u;
+        n ^= n >> 15u;
+
         n ^= (uint) InC * 83492791u;
+        n *= 2246822519u;
+        n ^= n >> 15u;
+
         n ^= (uint) InD * 2654435761u;
+        n *= 2246822519u;
+        n ^= n >> 15u;
 
         uint a = n * 1664525u + 1013904223u;
         uint b = a * 1664525u + 1013904223u;
