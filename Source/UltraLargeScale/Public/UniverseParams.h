@@ -437,7 +437,7 @@ struct ULTRALARGESCALE_API FUniverseRegionParams
  *  narrows to a float3 pin.
  *
  *  A MIRROR IS NOT THE PREFERENCE. UniverseDensityCore.ush compiles for C++ behind
- *  GalaxyHLSLShim.h, so this could in principle call the real thing -- but no universe
+ *  HLSLShim.h, so this could in principle call the real thing -- but no universe
  *  translation unit includes the core, and pulling the whole field surface into
  *  UniverseActor.cpp to share four lines of integer arithmetic is the worse trade.
  *
@@ -995,14 +995,14 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 
 	/** THERE IS NO CPU DERIVATION, and adding one would not give this layer a CPU placement
 	 *  path. The galaxy layer has one -- it compiles its core into C++ behind
-	 *  GalaxyHLSLShim.h and returns a constructed params struct -- and the same construction
+	 *  HLSLShim.h and returns a constructed params struct -- and the same construction
 	 *  here would be three lines against this struct.
 	 *
 	 *  IT WOULD SAMPLE A DIFFERENT FIELD. The shim stubs every Texture3D fetch to a neutral
 	 *  0.5, so a C++ evaluation reduces to the unwarped analytic web. This field is more
 	 *  texture-dependent than the galaxy's, not less -- two region fetches and three warp
 	 *  fetches -- and turning them all neutral changes the GEOMETRY, not the shading. See
-	 *  the same warning in GalaxyHLSLShim.h: the shim path must never place entities.
+	 *  the same warning in HLSLShim.h: the shim path must never place entities.
 	 *
 	 *  So placement lands on the compute harness, which samples the same volumes the
 	 *  material does, and FillShaderParameters is how it gets its inputs. A CPU probe for

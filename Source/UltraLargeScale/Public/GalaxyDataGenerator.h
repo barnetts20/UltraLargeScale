@@ -4,8 +4,8 @@
 // The density field itself lives in Shaders/GalaxyDensityCore.ush and is compiled by
 // BOTH the shader and this module, so star placement and the rendered gas are one
 // function rather than two implementations kept in agreement by hand. Only
-// GalaxyDataGenerator.cpp compiles it, inside namespace GalaxyHLSL -- see
-// GalaxyHLSLShim.h for why that namespace must not be opened.
+// GalaxyDataGenerator.cpp compiles it, inside namespace HLSLShim -- see
+// HLSLShim.h for why that namespace must not be opened.
 
 #pragma once
 
@@ -17,10 +17,10 @@
 #include "FTierStreamingSystem.h"
 #include "FNiagaraParticleBuffer.h"
 
-/** Declared in GalaxyDensityCore.ush, compiled inside namespace GalaxyHLSL by
+/** Declared in GalaxyDensityCore.ush, compiled inside namespace HLSLShim by
  *  GalaxyDataGenerator.cpp. Held by pointer so this header needs neither the shim nor
  *  the field itself. */
-namespace GalaxyHLSL
+namespace HLSLShim
 {
 	struct GalaxyDensityParams;
 }
@@ -47,7 +47,7 @@ public:
 	/** Clamped, pre-inverted fields plus the 16 per-arm records, derived once in
 	 *  Initialize(). Rebuilding it per sample would repeat 16 hashes, a tan and every
 	 *  reciprocal on every candidate. */
-	TUniquePtr<GalaxyHLSL::GalaxyDensityParams> Derived;
+	TUniquePtr<HLSLShim::GalaxyDensityParams> Derived;
 
 #pragma region Density Sampling
 

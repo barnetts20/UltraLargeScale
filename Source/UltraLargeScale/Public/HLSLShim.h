@@ -1,11 +1,18 @@
 #pragma once
 
-// GalaxyHLSLShim.h
-// The HLSL surface GalaxyDensityCore.ush uses, in C++. Include this FIRST, then
-// the .ush, and one source compiles for both targets:
+// HLSLShim.h
+// The HLSL surface the shared .ush cores use, in C++. Include this FIRST, then the .ush,
+// and one source compiles for both targets:
 //
-//     #include "GalaxyHLSLShim.h"
+//     #include "HLSLShim.h"
 //     #include "GalaxyDensityCore.ush"
+//
+// NOT GALAXY-SPECIFIC, and the name says so now. Nothing below mentions a layer: the
+// surface is float2/3/4, the scalar intrinsics, and the two texture stubs. The galaxy
+// core is the only translation unit that compiles through it today, but
+// UniverseDensityCore.ush is written to the same subset and names the same stub types,
+// and UniverseParams.h mirrors four expressions out of it by hand rather than including
+// the core -- a mirror this shim is what would eventually retire.
 //
 // The .ush deliberately stays inside this subset: no resources, no multi-component
 // swizzles, no integer vectors. Anything added there that is not defined here breaks
@@ -19,14 +26,14 @@
 //
 // THE NAMESPACE IS NEVER OPENED. Include the .ush INSIDE it instead:
 //
-//     #include "GalaxyHLSLShim.h"
-//     namespace GalaxyHLSL { #include "GalaxyDensityCore.ush" }
+//     #include "HLSLShim.h"
+//     namespace HLSLShim { #include "GalaxyDensityCore.ush" }
 //
 // MSVC's <cmath> declares float overloads of sqrt/abs/exp/pow/... at GLOBAL scope,
 // which libstdc++ does not. Opening this namespace would put both sets in the same
 // scope and every call would be a genuine tie -- an ambiguity, not a resolution.
 // Compiling the field inside the namespace makes ordinary unqualified lookup find
-// GalaxyHLSL::sqrt and STOP, never reaching ::sqrt. Name hiding, not overloading.
+// HLSLShim::sqrt and STOP, never reaching ::sqrt. Name hiding, not overloading.
 
 #include <cmath>
 
@@ -36,7 +43,7 @@
 // Texture3DSigned. Nothing else in the shared files may branch on this -- a divergence
 // gated on the compiler is precisely what this whole arrangement exists to prevent, and
 // the one exception is a type name rather than any behaviour.
-#define GALAXY_HLSL_SHIM 1
+#define ULS_HLSL_SHIM 1
 
 #ifdef _MSC_VER
 #ifndef NOMINMAX
@@ -46,7 +53,7 @@
 
 typedef unsigned int uint;
 
-namespace GalaxyHLSL
+namespace HLSLShim
 {
 
     // ---------------------------------------------------------------------------
@@ -213,4 +220,4 @@ namespace GalaxyHLSL
     inline float dot(const float3& A, const float3& B) { return A.x * B.x + A.y * B.y + A.z * B.z; }
     inline float dot(const float4& A, const float4& B) { return A.x * B.x + A.y * B.y + A.z * B.z + A.w * B.w; }
 
-} // namespace GalaxyHLSL
+} // namespace HLSLShim

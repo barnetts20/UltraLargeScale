@@ -99,12 +99,12 @@ namespace GalaxySeed
 // the single marshal site. See FGalaxyDensityArgs.
 // -----------------------------------------------------------------------------
 
-/** GalaxyHLSL::GalaxyDensityParams is the DERIVED field -- a different type entirely,
+/** HLSLShim::GalaxyDensityParams is the DERIVED field -- a different type entirely,
  *  declared in GalaxyDensityCore.ush, which GalaxyDataGenerator.cpp compiles INSIDE
- *  namespace GalaxyHLSL. The namespace is what keeps the shim's sqrt/abs/exp from
+ *  namespace HLSLShim. The namespace is what keeps the shim's sqrt/abs/exp from
  *  colliding with the float overloads MSVC's <cmath> puts at global scope, so the type
  *  is namespace-qualified everywhere outside that file. */
-namespace GalaxyHLSL { struct GalaxyDensityParams; }
+namespace HLSLShim { struct GalaxyDensityParams; }
 
 /** GLOBAL ORIENTATION of the whole field. Applied at the sample entry point, so every
  *  layer, the noise frame and the m=1 modes all turn together.
@@ -827,7 +827,7 @@ struct ULTRALARGESCALE_API FGalaxyProceduralParams
 
 	/** The CPU derivation, from the packed arguments. Defined in GalaxyDataGenerator.cpp,
 	 *  the one translation unit that compiles the shim and the .ush. */
-	GalaxyHLSL::GalaxyDensityParams ToDerived() const;
+	HLSLShim::GalaxyDensityParams ToDerived() const;
 
 	/** Fills a compute shader parameter struct from the packed arguments, member for
 	 *  member. The shader-side names match MakeGalaxyDensityParams's parameter names, so a

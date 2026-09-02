@@ -6,7 +6,7 @@
 // fetches; two are signed vector fields, read by the warp octaves. The full mapping is
 // in the fetch table below.
 //
-// This file is compiled by C++ behind GalaxyHLSLShim.h exactly as the galaxy core is.
+// This file is compiled by C++ behind HLSLShim.h exactly as the galaxy core is.
 // The shim stubs BOTH texture types to their own neutral -- 0.5 for the UNORM variance
 // volumes, which is the midpoint of every authored range, and 0 for the signed warp
 // volumes, which is zero displacement -- and the C++ field therefore reduces to the
@@ -152,7 +152,7 @@
 // the shared file NAME the convention. The C++ shim defines Texture3DSigned as a real
 // distinct type with its own neutral, which is what makes a fetch site given the wrong
 // convention a compile error there rather than a silent shear here.
-#ifndef GALAXY_HLSL_SHIM
+#ifndef ULS_HLSL_SHIM
 #define Texture3DSigned Texture3D
 #endif
 
@@ -985,7 +985,7 @@ struct UniverseDensityParams
 
         // COMPONENTS, NOT A SWIZZLE. This read c.xyz, which broke this file's own parity
         // rule -- no swizzles beyond .x/.y/.z/.w -- and was one of the reasons the universe
-        // core had never actually compiled under GalaxyHLSLShim.h. Identical in HLSL,
+        // core had never actually compiled under HLSLShim.h. Identical in HLSL,
         // buildable in C++.
         return float3(c.x, c.y, c.z);
     }

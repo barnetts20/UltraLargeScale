@@ -17,18 +17,18 @@
 // sqrt/abs/exp/pow and friends at GLOBAL scope, which libstdc++ does not; opening the
 // namespace would put both sets in the same scope and every call in the field would
 // be a genuine tie. Compiling the field inside the namespace instead makes ordinary
-// unqualified lookup find GalaxyHLSL::sqrt and stop, never reaching ::sqrt.
-#include "GalaxyHLSLShim.h"
+// unqualified lookup find HLSLShim::sqrt and stop, never reaching ::sqrt.
+#include "HLSLShim.h"
 
-namespace GalaxyHLSL
+namespace HLSLShim
 {
 #include "GalaxyDensityCore.ush"
 }
 
-using GalaxyHLSL::float3;
-using GalaxyHLSL::float4;
-using GalaxyHLSL::GalaxyDensityParams;
-using GalaxyHLSL::MakeGalaxyDensityParams;
+using HLSLShim::float3;
+using HLSLShim::float4;
+using HLSLShim::GalaxyDensityParams;
+using HLSLShim::MakeGalaxyDensityParams;
 
 #pragma region Lifetime
 
@@ -54,18 +54,18 @@ namespace
 	// would compile; it would also silently reorder the moment either type gained a member
 	// or changed alignment, and the symptom would be a galaxy whose every parameter is one
 	// slot out.
-	GalaxyHLSL::float4 ToShim(const FVector4f& InV)
+	HLSLShim::float4 ToShim(const FVector4f& InV)
 	{
-		return GalaxyHLSL::float4(InV.X, InV.Y, InV.Z, InV.W);
+		return HLSLShim::float4(InV.X, InV.Y, InV.Z, InV.W);
 	}
 
-	GalaxyHLSL::float3 ToShim(const FVector3f& InV)
+	HLSLShim::float3 ToShim(const FVector3f& InV)
 	{
-		return GalaxyHLSL::float3(InV.X, InV.Y, InV.Z);
+		return HLSLShim::float3(InV.X, InV.Y, InV.Z);
 	}
 }
 
-GalaxyHLSL::GalaxyDensityParams FGalaxyProceduralParams::ToDerived() const
+HLSLShim::GalaxyDensityParams FGalaxyProceduralParams::ToDerived() const
 {
 	// PURE PASS-THROUGH FROM Pack(). Every correlation -- arm width from the disc scale
 	// height, bulge and void radii from the disc radius, arm growth from the disc flare --

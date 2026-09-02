@@ -68,7 +68,7 @@
 // shared file NAME the convention. The C++ shim defines Texture3DSigned as a real distinct
 // type with its own neutral, which is what makes a fetch site given the wrong convention a
 // compile error there rather than a silent shear here.
-#ifndef GALAXY_HLSL_SHIM
+#ifndef ULS_HLSL_SHIM
 #define Texture3DSigned Texture3D
 #endif
 
@@ -804,7 +804,7 @@ GalaxyDensityParams MakeGalaxyDensityParams(
     // field -> galaxy.
     {
         // COMPONENTWISE, AND NORMALIZED BY HAND. This file compiles as C++ too, through
-        // GalaxyHLSLShim.h, and the shim has neither swizzles nor normalize -- a struct
+        // HLSLShim.h, and the shim has neither swizzles nor normalize -- a struct
         // member cannot present a .xyz the way an HLSL vector does. Shared code stays in
         // the intersection of the two languages; dot and rsqrt are both in the shim.
         float3 Raw = float3(InFieldOrientation.x, InFieldOrientation.y, InFieldOrientation.z);
