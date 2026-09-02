@@ -58,7 +58,7 @@ public:
 	 *  the default tuning while most of the volume sits below 0.01. Feeding it
 	 *  straight to a rejection test accepts every candidate above 1.0 -- the arms,
 	 *  the inner disc and the whole bulge -- erasing the structure it describes.
-	 *  Always route it through GalaxyDensityParams::SpawnProbability first. */
+	 *  Always route it through GalaxySpawnProbability, in GalaxyPlacement.ush, first. */
 	float SampleDensity(const FVector& InNormPos) const;
 
 #pragma endregion

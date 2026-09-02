@@ -396,9 +396,13 @@ void AUniverseActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
 {
 	if (!InMID) return;
 
-	// ONE PACK, and every pin below reads it. The four .w passengers -- skew, both warp
-	// scales, the large octave's lattice-follow -- are already loaded by Pack, so there is
+	// ONE PACK, and every pin below reads it. The three .w passengers -- both warp scales
+	// and the large octave's lattice-follow -- are already loaded by Pack, so there is
 	// nothing to assemble here and no second place for the packing to drift.
+	//
+	// VoidSpreadRange's .w IS UNCLAIMED and Pack sends zero. It carried a size-skew pin the
+	// core stopped reading; the pin is retired and the pin name is gone, but the PARAMETER
+	// is a float4 either way, so no material pin, node argument or parameter name moved.
 	const FUniverseDensityArgs A = UniverseParams.DensityParams.Pack(
 		UniverseParams.Seed, ComputeFieldOffset());
 

@@ -5,13 +5,13 @@
 // draw, where each one lands, and whether it survives. Nothing here reads a texture and
 // nothing here evaluates the field.
 //
-// A SEPARATE FILE FROM THE FIELD, deliberately. The galaxy layer keeps the equivalent
-// inside GalaxyDensityCore.ush, which is how it grew rather than a decision -- and that
-// core is now large enough that the placement half is hard to find in it. The two have
-// no coupling worth preserving: placement takes a density value and never asks where it
-// came from, which is the same split MakeCandidate/FinishEntity enforces at the function
-// level. Anything that samples the field includes both files; anything that only needs
-// keys and draws includes this one.
+// A SEPARATE FILE FROM THE FIELD, deliberately, and GalaxyPlacement.ush is now the same
+// arrangement one layer down -- this header used to record that the galaxy kept its
+// equivalent inside the field core, which was how it grew rather than a decision. The two
+// halves have no coupling worth preserving: placement takes a density value and never
+// asks where it came from, which is the same split MakeGalaxyCandidate/FinishGalaxyEntity
+// enforces at the function level. Anything that samples the field includes both files;
+// anything that only needs keys and draws includes this one.
 //
 // PARITY RULES, the same ones the field is written under -- this file is compiled by the
 // shader today and by C++ the moment a debug probe wants it:
@@ -20,7 +20,8 @@
 //   - Guard every pow() base away from zero.
 //   - No swizzles beyond .x/.y/.z/.w, no integer vectors, no HLSL-only intrinsics.
 //
-// THE CONTRACT, which the galaxy layer established and this one copies exactly:
+// THE CONTRACT, which the galaxy layer established and this one copies exactly, down to
+// the file it lives in:
 //
 //   MakeUniverseCandidate   everything decided by the candidate's own key -- position,
 //                           the acceptance draw, the extent draw, the decoratives. No
@@ -207,8 +208,12 @@ struct UniverseEntity
 // THE ANALYTIC CEILING
 // ==========================================================================
 // The largest value the field can return anywhere, for any region, from its authored
-// ranges alone -- something the galaxy layer has no equivalent of, because its density is
-// a sum of profiles with no bound short of evaluating them.
+// ranges alone. The galaxy layer has no equivalent, and that is a gap rather than an
+// impossibility: its Compose takes the MAX of four layers, each of which is bounded above
+// by an expression in its own pins, so the same kind of ceiling is derivable there. It is
+// simply less direct -- the two spheroids bound at their DensityOverPath outright, while
+// the arm term needs an allowance for the per-arm strength draw and the lopsided mode and
+// the disc term peaks at its centre where the inverse scale height is largest.
 //
 // The composition is InResolvedDensity.x * wall + InResolvedDensity.y * filament + floor,
 // with the wall term saturate(N-1) raised to a positive exponent and the filament term

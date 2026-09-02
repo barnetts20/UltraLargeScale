@@ -126,7 +126,7 @@ struct ULTRALARGESCALE_API FUniverseVarianceRange
 		: Min(InMin), Max(InMax), Bias(InBias) {}
 
 	/** Packs into the float4 the derivation expects. InW is the .w passenger -- unclaimed
-	 *  on most ranges, and carrying a partner setting on four of them. */
+	 *  on most ranges, and carrying a partner setting on three of them. */
 	FVector4f Pack(float InW = 0.0f) const
 	{
 		return FVector4f(Min, Max, Bias, InW);
@@ -135,7 +135,7 @@ struct ULTRALARGESCALE_API FUniverseVarianceRange
 	/** Whether this range is a constant, which is exactly the test the core applies to
 	 *  decide whether its region fetch is worth paying for.
 	 *
-	 *  ONLY MIN AND MAX ARE TESTED, and that matters because four of these carry an
+	 *  ONLY MIN AND MAX ARE TESTED, and that matters because three of these carry an
 	 *  unrelated scalar in .w. A range whose min equals its max is a constant however its
 	 *  passenger is set, so changing a warp scale must never make the layer think its
 	 *  amplitude varies. */
@@ -292,20 +292,20 @@ struct ULTRALARGESCALE_API FUniverseVoidParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Void")
 	FUniverseVarianceRange SizeSpread = FUniverseVarianceRange(0.0f, 0.5f, 2.0f);
 
-	/** Rides SizeSpread's own .w. Above 1 makes large voids rare and small ones common.
+	/** THERE IS NO SIZE SKEW PIN. The offset is the hash channel's FOURTH POWER times the
+	 *  spread, and four is a compile-time constant in the core -- see THE OFFSET EXPONENT IS
+	 *  FIXED AT FOUR in UniverseDensityCore.ush for the measurement behind the number.
 	 *
-	 *  IT RIDES THAT SLOT BECAUSE IT IS A FUNCTION OF THAT RANGE: skew multiplies the
-	 *  spread's own bias-shaped interpolant, so the two are one setting in the field before
-	 *  they are one pin in the packing.
+	 *  A SizeSkew pin rode SizeSpread's .w and fed that exponent through a modulator, and it
+	 *  had been dead for as long as the exponent had been a constant: tuning it produced no
+	 *  change of any kind. Retiring it was bit-identical to the shipped field, which is why
+	 *  it was retired rather than repaired.
 	 *
-	 *  INERT. UNIVERSE_SKEW_FIXED is 4, so the core's SkewPow ignores its exponent argument
-	 *  and this pin, the per-candidate product it feeds and the .w slot it rides do nothing.
-	 *  Tuning against it produces no change of any kind. The general path costs 54 pow calls
-	 *  per sample and is not worth restoring; a lerp between the fixed exponents 2 and 4 is
-	 *  the affordable version. Retire the pin or implement the lerp -- an authored control
-	 *  that cannot move anything is worse than no control. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Void", meta = (ClampMin = "0.0"))
-	float SizeSkew = 1.0f;
+	 *  WHAT THE EXPONENT WOULD BUY IF IT CAME BACK is tail, not spread: dispersion of void
+	 *  volume peaks near an exponent of 2 and moves by under a tenth across 1 to 8, while
+	 *  the largest void grows monotonically. SizeSpread is the lever for how varied the
+	 *  voids are. If a handle is wanted again the affordable form is a lerp between the
+	 *  fixed exponents 2 and 4, not a pow. */
 };
 
 
@@ -397,7 +397,7 @@ struct ULTRALARGESCALE_API FUniverseRegionParams
 	GENERATED_BODY()
 
 	/** Repeats per small cell for the STRUCTURE field, the coarser of the two. Drives the
-	 *  lattice blend, void size spread and skew, feature width, and the large warp octave
+	 *  lattice blend, void size spread, feature width, and the large warp octave
 	 *  -- everything that decides what SHAPE the web has, which changes over provinces
 	 *  rather than patches.
 	 *
@@ -715,8 +715,9 @@ struct FUniverseDensityArgs
 	FVector4f FeatureWidthRange = FVector4f(0.05f, 0.4f, 2.0f, 0.0f);
 	FVector4f VoidFloorRange = FVector4f(0.0f, 0.05f, 3.0f, 0.0f);
 
-	// --- ORGANICS --- .w carries a passenger on all but the small octave's weights
-	FVector4f VoidSizeSpreadRange = FVector4f(0.0f, 0.0f, 1.0f, 1.0f);
+	// --- ORGANICS --- .w carries a passenger on both warp amounts and on the large
+	// octave's weights; unclaimed on the other two
+	FVector4f VoidSizeSpreadRange = FVector4f(0.0f, 0.0f, 1.0f, 0.0f);
 	FVector4f WarpAmountLargeRange = FVector4f(0.0f, 0.0f, 1.0f, 0.0f);
 	FVector4f WarpAmountSmallRange = FVector4f(0.0f, 0.0f, 1.0f, 0.0f);
 	FVector4f WarpLargeWeights = FVector4f(1.0f, 1.0f, 1.0f, 0.0f);
@@ -896,11 +897,16 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 	 *  push, the compute parameter fill, a CPU derivation -- reads this rather than packing
 	 *  again.
 	 *
-	 *  Pure packing plus the four .w passengers. EACH PASSENGER BELONGS TO THE SAME FIELD AS
-	 *  ITS HOST: skew multiplies the spread's own interpolant, each warp scale multiplies its
-	 *  own octave's amount in the shear product, and the lattice-follow steers the octave the
-	 *  weights vector gains. A pin carrying both is one setting, not two unrelated ones
-	 *  sharing a wire -- the test any further claim on a free slot has to pass.
+	 *  Pure packing plus the three .w passengers. EACH PASSENGER BELONGS TO THE SAME FIELD AS
+	 *  ITS HOST: each warp scale multiplies its own octave's amount in the shear product, and
+	 *  the lattice-follow steers the octave the weights vector gains. A pin carrying both is
+	 *  one setting, not two unrelated ones sharing a wire.
+	 *
+	 *  THAT TEST IS NECESSARY AND NOT SUFFICIENT, which a retired fourth passenger is the
+	 *  evidence for: SizeSkew belonged to SizeSpread's field on its face and was still a
+	 *  control that could not move anything, because the exponent it fed was a compile-time
+	 *  constant in the core. A further claim on a free slot has to reach a LIVE consumer as
+	 *  well as belong to its host.
 	 *
 	 *  THE SEED IS AN ARGUMENT, not a member: FUniverseParams::Seed is the authoritative one
 	 *  and a second copy here would be free to disagree with it. The offset is an argument
@@ -932,8 +938,9 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 		Out.FeatureWidthRange = FeatureWidth.Pack();
 		Out.VoidFloorRange = Void.Floor.Pack();
 
-		// --- THE FOUR PASSENGERS, loaded in one place ---
-		Out.VoidSizeSpreadRange = Void.SizeSpread.Pack(Void.SizeSkew);
+		// --- THE THREE PASSENGERS, loaded in one place ---
+		// VoidSizeSpreadRange's .w was a fourth and is unclaimed; Pack defaults it to zero.
+		Out.VoidSizeSpreadRange = Void.SizeSpread.Pack();
 		Out.WarpAmountLargeRange = WarpLarge.Amount.Pack(WarpLarge.Scale);
 		Out.WarpAmountSmallRange = WarpSmall.Amount.Pack(WarpSmall.Scale);
 

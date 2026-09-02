@@ -53,7 +53,7 @@ struct FGalaxyEntityOut
 	 *  because the slot exists, not because anything reads it yet. */
 	float Density = 0.0f;
 
-	/** Undoes PackDecor in GalaxyDensityCore.ush. Keep the two together. */
+	/** Undoes PackGalaxyDecor in GalaxyPlacement.ush. Keep the two together. */
 	FVector3f DecodeDecor() const
 	{
 		constexpr float Inv = 1.0f / 1023.0f;

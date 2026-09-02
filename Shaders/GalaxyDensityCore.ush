@@ -16,8 +16,14 @@
 // exactly to the analytic one -- and a texture-free approximation of a textured field
 // produces a perfectly ordinary-looking galaxy that ignores what the material draws.
 //
+// PLACEMENT IS NOT IN THIS FILE. GalaxyPlacement.ush holds the key lattice, the candidate
+// and probe construction, the stochastic count and the analytic ceiling; it includes this
+// one, so anything that places entities gets both and anything that only draws gets the
+// field alone. Not one of the moved functions read a field of GalaxyDensityParams, which
+// is why the seam is where it is.
+//
 // The ray march lives in GalaxyDensityRaymarch.ush, which includes this file. Entity
-// generation lives in GalaxyEntityGen.usf, which also includes it.
+// generation lives in GalaxyEntityGen.usf, which includes GalaxyPlacement.ush.
 //
 // PARITY RULES -- both compilers see this file, so:
 //   - Guard every pow() base away from zero. HLSL evaluates pow(x,y) as
@@ -105,95 +111,6 @@
 // THIS ONLY EVER LENGTHENS A STEP, so it can only make the march cheaper. It binds when
 // the budget is set finer than the field, which is exactly when it should.
 #define GALAXY_MIN_STEP_FRACTION 0.5f
-
-// Per-tier placement rules. Separate from GalaxyDensityParams because these change per
-// tier while the field does not.
-//
-// RETURNED BY VALUE, one candidate at a time, never through an output array: that would
-// need `out float3 A[N]` in HLSL and a pointer in C++, which is exactly the
-// spelled-differently-in-each-language divergence the no-`out` rule prevents.
-//
-// Extent is in the caller's FINAL units. Divide by UnitScale before filling this in, so
-// the field stays unit-agnostic and the conversion happens once, where UnitScale lives.
-struct GalaxyPlacement
-{
-    // The density that reads as a certain spawn, held inverted. PER-CALL rather than a
-    // field parameter, because every cell rejects against ITS OWN probed peak: the ratio
-    // then runs order-1 across the cell instead of order-1e-3, so most candidates land,
-    // and the cell cancels out of the result exactly.
-    float InvDensityReference;
-    float SpawnExponent; // 1 = the raw response; <1 spawns more in faint regions
-    float ExtentMin;
-    float ExtentMax;
-    float ExtentExponent; // <1 biases small, >1 biases large
-};
-
-// The spacing of the per-candidate key lattice. Every key a cell derives is
-// KeySeed + GALAXY_SLOT_STRIDE * n for some integer n: candidates take n >= 0 and
-// envelope probes take n < 0, so the two families can never collide however large the
-// candidate budget grows.
-//
-// THE INVARIANT IS NOT WHAT IT LOOKS LIKE. Two keys collide only when
-// GALAXY_SLOT_STRIDE * (nA - nB) equals the difference between two tier offsets, and
-// every tier offset is far smaller than the stride -- so growing the budget moves the
-// whole lattice and introduces nothing. What breaks it is a tier offset reaching the
-// stride, or GALAXY_DECOR_OFFSET landing on an offset difference modulo it.
-#define GALAXY_SLOT_STRIDE 977
-#define GALAXY_DECOR_OFFSET 24337
-
-// A third key family, one draw per cell, for StochasticCount below.
-//
-// Offsets must not share a residue modulo the stride, or two families land on the same
-// lattice point. Residues: candidates 0, decor 889, rounding 945. Tier seed offsets
-// enter through KeySeed and are small, so the check is that no residue difference --
-// 945, 56, 889 -- falls within the tier offset spread.
-#define GALAXY_ROUND_OFFSET 51749
-
-GalaxyPlacement MakeGalaxyPlacement(
-    float InDensityReference, // the density that reads as a certain spawn
-    float InSpawnExponent,
-    float InExtentMin, // FINAL units: divide by UnitScale before calling
-    float InExtentMax,
-    float InExtentExponent)
-{
-    GalaxyPlacement Q;
-
-    // Division guard, not a range limit: a reference of zero is a divide by zero and
-    // the infinity accepts every candidate in the galaxy at once.
-    Q.InvDensityReference = 1.0f / max(InDensityReference, 1e-3f);
-    Q.SpawnExponent = max(InSpawnExponent, 1e-3f);
-    Q.ExtentMin = InExtentMin;
-    Q.ExtentMax = InExtentMax;
-    Q.ExtentExponent = max(InExtentExponent, 1e-3f);
-
-    return Q;
-}
-
-// A candidate before the field has been consulted.
-//
-// MAKECANDIDATE / FINISHENTITY IS THE CONTRACT the other layers copy, and the split is
-// the whole of it: the DENSITY SOURCE stays the caller's choice. A single SampleEntity
-// doing both would have to name its own source, and naming it means hardcoding the
-// analytic field -- which puts the textured path, warp and modulation included,
-// permanently out of reach of placement.
-struct GalaxyCandidate
-{
-    float3 Pos; // caller's units
-    float3 Norm; // the same point in the field's [-1,1] frame
-    float AcceptDraw; // uniform in [0,1), compared against the spawn probability
-    float ExtentDraw; // uniform in [0,1), decorrelated from AcceptDraw
-    float3 Decor;
-};
-
-struct GalaxyEntity
-{
-    float3 Pos; // caller's units, same frame as the cell centre passed in
-    float Extent;
-    float Density; // raw field value at Pos, before any spawn shaping
-    float3 Decor; // three decorrelated uniforms in [0,1) for colour, rotation, type
-    float bValid; // 0 = rejected; the caller skips it
-};
-
 
 struct GalaxyDensityParams
 {
@@ -302,10 +219,10 @@ struct GalaxyDensityParams
     float NoiseEnable; // 0 skips every texture read
     float HaloTwistInherit; // fraction of the spiral twist the halo frame takes
 
-    // SpawnExponent, extent range and extent shaping are PER TIER and live in
-    // GalaxyPlacement instead. They cannot sit here: the derivation runs sixteen arm
-    // hashes and a tan, so rebuilding this struct once per tier to change a scale
-    // range would repeat all of that to alter two numbers the field never reads.
+    // SpawnExponent, extent range and extent shaping are PER TIER and live in the
+    // GalaxyPlacement struct, in GalaxyPlacement.ush. They cannot sit here: the derivation
+    // runs sixteen arm hashes and a tan, so rebuilding this struct once per tier to change
+    // a scale range would repeat all of that to alter two numbers the field never reads.
 
     // ======================================================================
     // HELPERS
@@ -329,89 +246,24 @@ struct GalaxyDensityParams
     // C++ and HLSL, so this is bit-exact across both. Derivation-only.
     float4 ArmHash(int InIndex, int InSeed)
     {
-        uint n = (uint) (InIndex * 73856093) ^ (uint) (InSeed * 19349663);
+        // CAST TO uint BEFORE MULTIPLYING, and this one is reached at the SHIPPED DEFAULT
+        // rather than at some extreme: ArmAsymSeed is 211, and 211 * 19349663 is 4.08e9,
+        // which overflows int32. Signed overflow is undefined behaviour in C++ -- not
+        // merely implementation-defined -- so a compiler that can prove it happens may fold
+        // the expression away, and the arms come out with no asymmetry at all rather than
+        // with different asymmetry. Observed on a hash of this shape under gcc -O2, which
+        // warns -Waggressive-loop-optimizations and collapses it to a constant. Unsigned
+        // overflow wraps by definition in both languages and matches the GPU's
+        // two's-complement result bit for bit.
+        //
+        // The seed term crosses int32 at 111; the index term cannot, since GALAXY_MAX_ARMS
+        // bounds it at 1.1e9. The unsigned form is bit-identical wherever the signed one
+        // happened to wrap, so no existing galaxy moves. Suffix every multiplier with u so
+        // HLSL cannot type one as int and reintroduce it.
+        uint n = ((uint) InIndex * 73856093u) ^ ((uint) InSeed * 19349663u);
 
         // Scalar rather than uint4: this was the only integer vector in the file, and
         // keeping it out means the C++ shim needs no such type. Arithmetic identical.
-        uint a = n * 1664525u + 1013904223u;
-        uint b = a * 1664525u + 1013904223u;
-        uint c = b * 1664525u + 1013904223u;
-        uint d = c * 1664525u + 1013904223u;
-
-        a ^= a >> 16u;
-        b ^= b >> 16u;
-        c ^= c >> 16u;
-        d ^= d >> 16u;
-        a *= 1664525u;
-        b *= 1664525u;
-        c *= 1664525u;
-        d *= 1664525u;
-        a ^= a >> 16u;
-        b ^= b >> 16u;
-        c ^= c >> 16u;
-        d ^= d >> 16u;
-
-        const float Inv32 = 1.0f / 4294967296.0f;
-        return float4(float(a) * Inv32, float(b) * Inv32,
-                      float(c) * Inv32, float(d) * Inv32);
-    }
-
-    // Stateless four-value hash on four integers. Same wrapping uint arithmetic as
-    // ArmHash, widened so a cell and a slot index can both key it.
-    //
-    // This replaces the sequential FRandomStream the CPU sampler used, and the
-    // change is not merely a port. A stream makes candidate i depend on every draw
-    // before it, so one entity cannot be produced without producing all of its
-    // predecessors -- fine in a loop, impossible for one thread per slot. Keyed on
-    // (cell, slot) instead, any entity is recomputable on its own, identity stops
-    // being "position in the append order", and a region regenerates identically
-    // after the player leaves and comes back.
-    float4 Hash4(int InA, int InB, int InC, int InD)
-    {
-        // MIXED SEQUENTIALLY, ONE INPUT AT A TIME. Folding the four terms in parallel --
-        // (A*p1) ^ (B*p2) ^ (C*p3) ^ (D*p4) -- is the obvious form and it COLLIDES ON
-        // MIRRORED CELLS. For any v, v ^ -v depends only on v's trailing zero count, and
-        // every multiplier is odd so the product keeps that count. Flip the sign of two
-        // axes whose coordinates have the same trailing zero count and the two XOR deltas
-        // are equal, cancel, and the cell hashes IDENTICALLY to its mirror image.
-        //
-        // WHAT THAT LOOKS LIKE, because it does not look like a hash fault: two cells
-        // reflected through a coordinate plane draw the same jitter, the same candidate
-        // positions, the same accept values and the same stochastic rounding, for every
-        // slot. They are the same cell stamped twice. Wherever the shared draw is unlucky
-        // against the local density, both cells thin together -- so the artifact is
-        // mirror-symmetric gaps on the generation grid, at the grid's own frequency, and
-        // it moves wholesale when the subdivision changes the coordinate range.
-        //
-        // Measured on the large tier's grid: 336 of 512 cells at subdivision 3, and 32 of
-        // 64 at subdivision 2, shared a key with another cell.
-        //
-        // A MULTIPLY AND A SHIFT AFTER EVERY TERM is what breaks it. The multiply makes
-        // the fold non-commutative so a later delta cannot cancel an earlier one, and the
-        // xorshift carries high bits down so the next XOR lands on mixed state rather than
-        // on a raw product. Both are required: with the multiply alone, deltas introduced
-        // by the first two terms still cancel against each other before any mixing has
-        // happened.
-        //
-        // MOVING A TERM'S POSITION RESEEDS EVERYTHING. The order is part of the function.
-        uint n = 2166136261u;
-
-        n ^= (uint) InA * 73856093u;
-        n *= 2246822519u;
-        n ^= n >> 15u;
-
-        n ^= (uint) InB * 19349663u;
-        n *= 2246822519u;
-        n ^= n >> 15u;
-
-        n ^= (uint) InC * 83492791u;
-        n *= 2246822519u;
-        n ^= n >> 15u;
-
-        n ^= (uint) InD * 2654435761u;
-        n *= 2246822519u;
-        n ^= n >> 15u;
-
         uint a = n * 1664525u + 1013904223u;
         uint b = a * 1664525u + 1013904223u;
         uint c = b * 1664525u + 1013904223u;
@@ -701,10 +553,34 @@ struct GalaxyDensityParams
         return 1.0f - t * t * (3.0f - 2.0f * t);
     }
 
-    // Density is additive: arms are an overdensity riding on the disc, and the bulge
-    // and disc occupy the same space. Do not use max() here -- it makes the layers
-    // compete, so the disc vanishes inside the arms and every authored value inflates
-    // to out-bid its neighbours.
+    // THE LOUDEST LAYER WINS, and this is what makes LayerDensity mean what it says.
+    // The four layers are not four media stacked in the same volume, they are four
+    // descriptions of one stellar population at different scales -- the bulge and the
+    // inner disc describe the same mass, and the arms are the disc's own material
+    // rearranged. Adding them double-counts it, and the cost of that lands on the pins:
+    // under a sum, a bulge of 3 and a disc of 0.5 draw 3.5 through the core, so neither
+    // number is the optical depth through its own layer any more and every value has to
+    // be authored against what it happens to overlap.
+    //
+    // Under max each pin IS that layer's peak, which is exactly the claim the OPTICAL
+    // DEPTH NORMALISATION block makes: ArmDensity = 1 draws as 1. That claim is true only
+    // here, and it is what the whole per-layer path-length division exists to deliver.
+    //
+    // WHAT IT COSTS, so it is not read as an oversight. A dimmer layer is INVISIBLE
+    // wherever a brighter one overlaps it -- at the shipped densities the disc and
+    // background contribute nothing at all inside the bulge radius -- so raising one pin
+    // does not brighten a region, it takes the region over. And max is C0 but not C1, so
+    // there is a gradient crease along every surface where two layers cross. Modulation
+    // runs per layer BEFORE this, so that crossover surface also moves with the noise
+    // rather than sitting still.
+    //
+    // A BOUND IS AVAILABLE HERE and is not currently taken. Every layer is bounded above
+    // by an expression in its own authored pins, so max of the four is an analytic ceiling
+    // on the whole field -- the thing UniversePlacement.ush has and this layer does not.
+    // The two spheroids bound at their DensityOverPath outright; the arm needs an
+    // allowance for the per-arm strength draw and the lopsided mode, and the disc peaks at
+    // its centre where invH is largest. Worth deriving if a probed envelope ever needs
+    // separating from a fault upstream of the probes.
     //
     // Not clamped. The marcher consumes this as sigma and wants the full range; the
     // CPU rejection sampler maps it to a probability with its own response curve.
@@ -816,204 +692,6 @@ struct GalaxyDensityParams
     // ======================================================================
     // ENTITY PLACEMENT
     // ======================================================================
-
-    // Density -> acceptance probability.
-    //
-    // The field is an OPTICAL DEPTH, not a probability: it peaks in the hundreds
-    // while most of the volume sits below 0.01, so clamping it to [0,1] here would
-    // accept every candidate across the arms, the inner disc and the bulge at once,
-    // flattening the distribution exactly where the structure is.
-    //
-    // The mapping is a POWER LAW and must stay one. Per-cell normalisation is
-    // artifact-free only because the envelope cancels: a cell's budget scales as E^g
-    // and its acceptance as (d/E)^g, so the realised density is a function of d alone.
-    // Anything that is not a power law -- a Beer-Lambert 1-exp(-r), a soft knee -- puts
-    // the cell back into the result and turns every cell boundary into a visible step.
-    //
-    // Linear (g = 1) keeps star number density proportional to gas density: accepted
-    // count is candidates * p, and only p ~ d makes a region twice as dense hold twice
-    // the stars. SpawnExponent bends that toward or away from the dense end.
-    float SpawnProbability(float InDensity, GalaxyPlacement InPlace)
-    {
-        if (InDensity <= 0.0f)
-        {
-            return 0.0f;
-        }
-
-        // Do NOT name the intermediate `linear`. That is an HLSL interpolation
-        // modifier and a reserved word, which C++ accepts without comment.
-        float ratio = min(InDensity * InPlace.InvDensityReference, 1.0f);
-
-        return saturate(PowSafe(ratio, max(InPlace.SpawnExponent, 1e-3f)));
-    }
-
-    // A sample point inside a cell, for estimating that cell's density ENVELOPE before
-    // any candidate is drawn. The caller evaluates the field at the returned point with
-    // whatever source it holds -- the same split MakeCandidate/FinishEntity uses.
-    //
-    // Eight corners, then jitter. Corners alone miss an arm passing through the middle
-    // of a cell without reaching any vertex, which both discards live cells and
-    // under-estimates the envelope of the ones it keeps. Jitter alone misses a peak
-    // sitting exactly at a vertex. Both happen, so the probe set does both.
-    //
-    // The jitter key runs DOWNWARD from the cell's seed while candidates run upward,
-    // so a probe can never draw the same key as a candidate in the same cell.
-    float3 MakeProbe(float3 InCellCentre, float InCellExtent,
-                     int InCellX, int InCellY, int InCellZ,
-                     int InKeySeed, uint InProbeIndex)
-    {
-        if (InProbeIndex < 8u)
-        {
-            return float3(
-                InCellCentre.x + ((InProbeIndex & 1u) != 0u ? InCellExtent : -InCellExtent),
-                InCellCentre.y + ((InProbeIndex & 2u) != 0u ? InCellExtent : -InCellExtent),
-                InCellCentre.z + ((InProbeIndex & 4u) != 0u ? InCellExtent : -InCellExtent));
-        }
-
-        float4 h = Hash4(InCellX, InCellY, InCellZ,
-                         InKeySeed - (int) (InProbeIndex + 1u) * GALAXY_SLOT_STRIDE);
-
-        // Componentwise, and no swizzle. The shim gives float3/float4 members and
-        // compound assignment only -- no .xyz, no free operator+ -- so the whole core
-        // is written this way and this function is not the place to start relying on
-        // more. Matches MakeCandidate exactly, which is the point: a probe and a
-        // candidate place a point in the cell by the same arithmetic.
-        return float3(
-            InCellCentre.x + (h.x * 2.0f - 1.0f) * InCellExtent,
-            InCellCentre.y + (h.y * 2.0f - 1.0f) * InCellExtent,
-            InCellCentre.z + (h.z * 2.0f - 1.0f) * InCellExtent);
-    }
-
-    // Three decorrelated uniforms in [0,1) folded into one 32-bit word, ten bits each.
-    //
-    // Halves the entity record, which is readback traffic on every boundary cross. Ten
-    // bits is 1024 levels per channel against the eight a colour target carries, so
-    // nothing downstream can see the quantisation.
-    //
-    // The word is stored in an INTEGER buffer and must stay in one. Smuggling a packed
-    // payload through a float channel looks equivalent and is not: an arbitrary bit
-    // pattern read as a float can land on a denormal, which hardware may flush to zero,
-    // or on the all-ones exponent, which is a NaN. Neither survives a round trip
-    // reliably, and both fail silently on a subset of values.
-    //
-    // SCALAR ONLY, in both directions. The C++ shim provides float3 and a scalar
-    // saturate; it has no uint3 and no vector saturate, and this file has to compile
-    // through it. Vector forms here fail on the C++ side alone, which is a build the
-    // shader compiler will never catch.
-    uint PackDecor(float3 InDecor)
-    {
-        uint qx = (uint) (saturate(InDecor.x) * 1023.0f + 0.5f);
-        uint qy = (uint) (saturate(InDecor.y) * 1023.0f + 0.5f);
-        uint qz = (uint) (saturate(InDecor.z) * 1023.0f + 0.5f);
-
-        return qx | (qy << 10u) | (qz << 20u);
-    }
-
-    float3 UnpackDecor(uint InPacked)
-    {
-        const float Inv = 1.0f / 1023.0f;
-
-        return float3(
-            (float) (InPacked & 1023u) * Inv,
-            (float) ((InPacked >> 10u) & 1023u) * Inv,
-            (float) ((InPacked >> 20u) & 1023u) * Inv);
-    }
-
-    // How many candidates a cell draws, from a real-valued budget.
-    //
-    // STOCHASTIC, NOT ROUNDED OR FLOORED. A cell's budget is BudgetScale x mass_i and
-    // most of a galaxy is faint, so in the outer halo that number is a small fraction.
-    // Any deterministic rounding destroys the distribution at the bottom end: a floor
-    // of 1 makes every faint cell draw the same count whatever it holds, so the halo's
-    // entity count tracks CELL COUNT rather than density, and plain rounding empties
-    // everything below half a candidate instead.
-    //
-    // Rounding down and adding one with probability frac() has expectation exactly
-    // InRaw, so the population is right in aggregate at every density while each cell
-    // holds a whole number.
-    //
-    // WAVE-UNIFORM BY CONSTRUCTION: the draw is keyed on the cell alone, so every lane
-    // in the group computes the same count and the strided candidate loop cannot
-    // diverge. Do not key it on the slot or the lane.
-    uint StochasticCount(float InRaw, int InCellX, int InCellY, int InCellZ,
-                         int InKeySeed, float InCeiling)
-    {
-        float r = min(max(InRaw, 0.0f), InCeiling);
-
-        // NOT named `frac`. That is an HLSL intrinsic, and shadowing one with a local
-        // is accepted by some compilers and rejected by others -- the same family of
-        // trap as naming a float `linear`.
-        float whole = floor(r);
-        float fracPart = r - whole;
-
-        float4 h = Hash4(InCellX, InCellY, InCellZ, InKeySeed + GALAXY_ROUND_OFFSET);
-
-        return (uint) whole + ((h.x < fracPart) ? 1u : 0u);
-    }
-
-    // One candidate, decided entirely by its own key. Everything that does not need the
-    // field.
-    //
-    // InCellCentre and InCellExtent describe the cell in the caller's units;
-    // InInvGalaxyExtent converts into the normalized [-1,1] frame the field is defined
-    // in. The caller already holds that reciprocal, and passing it beats storing a
-    // second extent here that could disagree with the one the proxy uses.
-    GalaxyCandidate MakeCandidate(float3 InCellCentre, float InCellExtent,
-                                  float InInvGalaxyExtent, int InCellX, int InCellY,
-                                  int InCellZ, int InSlot)
-    {
-        GalaxyCandidate C;
-
-        float4 h = Hash4(InCellX, InCellY, InCellZ, InSlot);
-
-        C.Pos = float3(
-            InCellCentre.x + (h.x * 2.0f - 1.0f) * InCellExtent,
-            InCellCentre.y + (h.y * 2.0f - 1.0f) * InCellExtent,
-            InCellCentre.z + (h.z * 2.0f - 1.0f) * InCellExtent);
-
-        C.Norm = float3(C.Pos.x * InInvGalaxyExtent,
-                        C.Pos.y * InInvGalaxyExtent,
-                        C.Pos.z * InInvGalaxyExtent);
-
-        C.AcceptDraw = h.w;
-
-        // MUST NOT REUSE AcceptDraw, or share a hash component with it. Acceptance
-        // keeps only candidates whose draw fell below p, so among survivors that value
-        // is biased low -- and in a sparse region, where p is small, only the very
-        // lowest draws survive at all. Sharing it correlates extent with local density
-        // and leaves sparse regions holding systematically tiny stars. A scrambled
-        // recombination of the other three costs four ops against a second hash.
-        float e = h.x * 7.31f + h.y * 3.17f + h.z * 11.71f;
-        C.ExtentDraw = e - floor(e);
-
-        // A second key for the decorative values, so colour is stable for a given
-        // entity without being tied to where it landed.
-        float4 g = Hash4(InCellX, InCellY, InCellZ, InSlot + GALAXY_DECOR_OFFSET);
-        C.Decor = float3(g.x, g.y, g.z);
-
-        return C;
-    }
-
-    // Everything that does need it. InDensity is the RAW field value at C.Norm,
-    // whichever way the caller obtained it: SampleAnalytic for the texture-free path,
-    // GalaxySample for the textured one.
-    GalaxyEntity FinishEntity(GalaxyPlacement InPlace, GalaxyCandidate InC,
-                              float InDensity)
-    {
-        GalaxyEntity E;
-
-        E.Pos = InC.Pos;
-        E.Density = InDensity;
-        E.Decor = InC.Decor;
-        E.bValid = (InC.AcceptDraw < SpawnProbability(InDensity, InPlace))
-            ? 1.0f : 0.0f;
-
-        E.Extent = InPlace.ExtentMin
-            + (InPlace.ExtentMax - InPlace.ExtentMin)
-              * PowSafe(InC.ExtentDraw, max(InPlace.ExtentExponent, 1e-3f));
-
-        return E;
-    }
 
 
     // ======================================================================
@@ -1279,6 +957,12 @@ GalaxyDensityParams MakeGalaxyDensityParams(
         / max(bgR * P.CompactProfileIntegral(P.BackgroundConcentration), 1e-6f);
 
     // --- PER-ARM RECORDS ---
+    // ArmData.w IS A FADE START, AND IT CAN GO NEGATIVE. At an ArmAsymLength near 1 a high
+    // hash draw puts the start at -armFadeW, so the fade is already complete at r = 0 and
+    // that arm is DELETED rather than shortened -- the arm count silently drops while ArmN
+    // still reads what was authored. Deliberately unclamped, in line with this file's
+    // no-range-limits convention: the effect is visible rather than absorbed. Worth knowing
+    // before a missing arm is blamed on the merge loop.
     // Invariant along a ray, so hashing them per sample would repeat identical work.
     // Every slot is filled, not just the first ArmN, so none is read uninitialised.
     P.ArmN = (int) clamp(InArmCount, 1.0f, (float) GALAXY_MAX_ARMS);
@@ -1329,7 +1013,7 @@ GalaxyDensityParams MakeGalaxyDensityParams(
 // low-frequency. A single ridging uniform applied to both at once can only be set to a
 // value that suits neither, which is why ASSET CHOICE carries it instead.
 //
-// THE MODULATION FETCH IS WHY THIS MATTERED MOST. GalaxySampleNoiseTex centres four
+// THE MODULATION FETCH IS WHY THIS MATTERED MOST. It centres four
 // channels and mixes them with a signed weight vector, which is built for a multinoise
 // asset -- four uncorrelated generators, one per channel. Fed four channels of one packed
 // Perlin-Worley volume it was mixing four VIEWS of one field: the values decorrelate but
@@ -1346,7 +1030,15 @@ GalaxyDensityParams MakeGalaxyDensityParams(
 // touches Parameters or View, belongs in the material or the compute shader.
 // ===========================================================================
 
-// --- VOLUME TEXTURE LOOKUP, SIGNED ---
+// --- THE MODULATION FETCH ---
+// ONE FETCH, AND ONE FUNCTION. A GalaxyNoise wrapper sat in front of this and forwarded
+// its four arguments unchanged; it was the octave loop's entry point and outlived it, so
+// the file carried two names for one read. The argument it held is worth keeping: the
+// texture is a pre-baked volume that already carries a spectrum, so summing octaves of it
+// re-filters something already filtered, at one texture read each, in a dynamic loop, on
+// the hottest path in the stack. For genuinely more fractal detail, bake a deeper field
+// into a larger volume: the cost lands once at bake time instead of per sample.
+//
 // SampleLevel, not Sample: inside a dynamic loop the derivatives driving mip
 // selection are undefined. Called as a method rather than through the
 // Texture3DSampleLevel macro so this file does not depend on Common.ush having been
@@ -1384,17 +1076,6 @@ float GalaxySampleNoiseTex(GalaxyDensityParams P, Texture3D InNoiseTex, SamplerS
     float cw = t.w * 2.0f - 1.0f;
 
     return dot(P.NoiseChannelWeights, float4(cx, cy, cz, cw));
-}
-
-// ONE FETCH. The texture is a pre-baked Perlin-Worley volume that already carries a
-// spectrum, so summing octaves of it re-filters something already filtered -- at one
-// texture read each, in a dynamic loop, on the hottest path in the stack.
-//
-// For genuinely more fractal detail, bake a deeper field into a larger volume rather
-// than stacking reads here: the cost lands once at bake time instead of per sample.
-float GalaxyNoise(GalaxyDensityParams P, Texture3D InNoiseTex, SamplerState InNoiseSampler, float3 Pos)
-{
-    return GalaxySampleNoiseTex(P, InNoiseTex, InNoiseSampler, Pos);
 }
 
 // Full field: analytic layers, positionally warped, then modulated.
@@ -1509,7 +1190,7 @@ float GalaxySample(GalaxyDensityParams P,
         && (L.x + L.y) > 1e-4f)
     {
         float3 nf = P.NoiseFrame(NormPos, gasTwist, float2(P.NoiseScale.x, P.NoiseScale.y), P.NoiseOffset);
-        gasNoise = GalaxyNoise(P, InNoiseTexDisc, InNoiseSamplerDisc, nf);
+        gasNoise = GalaxySampleNoiseTex(P, InNoiseTexDisc, InNoiseSamplerDisc, nf);
     }
 
     if (bHaloNoise && (P.NoiseAmountBulge != 0.0f || P.NoiseAmountBackground != 0.0f)
@@ -1517,7 +1198,7 @@ float GalaxySample(GalaxyDensityParams P,
     {
         float3 hf = P.NoiseFrame(NormPos, haloTwist, float2(P.NoiseScale.z, P.NoiseScale.w),
                                  P.NoiseOffset);
-        haloNoise = GalaxyNoise(P, InNoiseTexHalo, InNoiseSamplerHalo, hf);
+        haloNoise = GalaxySampleNoiseTex(P, InNoiseTexHalo, InNoiseSamplerHalo, hf);
     }
 
     L = P.ApplyModulation(L, gasNoise, haloNoise);

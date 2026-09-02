@@ -58,7 +58,7 @@
 // departing node that was inside the top three steps F2 or F3 discontinuously. Soft
 // weights fix that to exactly the degree that a candidate at the window edge carries
 // negligible weight, which is a checkable condition rather than a hope -- see the
-// truncation bound at WeightedNodeMeasure, which is where the remaining exposure
+// truncation bound at LatticeWeightSums, which is where the remaining exposure
 // lives and is stated in numbers.
 //
 // CLUSTERS ARE STILL NOT ANALYTIC, but they could be again for free. A fourth rank,
@@ -104,7 +104,7 @@
 // stage actually costs. Leave it at 0 in anything shipped.
 //
 //   0  everything
-//   1  no regional variance
+//   1  no regional variance -- both FETCHES and both RESOLVE chains
 //   2  also no domain warp
 //   3  also no neighbourhood search -- one cell per lattice instead of twenty-seven
 //
@@ -112,6 +112,17 @@
 // fetch and there is no such fetch any more. A new stage that adds one should take
 // level 1 back and push the rest down, since the outermost thing is the cheapest to
 // bisect away first.
+//
+// RUNG 1 FORCES THE ENABLES OFF rather than neutralising the fetch, and the difference
+// is the whole point of the rung. Returning a constant 0.5 from the fetch removed two
+// texture reads and left all nine VarianceT/VarianceRemap resolves standing -- nine
+// pow() pairs -- so the reported gap between rungs 0 and 1 was the fetches alone under
+// a label that named the whole stage. It also moved the FIELD: a neutral CHANNEL of 0.5
+// still goes through each consumer's bias, and 0.5^bias is not the midpoint of a range
+// unless the bias is 1, so the probed field and the runtime-disabled field disagreed
+// wherever a bias was authored. Clearing bRegionEnableA/B in the derivation removes the
+// fetches, the resolves and the divergence in one place. See the override at the end of
+// MakeUniverseDensityParams.
 //
 // WHY A COMPILE-TIME LADDER AND NOT THE PARAMETERS. bWarpEnable, bRegionEnableA,
 // bRegionEnableB, bLatticeLarge and bShape are RUNTIME branches, so both sides of each are
@@ -126,7 +137,7 @@
 // exponentials, on the order of a thousand instructions and the floor under everything
 // else here.
 //
-// Note that level 4 does not merely make the field meaningless, it makes it EMPTY: a
+// Note that level 3 does not merely make the field meaningless, it makes it EMPTY: a
 // single candidate gives (sum w)^2 / (sum w^2) = 1 identically, so both feature
 // measures read as pure void and the density collapses to the floor. That is fine for
 // an instruction count and useless for anything else.
@@ -152,7 +163,7 @@
 // ==========================================================================
 // The weight is exp2(lambda * (pivot - u)), where u is the power-diagram squared
 // distance to a candidate node. These three fix how lambda comes off an authored
-// width and how the exponent is kept inside float32. See WeightedNodeMeasure for what
+// width and how the exponent is kept inside float32. See LatticeWeightSums for what
 // the weight is FOR.
 //
 // WIDTH_TO_LAMBDA is a CALIBRATION, chosen so an authored width means the same
@@ -187,7 +198,7 @@
 // pivot above, the squared accumulator's exponent spans about
 // +-2*lambda*(0.31 + 0.5*spread), and float32 overflows past 2^127. 100 keeps that
 // inside the range for any spread below about 0.65 -- comfortably wider than the
-// truncation bound at WeightedNodeMeasure allows anyway -- and corresponds to a
+// truncation bound at LatticeWeightSums allows anyway -- and corresponds to a
 // feature width of 0.032 cells, a wall three percent of a void across.
 //
 // The failure past it is benign and worth knowing: what underflows first is the
@@ -255,8 +266,8 @@
 //   because it wins by default once the fine one steps back. That asymmetry is not a
 //   simplification, it is the shape of the problem.
 //
-// Removing a node by shrinking its territory is exactly the mechanism VoidSizeSkew
-// already uses on individual nodes, applied to a whole lattice at once -- which is why
+// Removing a node by shrinking its territory is exactly the mechanism the power-diagram
+// offset already uses on individual nodes, applied to a whole lattice at once -- which is why
 // it is continuous where a hash threshold that deleted nodes outright would pop.
 //
 // WHERE THE CROSSOVER SITS. The mean power distance to a sample's nearest node is
@@ -333,14 +344,40 @@
 // still guaranteed however large this makes the step.
 #define UNIVERSE_MIN_STEP_FRACTION 0.5f
 
-// The skew exponent is applied to every one of the 27 candidates, so a pow() here is
-// 27 transcendental pairs per march step -- log2 and exp2 each at a quarter rate.
-// Defining this to a small whole number replaces them with repeated squaring, and
-// costs the ability to modulate the skew regionally or animate it: set
-// UNIVERSE_SKEW_FIXED to 0 to get the general pow path back.
+// ==========================================================================
+// THE OFFSET EXPONENT IS FIXED AT FOUR, AND THE PIN THAT SET IT IS RETIRED
+// ==========================================================================
+// The power-diagram offset is h.w^4 * spread, applied at LatticeWeightSums. Four is a
+// compile-time constant and two multiplies; it was a VoidSizeSkew pin multiplied by a
+// regional modulator and evaluated as a pow(), and that path had been switched off by a
+// UNIVERSE_SKEW_FIXED ladder for long enough that the pin, the modulator and the .w slot
+// carrying them did nothing at all. Retiring them is bit-identical to the field as it
+// stood, which is the only reason it was done rather than repaired.
 //
-// 4 is the shipped default and is exactly two multiplies.
-#define UNIVERSE_SKEW_FIXED 4
+// WHAT THE EXPONENT DOES, so it is not reinvented as a control. It reshapes a uniform
+// hash channel into the offset distribution, over the same [0, spread] support -- so it
+// moves the SHAPE of the void-size distribution and not its range. Measured on the real
+// diagram, 12^3 cells at spread 0.5, coefficient of variation of void volume:
+//
+//   exponent      0      1      2      4      8
+//   CV         0.255  0.523  0.574  0.565  0.504
+//   max void    1.91   2.81   3.09   3.27   3.27
+//
+// Dispersion is SPREAD's lever, not this one: it is non-monotonic in the exponent and
+// peaks near 2, and at spread 0.1 the whole row is flat to three percent. What raising it
+// past 1 genuinely buys is the TAIL -- the median void shrinks while the largest grows,
+// which is the occasional wide void among small ones. Four sits at the top of that.
+//
+// AN EXPONENT OF ZERO IS NOT "NO SKEW". It gives every node the full spread, which on one
+// lattice is a constant on every u and therefore invariant -- the same field as spread 0.
+// With two lattices it is not invariant, because InDistScale differs between them, and it
+// becomes a uniform bias handing territory to the coarse tier. Worth knowing before any
+// future control is given a range that reaches it.
+//
+// IF AN AUTHORED HANDLE IS EVER WANTED BACK, the affordable form is a lerp between the
+// two fixed exponents 2 and 4 -- three multiplies and a madd against a pow's log2/exp2
+// pair at quarter rate, fifty-four times per sample -- and it spans the whole range the
+// table above says is useful. The general pow path is not worth restoring.
 
 // One 32-bit avalanche split into four 8-bit lanes, instead of four chained LCGs
 // each given three rounds of xor-shift-multiply. Measured at 12% of the ranking
@@ -490,8 +527,16 @@ int WrapCell(int InValue, int InPeriod)
 // cell. Two compares and a select, against the twenty-odd cycles of an integer modulo --
 // which matters because this runs fifty-four times per sample where WrapCell runs six.
 //
-// THE PRECONDITION IS NOT CHECKED and cannot be relaxed: hand it an unreduced index and
-// it returns one, silently, and the field grows a second lattice offset from the first.
+// THE PRECONDITION IS NOT CHECKED, and what it actually requires is one period of slack
+// rather than exact reduction: the single compare-and-add closes for any index whose sum
+// with the offset lands in [-InPeriod, 2*InPeriod), and returns the correct wrapped cell
+// throughout that span. SampleCell RELIES ON THAT SLACK -- the warp adds a whole-cell
+// carry to an already-reduced index and does not re-reduce, so the walk is routinely
+// handed an index a few cells either side of the range. A few cells against a period of
+// 1.6e7 is not close to the edge, and the torus still closes exactly.
+//
+// Past that span it returns an index that is merely wrong, silently, and the field grows
+// a second lattice offset from the first.
 int StepCell(int InWrapped, int InOffset, int InPeriod)
 {
     int n = InWrapped + InOffset;
@@ -654,7 +699,6 @@ struct UniverseDensityParams
     // planes, and the warp displaces both. If a grid-aligned artifact ever appears at
     // exactly the ratio's spacing, this is where it comes from.
     float LatticeRatio; // large cell size / small, whole number, >= 1
-    int LatticeRatioInt; // the same number, for the exact offset split
     // Only the COORDINATE SPLIT uses this now. The warp deliberately does not: its
     // amplitudes are carried into the coarse lattice as the same numbers rather than
     // the same physical displacement, so nothing is converted there. See the warp block
@@ -681,7 +725,7 @@ struct UniverseDensityParams
     int LargeOffsetCellZ;
 
     // The field's period on each lattice, in that lattice's own cells. Derived once in
-    // MakeUniverseDensityParams; LargeCellPeriod is exactly CellPeriod / LatticeRatioInt,
+    // MakeUniverseDensityParams; LargeCellPeriod is exactly CellPeriod / LatticeRatio,
     // which is whole by construction of the period.
     int CellPeriod;
     int LargeCellPeriod;
@@ -721,7 +765,7 @@ struct UniverseDensityParams
     // on a rank difference: past it, the feature contributed exactly nothing. It is now
     // the distance at which a competing node's weight has halved, which has no cutoff
     // at all -- the falloff is smooth and the tail is exponential rather than absent.
-    // See WeightedNodeMeasure for the derivation of lambda from it.
+    // See LatticeWeightSums for the derivation of lambda from it.
     //
     // THERE IS ONLY ONE WIDTH NOW, and it is the filament's. Both features read the
     // same participant count off the same weights, so a second width would need a
@@ -732,7 +776,7 @@ struct UniverseDensityParams
     // WALL WIDTH IS NOW WALL FALLOFF, and this is a repurpose rather than a rename.
     // The wall term is saturate(N - 1) and 1 is the measure's own FLOOR, so the wall
     // is the feature that sits on top of the aggregate tail described at
-    // WeightedNodeMeasure -- and once the tail alone carries N past 2, the saturate
+    // LatticeWeightSums -- and once the tail alone carries N past 2, the saturate
     // pins the term at full and the old width pin stopped changing anything at all.
     // That is the symptom: a wall width that appears dead while filament width still
     // works, because the filament threshold at 2 sits above the tail rather than in it.
@@ -761,15 +805,10 @@ struct UniverseDensityParams
     // worth revisiting when the offset was next touched, and this is that time: the weight
     // wants a squared distance anyway, so the offset moved into that space and the 27
     // roots went with it. The unit changes with it -- see MakeUniverseDensityParams.
+    // .w IS UNCLAIMED AGAIN. It carried VoidSizeSkew, which is retired -- see THE OFFSET
+    // EXPONENT IS FIXED AT FOUR. A new passenger has to pass the test in the DERIVATION
+    // block: it must belong to the same field as its host.
     float4 VoidSizeSpreadRange; // power-diagram offset per node, squared cell units
-                                // .w CARRIES THE SKEW -- see below
-    // VoidSizeSkew RIDES ITS OWN RANGE'S .w, which is the first of the free per-field
-    // handles to be claimed. It is not independently ranged and never was: it already
-    // rode VoidSizeSpreadRange's bias-shaped interpolant as a derived multiplier, so
-    // the pin and the range were coupled in the field before they were coupled in the
-    // struct. Carrying it in the range it is already a function of makes that explicit
-    // and costs a pin. See the coupling note where mSkew is computed in SampleCell.
-    float VoidSizeSkew; // >1 makes large voids rare and small ones common
     // Two octaves. Amounts are peak displacement in cells; scales are texture repeats
     // per CELL, quantized to 1/UNIVERSE_WARP_WRAP so the precision wrap stays seamless.
     // Shear -- what actually curves the web -- is amount * scale * gradient, so no pin
@@ -823,7 +862,7 @@ struct UniverseDensityParams
     //
     //   FIELD A, COARSE -- what shape the web has
     //     A.x  which lattice (the cell-size blend)
-    //     A.y  void size spread, and the skew that shapes its distribution
+    //     A.y  void size spread
     //     A.z  feature width, the single lambda for walls and filaments alike
     //     A.w  large warp octave amount
     //
@@ -833,10 +872,13 @@ struct UniverseDensityParams
     //     B.z  filament density, void floor
     //     B.w  small warp octave amount
     //
-    // WHAT IS DELIBERATELY STILL CORRELATED. Spread with skew, because they are one
-    // setting: skew distributes the offsets that spread scales. Filament density with the
-    // floor, because how much haze a region carries reasonably tracks how much structure
-    // it has.
+    // WHAT IS DELIBERATELY STILL CORRELATED. Filament density with the floor, because how
+    // much haze a region carries reasonably tracks how much structure it has.
+    //
+    // A.y IS A SINGLE CONSUMER NOW and is deliberately not reused. It resolved the void
+    // offset's reach and its distribution shape together, on the argument that void size
+    // is one setting; the shape half is retired and the argument is unchanged, so the
+    // channel stays with void size rather than being handed to the next arrival.
     //
     // B.w AND THE SECOND HALF OF B.z ARE FREE now that the cluster/gas stage is out, so
     // the next consumer to arrive has somewhere uncorrelated to go without a third fetch.
@@ -883,16 +925,16 @@ struct UniverseDensityParams
     float bRegionEnableA; // skips fetch A when every structure range is degenerate
     float bRegionEnableB; // skips fetch B when every appearance range is degenerate
 
-    // --- BOUNDS ---
-    // The field itself is unbounded and tiles forever through the cell hash. This
-    // fade exists only to keep a finite proxy from cutting it off with a hard edge.
-    // Set BoundsFadeStart >= 1 to disable.
     // --- MARCH ---
     // Not used inside this file at all; it is derived here because this is where the
     // cell size and the feature width both live, and handed to the march. See
     // UNIVERSE_MIN_STEP_FRACTION.
     float MinFeatureStep; // normalized units; the step below which sampling is wasted
 
+    // --- BOUNDS ---
+    // The field itself is unbounded and tiles forever through the cell hash. This
+    // fade exists only to keep a finite proxy from cutting it off with a hard edge.
+    // Set BoundsFadeStart >= 1 to disable.
     float BoundsFadeStart;
     float BoundsFadeStartSq;
     float InvBoundsFadeSpan;
@@ -902,36 +944,17 @@ struct UniverseDensityParams
     // HELPERS
     // ======================================================================
 
-    // Raises a hash value in [0,1) to the skew exponent. With UNIVERSE_SKEW_FIXED set
-    // this is repeated squaring and the exponent argument is ignored, which is what
-    // makes the regional skew modulation a no-op in that configuration -- deliberate,
-    // and the reason RegionVoidScale drives spread alone unless the general path is
-    // switched back on.
-    float SkewPow(float x, float p)
-    {
-#if UNIVERSE_SKEW_FIXED == 2
-        return x * x;
-#elif UNIVERSE_SKEW_FIXED == 4
-        float x2 = x * x;
-        return x2 * x2;
-#elif UNIVERSE_SKEW_FIXED == 8
-        float x2 = x * x;
-        float x4 = x2 * x2;
-        return x4 * x4;
-#else
-        return PowSafe(x, p);
-#endif
-    }
-
     // Guards the BASE only. pow(0, p) is undefined for p <= 0 and the compilers
     // disagree about what it returns; the exponent is deliberately unguarded, so a
-    // negative concentration or skew will blow up near the profile edge and that is
-    // visible rather than absorbed.
+    // negative variance bias or wall falloff blows up visibly rather than being
+    // absorbed. Those two, and the wall term in DensityFromWeb, are the only callers.
     float PowSafe(float x, float p)
     {
         return (x > UNIVERSE_POW_EPSILON) ? pow(x, p) : 0.0f;
     }
 
+    // DECLARED BEFORE ITS CALLERS, matching GalaxyDensityCore.ush. C++ resolves a member
+    // against the whole struct whatever the order, and HLSL is not guaranteed to.
     // Turns one raw warp fetch into the three displacement axes a warp octave needs.
     // Weights are an elementwise GAIN on the channels -- w has nowhere to go, since there
     // is no fourth displacement axis.
@@ -968,9 +991,9 @@ struct UniverseDensityParams
     }
 
     // THE VARIANCE CONVENTION: every packed (min, max, bias, free) field is resolved
-    // in two steps, split apart because some quantities need the intermediate t --
-    // the width/skew couplings in SampleCell reuse it as a signed delta rather than
-    // re-deriving their own shape from the raw channel.
+    // in two steps, split apart because a consumer may want the intermediate t rather than
+    // a value lerped from it -- the lattice blend in SampleCell is one, and takes VarianceT
+    // alone because the two extremes it interpolates are the lattices themselves.
     //
     // VarianceT is the RAW CHANNEL only, never centred -- unlike WeightedScalar's
     // [-1,1] convention, a lerp wants its blend factor in [0,1] to begin with, so
@@ -1058,7 +1081,7 @@ struct UniverseDensityParams
     // painted, never where the skeleton is, so a Voronoi vertex the CPU constructs is
     // still the vertex the shader draws.
     //
-    // Anything consumed INSIDE the ranking -- spread and skew -- moves the
+    // Anything consumed INSIDE the ranking -- the void offset's spread -- moves the
     // skeleton itself. That is allowed here, because the modulation is evaluated once
     // per sample and every one of the 27 nodes then shares it, so each sample still
     // sees a consistent tessellation and the field stays continuous. What it costs is
@@ -1136,12 +1159,11 @@ struct UniverseDensityParams
                       int InCellX, int InCellY, int InCellZ, float3 InFrac,
                       float InScale, float3 InPhase)
     {
-#if UNIVERSE_COST_PROBE >= 1
-        // Neutral midpoint, not zero -- a disabled/probed-out fetch should read as
-        // "the middle of every authored range," matching the same fallback used when
-        // bRegionEnable is off at runtime.
-        return float4(0.5f, 0.5f, 0.5f, 0.5f);
-#else
+        // NO COST-PROBE SHORT-CIRCUIT HERE ANY MORE. Rung 1 used to return a constant 0.5
+        // from this function, which left every VarianceT/VarianceRemap resolve in the
+        // instruction count and pushed a neutral CHANNEL through each consumer's bias
+        // instead of reproducing the runtime-disabled midpoint. The rung now clears
+        // bRegionEnableA/B in the derivation, so this function is simply not called.
         // Same masked cell-relative construction as the warp, and exact for the same
         // reason. Both region scales are quantized so the 4096-cell wrap closes
         // seamlessly. Scale and phase are arguments rather than struct reads because
@@ -1157,7 +1179,6 @@ struct UniverseDensityParams
         // assets are signed. The two conventions are why the four textures do not all
         // arrive as one array.
         return InVarianceTex.SampleLevel(InVarianceSampler, uv, 0.0f);
-#endif
     }
 
     // ======================================================================
@@ -1202,7 +1223,7 @@ struct UniverseDensityParams
     //
     //     u = ( |node - sample|^2 - offset ) * distScale  +  uBias
     //
-    // and the offset is the skewed hash channel scaled by the resolved spread. The
+    // and the offset is the hash channel's fourth power scaled by the resolved spread. The
     // spread rides inside the distScale multiply deliberately: a lattice's void-size
     // variation should be the same FRACTION of its own cells on both lattices, so the
     // coarse one's offsets scale up with its cells rather than staying a fixed absolute
@@ -1223,7 +1244,8 @@ struct UniverseDensityParams
     //   distance, full stop.
     //
     //   ONE EXPONENTIAL, FULL STOP. Per candidate the whole cost is a hash, three
-    //   subtracts, three madds for the squared distance, the skew's two multiplies, one
+    //   subtracts, three madds for the squared distance, two multiplies for the offset's
+    //   fourth power, one
     //   exp2 and two madds for the accumulators.
     //
     // LAMBDA, PIVOT AND SUPPRESSION ARE THE CALLER'S, not this function's, because both
@@ -1297,7 +1319,7 @@ struct UniverseDensityParams
     // smaller number here.
     float2 LatticeWeightSums(int InCellX, int InCellY, int InCellZ, float3 InFrac,
                              float InLambda, float InPivot,
-                             float InResolvedSpread, float InSkewScale,
+                             float InResolvedSpread,
                              float InDistScale, float InUBias,
                              int InPeriod)
     {
@@ -1355,23 +1377,27 @@ struct UniverseDensityParams
                     // POWER-DIAGRAM OFFSET: subtracted from the square, so a node with a
                     // larger offset claims more space and voids differ in size.
                     //
-                    // The skew is what mixes SCALES rather than merely jittering one
-                    // scale. A uniform offset distribution gives every void a size near
-                    // the mean; the exponent makes a large offset rare, and a node whose
-                    // offset far exceeds its neighbours' swallows their territory
-                    // outright, leaving one wide void where several small ones would
-                    // have been. Removing a node by geometry this way is continuous,
-                    // unlike a hash threshold that deletes it -- which is the same
-                    // mechanism the lattice suppression below uses, at the scale of a
-                    // whole lattice rather than one node.
+                    // THE FOURTH POWER IS WHAT MIXES SCALES rather than merely jittering
+                    // one. A uniform offset gives every void a size near the mean; raising
+                    // the channel makes a large offset rare, so a node whose offset far
+                    // exceeds its neighbours' swallows their territory outright and leaves
+                    // one wide void where several small ones would have been. Removing a
+                    // node by geometry this way is continuous, unlike a hash threshold
+                    // that deletes it -- the same mechanism the lattice suppression below
+                    // uses, at the scale of a whole lattice rather than one node.
+                    //
+                    // FOUR IS FIXED AND NO LONGER AUTHORED. Two multiplies, and the
+                    // measurement behind the number is at THE OFFSET EXPONENT IS FIXED AT
+                    // FOUR near the top of the file.
                     //
                     // Not re-centred on zero: the measure is invariant under a common
                     // scaling of every weight, and a constant added to every u is
                     // exactly such a scaling, so centring would cost a subtract to
                     // change nothing at all.
+                    float hw2 = h.w * h.w;
+
                     float u = (dx * dx + dy * dy + dz * dz
-                             - SkewPow(h.w, VoidSizeSkew * InSkewScale)
-                               * InResolvedSpread) * InDistScale
+                             - hw2 * hw2 * InResolvedSpread) * InDistScale
                             + InUBias;
 
                     // exp2 rather than exp: it is the hardware primitive on both sides,
@@ -1421,7 +1447,7 @@ struct UniverseDensityParams
     //
     // THE WALL EXPONENT IS WHERE THE TAIL IS PAID FOR. The two thresholds are not
     // symmetric: the filament's sits at 2, comfortably above the measure's floor, so
-    // the aggregate tail described at WeightedNodeMeasure never reaches it and
+    // the aggregate tail described at LatticeWeightSums never reaches it and
     // saturate(N - 2) is genuinely zero through a void interior. The wall's sits at 1,
     // which IS the floor, so the wall term reads the tail directly -- and once the tail
     // alone carries N past 2 the saturate pins it at full and no amount of retuning the
@@ -1569,7 +1595,6 @@ struct UniverseDensityParams
         float mInvWidth = 1.0f / max(VarianceRemap(0.5f, FeatureWidthRange), 1e-6f);
         float mVoidFloor = VarianceRemap(0.5f, VoidFloorRange);
         float mSpread = VarianceRemap(0.5f, VoidSizeSpreadRange);
-        float mSkew = 1.0f;
         float mWarpLarge = VarianceRemap(0.5f, WarpAmountLargeRange);
         float mWarpSmall = VarianceRemap(0.5f, WarpAmountSmallRange);
 
@@ -1577,6 +1602,12 @@ struct UniverseDensityParams
         // reason it is everywhere else here: with no region signal, half way between
         // the two authored lattices is the predictable "what does this look like with
         // variance off," where a bias-shaped 0.5 would be a number nobody authored.
+        //
+        // IT IS ONLY REACHED UNDER THE COST PROBE. bRegionEnableA carries `ratio > 1.5`
+        // precisely so a second lattice pays for fetch A on its own, and tLattice below is
+        // forced to zero when there is no second lattice -- so at runtime this value is
+        // either overwritten or multiplied out. Rung 1 clears the enables with a second
+        // lattice still live, which is the one configuration that reads it.
         float mLatticeBlend = 0.5f;
 
 
@@ -1606,20 +1637,14 @@ struct UniverseDensityParams
             // lattices themselves.
             mLatticeBlend = VarianceT(a.x, CellSizeBias);
 
-            // a.y -> VOID SIZE, both the spread and the skew that shapes its
-            // distribution. These two stay together deliberately: skew decides how the
-            // offsets are distributed and spread decides how far they reach, so they are
-            // one setting rather than two that happen to correlate.
+            // a.y -> VOID SIZE. It drove the offset distribution's SHAPE as well as its
+            // reach until the shape stopped being authored; the exponent is fixed now, so
+            // this channel resolves the spread and nothing else. The channel is not
+            // reassigned: a second consumer sharing it would be a new correlation, and the
+            // reason the allocation table calls A.y void size is that void size is one
+            // setting whether or not it currently takes two numbers.
             float voidT = VarianceT(a.y, VoidSizeSpreadRange.z);
             mSpread = VarianceRemap(voidT, VoidSizeSpreadRange);
-
-            // Off the RAW channel, not off spread's bias-shaped interpolant. Skew has no
-            // range of its own to carry a bias in -- its value rides
-            // VoidSizeSpreadRange.w -- so the choice is between chaining it to spread's
-            // response curve or giving it the plain linear one. The plain one is looser:
-            // chained, skew was an affine function of spread and could not have a
-            // different shape at all.
-            mSkew = 1.0f + (a.y * 2.0f - 1.0f) * 0.5f;
 
             // a.z -> FEATURE WIDTH, which is the single lambda for walls and filaments
             // alike since the measure collapsed to one weight set. It used to ride
@@ -2070,7 +2095,7 @@ struct UniverseDensityParams
         if (fineCeiling > -UNIVERSE_LATTICE_SKIP)
         {
             float2 fine = LatticeWeightSums(cx, cy, cz, frac, lam, pivot,
-                                            mSpread, mSkew, 1.0f, suppress,
+                                            mSpread, 1.0f, suppress,
                                             CellPeriod);
             sumW += fine.x;
             sumSqW += fine.y;
@@ -2078,12 +2103,12 @@ struct UniverseDensityParams
 
         if (bLatticeLarge > 0.5f)
         {
-            // Same spread, skew and width NUMBERS, converted into shared units by
+            // Same spread and width NUMBERS, converted into shared units by
             // ratioSq rather than re-authored. That is what makes the two lattices one
             // field at two scales instead of two unrelated fields: a void's size
             // variation is the same fraction of its own cell on both.
             float2 coarse = LatticeWeightSums(lx, ly, lz, lfrac, lam, pivot,
-                                              mSpread, mSkew, ratioSq, 0.0f,
+                                              mSpread, ratioSq, 0.0f,
                                               LargeCellPeriod);
             sumW += coarse.x;
             sumSqW += coarse.y;
@@ -2242,10 +2267,9 @@ int FloorDiv(int InValue, int InDivisor)
 // bias and behaves the same way, but there is nothing to lerp, so it never passes
 // through VarianceRemap and it is absent from the packing table above.
 //
-// FOUR VECTORS CARRY A PASSENGER IN .w, which was documented as a free per-field
+// THREE VECTORS CARRY A PASSENGER IN .w, which was documented as a free per-field
 // handle from the day the packing convention landed:
 //
-//   VoidSizeSpreadRange.w    VoidSizeSkew
 //   WarpAmountLargeRange.w   WarpScaleLarge
 //   WarpAmountSmallRange.w   WarpScaleSmall
 //   WarpLargeWeights.w       how much of the lattice ratio the large octave's
@@ -2253,19 +2277,24 @@ int FloorDiv(int InValue, int InDivisor)
 //
 // The test each of these passes, and the one to apply to the next candidate: the
 // passenger belongs to the SAME FIELD as its host, so a pin carrying both is one
-// setting rather than two unrelated ones sharing a wire. Skew already rode spread's
-// own interpolant. Each warp scale multiplies its octave's amount in the shear
-// product, so neither number means anything without the other. And the large octave's
-// lattice-follow sits in the weights vector that already gains that same octave's three
-// displacement axes, where .w had nothing to steer.
+// setting rather than two unrelated ones sharing a wire. Each warp scale multiplies its
+// octave's amount in the shear product, so neither number means anything without the
+// other. And the large octave's lattice-follow sits in the weights vector that already
+// gains that same octave's three displacement axes, where .w had nothing to steer.
+//
+// VoidSizeSpreadRange.w WAS THE FOURTH and is unclaimed again. It carried VoidSizeSkew,
+// which passed the test on its face -- the skew shaped the distribution the spread
+// scaled -- and was still a control that could not move anything, because the exponent it
+// fed had been a compile-time constant for longer than the pin had existed. The test the
+// list above states is necessary and is not sufficient: a passenger also has to reach a
+// live consumer.
 //
 // WHAT IS LEFT UNRANGED is not an accident of which pass reached which pin. CellSize
 // cannot be, and that is structural rather than a matter of degree -- see the note at
 // RegionAxes. Neither region scale must be, or a field decides how big its own regions
 // are -- at a position it can only know by having already fetched itself. Both warp
 // scales were ranged and were rolled back after looking at the result -- see THE FETCH
-// SCALES ARE FIXED. VoidSizeSkew and the enables are riders and switches rather than
-// quantities.
+// SCALES ARE FIXED. The enables are switches rather than quantities.
 //
 // NO RANGE CLAMPING. Every parameter passes through at whatever value it is
 // given, so the effect of pushing one past its sensible range is visible rather
@@ -2274,8 +2303,8 @@ int FloorDiv(int InValue, int InDivisor)
 // used to be clamped are documented at their parameter instead -- the numbers
 // are worth keeping even though the enforcement is not:
 //
-//   *Range.w        A free per-field handle. CLAIMED on VoidSizeSpread, both
-//                   WarpAmounts and WarpLargeWeights, and unclaimed on the rest; the
+//   *Range.w        A free per-field handle. CLAIMED on both WarpAmounts and on
+//                   WarpLargeWeights, and unclaimed on the rest; the
 //                   list and the test a new claim should pass are in the DERIVATION
 //                   block above. A .w is deliberately NOT part of the
 //                   min/max degeneracy test that gates the region fetch, so setting one
@@ -2300,7 +2329,7 @@ int FloorDiv(int InValue, int InDivisor)
 //                   window is sound while spread stays well under 1.0 minus the
 //                   dominant candidate's own power distance, and the weight ratio at
 //                   a cell-plane transition is 2^(-lambda*(1.0 - spread - u1)). See
-//                   the TRUNCATION paragraph at WeightedNodeMeasure, and note that
+//                   the TRUNCATION paragraph at LatticeWeightSums, and note that
 //                   the bound degrades with WIDE features as well as large spread.
 //   WarpAmount*Range peak displacement in cells, and NOT the convention the retired
 //                   lattice path used: that one centred and doubled, so any value
@@ -2376,7 +2405,7 @@ UniverseDensityParams MakeUniverseDensityParams(
     float4 InVoidFloorRange, // ambient everywhere
 
     // --- ORGANICS ---
-    float4 InVoidSizeSpreadRange, // .xyz offset per node, SQUARED cell units; .w SKEW
+    float4 InVoidSizeSpreadRange, // .xyz offset per node, SQUARED cell units; .w unclaimed
     float4 InWarpAmountLargeRange, // .xyz displacement in cells; .w repeats per cell
     float4 InWarpAmountSmallRange, // .xyz displacement in cells; .w repeats per cell
     float4 InWarpLargeWeights, // per-axis gain on the large octave's displacement
@@ -2404,7 +2433,6 @@ UniverseDensityParams MakeUniverseDensityParams(
     // something surprising.
     float ratio = max(floor(max(InCellSizeRange.y, 0.0f) / cellSmall + 0.5f), 1.0f);
     P.LatticeRatio = ratio;
-    P.LatticeRatioInt = (int) ratio;
     P.InvLatticeRatio = 1.0f / ratio;
 
     // log2 rather than a repeated multiply: the consumer wants exp2 of a fraction of
@@ -2462,9 +2490,9 @@ UniverseDensityParams MakeUniverseDensityParams(
     P.VoidFloorRange = InVoidFloorRange;
 
     P.VoidSizeSpreadRange = InVoidSizeSpreadRange;
-    // UNPACKED FROM .w, all three of them. A packed handle is only worth having if
-    // the unpack is in one place; these are it.
-    P.VoidSizeSkew = InVoidSizeSpreadRange.w;
+    // UNPACKED FROM .w, both of them. A packed handle is only worth having if the unpack
+    // is in one place; these are it. VoidSizeSpreadRange.w carried a third and is now
+    // unclaimed -- see THE OFFSET EXPONENT IS FIXED AT FOUR.
     P.WarpAmountLargeRange = InWarpAmountLargeRange;
     P.WarpAmountSmallRange = InWarpAmountSmallRange;
     P.WarpScaleLarge = QuantizeScale(InWarpAmountLargeRange.w);
@@ -2558,10 +2586,34 @@ UniverseDensityParams MakeUniverseDensityParams(
                      || (InWarpAmountSmallRange.x != InWarpAmountSmallRange.y))
                      ? 1.0f : 0.0f;
 
-    // See UNIVERSE_MIN_STEP_FRACTION. min of the two ends because a range may be
-    // authored in reverse, and max against zero because a degenerate or negative width
-    // should hand the floor back to the authored pin rather than drive it negative.
-    float minWidth = max(min(InFeatureWidthRange.x, InFeatureWidthRange.y), 0.0f);
+#if UNIVERSE_COST_PROBE >= 1
+    // RUNG 1 OF THE COST PROBE, and it belongs here rather than at the fetch. Clearing the
+    // two enables removes the fetches, the branches and all nine VarianceT/VarianceRemap
+    // resolves -- nine pow() pairs -- so the gap between rungs 0 and 1 is the regional
+    // variance stage rather than its two texture reads. It also makes the probed field
+    // identical to the runtime-disabled one, which a neutral 0.5 returned from the fetch
+    // was not: that value still passed through each consumer's bias, and 0.5^bias is the
+    // midpoint of a range only when the bias is 1.
+    P.bRegionEnableA = 0.0f;
+    P.bRegionEnableB = 0.0f;
+#endif
+
+    // See UNIVERSE_MIN_STEP_FRACTION. min of the two ends because a range may be authored
+    // in reverse.
+    //
+    // FLOORED AT THE WIDTH THE LAMBDA CLAMP IMPLIES, not at zero, and this mirrors
+    // `lam = min(UNIVERSE_WIDTH_TO_LAMBDA * mInvWidth, UNIVERSE_LAMBDA_MAX)` in SampleCell
+    // exactly. Past that clamp the field's finest wall stops narrowing with the pin and
+    // sits at UNIVERSE_WIDTH_TO_LAMBDA / UNIVERSE_LAMBDA_MAX cells -- 0.032, three percent
+    // of a void -- so a floor that kept following the pin down asked the march to resolve
+    // detail the field cannot express, which is the one thing this number exists to stop.
+    //
+    // It also fixes the degenerate case rather than merely surviving it. A zero or negative
+    // width resolves through `1.0f / max(width, 1e-6f)` to an inverse of 1e6 and pins lambda
+    // AT the clamp, which is the field at its finest -- and the old max against zero handed
+    // the floor back to the authored pin at exactly that moment.
+    float minWidth = max(min(InFeatureWidthRange.x, InFeatureWidthRange.y),
+                         UNIVERSE_WIDTH_TO_LAMBDA / UNIVERSE_LAMBDA_MAX);
     P.MinFeatureStep = UNIVERSE_MIN_STEP_FRACTION * minWidth * cellSmall;
 
     P.BoundsFadeStart = InBoundsFadeStart;

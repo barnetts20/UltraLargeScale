@@ -16,7 +16,7 @@
 // Identity has to be (cell, slot); here the group id IS the cell index, and it is stable.
 
 #include "/Engine/Public/Platform.ush"
-#include "/UltraLargeScale/GalaxyDensityCore.ush"
+#include "/UltraLargeScale/GalaxyPlacement.ush"
 
 // ---------------------------------------------------------------------------
 // OUTPUT
@@ -40,7 +40,7 @@
 // Two uint4s per entity, matching FGalaxyEntityOut in GalaxyEntityGen.h so the readback
 // memcpys straight into it:
 //   [0] asuint(Pos.xyz), asuint(Extent)
-//   [1] PackDecor(Decor), Slot, CellIndex, asuint(Density)
+//   [1] PackGalaxyDecor(Decor), Slot, CellIndex, asuint(Density)
 // ---------------------------------------------------------------------------
 // TYPED, not structured, for both buffers. A structured UAV has no format, and RDG's
 // clear path needs one -- AddClearUAVPass over a structured UAV leaves the buffer at
@@ -287,7 +287,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     {
         const uint ProbeIndex = Round * GALAXY_ENTITYGEN_GROUP + GroupIndex;
 
-        const float3 ProbePos = P.MakeProbe(
+        const float3 ProbePos = MakeGalaxyProbe(
             Cell.Centre, Cell.HalfExtent,
             Cell.Coord.x, Cell.Coord.y, Cell.Coord.z,
             KeySeed, ProbeIndex);
@@ -363,7 +363,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     //
     // NO FLOOR AND NO CEILING. Both are cell-constant multipliers, and a cell-constant
     // multiplier is a visible cube. The real-valued budget reaches a whole number
-    // through StochasticCount, which preserves the expectation exactly.
+    // through GalaxyStochasticCount, which preserves the expectation exactly.
     // -----------------------------------------------------------------------
     const float Envelope = asfloat(OutCounts[CellIndex * 5u + 2u]);
 
@@ -377,7 +377,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     // The ceiling is a RUNAWAY STOP, not a tuning cap: reachable only if calibration
     // returned a mass near zero, which means the probes found nothing anywhere and the
     // inputs are wrong. The CPU says so from the counters.
-    const uint Candidates = P.StochasticCount(
+    const uint Candidates = GalaxyStochasticCount(
         RawCandidates, Cell.Coord.x, Cell.Coord.y, Cell.Coord.z, KeySeed, 4194304.0f);
 
     // Zero is ordinary, not an error: most of a galaxy is faint enough that a cell's
@@ -398,7 +398,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     // budget.
     for (uint Slot = GroupIndex; Slot < Candidates; Slot += GALAXY_ENTITYGEN_GROUP)
     {
-        GalaxyCandidate C = P.MakeCandidate(
+        GalaxyCandidate C = MakeGalaxyCandidate(
             Cell.Centre, Cell.HalfExtent, InvGalaxyExtent,
             Cell.Coord.x, Cell.Coord.y, Cell.Coord.z,
             (int) Slot * GALAXY_SLOT_STRIDE + KeySeed);
@@ -410,7 +410,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
             NoiseTexHalo, NoiseTexHaloSampler,
             C.Norm);
 
-        GalaxyEntity E = P.FinishEntity(Q, C, Density);
+        GalaxyEntity E = FinishGalaxyEntity(Q, C, Density);
 
         // Both counted BEFORE the acceptance test, so they describe what the shader saw
         // rather than only what it kept. The density max is over every candidate, which
@@ -450,7 +450,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
         // so this direction has no such case -- and it lets Slot and CellIndex stay
         // exact at any magnitude rather than only to 2^24.
         OutEntities[Base + 0u] = uint4(asuint(E.Pos), asuint(E.Extent));
-        OutEntities[Base + 1u] = uint4(P.PackDecor(E.Decor), Slot, CellIndex, asuint(E.Density));
+        OutEntities[Base + 1u] = uint4(PackGalaxyDecor(E.Decor), Slot, CellIndex, asuint(E.Density));
     }
 #endif
 }
