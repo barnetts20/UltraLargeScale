@@ -1,36 +1,31 @@
 // UniverseEntityGen.usf
-// GPU entity placement against the universe density field, sampling the same field the material
-// draws so placement and rendering agree. One group per cell; the group id, unwrapped by
-// DispatchGroupsX, is the cell index. UNIVERSE_ENTITYGEN_PASS picks the pass: 0 probes each cell
-// for an envelope and a mass, 1 draws candidates against it and needs 0 to have run over the same
-// batch. Identity is (CellIndex, Slot) and travels in the record; storage order is
-// scheduling-dependent and nothing may key off it.
+// GPU entity placement against the universe density field, sampling the same field the material draws so
+// placement and rendering agree. One group per cell, the group id unwrapped by DispatchGroupsX being the cell
+// index. UNIVERSE_ENTITYGEN_PASS picks the pass: 0 probes each cell for an envelope and a mass, 1 draws
+// candidates against it and so needs 0 to have run over the same batch. Identity is (CellIndex, Slot) and rides
+// in the record; storage order is scheduling-dependent and nothing may key off it.
 
 #include "/Engine/Public/Platform.ush"
 #include "/UltraLargeScale/UniversePlacement.ush"
 
-// Globally compacted output, two uint4 per entity, matching FUniverseEntityOut so the readback
-// memcpys straight in: [0] asuint(Pos.xyz) with Pos relative to the cell centre, asuint(Extent);
-// [1] PackUniverseDecor(Decor), Slot, CellIndex, asuint(Density). Typed, not structured:
-// AddClearUAVPass needs a format, and an uncleared cursor makes InterlockedAdd return a huge
-// index so every write fails the bounds test silently.
+// Globally compacted, two uint4 per entity, matching FUniverseEntityOut so the readback memcpys straight in: [0]
+// asuint(Pos.xyz) cell-relative, asuint(Extent); [1] PackUniverseDecor(Decor), Slot, CellIndex, asuint(Density).
+// Typed, not structured: AddClearUAVPass needs a format, and uncleared every write fails its test in silence.
 RWBuffer<uint4> OutEntities;
 
-// Five counters per cell plus a global tail. asuint is monotonic for non-negative floats, so
-// InterlockedMax over the bit pattern orders exactly as the float does.
+// Five counters per cell plus a global tail. asuint is monotonic for non-negative floats, so InterlockedMax over
+// the bit pattern orders as the float does.
 //   [i*5+0] accepted   [i*5+1] candidates evaluated   [i*5+3] max candidate density, asuint
 //   [i*5+2] envelope, asuint -- written by pass 0, read by pass 1
-//   [i*5+4] mass: mean of (density/BudgetAnchor)^PlaceSpawnExponent over the jittered probes,
-//           which the CPU solves BudgetScale from
+//   [i*5+4] mass: mean of (density/BudgetAnchor)^PlaceSpawnExponent over the jittered probes; the CPU solves
+//           BudgetScale from these
 //   [NumCells*5+0] global append cursor   [NumCells*5+1+s] accepted count for slot s
-// Per-slot counters keep counting past SlotCapacity, so the final value is that slot's true demand.
-// [1] over NumCells*UNIVERSE_ENTITYGEN_PROBES is the candidate/probe cost ratio; [3] above [2] means
-// the probes under-estimated the cell and flattened its peak, visible as grid artifacts.
+// Per-slot counters keep counting past SlotCapacity, so the final value is that slot's true demand. [1] over
+// NumCells*UNIVERSE_ENTITYGEN_PROBES is the candidate/probe cost ratio; [3] above [2] means the probes
+// under-estimated the cell and flattened its peak, showing as grid artifacts.
 RWBuffer<uint> OutCounts;
 
-// The dispatched batch, geometry only -- the shader derives envelope and budget itself.
-// Padding keeps every vector off a sixteen-byte boundary; a straddler packs differently on
-// some backends and shifts every field after it silently.
+// Geometry only; the shader derives envelope and budget itself.
 struct FUniverseGenCell
 {
     int3 CentreCell; // whole field cells, wrapped into [0, period) by the caller
@@ -38,7 +33,7 @@ struct FUniverseGenCell
     float3 CentreFrac; // remainder of the centre within CentreCell, [0,1)
     uint SlotIndex; // which buffer region this cell's entities belong to
     int3 Coord; // the placement key; NOT the dispatch index, and NOT wrapped
-    uint Pad1; // 48 bytes total, matching the C++ mirror without packing rules
+    uint Pad1; // 48 bytes, matching the C++ mirror; no vector may straddle a 16-byte boundary
 };
 
 StructuredBuffer<FUniverseGenCell> InCells;
@@ -46,42 +41,34 @@ StructuredBuffer<FUniverseGenCell> InCells;
 uint NumCells;
 uint EntityCapacity; // records in OutEntities
 
-// Many cells share one slot and the buffer reserves SlotCapacity records for each. The cap is
-// load-bearing: with only the global cursor, slots whose groups run early fill and the rest get
-// nothing, so the population follows GPU scheduling -- entities in voids, emptiness in filaments.
+// Many cells share one slot, and the buffer reserves SlotCapacity records for each. The cap is load-bearing: on
+// the global cursor alone, slots whose groups run early fill and the rest get nothing, so the population would
+// follow GPU scheduling rather than the field -- entities in voids, emptiness in filaments.
 uint NumSlots;
 uint SlotCapacity;
 
-// Width of the wrapped group grid. Groups are laid out 2D because a subdivided grid exceeds
-// the 65535-per-dimension dispatch limit; the tail of the last row returns early.
+// Laid out 2D: a subdivided grid exceeds the 65535-per-dimension limit. The last row's tail returns early.
 uint DispatchGroupsX;
 
 float BudgetScale; // per-tier constant; accepted_i = BudgetScale * mass_i. Pass 1 only.
 int KeySeed; // universe seed folded with the tier's seed offset
 
-// Caller units -> the field's normalized frame: reciprocal of the RAY MARCH PROXY'S half extent,
-// not the sector extent and not this tier's grid. No traversal term -- the proxy is camera-pegged,
-// so the material's offset push cancels and a point scaled by this is bit-for-bit the point the
-// material marches at the same place.
+// Caller units -> the field's normalized frame: reciprocal of the RAY MARCH PROXY'S half extent, not the sector
+// extent nor this tier's grid. No traversal term: the proxy is camera-pegged, so the material's push cancels.
 float InvFieldExtent;
 
-// Divides the mass in pass 0 and the envelope in pass 1 and cancels exactly out of the
-// result; it only keeps per-cell masses near 1. Not a tuning knob.
-float BudgetAnchor;
+float BudgetAnchor; // divides mass in pass 0 and envelope in pass 1 and cancels out; keeps masses near 1
 
-// Widens the probed peak to cover the sampling miss: a finite probe set under-shoots a sharp
-// peak falling between its samples. Watch counter [3] against [2] for residual clipping.
-float EnvelopePad;
+float EnvelopePad; // covers the SAMPLING miss: a finite probe set under-shoots a peak falling between samples
 
-// Placement shaping; the per-cell envelope overrides Q.InvDensityReference.
-float PlaceSpawnExponent;
+float PlaceSpawnExponent; // placement shaping; the per-cell envelope overrides Q.InvDensityReference
 float PlaceExtentMin;
 float PlaceExtentMax;
 float PlaceExtentExponent;
 
-// Two UNORM multinoise volumes for the region axes, two signed vector volumes for the warp octaves,
-// matching the material's Custom node pin for pin. ALL FOUR OR NONE: a stale texture places entities
-// against a field nobody renders, so the CPU refuses to dispatch unless every one resolves.
+// Two UNORM multinoise volumes for the region axes, two signed vector volumes for the warp octaves, matching the
+// material's Custom node pin for pin. ALL FOUR OR NONE -- a stale one places entities against a field nobody
+// renders, so the CPU will not dispatch unless all four resolve.
 Texture3D VarianceTexA;
 SamplerState VarianceTexASampler;
 Texture3D VarianceTexB;
@@ -91,9 +78,9 @@ SamplerState WarpTexLargeSampler;
 Texture3D WarpTexSmall;
 SamplerState WarpTexSmallSampler;
 
-// Raw, in the order MakeUniverseDensityParams takes them. A pre-derived struct would have to match
-// HLSL packing against the C++ layout, where one straddling float3 shifts everything after it.
-// FUniverseDensityParams::FillShaderParameters writes these names, so a change breaks both sides.
+// Raw, in the order MakeUniverseDensityParams takes them: a pre-derived struct would have to match HLSL packing
+// against the C++ layout, where one straddling float3 shifts everything after it. FillShaderParameters writes
+// exactly these names, so a change breaks both sides at compile time.
 float4 InCellSizeRange;
 float InSeed;
 float3 InOffsetCell;
@@ -111,22 +98,18 @@ float4 InWarpSmallWeights;
 float4 InRegionScales;
 float InBoundsFadeStart;
 
-// Lanes per group, and probes per round. Both groupshared arrays are sized on it and both
-// reductions iterate to it.
-#define UNIVERSE_ENTITYGEN_GROUP 64u
+#define UNIVERSE_ENTITYGEN_GROUP 64u // lanes per group and probes per round; both reductions iterate to it
 
 // Probes per lane. The envelope is a MAX over thin filaments in a mostly-empty volume, so one round
-// under-estimates cell peaks by an order of magnitude at every cell size. Subdivision is the wrong
-// lever: it raises probe density but multiplies group count. Four rounds gives one clipped
-// cell in a hundred at a C/P ratio near 0.1; tune against both counters, never one.
+// under-estimates cell peaks by an order of magnitude at every size; subdivision is the wrong lever, raising
+// probe density but multiplying group count. Four rounds gives one clipped cell in a hundred at C/P near 0.1.
 #define UNIVERSE_ENTITYGEN_PROBE_ROUNDS 2u
 #define UNIVERSE_ENTITYGEN_PROBES (UNIVERSE_ENTITYGEN_GROUP * UNIVERSE_ENTITYGEN_PROBE_ROUNDS)
 
-// Probed peak; groupshared has no float atomics, so it reduces as bit patterns.
-groupshared uint GroupEnvelopeBits;
+groupshared uint GroupEnvelopeBits; // probed peak; groupshared has no float atomics, so it reduces as bits
 
-// Shaped densities, summed by lane 0 in fixed order. Float addition is not associative and
-// this sum divides the tier's budget, so an atomic would let scheduling decide the low bits.
+// Summed by lane 0 in fixed order: float addition is not associative and this sum divides the tier's budget, so
+// an atomic would let scheduling decide the low bits.
 groupshared float GroupMass[UNIVERSE_ENTITYGEN_GROUP];
 
 [numthreads(UNIVERSE_ENTITYGEN_GROUP, 1, 1)]
@@ -141,10 +124,9 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
     FUniverseGenCell Cell = InCells[CellIndex];
 
-    // The cell's own field offset added to the dispatch-wide one: integer field cell plus fraction,
-    // so every float afterwards is a small offset inside one cell. NEVER PASS AN ABSOLUTE CENTRE --
-    // caller space tracks VirtualTraversal without bound, at 5e13 a float32 ulp is ~4e6, so every
-    // probe collapses onto one value and the cell reports no mass while the raymarch draws fine.
+    // The cell's own field offset added to the dispatch-wide one: integer cell plus fraction, so every float
+    // afterwards is a small offset inside one cell. NEVER PASS AN ABSOLUTE CENTRE -- at the 5e13 caller space
+    // reaches, a float32 ulp is ~4e6, so every probe collapses onto one value and the cell reports no mass.
     UniverseDensityParams P = MakeUniverseDensityParams(
         InCellSizeRange,
         InSeed,
@@ -167,8 +149,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     const float Exponent = max(PlaceSpawnExponent, 1e-3f);
 
 #if UNIVERSE_ENTITYGEN_PASS == 0
-    // PASS 0 -- cull the cell, envelope it, weigh it. The probe pattern is identical in both
-    // passes, so a cell's measured mass is the estimate its own group produces.
+    // PASS 0 -- cull, envelope and weigh. Identical probes in both passes, so a cell's mass is its own estimate.
     if (GroupIndex == 0u)
     {
         GroupEnvelopeBits = 0u;
@@ -179,20 +160,18 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
     float LocalPeak = 0.0f;
     float LocalMass = 0.0f;
 
-    // Strided, so lane n takes probes n, n+64, ..., keeping hash inputs adjacent in a wave.
     for (uint Round = 0u; Round < UNIVERSE_ENTITYGEN_PROBE_ROUNDS; ++Round)
     {
         const uint ProbeIndex = Round * UNIVERSE_ENTITYGEN_GROUP + GroupIndex;
 
-        // Offset FROM the cell centre; the centre lives in P as an exact integer cell. Hash
-        // inputs are Coord and KeySeed only, so the pattern reproduces on every visit.
+        // Offset FROM the centre, which lives in P as an exact integer cell. Hashed on Coord and KeySeed only,
+        // so a cell's probe pattern reproduces on every visit.
         const float3 ProbePos = MakeUniverseProbe(
             float3(0.0f, 0.0f, 0.0f), Cell.HalfExtent,
             Cell.Coord.x, Cell.Coord.y, Cell.Coord.z,
             KeySeed, ProbeIndex);
 
-        // The same function acceptance uses, and the UNFADED one -- UniverseRayMarch applies
-        // BoundsFade. A faded probe would tie every cell's count to the camera at generation.
+        // The same function acceptance uses, UNFADED -- a faded probe would tie the cell's count to the camera.
         const float ProbeDensity = max(
             P.SampleAtPosition(VarianceTexA, VarianceTexASampler,
                 VarianceTexB, VarianceTexBSampler,
@@ -204,8 +183,8 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
         LocalPeak = max(LocalPeak, ProbeDensity);
 
-        // Probes 0-7 are the cell's vertices: they belong in the MAX, since a wall on a corner
-        // is what jitter alone misses, but not in the MEAN, where extremes bias the mass.
+        // Probes 0-7 are the cell's vertices: in the MAX, since a wall on a corner is what jitter alone misses,
+        // but not in the MEAN, where samples pinned at the extremes bias the mass.
         if (ProbeIndex >= 8u)
         {
             LocalMass += pow(ProbeDensity * InvAnchor, Exponent);
@@ -227,26 +206,23 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
         float Envelope = asfloat(GroupEnvelopeBits) * EnvelopePad;
 
-        // Runaway stop: the envelope raised to the spawn exponent IS the candidate budget, so a
-        // garbage value costs millions of candidates per cell rather than a wrong picture. The field
-        // cannot exceed its three resolved maxima; cells pinned here mean the parameters are wrong.
+        // Runaway stop: the envelope raised to the spawn exponent IS the budget, so garbage costs millions of
+        // candidates per cell rather than a wrong picture. Cells pinned here mean bad field parameters.
         Envelope = min(Envelope, UniverseAnalyticCeiling(P) * EnvelopePad);
 
-        // Written before any early-out: envelope zero is an empty cell, expected and common,
-        // while a slot still at the cleared value means the group never reached here.
+        // Before any early-out: envelope zero is an empty cell, a slot at the cleared value is no group at all.
         OutCounts[CellIndex * 5u + 2u] = asuint(max(Envelope, 0.0f));
 
-        // Every probe except the eight corners.
         const float MassSamples = float(UNIVERSE_ENTITYGEN_PROBES - 8u);
 
         OutCounts[CellIndex * 5u + 4u] = asuint(Sum / MassSamples);
     }
 
 #else
-    // PASS 1 -- the cell draws BudgetScale * (envelope/anchor)^g candidates and accepts each with
-    // probability (density/envelope)^g, so accepted = BudgetScale * mass_i: the envelope cancels,
-    // keeping per-cell normalisation free of grid artifacts. No floor or ceiling -- a cell-constant
-    // multiplier is a visible cube on a cubic grid; UniverseStochasticCount keeps the expectation.
+    // PASS 1 -- the cell draws BudgetScale * (envelope/anchor)^g candidates and accepts each with probability
+    // (density/envelope)^g, so accepted = BudgetScale * mass_i: the envelope cancels, keeping per-cell
+    // normalisation free of grid artifacts. No floor or ceiling, since a cell-constant multiplier is a visible
+    // cube on a cubic grid; UniverseStochasticCount preserves the expectation.
     const float Envelope = asfloat(OutCounts[CellIndex * 5u + 2u]);
 
     if (!(Envelope > 0.0f))
@@ -256,13 +232,11 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
     const float RawCandidates = BudgetScale * pow(Envelope * InvAnchor, Exponent);
 
-    // Runaway stop, not a tuning cap: reachable only if calibration returned a mass near zero,
-    // meaning the probes found nothing anywhere and the inputs are wrong.
+    // Runaway stop, not a cap: reachable only if calibration returned a mass near zero, so the inputs are wrong.
     const uint Candidates = UniverseStochasticCount(
         RawCandidates, Cell.Coord.x, Cell.Coord.y, Cell.Coord.z, KeySeed, 4194304.0f);
 
-    // Zero is ordinary: most of the web is void, so the budget is often under one candidate.
-    if (Candidates == 0u)
+    if (Candidates == 0u) // ordinary: most of the web is void, so a cell's budget is under one candidate
     {
         return;
     }
@@ -271,12 +245,10 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
         Envelope, PlaceSpawnExponent,
         PlaceExtentMin, PlaceExtentMax, PlaceExtentExponent);
 
-    // Strided so consecutive lanes take consecutive slots. No surplus-thread early-out because
-    // the loop bound IS the budget.
+    // Strided so consecutive lanes take consecutive slots; no surplus-thread early-out, the bound IS the budget.
     for (uint Slot = GroupIndex; Slot < Candidates; Slot += UNIVERSE_ENTITYGEN_GROUP)
     {
-        // Zero centre as in pass 0: C.Pos is caller units relative to the cell centre, C.Norm
-        // that offset normalised. C.Pos is written out, so the entity record is cell-relative.
+        // Zero centre as in pass 0: C.Pos is cell-relative caller units and is what gets written out.
         UniverseCandidate C = MakeUniverseCandidate(
             float3(0.0f, 0.0f, 0.0f), Cell.HalfExtent, InvFieldExtent,
             Cell.Coord.x, Cell.Coord.y, Cell.Coord.z,
@@ -291,8 +263,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
         UniverseEntity E = FinishUniverseEntity(Q, C, Density);
 
-        // Counted BEFORE acceptance, so they describe what the shader saw rather than what it
-        // kept, and [3] stays comparable against the envelope in [2].
+        // Counted BEFORE acceptance, describing what the shader saw rather than kept; [3] is comparable to [2].
         InterlockedAdd(OutCounts[CellIndex * 5u + 1u], 1u);
         InterlockedMax(OutCounts[CellIndex * 5u + 3u], asuint(max(Density, 0.0f)));
 
@@ -303,8 +274,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
         InterlockedAdd(OutCounts[CellIndex * 5u], 1u); // per-cell tally; it bounds nothing
 
-        // Taken BEFORE the global claim, so a full slot costs nothing further and cannot
-        // consume another slot's room.
+        // Taken BEFORE the global claim, so a full slot costs nothing further and cannot eat another's room.
         uint SlotPrev;
         InterlockedAdd(OutCounts[NumCells * 5u + 1u + Cell.SlotIndex], 1u, SlotPrev);
 
@@ -313,8 +283,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
             continue;
         }
 
-        // The per-slot ceilings sum to EntityCapacity, so this is the bounds test on the write
-        // rather than a real constraint -- a UAV write past the end is undefined, not clamped.
+        // Per-slot ceilings sum to EntityCapacity, so this is the write's bounds test, not a real constraint.
         uint Global;
         InterlockedAdd(OutCounts[NumCells * 5u], 1u, Global);
 
@@ -325,8 +294,8 @@ void MainCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
         const uint Base = Global * 2u;
 
-        // Integers carrying float bit patterns, never the reverse: an arbitrary pattern read as
-        // a float can be a denormal or NaN. It also keeps Slot and CellIndex exact past 2^24.
+        // Integers carrying float bit patterns, never the reverse: an arbitrary pattern read as a float can be a
+        // denormal or a NaN, and this keeps Slot and CellIndex exact past 2^24.
         OutEntities[Base + 0u] = uint4(asuint(E.Pos), asuint(E.Extent));
         OutEntities[Base + 1u] = uint4(PackUniverseDecor(E.Decor), Slot, CellIndex, asuint(E.Density));
     }

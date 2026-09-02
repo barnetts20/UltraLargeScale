@@ -1,101 +1,25 @@
 #pragma once
 
 // UniverseDensityRaymarch.ush
-// The ray march, and nothing else.
-
-// RENAMED FROM UniverseDensity.ush, to match GalaxyDensityRaymarch.ush. The four files
-// per layer now carry the same four names: DensityCore is the field, DensityRaymarch is
-// the view of it, Placement is the keys and draws, EntityGen is the dispatch. The old
-// name predated the split that moved the field out of this file and read as though it
-// were the field itself.
-//
-// THE ONLY CALLER IS A MATERIAL. Nothing in C++ or in another .ush includes this file --
-// the Custom node inside the volumetric material does, by path, and a Custom node fails
-// at SHADER compile rather than at build. Renaming the file without editing that include
-// is a red material with nothing pointing at the cause. The galaxy layer's equivalent
-// node is the one to compare against. Everything that touches a texture -- warp,
-// regional variance, the analytic web, the cluster/gas composition -- now lives in
-// UniverseDensityCore.ush's SampleAtPosition, which returns a single finished density
-// per sample. This file's job is purely the sphere-bounded march: step sizing,
-// accumulation, early-out, and calling that one function once per step.
-//
-// The textures and samplers are threaded down into the core rather than sampled here,
-// same as before -- there are FOUR pairs now rather than one, since the field's fetches
-// were split onto purpose-baked assets, but this file's relationship to them is unchanged:
-// it holds them, it never reads them. THE FIELD OFFSET NO LONGER PASSES THROUGH THIS
-// FUNCTION AT ALL: it is
-// constant for the draw, so it is resolved once into the params struct instead of being
-// handed to every sample. It still has to stay split into an integer cell count and a
-// fraction -- a float3 carrying the player's position stops resolving a fraction of a
-// cell long before the magnitudes this layer reaches.
-//
-// Nothing here touches Parameters or View -- those exist only inside the generated
-// material function, so the dither that needs them stays in the Custom node body.
+// The ray march, and nothing else: step sizing, accumulation, early-out, and one SampleAtPosition call per step.
+// Everything touching a texture lives in UniverseDensityCore.ush; the four texture pairs are held here but never
+// read, and nothing touches Parameters or View. THE ONLY CALLER IS A MATERIAL Custom node, which includes this by
+// path and fails at SHADER compile rather than at build. The field offset never passes through here: constant for
+// the draw, it is resolved once into the params struct, still split into integer cell and fraction, since a
+// float3 holding the player's position loses the fraction far too early.
 
 #include "/UltraLargeScale/UniverseDensityCore.ush"
 
 // --- RAYMARCH: ANALYTIC SPHERE-BOUNDED DENSITY ACCUMULATION ---
-// Same stepping rule as the galaxy layer. The proxy mesh decides which pixels run; the
-// unit sphere decides where to march.
-//
-// SAMPLES SIT AT STEP MIDPOINTS, and the bounds fade is applied here rather than in the
-// core -- see both notes in the loop.
-//
-// STEP LENGTH IS SET BY THE MARCH, NOT BY THE CAMERA. The first step is
-//
-//     baseStep = chord / StepCount
-//
-// and every step after it grows linearly with how far along the chord it starts:
-//
-//     h = baseStep * (1 + StepGrowth * t01)
-//
-// This replaces sizing the step as a fraction of camera distance, and the reason is the
-// near field. A camera-distance step goes to ZERO at the camera, so a viewer inside the
-// volume -- which is the normal case here, since the proxy is a sphere centred on them
-// -- got a step floored only by an absolute pin, and successive samples landed inside a
-// single cell, each paying a full fifty-four-candidate neighbourhood walk to re-derive a
-// field that had not changed between them. A first step derived from the chord cannot
-// collapse that way, because it does not know where the camera is.
-//
-// The two rules agree about the far field and disagree only at the origin, which is
-// worth knowing before tuning: with the camera at the centre of its own proxy, dCam is
-// about t, so the old rule was 2*k*t -- linear in distance, through zero -- and the new
-// one is affine in distance with a floor the plan chose. The growth term is what keeps
-// the far half from being oversampled.
-//
-// STEPCOUNT IS A BUDGET, NOT A COUNT. Growth means the steps overshoot the chord before
-// the budget is spent, so the loop finishes early: the actual count is
-// StepCount * ln(1 + growth) / growth, which is 0.69 of the budget at growth 1 and 0.46
-// at growth 3. Raising growth trades far-field detail for step count directly.
-//
-// Two floors sit under all of it. The authored MinStep, and the field's own resolution,
-// which stops the step going below the width of the narrowest wall the parameters can
-// produce. They answer different questions -- how far a step may go, and how much
-// detail is actually there to find.
-//
-// Do not add a box bounds test on the marched position. InStartPos sits exactly on
-// the proxy surface, so a component is exactly 0 or 1 before any FP error, and such a
-// test breaks on iteration zero wherever rounding pushes it outside -- view-direction
-// dependent, so it shows as angle-dependent dropout at silhouettes.
-//
-// WILL CHANGE: the universe proxy is a sphere centred on the CAMERA, so the chord is
-// a constant length and the entry/exit maths collapses to a fixed span rather than an
-// intersection. Correct as written for a fixed test volume; not the final bounding.
-//
-// InViewVec is the LOCAL camera vector, surface toward camera. DIRECTION ONLY.
-//
-// InCamPosN is the camera in NORMALIZED space -- the same frame as the marched position,
-// box spanning -1 to 1 -- and no remap is applied to it here. A remap applied in the
-// shader silently biases anything supplied in a different frame, and a biased camera
-// position is indistinguishable from a correct one until the geometry is wrong.
-//
-// Once the proxy becomes a sphere centred on the camera this collapses: the camera is
-// always at the origin, InCamPosN is zero, and the distance is just t.
-//
-// RETURNS  (emission, steps taken, 0, transmittance).
-//
-// The step count rides in G because cost has no other observer: a march that truncates
-// looks identical to one that finished, and the far half of the volume is simply absent.
+// Same rule as the galaxy layer: baseStep = chord / StepCount, then h = baseStep * (1 + StepGrowth * t01), t01
+// being progress along the chord and NOT distance from the camera -- which goes to ZERO at the camera, and a
+// viewer inside the volume is the normal case here, so successive samples landed in one cell each paying a
+// fifty-four-candidate walk to re-derive an unchanged field. STEPCOUNT IS A BUDGET, NOT A COUNT: growth
+// overshoots the chord early, giving StepCount * ln(1 + growth) / growth steps. DO NOT ADD A BOX BOUNDS TEST --
+// InStartPos sits exactly on the proxy surface, so one breaks on iteration zero wherever rounding pushes it out.
+// InViewVec is the local camera vector, surface toward camera, DIRECTION ONLY; InCamPosN is the camera in
+// NORMALIZED space, the marched position's frame, NO REMAP applied here. Returns (emission, raw step count, 0,
+// transmittance) -- the count rides in G because a truncated march looks identical to a finished one.
 float4 UniverseRayMarch(UniverseDensityParams P,
                         Texture3D InVarianceTexA, SamplerState InVarianceSamplerA,
                         Texture3D InVarianceTexB, SamplerState InVarianceSamplerB,
@@ -106,9 +30,7 @@ float4 UniverseRayMarch(UniverseDensityParams P,
                         int InMaxSteps, float InDensityScale, float InJitter,
                         float InNoisePower)
 {
-    // Unit box [0,1] -> normalized space [-1,1]. Uniform scale, so a direction is
-    // identical in both.
-    float3 o = 2.0 * (InStartPos - 0.5);
+    float3 o = 2.0 * (InStartPos - 0.5); // unit box [0,1] -> normalized [-1,1]; uniform, so dir is unchanged
     float3 dir = normalize(-InViewVec);
 
     float b = dot(o, dir);
@@ -121,9 +43,9 @@ float4 UniverseRayMarch(UniverseDensityParams P,
 
     float sq = sqrt(disc);
 
-    // Origin inside the sphere: clamp the near end. Outside: take the whole chord
-    // WITHOUT clamping to zero, because with an inverted-normal proxy the shaded
-    // point is the far face and the chord lies at negative t.
+    // WILL CHANGE: the proxy becomes a sphere centred on the CAMERA, collapsing this to a fixed span. Inside,
+    // clamp the near end; outside take the whole chord WITHOUT clamping to zero, since an inverted-normal proxy
+    // shades the FAR face and its chord lies at negative t.
     float tEnter = (c < 0.0) ? 0.0 : (-b - sq);
     float tExit = -b + sq;
     if (tExit <= tEnter)
@@ -131,66 +53,38 @@ float4 UniverseRayMarch(UniverseDensityParams P,
         return float4(0.0, 0.0, 0.0, 1.0);
     }
 
-    // DISTANCE FROM THE CAMERA. It no longer sets step size -- see the header -- and its
-    // only remaining job is trimming the chord below, so that a camera inside the volume
-    // does not march the stretch behind itself. The sample at t sits at o + dir*t and the
-    // camera at o - dCam*dir, so their separation is (dCam + t).
     float dCam = dot(o - InCamPosN, dir);
 
-    // START AT THE CAMERA WHEN IT IS INSIDE THE VOLUME. The chord otherwise begins
-    // behind the viewer and the budget is spent on geometry nobody can see -- and this
-    // matters MORE under plan-relative stepping than it did under camera-relative, since
-    // the step no longer collapses over that stretch but is sized as if it were part of
-    // the visible span.
-    //
-    // GUARDED SO IT CAN ONLY SHORTEN. Each condition rules out a way a wrong InCamPosN
-    // could empty the chord instead of trimming it; the fallback is the full chord,
-    // which is slower but still correct.
+    // START AT THE CAMERA WHEN INSIDE: the step is a fraction of the span, so an untrimmed stretch behind the
+    // viewer coarsens everything visible as well as wasting budget. GUARDED TO ONLY EVER SHORTEN.
     float tStart = tEnter;
     if (dCam > 0.0 && -dCam > tEnter && -dCam < tExit)
     {
         tStart = -dCam;
     }
 
-    // THE CHORD IS WHAT SIZES THE STEP. Everything about the progression falls out of
-    // these two lines: the span the ray actually has to cover, divided by the budget.
     float span = max(tExit - tStart, 1e-6);
     float baseStep = span / max(InStepCount, 1.0);
 
-    // FLOORED BY THE FIELD'S OWN RESOLUTION as well as by the pin. P.MinFeatureStep is
-    // half the narrowest wall the field can produce, in normalized units, derived from
-    // the feature width and the small cell size together -- see
-    // UNIVERSE_MIN_STEP_FRACTION in the core. The authored pin cannot do this job alone:
-    // it is an absolute distance with no knowledge of the cell size, so it is wrong the
-    // moment CellSizeRange moves.
-    //
-    // Taking the LARGER of the two leaves the pin able to make steps coarser and stops it
-    // making them pointlessly finer. It binds only when the budget is set high enough
-    // that baseStep falls below what the field can express, which is exactly when it
-    // should.
+    // Two floors answering different questions: the pin is how far a step MAY go, P.MinFeatureStep how much
+    // detail is there to find (UNIVERSE_MIN_STEP_FRACTION). The pin alone is ignorant of cell size.
     float minStep = max(max(InMinStep, P.MinFeatureStep), 1e-5);
 
     float growth = max(InStepGrowth, 0.0);
     float invSpan = 1.0 / span;
 
-    // Dither shortens the FIRST step. It costs no path length -- the loop clamps the
-    // last step to the exit -- and it offsets each pixel's lattice independently.
-    float firstScale = clamp(InJitter, 0.05, 1.0);
+    float firstScale = clamp(InJitter, 0.05, 1.0); // shortens the FIRST step; no path lost, the exit clamps
 
     float t = tStart;
     float stepsTaken = 0.0;
 
     bool bShape = (InNoisePower != 1.0);
 
-    // Cell units to normalized units.
     float transmittance = 1.0;
     float emission = 0.0;
 
-    // InMaxSteps is a SAFETY BOUND, not the step count. StepCount and the growth rate
-    // set the count between them; this only stops a pathological combination from
-    // hanging the shader, and should sit comfortably above StepCount rather than near it.
     [loop]
-    for (int i = 0; i < InMaxSteps; i++)
+    for (int i = 0; i < InMaxSteps; i++) // InMaxSteps is a SAFETY BOUND, not the count; keep it above StepCount
     {
         if (t >= tExit)
         {
@@ -199,23 +93,9 @@ float4 UniverseRayMarch(UniverseDensityParams P,
 
         stepsTaken += 1.0;
 
-        // THE STEP IS SIZED BEFORE THE SAMPLE IS TAKEN, because the sample sits at the
-        // MIDPOINT of the step and the midpoint is not known until the length is. That
-        // ordering is the only structural difference from sampling at the step start.
-        //
-        // GROWS WITH PROGRESS ALONG THE CHORD, not with distance from the camera. t01 is
-        // saturated rather than trusted: tStart can be trimmed forward to the camera
-        // above, and a wrong InCamPosN that trimmed it past tExit would otherwise drive
-        // the step negative and hang the march.
-        float t01 = saturate((t - tStart) * invSpan);
+        float t01 = saturate((t - tStart) * invSpan); // saturated: tStart past tExit would go negative
         float h = max(baseStep * (1.0 + growth * t01), minStep);
 
-        // FIRST-STEP DITHER. Without it every ray starts at the same place and takes
-        // identical steps, so sample positions lock to the field across every pixel at
-        // once -- structured aliasing that swims as the field scrolls under the proxy.
-        //
-        // No path is lost: the clamp below pulls the last step to the exit, so every ray
-        // covers the same span whatever its offset.
         if (i == 0)
         {
             h *= firstScale;
@@ -226,15 +106,8 @@ float4 UniverseRayMarch(UniverseDensityParams P,
             h = tExit - t;
         }
 
-        // SAMPLED AT THE MIDPOINT. Growing steps otherwise weight each interval by its
-        // LEADING FACE: the density found at the near edge is applied across the whole
-        // step, and since every step is longer than the one before it, the error is
-        // systematic rather than noise -- the field reads heavy in the direction of
-        // travel, and more so the faster the steps grow. The galaxy march samples the
-        // midpoint for the same reason.
-        //
-        // It costs the step length being needed first, which is why the sizing above
-        // moved ahead of the fetch.
+        // MIDPOINT, which is why sizing precedes the fetch: growing steps otherwise weight every interval by its
+        // LEADING FACE, a systematic bias toward the camera rather than noise.
         float3 samplePos = o + dir * (t + h * 0.5);
 
         float density = P.SampleAtPosition(InVarianceTexA, InVarianceSamplerA,
@@ -247,18 +120,13 @@ float4 UniverseRayMarch(UniverseDensityParams P,
             density = P.PowSafe(density, InNoisePower);
         }
 
-        // THE BOUNDS FADE IS APPLIED HERE, not inside the field. It is a property of how
-        // the field is being viewed rather than of the field, and this is the only place
-        // that knows about the sphere it fades toward -- entity generation samples the
-        // same core and must see none of it. dot(samplePos, samplePos) is the same
-        // radial term the core used to compute for itself; the marched position is
-        // already in the normalized frame the fade is defined in.
+        // APPLIED HERE, not in the field: the fade belongs to how the field is VIEWED, and entity generation
+        // samples the same core and must see none of it.
         density *= P.BoundsFade(dot(samplePos, samplePos));
 
         float alpha = 1.0 - exp(-density * InDensityScale * h * 0.5);
 
-        // Flat white emission: structure only.
-        emission += alpha * transmittance;
+        emission += alpha * transmittance; // flat white: structure only
         transmittance *= 1.0 - alpha;
 
         if (transmittance < 0.001)
