@@ -703,9 +703,8 @@ namespace GalaxyEntityGen
 			return false;
 		}
 
-		// NOTHING IS CLAMPED HERE. The per-cell accepted counts used to be clipped to a
-		// run width before the scatter could walk them; with a shared buffer no cell owns
-		// a run, and the counts are pure diagnostics.
+		// NOTHING IS CLAMPED HERE. No cell owns a run in a shared buffer, so there is no run
+		// width to clip a per-cell count against -- the counts are pure diagnostics.
 		//
 		// The global cursor deliberately over-counts past capacity -- it is the true
 		// total accepted, which is what the caller thins against. Clamping it would make

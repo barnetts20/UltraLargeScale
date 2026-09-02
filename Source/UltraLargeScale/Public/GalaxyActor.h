@@ -134,8 +134,17 @@ public:
 
 protected:
 #pragma region Params Accessors
+	/** THE TWO SCALE ACCESSORS STAY PROTECTED. They are this galaxy's own frame, and a
+	 *  caller that reads them is a caller reconstructing a position instead of asking for
+	 *  one -- the same rule the universe applies to its proxy extent and field offset. */
 	virtual double GetUnitScale() const override { return Params.UnitScale; }
 	virtual double GetExtent() const override { return Params.Extent; }
+
+	/** THE THREE THAT DELEGATE UPWARD ARE PUBLIC, because they answer questions about the
+	 *  HIERARCHY rather than about this galaxy: who owns the parallax scale, where the pool
+	 *  lives, which universe this belongs to. A child actor needs all three and holds no
+	 *  other route to them, so the island is the narrowest form of that access rather than
+	 *  a convenience. */
 public:
 	virtual double GetEffectiveSpeedScale() const override { return Universe ? Universe->GetEffectiveSpeedScale() : 1.0; }
 	virtual UActorPoolManager* GetPoolManager() const override { return Universe ? Universe->GetPoolManager() : nullptr; }
@@ -231,6 +240,10 @@ private:
 	void DebugDrawSpawnNode(const TSharedPtr<FOctreeNode>& InNode) const;
 #pragma endregion
 
+	/** PUBLIC BECAUSE THE PARENT DRIVES THEM, and only the parent. The universe decides when
+	 *  a galaxy scans and whether the player is inside it; both are steps in its tick
+	 *  cascade rather than services this actor offers. The spawn-scan state they operate on
+	 *  stays private above. */
 public:
 #pragma region Hierarchical Scan (called by Universe)
 	/** Dispatches an async scan if enough time has elapsed. Called by

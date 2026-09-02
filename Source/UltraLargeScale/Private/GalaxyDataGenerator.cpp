@@ -141,17 +141,15 @@ float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
 
 void GalaxyDataGenerator::Initialize()
 {
-	// DROP THE CALIBRATION. It is solved against a SPECIFIC density field, and this
-	// generator is a by-value member of AGalaxyActor, which is POOLED -- ReInit assigns
-	// new Params and calls straight back through here on an object that has already run
-	// a different galaxy.
+	// DROP THE CALIBRATION. It is solved against a SPECIFIC density field, and this generator
+	// is a by-value member of AGalaxyActor, which is POOLED -- ReInit assigns new Params and
+	// calls straight back through here on an object that has already run a different galaxy.
 	//
-	// Keeping it meant a recycled actor found a cached entry for tier offset 0, 7 or 13
-	// and returned it without calibrating, so the new galaxy's entities were placed at a
-	// density solved for the old one's field. Silent in every way that matters: no
-	// warning, and the only visible trace is the absence of the "calibrated tier" line
-	// that a first-run galaxy logs. Counts then miss SlotCapacity by whatever ratio the
-	// two fields' masses happened to differ by.
+	// A SURVIVING CACHE ENTRY IS A SILENT WRONG ANSWER. The recycled actor finds an entry for
+	// tier offset 0, 7 or 13 and returns it without calibrating, so the new galaxy's entities
+	// are placed at a density solved for the previous one's field. Nothing warns; the only
+	// visible trace is the ABSENCE of the "calibrated tier" line a first-run galaxy logs, and
+	// the counts then miss SlotCapacity by whatever ratio the two fields' masses differ by.
 	//
 	// BEFORE Derived is rebuilt, so a caller racing this cannot find a stale scale
 	// beside a fresh field.
@@ -389,7 +387,12 @@ void GalaxyDataGenerator::BuildFullTierGrid(
 	const int32 Ring = FMath::CeilToInt32(
 		static_cast<double>(Params.Extent) / CellSize) + 1;
 
-	const double InvExtent = 1.0 / FMath::Max(static_cast<double>(Params.Extent), 1e-9);
+	// THE SAME CULL THE SUBDIVISION USES, and it has to be. This grid and the children it is
+	// subdivided into are measured against one field, so two spellings of "outside the unit
+	// sphere" would let the two disagree about a boundary cell -- calibration would then
+	// weigh a set of cells generation never produces.
+	const auto KeepCell = FTierStreamingSystem::MakeSphereBoundsCull(
+		static_cast<double>(Params.Extent));
 
 	OutCells.Reserve((2 * Ring + 1) * (2 * Ring + 1) * (2 * Ring + 1) / 2);
 
@@ -404,14 +407,9 @@ void GalaxyDataGenerator::BuildFullTierGrid(
 					static_cast<double>(iy) * CellSize,
 					static_cast<double>(iz) * CellSize);
 
-				// Nearest point of the cell to the origin. Beyond the unit sphere the
-				// field is zero everywhere in it, so no probe would find anything.
-				const FVector Nearest(
-					FMath::Max(FMath::Abs(Centre.X) - HalfCell, 0.0) * InvExtent,
-					FMath::Max(FMath::Abs(Centre.Y) - HalfCell, 0.0) * InvExtent,
-					FMath::Max(FMath::Abs(Centre.Z) - HalfCell, 0.0) * InvExtent);
-
-				if (Nearest.SizeSquared() >= 1.0)
+				// Beyond the unit sphere the field is zero everywhere in the cell, so no
+				// probe would find anything.
+				if (!KeepCell(Centre, HalfCell))
 				{
 					continue;
 				}
@@ -465,11 +463,11 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 		return true;
 	}
 
-	// FAIL CLOSED, VISIBLY. There is no CPU path behind this any more, so a failure
-	// here means these slots get nothing -- and a slot is REUSED as the player crosses
-	// boundaries, so "nothing written" is not an empty slot, it is the previous
-	// occupant's entities still sitting there at a coord they no longer belong to.
-	// That reads as a placement bug rather than a generation failure.
+	// FAIL CLOSED, VISIBLY. There is no CPU path behind this, so a failure here means these
+	// slots get nothing -- and a slot is REUSED as the player crosses boundaries, so
+	// "nothing written" is not an empty slot. It is the previous occupant's entities sitting
+	// there at a coord they do not belong to, which reads as a placement bug rather than a
+	// generation failure.
 	//
 	// Blanking costs an empty region, which is honest, and the caller logs.
 	auto FailBatch = [&InQueuedCells, &InBuffer, &OutSlotCounts]() -> bool
@@ -581,9 +579,9 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 		Cells.Add(Cell);
 	}
 
-	// SIZE GUARD. Both axes are bounded by construction now -- the dispatch is one group
-	// per cell, the readback is slots x capacity -- so this fires only on an absurd
-	// authored capacity, never on the cell count, which is what it used to catch.
+	// SIZE GUARD. Both axes are bounded by construction -- the dispatch is one group per
+	// cell, the readback is slots x capacity -- so this can only fire on an absurd authored
+	// capacity, never on the cell count.
 	constexpr int64 kMaxEntries = 4 * 1024 * 1024;   // 128 MB at 32 bytes each
 
 	if (static_cast<int64>(EntityCapacity) > kMaxEntries)
@@ -822,10 +820,11 @@ bool GalaxyDataGenerator::GenerateTierBatchGPU(
 	// order answers it by grid position, and the cut then lies along grid planes.
 	//
 	// Thinning keeps a uniform fraction of every cell's entities instead, so the shape
-	// survives and only the count comes down. This is what the CPU prepass used to do by
-	// dividing a pooled budget before generating; doing it here costs candidates that get
-	// discarded, and buys not needing a second dispatch and a global reduction to know the
-	// total in advance.
+	// survives and only the count comes down.
+	//
+	// AFTER GENERATION RATHER THAN BEFORE IT. Dividing a pooled budget up front needs the
+	// batch total in advance, which needs a second dispatch and a global reduction to
+	// obtain. Thinning here spends candidates that get discarded and buys that away.
 	TArray<int32> SlotTotals;
 	SlotTotals.SetNumZeroed(NumSlots);
 

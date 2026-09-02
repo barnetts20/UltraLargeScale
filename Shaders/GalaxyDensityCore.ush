@@ -1326,8 +1326,8 @@ GalaxyDensityParams MakeGalaxyDensityParams(
 // SPLIT BY FAMILY, NOT ONLY BY ROLE, because gas and halo want opposite things from a
 // texture and one asset could only ever be a compromise. Gas lanes want ridged,
 // filamentary, Worley-leaning structure; the halo wants something smooth and
-// low-frequency. That used to be a single NoiseRidged uniform applied to both at once,
-// which is why it was always set to a value that suited neither. Asset choice replaces it.
+// low-frequency. A single ridging uniform applied to both at once can only be set to a
+// value that suits neither, which is why ASSET CHOICE carries it instead.
 //
 // THE MODULATION FETCH IS WHY THIS MATTERED MOST. GalaxySampleNoiseTex centres four
 // channels and mixes them with a signed weight vector, which is built for a multinoise
@@ -1456,15 +1456,14 @@ float GalaxySample(GalaxyDensityParams P,
     // share the fetch and scale it independently, so they can warp in opposite
     // directions for the price of one lookup.
     //
-    // NO CENTRING STEP ANY MORE. Both of these read (v - 0.5), because the shared asset
-    // was UNORM and a displacement has to be signed. They now read purpose-baked curl and
-    // gradient vector volumes which ARE signed: the asset stores [-1,1] and the fetch
-    // returns it.
+    // NO CENTRING STEP. These read purpose-baked curl and gradient vector volumes, which
+    // ARE signed: the asset stores [-1,1] and the fetch returns it. A UNORM asset would
+    // need (v - 0.5) here and would decode to half the range.
     //
-    // THIS DOUBLES THE DECODED RANGE, from [-0.5,+0.5] to [-1,+1], so every warp amount
-    // means twice the displacement it used to. The four WarpAmount defaults were halved in
-    // GalaxyParams.h to compensate; an archetype authored against the old convention will
-    // warp twice as hard until its amounts are halved too.
+    // THE DECODED RANGE IS THE AMOUNT'S DENOMINATOR. [-1,+1] means a warp amount displaces
+    // twice as far as the same amount against a centred UNORM decode, so the defaults in
+    // GalaxyParams.h are tuned for signed assets and an archetype authored against a
+    // half-scale convention warps twice as hard until its own amounts are halved.
     //
     // AN UNSIGNED ASSET BOUND HERE fails the way it does everywhere in this stack: a [0,1]
     // field read as signed has a mean of +0.5, so the family is bodily TRANSLATED by half

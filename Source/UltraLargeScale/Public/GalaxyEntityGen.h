@@ -45,7 +45,7 @@ struct FGalaxyEntityOut
 	uint32 Slot = 0;
 
 	/** Index into the batch's cell array. Required, not diagnostic: entities are
-	 *  appended to one shared buffer, so position no longer says which cell -- and
+	 *  appended to one shared buffer, so position says nothing about which cell -- and
 	 *  therefore which SLOT -- an entity belongs to. */
 	uint32 CellIndex = 0;
 
@@ -223,8 +223,8 @@ public:
 
 /** One in-flight dispatch. Owns its readback fence and its result.
  *
- *  ASYNCHRONOUS BY CONSTRUCTION. The tier callbacks used to fill a particle buffer
- *  and return a count in the same call; that is no longer possible, because the
+ *  ASYNCHRONOUS BY CONSTRUCTION. A tier callback cannot fill a particle buffer and
+ *  return a count in the same call, because the
  *  answer does not exist until the GPU has run and the copy has landed. Poll
  *  IsReady() over subsequent frames and never block on it: a synchronous readback
  *  stalls the render thread for the entire pipeline depth, which is precisely the

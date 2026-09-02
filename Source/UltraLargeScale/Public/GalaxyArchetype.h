@@ -143,13 +143,13 @@ public:
 	 *  distinct galaxies as the SHORTEST bag has entries; separate streams give the full
 	 *  product. Three ridged disc volumes and two halo volumes is six combinations, not two.
 	 *
-	 *  THIS IS WHERE RIDGING LIVES NOW. NoiseRidged was a uniform folding every channel at
-	 *  sample time, one value shared by gas and halo, which is why it shipped at 0 -- no
-	 *  setting suited both families. Fill NoiseDiscTextures with ridged bakes and
-	 *  NoiseHaloTextures with smooth ones and each family gets what it wants for free.
+	 *  THIS IS WHERE RIDGING LIVES. A uniform folding every channel at sample time would be
+	 *  one value shared by gas and halo, and no setting suits both families. Fill
+	 *  NoiseDiscTextures with ridged bakes and NoiseHaloTextures with smooth ones and each
+	 *  family gets what it wants for free.
 	 *
-	 *  WIRED BUT UNCURATED. All four default empty, which reproduces the previous behaviour
-	 *  exactly: no roll happens and every galaxy takes the actor's defaults. Filling them
+	 *  WIRED BUT UNCURATED. All four default empty, in which case no roll happens and every
+	 *  galaxy takes the actor's defaults. Filling them
 	 *  is the next step, not part of the texture split. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rolls")
 	TArray<TObjectPtr<UVolumeTexture>> WarpDiscTextures;

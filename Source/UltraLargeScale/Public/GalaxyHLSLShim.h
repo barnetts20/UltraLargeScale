@@ -126,13 +126,13 @@ namespace GalaxyHLSL
     //                    channels feed VarianceT as a [0,1] lerp factor directly.
     //   Texture3DSigned  values already in [-1,1], neutral 0. The curl/gradient vector
     //                    fields the warp octaves read, which carry their own sign and are
-    //                    no longer centred by the shader at all.
+    //                    never centred by the shader.
     //
     // GETTING THE NEUTRAL WRONG HERE IS SILENT AND STRUCTURAL. A signed asset stubbed at
     // 0.5 displaces the C++ field by half the warp amplitude on every axis, so the CPU
     // field stops being the unwarped analytic web and becomes a uniformly-sheared version
-    // of it -- which still evaluates, still looks like a cosmic web, and no longer matches
-    // what the shader draws anywhere.
+    // of it -- which evaluates cleanly, looks like a cosmic web, and matches what the shader
+    // draws nowhere.
     // ---------------------------------------------------------------------------
 
     struct SamplerState {};

@@ -69,30 +69,28 @@ public:
 	 *  returns zero until it does. */
 	void Initialize();
 
-	// BuildNoise AND DensityNoise REMOVED. They built the legacy FastNoise graph from
-	// FGalaxyParams::EncodedTree and nothing ever sampled the result -- the field this
-	// layer places against is GalaxyDensityCore.ush, evaluated through Derived above.
-	// They were the module's last reference to NewFromEncodedNodeTree.
+	// THERE IS NO SECOND FIELD HERE. The only thing this layer places against is
+	// GalaxyDensityCore.ush, evaluated through Derived above. A noise graph built beside it
+	// would be a field nobody renders, and entities placed against one are entities sitting
+	// beside the structure they belong to.
 
 #pragma endregion
 
 #pragma region Tier Generation
 
-	/** Generation is GPU-ONLY for this layer, and now GPU-only end to end.
+	/** GENERATION IS GPU-ONLY FOR THIS LAYER, end to end. Cell culling, envelope estimation
+	 *  and per-cell budgeting all happen in the dispatch, where they sample the TEXTURED
+	 *  field; a CPU prepass could only reach an analytic stand-in for it, and a budget
+	 *  solved against a different field from the one entities are rejected against is wrong
+	 *  in a way nothing reports.
 	 *
-	 *  The per-slot CPU generators went first -- GenerateTierNode, GenerateLargeTierSlot
-	 *  and the MakePlacement helper they shared -- along with the
-	 *  FParticleTierConfig::GenerateCallback bindings that reached them. The density
-	 *  PREPASS went second: cell culling, envelope estimation and per-cell budgeting all
-	 *  moved into the dispatch, where they can sample the textured field instead of an
-	 *  analytic stand-in for it.
+	 *  WHAT IS LEFT ON THIS SIDE IS GEOMETRY AND MARSHALLING. Nothing here evaluates the
+	 *  field, so GalaxyDensityCore.ush does not have to compile as C++ to serve the runtime.
+	 *  The shim stays for the bake and the parity probe, which are verification tools rather
+	 *  than a second implementation of the path.
 	 *
-	 *  What that leaves on this side is geometry and marshalling. Nothing here evaluates
-	 *  the field, so GalaxyDensityCore.ush no longer has to compile as C++ to serve the
-	 *  runtime -- the shim stays for the bake and the parity probe, which are
-	 *  verification tools rather than a second implementation of the path.
-	 *
-	 *  The other two layers still bind GenerateCallback, so it stays on the config. */
+	 *  FParticleTierConfig::GenerateCallback stays on the config because the other two
+	 *  layers bind it. */
 
 public:
 	/** THE CELL TYPE AND THE SUBDIVISION ARE SHARED. Both live on FTierStreamingSystem
@@ -142,8 +140,8 @@ public:
 	 *  Returns false if the dispatch could not run or the readback timed out. There is no
 	 *  CPU path behind it, so it FAILS CLOSED: the affected slots are blanked and their
 	 *  counts zeroed before returning. A slot is reused as the player crosses boundaries,
-	 *  and leaving one untouched shows the previous occupant's entities at a coord they
-	 *  no longer belong to. Every such path logs. */
+	 *  and leaving one untouched shows the previous occupant's entities at a coord they do
+	 *  not belong to. Every such path logs. */
 	bool GenerateTierBatchGPU(
 		const TArray<FTierBatchCell>& InCells,
 		FNiagaraParticleBuffer& InBuffer,

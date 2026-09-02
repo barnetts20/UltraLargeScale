@@ -45,12 +45,14 @@ AGalaxyActor::AGalaxyActor()
 	// pair UNORM multinoise -- they are not interchangeable, and binding a multinoise volume
 	// to a warp slot translates that family instead of displacing it.
 	//
-	// GAS AND HALO TAKE DIFFERENT DEFAULTS BY ROLE BUT THE SAME ASSET WITHIN A ROLE, for now.
-	// The families reading different assets is what the split bought; giving them different
-	// CONTENT is the curation step, and until the bags are filled the honest default is the
-	// same asset in both slots of a role. That is still strictly better than before, because
-	// gas and halo no longer share a fetch and no longer need GALAXY_HALO_DOMAIN to pull
-	// them apart -- but the visible gain arrives when NoiseDiscTextures gets ridged bakes.
+	// ONE ASSET PER ROLE, THE SAME IN BOTH SLOTS OF IT. These are fallbacks, not a curation:
+	// gas and halo reading SEPARATE FETCHES is what makes distinct content possible, and
+	// filling the archetype bags is what makes it real. Until they are filled, the honest
+	// default is the same asset in both slots rather than an arbitrary pairing.
+	//
+	// THE VISIBLE GAIN ARRIVES WITH THE BAGS. Point NoiseDiscTextures at ridged bakes and
+	// NoiseHaloTextures at smooth ones and the two families diverge with no per-sample cost
+	// and no shared domain offset needed to pull them apart.
 	{
 		static ConstructorHelpers::FObjectFinder<UVolumeTexture> DefaultWarp(
 			TEXT("/UniverseNoisePack/128/VT_PerlinCurl_S4.VT_PerlinCurl_S4"));
@@ -468,11 +470,9 @@ void AGalaxyActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
 	// --- RENDER ---
 	InMID->SetScalarParameterValue(TEXT("MasterDensityScale"), D.Master.MasterDensityScale);
 	InMID->SetScalarParameterValue(TEXT("MasterDensityPower"), D.Master.MasterDensityPower);
-	// TWO, AND ONLY TWO, where there were four. The iteration bound is derived in the
-	// Custom node from StepBudget and the step floor comes from the field's own
-	// MinFeatureStep, so neither is a value this side has any business supplying; StepRatio
-	// and MinSamples describe a stepping rule the marcher no longer uses. See the notes on
-	// FGalaxyMaterialParams.
+	// TWO, AND ONLY TWO. The iteration bound is derived in the Custom node from StepBudget
+	// and the step floor comes from the field's own MinFeatureStep, so neither is a value
+	// this side has any business supplying. See the notes on FGalaxyMaterialParams.
 	//
 	// A MID SILENTLY IGNORES A NAME THE MATERIAL DOES NOT HAVE, so the two names below are
 	// load-bearing: until the material's pins are renamed to match, these push nothing and
@@ -546,8 +546,9 @@ void AGalaxyActor::BuildTierConfigs()
 	//
 	// The large tier differs only in data: one slot covering the whole galaxy, subdivided
 	// deeply enough to resolve structure, with every child writing to that one slot. It
-	// used to have a bespoke cull grid and a bespoke cell builder; those described the
-	// same tiling GenerationSubdivision already produces.
+	// needs no bespoke cull grid or cell builder -- GenerationSubdivision produces exactly
+	// that tiling, and a second one beside it would be a second place the child coords could
+	// drift from the ones calibration measured.
 	//
 	// bCellsShareSlot is the one flag that distinguishes it, and it is about CALIBRATION,
 	// not generation: many cells feeding one slot means the slot holds their sum, so the
@@ -842,7 +843,12 @@ void AGalaxyActor::RequestScan()
 					AGalaxyActor* InnerSelf = WeakThis.Get();
 					if (!InnerSelf) return;
 					InnerSelf->bSpawnScanInProgress.store(false);
-					// Same guard as AUniverseActor::RequestScan: if the tree was swapped while this scan was in flight (pool return installs a fresh tree), these nodes belong to a retired tree — for a pooled-and-respawned galaxy they are the PREVIOUS identity's nodes, and processing them would spawn ghost star systems with the old seeds. Drop them; the next interval rescans the live tree.
+					// THE TREE CAN BE SWAPPED WHILE A SCAN IS IN FLIGHT -- a pool return
+					// installs a fresh one -- and these nodes then belong to a tree nothing
+					// reads. For a pooled-and-respawned galaxy they are the PREVIOUS
+					// identity's nodes, so processing them spawns ghost star systems carrying
+					// that identity's seeds. Drop them; the next interval rescans the live
+					// tree. Same guard as AUniverseActor::RequestScan.
 					if (InnerSelf->Octree != TreeSnapshot) return;
 					InnerSelf->PendingScanResults = NearbyArray;
 					InnerSelf->bHasPendingScanResults = true;
@@ -952,10 +958,15 @@ void AGalaxyActor::SpawnStarSystemFromPool(TSharedPtr<FOctreeNode> InNode)
 		}
 	}
 
-	// Rotation is seed-derived and parent-owned for now (folds into Generate in step E).
+	// SEED-DERIVED AND PARENT-OWNED. The child does not roll its own orientation: the seed
+	// that produced the particle produces the rotation, so a system faces the same way on
+	// every visit without the child having to store anything.
 	P.Rotation = FRandomStream(InNode->Data.Seed).GetUnitVector().Rotation();
 
-	// Typed re-init: sets Params, arms deferred placement (PendingNodeCenter = ParticlePos), hides, and runs the async init chain. FinalizeStarSystemPlacement positions/unhides once Ready, exactly as before.
+	// TYPED RE-INIT. Sets Params, arms deferred placement (PendingNodeCenter = ParticlePos),
+	// hides the actor and runs the async init chain. FinalizeStarSystemPlacement positions
+	// and unhides it once the state reaches Ready -- placing it here instead would put a
+	// visible actor at the origin for the length of the init chain.
 	System->ReInit(P, FTransform(ParticlePos));
 
 	UE_LOG(LogTemp, Log, TEXT("AGalaxyActor::SpawnStarSystemFromPool - inert=%d particle=(%.1f,%.1f,%.1f) extent=%.2f unitScale(const)=%.4e derivedExtent=%.4e seed=%d (deferred)"), PM->NumInert(AStarSystemActor::StaticClass()), ParticlePos.X, ParticlePos.Y, ParticlePos.Z, ParticleExtent, P.UnitScale, P.Extent, P.Seed);
@@ -1035,7 +1046,10 @@ void AGalaxyActor::FinishStarSystemPoolReturn(TWeakObjectPtr<AStarSystemActor> W
 			if (!AsyncSystem) return;
 			AsyncSystem->Octree->bIsResetting.store(true);
 			FPlatformProcess::Yield();
-			// Build the fresh tree in a LOCAL; the MEMBER swap happens on the game thread below — a background assign races GT readers of the TSharedPtr (BuildStreamingContext, spawn-scan snapshot). The old tree keeps bIsResetting raised and dies with its last shared ref.
+			// BUILT IN A LOCAL, SWAPPED ON THE GAME THREAD BELOW. Assigning the member from a
+			// background thread races the game-thread readers of that TSharedPtr --
+			// BuildStreamingContext and the spawn-scan snapshot both copy it. The outgoing
+			// tree keeps bIsResetting raised and dies with its last shared reference.
 			TSharedPtr<FOctree> FreshTree = MakeShared<FOctree>(AsyncSystem->Params.Extent);
 			AsyncTask(ENamedThreads::GameThread, [WeakThis, WeakSystem, FreshTree]()
 				{

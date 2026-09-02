@@ -89,13 +89,14 @@ namespace GalaxySeed
 // reason. They are kept as labels of intent, and would become live if a sub-struct were
 // ever hoisted onto a UObject.
 //
-// THE DERIVATION MIRROR IS GONE, deliberately. Declaration order used to follow
-// MakeGalaxyDensityParams' argument list so a misplaced member was visible by reading
-// the two side by side. Grouping by layer costs that, and buys something back: each
-// float4 in ToDerived now reads one slot per layer --
-// float4(Arms.ArmRadius, Disc.DiscRadius, Bulge.BulgeRadius, ...) -- so the packing's
-// own structure is visible in the expression instead of having to be remembered. The
-// check that remains is that every member appears exactly once in ToDerived.
+// DECLARATION ORDER DOES NOT MIRROR THE DERIVATION'S ARGUMENT LIST, and that is a trade.
+// Mirroring it would make a misplaced member visible by reading the two side by side;
+// grouping by layer instead makes each float4 in Pack() read one slot per layer --
+// (Arms.ArmRadius, Disc.DiscRadius, Bulge.BulgeRadius, ...) -- so the packing's own
+// structure is visible in the expression rather than having to be remembered.
+//
+// THE CHECK THAT REPLACES IT is that every member appears exactly once in Pack(), which is
+// the single marshal site. See FGalaxyDensityArgs.
 // -----------------------------------------------------------------------------
 
 /** GalaxyHLSL::GalaxyDensityParams is the DERIVED field -- a different type entirely,
@@ -193,11 +194,13 @@ struct ULTRALARGESCALE_API FGalaxyArmParams
 	/** Positional warp per layer. Signed: negative flips the displacement direction.
 	 *  Affects render and placement alike, as the amounts above do.
 	 *
-	 *  HALVED WITH THE SIGNED WARP ASSETS, from 0.05. The warp fetch used to decode a UNORM
-	 *  volume as (v - 0.5), giving [-0.5,+0.5]; it now reads a signed vector volume raw,
-	 *  giving [-1,+1]. Same amount, twice the displacement -- so every warp amount in this
-	 *  file was halved to hold the previous look. An archetype authored against the old
-	 *  convention warps twice as hard until its own amounts are halved. */
+	 *  DENOMINATED IN THE ASSET'S VALUE SCALE. The warp fetch reads a SIGNED vector volume
+	 *  raw, so the decoded displacement spans [-1,+1]; a UNORM volume decoded as (v - 0.5)
+	 *  spans half that and needs twice the amount for the same bend. The defaults here are
+	 *  tuned for the signed assets.
+	 *
+	 *  AN ARCHETYPE CARRIES ITS OWN AMOUNTS and is not retuned by this file. One authored
+	 *  against a half-scale convention warps twice as hard until its amounts are halved. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
 	float WarpAmountArms = 0.025f;
 #pragma endregion
@@ -426,10 +429,10 @@ struct ULTRALARGESCALE_API FGalaxyNoiseFieldParams
 	// toward the 1-2|c| fold, at four lerps and four abs per fetch on the hottest path in
 	// the stack, to produce something a ridged noise volume simply IS.
 	//
-	// IT WAS ALSO ONE VALUE FOR TWO FAMILIES. Gas lanes want a hard ridge and the halo
-	// wants none, so any setting suited one and spoiled the other -- which is why it
-	// shipped at 0. Now that gas and halo read separate assets, ridging is chosen by
-	// WHICH ASSET IS BOUND, independently per family, at no per-sample cost.
+	// IT WOULD ALSO BE ONE VALUE FOR TWO FAMILIES. Gas lanes want a hard ridge and the halo
+	// wants none, so any single setting suits one and spoils the other. Gas and halo read
+	// separate assets, so ridging is chosen by WHICH ASSET IS BOUND, independently per
+	// family, at no per-sample cost.
 	//
 	// AN ARCHETYPE WANTING RIDGED GAS LANES points NoiseDiscTextures at a ridged bake.
 	// Nothing to set here.
@@ -637,19 +640,19 @@ struct ULTRALARGESCALE_API FGalaxyProceduralParams
 	 *  resolved choices. FOUR BAGS, FOUR INDEPENDENT ROLLS, so a galaxy can pair ridged gas
 	 *  lanes with a smooth halo without either bag having to enumerate the combinations.
 	 *
-	 *  WHICH IS WHERE RIDGING LIVES NOW. NoiseRidged was a uniform lerping every channel
-	 *  toward a fold at sample time, one value shared by gas and halo, and it shipped at 0
-	 *  because no setting suited both. Point NoiseDiscTextures at ridged bakes and
-	 *  NoiseHaloTextures at smooth ones and each family gets what it wants, for free.
+	 *  WHICH IS WHERE RIDGING LIVES. A uniform lerping every channel toward a fold at sample
+	 *  time would be one value shared by gas and halo, and no setting suits both. Point
+	 *  NoiseDiscTextures at ridged bakes and NoiseHaloTextures at smooth ones and each
+	 *  family gets what it wants, for free.
 	 *
 	 *  THE WARP PAIR MUST BE SIGNED, values in [-1,1]. The shader applies their channels
 	 *  directly as displacements with no centring step at all. A UNORM volume cannot carry
 	 *  that: read as signed it has a mean of +0.5, and the family is bodily translated by
-	 *  half its warp amount rather than locally displaced -- the disc still looks like a
-	 *  disc, just not concentric with the bulge. Check the asset's format.
+	 *  half its warp amount rather than locally displaced -- the disc looks like a disc,
+	 *  just not concentric with the bulge. Check the asset's format.
 	 *
 	 *  Placement is GPU-only and the dispatch samples all four. With any one unset the
-	 *  galaxy generates NOTHING -- there is no analytic path behind it any more.
+	 *  galaxy generates NOTHING; there is no analytic path behind it.
 	 *  AGalaxyActor::InitializeData substitutes its defaults for whichever are unset, which
 	 *  is what keeps an unauthored archetype from silently producing an empty galaxy. NOT
 	 *  the constructor: ReInit assigns Params wholesale, so anything the constructor wrote
@@ -874,8 +877,8 @@ struct ULTRALARGESCALE_API FGalaxyProceduralParams
 
 /** Material-side parameters for the volumetric proxy.
  *
- *  PROVISIONAL. The galaxy raymarcher is a debug marcher until the paradigm has
- *  propagated to the other layers; this set will be rebuilt against the real one. */
+ *  PROVISIONAL. The galaxy raymarcher is a debug marcher; this set is sized for it and
+ *  wants rebuilding against a shipping marcher. */
 USTRUCT(BlueprintType)
 struct ULTRALARGESCALE_API FGalaxyMaterialParams
 {
@@ -884,34 +887,30 @@ struct ULTRALARGESCALE_API FGalaxyMaterialParams
 	/** THE MARCH CONTROLS. BOTH of them reach the material, so the baseline lives here
 	 *  rather than only on the material asset.
 	 *
-	 *  THE STEPPING RULE IS THE UNIVERSE LAYER'S, and this set replaced four properties
-	 *  that described the old one -- NearSteps, MinSamples, StepRatio and MaxSteps. Step
-	 *  length is now
+	 *  THE STEPPING RULE IS THE UNIVERSE LAYER'S:
 	 *
 	 *      baseStep = span / StepBudget
 	 *      h        = baseStep * (1 + StepGrowth * t01)
 	 *
 	 *  with t01 the progress along the marched span rather than the distance from the
-	 *  camera. The old rule kept a step a constant size ON SCREEN, which is a genuine
-	 *  property and worth remembering was given up deliberately. What it could not do is
-	 *  give a PREDICTABLE COST: the count depended on where the camera was and collapsed
-	 *  toward chord/MinStep on close approach, and with four density marchers able to be
-	 *  on screen at once, per-layer cost has to be something set rather than discovered.
+	 *  camera. A camera-relative step keeps every step a constant size ON SCREEN, which is
+	 *  a genuine property -- but it makes the count depend on where the camera is,
+	 *  collapsing toward chord/floor on close approach. With four density marchers able to
+	 *  be on screen at once, per-layer cost has to be SET rather than discovered.
 	 *
-	 *  These are PERFORMANCE controls rather than look controls: because LayerDensity is
-	 *  an optical depth normalised by path length, changing either does not require
-	 *  retuning a density. They are candidates for the game's quality settings. */
+	 *  PERFORMANCE CONTROLS, NOT LOOK CONTROLS. LayerDensity is an optical depth normalised
+	 *  by path length, so changing either of these does not require retuning a density.
+	 *  Candidates for the game's quality settings. */
 
-	 /** A CEILING ON THE STEP COUNT, NOT A FLOOR, which is what the old MinSamples name
-	  *  had backwards. Growth only ever lengthens steps, so every step is at least
-	  *  span / StepBudget and the actual count is StepBudget * ln(1+g)/g -- equal to the
-	  *  budget only at growth 0, 0.69 of it at growth 1, 0.55 at growth 2. See
+	 /** A CEILING ON THE STEP COUNT, NOT A FLOOR. Growth only ever lengthens steps, so every
+	  *  step is at least span / StepBudget and the actual count is StepBudget * ln(1+g)/g --
+	  *  equal to the budget only at growth 0, 0.69 of it at growth 1, 0.55 at growth 2. See
 	  *  GetEffectiveStepCount.
 	  *
-	  *  THE DEFAULT IS NOT THE OLD NEAR-FIELD BUDGET. NearSteps was 256 and MinSamples 32,
-	  *  and the floor took over just outside the volume, so a close pass ran 256 uniform
-	  *  steps and a distant galaxy ran 32. 192 at growth 2 resolves to about 105 steps and
-	  *  pays that whatever the viewer does. */
+	  *  READ IT AS THE RESOLVED COUNT, NOT THE BUDGET. 192 at growth 2 resolves to about 105
+	  *  steps, and pays that whatever the viewer is doing -- which is the property a
+	  *  camera-relative rule cannot offer, and the reason this number looks larger than a
+	  *  step count would. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Volume Material",
 		meta = (ClampMin = "8.0", ClampMax = "1024.0"))
 	float VolumeStepBudget = 192.0f;
@@ -930,14 +929,13 @@ struct ULTRALARGESCALE_API FGalaxyMaterialParams
 		meta = (ClampMin = "0.0", ClampMax = "8.0"))
 	float VolumeStepGrowth = 2.0f;
 
-	// NO STEP FLOOR AND NO ITERATION BOUND HERE, and both were removed rather than
-	// forgotten. The march's step floor is P.MinFeatureStep -- half the narrowest of the
-	// arm cross-section and the disc scale height, derived in the core where both live --
-	// and an authored absolute cannot compete with a floor that knows the field's own
-	// thicknesses. The loop bound is derived in the Custom node as int(StepBudget) + 8,
-	// because the budget already bounds the count and an authored bound could therefore
-	// only truncate: a truncated march looks identical to one that finished, minus the far
-	// half of the volume.
+	// NO STEP FLOOR AND NO ITERATION BOUND HERE, deliberately. The step floor is
+	// P.MinFeatureStep -- half the narrowest of the arm cross-section and the disc scale
+	// height, derived in the core where both live -- and an authored absolute cannot compete
+	// with a floor that knows the field's own thicknesses. The loop bound is derived in the
+	// Custom node as int(StepBudget) + 8, since the budget already bounds the count and an
+	// authored bound could therefore only truncate: a truncated march looks identical to one
+	// that finished, minus the far half of the volume.
 
 	/** Steps the march will actually take, as opposed to the budget it was given. The two
 	 *  diverge fast: at growth 4 a budget of 32 resolves to about 13. Diagnostic rather
