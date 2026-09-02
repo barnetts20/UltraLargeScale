@@ -9,7 +9,7 @@
  *  The last link in the Universe -> Galaxy -> StarSystem chain: it runs the same
  *  speed-scale traversal as every layer, but at UnitScale = 1 there's no space
  *  left to compress, so the wrapped actor lives in real cm and moves with real
- *  precision. Knows nothing about what it wraps ? the class is passed in ? so it
+ *  precision. Knows nothing about what it wraps -- the class is passed in -- so it
  *  carries no dependency on the wrapped actor's module. The wrapped actor owns
  *  its own proceduralization; the proxy only positions it. */
 UCLASS()
@@ -24,7 +24,7 @@ public:
     UPROPERTY()
     AActor* Wrapped = nullptr;
 
-    /** Live universe speed scale ? stored each frame from TickParallax. Held so a
+    /** Live universe speed scale, stored each frame from TickParallax. Held so a
      *  future meshing gate can check it (updates run only at SpeedScale == 1). */
     double SpeedScale = 1.0;
 

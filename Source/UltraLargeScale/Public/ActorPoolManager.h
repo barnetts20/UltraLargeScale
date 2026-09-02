@@ -27,11 +27,11 @@ struct FActorSubPool
  * single permanent AUniverseActor; every layer reaches it by resolving up the
  * parent chain (GetPoolManager()), exactly like GetEffectiveSpeedScale.
  *
- * The manager is fully generic — it only ever touches AActor* and the UClass
+ * The manager is fully generic -- it only ever touches AActor* and the UClass
  * identity. All per-type behavior (seed->config, typed ReInit, wake/teardown)
  * lives elsewhere: proc-gen on the F*ParamBounds structs, ReInit on the typed
  * parent's call, wake/teardown on IPooledActor. Adding a new poolable type is a
- * UClass + RegisterType + a ReInit/bounds — no manager change.
+ * UClass + RegisterType + a ReInit/bounds -- no manager change.
  */
 UCLASS()
 class ULTRALARGESCALE_API UActorPoolManager : public UObject
@@ -64,14 +64,38 @@ public:
      *  Release() == OnReturnToPool() + ReturnPrepared(). */
     void ReturnPrepared(AActor* Actor);
 
-    /** Typed convenience wrapper. T::StaticClass() must have been registered. */
+    /** Typed convenience wrapper. T::StaticClass() must have been registered.
+     *
+     *  THE KEY IS THE C++ CLASS, NOT WHATEVER WAS REGISTERED, and that is the one way to
+     *  break this pool without any code here changing. AUniverseActor registers
+     *  GalaxyActorClass -- a TSubclassOf variable -- and acquires through this wrapper,
+     *  which hardcodes AGalaxyActor::StaticClass(). They match only because the
+     *  constructor sets them equal. Point one of those spawn-class members at a Blueprint
+     *  subclass and the two keys diverge: the prewarmed instances sit under one key while
+     *  every acquire misses under the other.
+     *
+     *  IT DEGRADES SILENTLY INTO A NON-POOL. AcquireByClass registers the missing key with
+     *  prewarm 0 and then grows by one on every single acquire, so the pool becomes
+     *  spawn-per-acquire with two warnings a time. HOW TO TELL IT APART from a genuinely
+     *  undersized pool, since the exhaustion warning is the same in both cases: an
+     *  undersized pool's NumInert oscillates, a key mismatch leaves NumInert on the
+     *  REGISTERED class pinned at its prewarm count forever, untouched.
+     *
+     *  Acquire by the same token that was registered if those members ever become
+     *  editable. */
     template<typename T>
     T* Acquire() { return Cast<T>(AcquireByClass(T::StaticClass())); }
 
     /** Live/inert diagnostics for the dev HUD. Inert count for a registered type. */
     int32 NumInert(TSubclassOf<AActor> Class) const;
 
-    /** Destroy every inert instance and clear the pools. Call from Universe EndPlay. */
+    /** Destroy every inert instance and clear the pools. Call from Universe EndPlay.
+     *
+     *  INERT ONLY, because the manager does not track live instances at all -- an acquired
+     *  actor leaves its sub-pool and is owned by whoever acquired it until it is released.
+     *  At EndPlay that is correct by accident rather than by design: the world teardown
+     *  that follows destroys them. It also means there is no leak detection here, and
+     *  NumInert is the only diagnostic the manager can offer. */
     void Shutdown();
 
     /** UObject world hook so engine utilities resolve a world off the manager. */

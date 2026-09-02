@@ -4,7 +4,6 @@
 #include "Engine/World.h"
 #include "NiagaraComponent.h"
 
-//TODO: Regions
 void UActorPoolManager::RegisterType(TSubclassOf<AActor> Class, int32 Prewarm)
 {
     if (!Class)
@@ -37,7 +36,7 @@ void UActorPoolManager::PrewarmAll(UWorld* World)
     {
         FActorSubPool& Pool = Entry.Value;
         const int32 ToSpawn = Pool.Prewarm - Pool.Inert.Num();
-        
+
         for (int32 i = 0; i < ToSpawn; ++i)
             if (AActor* Blank = SpawnInert(Entry.Key)) Pool.Inert.Add(Blank);
     }
@@ -117,7 +116,7 @@ void UActorPoolManager::Shutdown()
     {
         for (TObjectPtr<AActor>& Actor : Entry.Value.Inert)
             if (Actor) Actor->Destroy();
-        
+
         Entry.Value.Inert.Reset();
     }
     SubPools.Reset();

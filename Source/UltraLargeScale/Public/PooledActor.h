@@ -17,8 +17,8 @@ class UPooledActor : public UInterface
 /**
  * Thin per-type runtime contract for actors managed by UActorPoolManager.
  * The manager itself is fully generic (it only ever touches AActor*); the two
- * genuinely type-specific operations — waking an instance and tearing it down
- * with its child cascade — live here so the manager never needs a class per type.
+ * genuinely type-specific operations -- waking an instance and tearing it down
+ * with its child cascade -- live here so the manager never needs a class per type.
  *
  * Contract with UActorPoolManager:
  *   AcquireByClass()  pops an inert instance, calls OnAcquired(),  hands it back.
@@ -38,7 +38,7 @@ public:
      *  to the acquiring parent. Re-arm lifecycle/per-frame state and RE-STAMP any
      *  per-acquire traits (backdrop-capture flag, scale space) so a recycled
      *  instance never inherits a previous occupant's flags. Do NOT unhide/position
-     *  here — the parent's deferred finalize owns that. */
+     *  here -- the parent's deferred finalize owns that. */
     virtual void OnAcquired() {}
 
     /** Wake + reconfigure for a proxy-CARRIED body that needs its world radius
@@ -46,7 +46,18 @@ public:
      *  never by the manager; default no-op for the manager-pooled layers that aren't
      *  carried. Bodies should skip a rebuild when the built radius already matches.
      *  Made non-pure (with OnAcquired() above) so each implementer defines only the
-     *  one entry point it uses -- no dead stub on either side. */
+     *  one entry point it uses -- no dead stub on either side.
+     *
+     *  THIS OVERLOAD MUST UNHIDE, and it is the opposite of the rule above it. The two
+     *  entry points serve different owners: OnAcquired() is for the manager-pooled space
+     *  layers, whose parent defers placement to a FinalizeXxxPlacement once the frame's
+     *  VirtualTraversal is resolved, so unhiding there would show an actor at the origin
+     *  for the length of an async init chain. A carried body has no such deferral --
+     *  AParallaxProxyActor::ReInit positions it immediately and then calls this, and its
+     *  own non-IPooledActor fallback branch unhides. A body that leaves itself hidden here
+     *  is invisible for the rest of its life with nothing reporting it.
+     *
+     *  The hide is symmetric: OnReturnToPool() on a carried body is what hid it. */
     virtual void OnAcquired(double WorldRadius) {}
 
     /** Teardown + cascade-release. Called before the manager's generic inert step.
