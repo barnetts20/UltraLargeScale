@@ -1,7 +1,20 @@
-﻿/** Data generator for star-system content. FStarSystemParams lives in
- *  StarSystemParams.h, mirroring FUniverseParams and FGalaxyParams. Retained for
- *  future use (full orbit/noise generation); the first-pass actor uses analytic
- *  line layout and never calls GenerateData(). */
+﻿/** The star system's orbit types and the ellipse evaluation over them.
+ *
+ *  NOT A GENERATOR IN THE SENSE THE OTHER TWO LAYERS USE THE WORD. The universe and galaxy
+ *  layers place entities against a density field evaluated on the GPU; this layer lays its
+ *  bodies out ANALYTICALLY -- AStarSystemActor computes the orbits itself, fills
+ *  GeneratedOrbits, and reads positions back through GetOrbitPosition. There is no field,
+ *  no dispatch, and nothing here to calibrate.
+ *
+ *  THE NAME IS THE MIRROR'S, not a description. FStarSystemParams sits beside
+ *  FUniverseParams and FGalaxyParams for the same reason. If this layer ever does acquire a
+ *  density field, the shape to copy is GalaxyDataGenerator -- and the shared pieces are
+ *  already in place: FTierBatchCell, FTierStreamingSystem::SubdivideCells and the
+ *  Pack()/FillShaderParameters marshal pattern.
+ *
+ *  WHETHER IT SHOULD is an open question rather than a pending task. A handful of bodies on
+ *  orbits is not a density distribution, and a field this layer does not need would cost a
+ *  shader and buy nothing. */
 
 #pragma once
 
@@ -11,26 +24,6 @@
 class ULTRALARGESCALE_API StarSystemDataGenerator
 {
 public:
-	StarSystemDataGenerator() : Seed(8647) {}
-	StarSystemDataGenerator(int InSeed) : Seed(InSeed) {}
-
-	/** Seeded so callers can reproduce the same system. */
-	int Seed = 0;
-
-	/** Set by the owning actor before any generation call. */
-	double Extent = 0.0;
-	double UnitScale = 1.0;
-
-	/** Parent star particle's color, set by the owning actor before generation
-	 *  from FStarSystemParams::ParentColor (FBaseParams). GenerateData tints the
-	 *  central star with this (GenerateData is unused in the first pass). */
-	FLinearColor ParentColor = FLinearColor(1, 1, 1, 1);
-
-	/** Used only by GenerateData. */
-	FRotator Rotation = FRotator(0.0, 0.0, 0.0);
-	int MinInsertionDepth = 1;
-	int MaxInsertionDepth = 1;
-
 #pragma region Object Types
 	/** Object class stored as TypeId in octree nodes. */
 	enum EObjectType
@@ -62,36 +55,20 @@ public:
 
 #pragma endregion
 
-#pragma region Planet Depth Distribution
-	/** Probability distribution for planet depth selection. */
-	static constexpr double DepthProb[10] = {
-		0.12,  // moonlets / large asteroids
-		0.15,  // large moons
-		0.18,  // Mars-Mercury class
-		0.20,  // Earth-sized (peak)
-		0.14,  // Super-Earths
-		0.09,  // Sub-Neptunes
-		0.06,  // Neptune-class
-		0.03,  // Saturn-class
-		0.02,  // Jupiter-class
-		0.01   // Super-Jupiters
-	};
+#pragma region Orbit Layout
 
-#pragma endregion
-
-#pragma region Full Generation
-	/** Full orbit/noise generation, not called during the first-pass analytic
-	 *  implementation. */
-	void GenerateData(TSharedPtr<FOctree> InOctree);
-	void GenerateOrbits();
-	void GeneratePlanet(const FOrbit& InPlanetOrbit, int32 InOrbitIndex);
-	void GenerateDebris(const FOrbit& InDebrisOrbit, int32 InOrbitIndex);
-	void GenerateUnboundDebris();
-	void GenerateGas();
+	/** A point on the ellipse InOrbit describes, at its own Phase.
+	 *
+	 *  THE ONLY THING THIS CLASS COMPUTES. AStarSystemActor lays the orbits out itself --
+	 *  it fills GeneratedOrbits directly and calls this per planet -- so what lives here is
+	 *  the orbit TYPE and the ellipse evaluation, not a generation pass.
+	 *
+	 *  It reads nothing but its argument, which is what lets the actor call it against a
+	 *  temporary copy with a swept Phase to draw an orbit track. */
 	FVector GetOrbitPosition(const FOrbit& Orbit) const;
 
+	/** The system's orbits. POPULATED BY THE ACTOR, not here. */
 	TArray<FOrbit>     GeneratedOrbits;
-	TArray<FPointData> GeneratedData;
 
 #pragma endregion
 };

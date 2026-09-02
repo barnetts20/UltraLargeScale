@@ -706,8 +706,8 @@ struct ULTRALARGESCALE_API FGalaxyProceduralParams
 	 *  actor, so rolling it per galaxy means reallocating on every spawn -- the exact
 	 *  cost pooling exists to avoid.
 	 *
-	 *  So it lands here, applied where BudgetScale is computed:
-	 *  capacity * StarDensityScale / divisor. Buffer sizes never move, and a sparse
+	 *  So it lands where BudgetScale is computed, as capacity * StarDensityScale / divisor
+	 *  -- see GalaxyDataGenerator::GetTierBudgetScale. Buffer sizes never move, and a sparse
 	 *  galaxy genuinely GENERATES fewer entities rather than being thinned afterwards.
 	 *
 	 *  THINNING ONLY -- clamped to 1. SlotCapacity both sizes the buffer and is the

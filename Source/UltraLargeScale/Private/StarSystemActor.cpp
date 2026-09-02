@@ -173,7 +173,6 @@ void AStarSystemActor::ResetForPool()
 	PlanetPositions.Empty();
 	PlanetExtents.Empty();
 	PlanetColors.Empty();
-	SystemGenerator.GeneratedData.Empty();
 	SystemGenerator.GeneratedOrbits.Empty();
 
 	Super::ResetForPool();

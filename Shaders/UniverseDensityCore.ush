@@ -145,7 +145,6 @@
 #define Texture3DSigned Texture3D
 #endif
 
-#define UNIVERSE_PI 3.14159265358979323846f
 #define UNIVERSE_POW_EPSILON 1e-6f
 
 // ==========================================================================

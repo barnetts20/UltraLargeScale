@@ -4,7 +4,6 @@
 #include "ProceduralSpaceActor.h"
 #include "UniverseDataGenerator.h"
 #include "GalaxyDataGenerator.h"
-#include "StarSystemDataGenerator.h"
 #include "NiagaraSystem.h"
 #include "NiagaraComponent.h"
 #include "DataTypes.h"
@@ -61,10 +60,6 @@ public:
 	 *  costs too much. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Backdrop Capture", meta = (ClampMin = "0.25", ClampMax = "1.0"))
 	float BackdropResolutionScale = 1.0f;
-
-	/** The HDR render target the virtual stack is captured into. The composite
-	 *  post-process material samples this as the backdrop. Null until BeginPlay. */
-	UTextureRenderTarget2D* GetBackdropRenderTarget() const { return BackdropRT; }
 
 	/** Debug: hand-assign an RT asset to view the capture in the RT asset editor.
 	 *  When set, EnsureBackdropRenderTarget uses it verbatim and skips sizing/alloc. */

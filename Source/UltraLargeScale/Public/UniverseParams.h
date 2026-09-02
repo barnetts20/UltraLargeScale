@@ -139,13 +139,15 @@ struct ULTRALARGESCALE_API FUniverseVarianceRange
 	 *  unrelated scalar in .w. A range whose min equals its max is a constant however its
 	 *  passenger is set, so changing a warp scale must never make the layer think its
 	 *  amplitude varies. */
+	 /** True when the range carries no region signal, which is what lets the core skip a
+	  *  fetch entirely.
+	  *
+	  *  THE SKIP IS EXACT, NOT AN APPROXIMATION, and that is the property to preserve: a
+	  *  fetch is only skipped when EVERY range feeding it is degenerate, in which case the
+	  *  lerp returns that constant whatever t is. A skip condition that admitted a
+	  *  near-degenerate range would substitute a midpoint for a value that is not one, and
+	  *  the error would show only in the provinces where that range actually varies. */
 	bool IsDegenerate() const { return Min == Max; }
-
-	/** The value with no region signal at all: the plain midpoint, NOT run through the
-	 *  bias. This mirrors the core's fallback when a fetch is skipped, and it is exact
-	 *  rather than approximate -- a fetch is only skipped when every range feeding it is
-	 *  degenerate, in which case the lerp returns that constant whatever t is. */
-	float Midpoint() const { return FMath::Lerp(Min, Max, 0.5f); }
 };
 
 
@@ -504,21 +506,13 @@ namespace UniverseCellWrap
 			static_cast<double>(InLattice.CellSizeLarge)));
 	}
 
-	/** Reduces into [0, InPeriod). FLOORED, not truncated: C++ and HLSL both truncate
-	 *  toward zero, so a negative index would come back negative and hash as a different
-	 *  cell from its counterpart one period away. */
-	inline int32 Wrap(int32 InValue, int32 InPeriod)
-	{
-		if (InPeriod <= 0) return InValue;
-		const int32 R = InValue % InPeriod;
-		return (R < 0) ? (R + InPeriod) : R;
-	}
-
-	/** THE PRESENTATION HALF OF Wrap, and the ONLY thing it is for.
+	/** FOLDS A WRAPPED CELL INDEX BACK TO SIGNED, FOR DISPLAY, and that is the only thing it
+	 *  is for.
 	 *
 	 *  Every consumer of a cell index -- the hash, StepCell's bounds check, the & 4095
-	 *  texture wrap, the gen cells -- wants the unsigned [0, period) form Wrap produces, and
-	 *  none of them may be handed this one. What that form costs is legibility: the index is
+	 *  texture wrap, the gen cells -- wants the unsigned [0, period) form the reduction in
+	 *  FUniverseFieldOffset::FromCellPositionWrapped produces, and none of them may be
+	 *  handed this one. What that form costs is legibility: the index is
 	 *  reduced with a FLOORED modulo, so one cell left of the origin reports period-1. That
 	 *  is not a rollover, it is the torus closure -- cell -1 and cell period-1 are the same
 	 *  cell, and that identity is exactly what makes the wrap seamless -- but nobody reads

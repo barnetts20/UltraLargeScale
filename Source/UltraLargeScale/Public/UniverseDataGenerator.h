@@ -25,20 +25,14 @@ public:
 	};
 
 	FUniverseParams Params;
-	TArray<FPointData> GeneratedData;
 
-	// THE FASTNOISE STACK IS GONE, entire. What stood here was Initialize, BuildNoise,
-	// SampleNoiseVolume and the three per-tier rejection samplers -- GenerateLargeTierNode,
-	// GenerateMidTierNode and GenerateSmallTierNode -- kept for one pass after the GPU swap
-	// so that reverting it meant rebinding three callbacks rather than restoring deleted
-	// code. That pass is over: all three tiers bind GenerateBatchCallback and dispatch.
+	// NO CPU PLACEMENT PATH, AND NO FALLBACK. All three tiers bind GenerateBatchCallback
+	// and dispatch.
 	//
-	// THEY WERE NEVER A FALLBACK. They sampled a DIFFERENT FIELD from the one the ray march
-	// draws, so falling back to them would have placed entities against a universe nobody is
-	// looking at. The GPU path fails closed for that reason and still does.
-	//
-	// FUniverseParams::EncodedTree and FUniverseNoiseGraphParams came out with them; they
-	// were each other's only remaining consumers.
+	// A CPU SAMPLER HERE WOULD EVALUATE A DIFFERENT FIELD from the one the ray march draws:
+	// the shim stubs every texture fetch to a neutral 0.5, so the C++ evaluation reduces to
+	// the unwarped analytic web. Falling back to one would place entities against a universe
+	// nobody is looking at, which is why the GPU path fails closed instead of degrading.
 
 #pragma region GPU Entity Generation
 

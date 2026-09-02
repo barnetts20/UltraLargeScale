@@ -328,9 +328,33 @@ float GalaxyDataGenerator::GetTierBudgetScale(
 			const double Divisor = bInCellsShareSlot ? Total : LargestParent;
 			const int32 Capacity = FMath::Max(InTierParams.SlotCapacity, 1);
 
+			// THE PER-GALAXY DENSITY KNOB, APPLIED HERE AND NOWHERE ELSE.
+			//
+			// It scales the TARGET rather than the field, which is the only place it can go.
+			// Scaling the density field does nothing: acceptance normalises against each
+			// cell's own probed envelope, so multiplying the whole field by c scales every
+			// mass by c^exponent and BudgetScale by its inverse, and the accepted counts come
+			// out identical. Scaling SlotCapacity would resize the Niagara buffers, which are
+			// allocated once per pooled actor -- reallocating on every spawn is the cost
+			// pooling exists to avoid.
+			//
+			// Solving BudgetScale against a reduced capacity makes a sparse galaxy GENERATE
+			// fewer entities rather than being thinned afterwards, so the shape it does place
+			// is the shape the field describes.
+			//
+			// CLAMPED TO 1, AND THINNING ONLY. SlotCapacity both sizes the buffer and is the
+			// calibration target, so above 1 the tier aims past what the buffer holds and the
+			// excess is dropped by the cursor backstop -- silently, in arrival order, which is
+			// spatial. Denser than capacity needs a larger SlotCapacity, which is the thing
+			// that cannot roll per galaxy.
+			const double DensityScale = FMath::Clamp(
+				static_cast<double>(Params.Procedural.StarDensityScale), 0.0, 1.0);
+
+			const double Target = static_cast<double>(Capacity) * DensityScale;
+
 			if (Divisor > 0.0)
 			{
-				Scale = static_cast<float>(static_cast<double>(Capacity) / Divisor);
+				Scale = static_cast<float>(Target / Divisor);
 			}
 
 			UE_LOG(LogTemp, Display,
