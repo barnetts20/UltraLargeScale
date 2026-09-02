@@ -6,15 +6,15 @@
 //
 // NEVER BINDS A RESOURCE, ONLY RECEIVES ONE. Every function that samples takes the
 // texture and sampler its caller already holds; nothing here declares one, and nothing
-// here touches Parameters or View. That rule is what lets a material Custom node, a
-// compute dispatch and C++ behind a small shim all call the same code rather than
-// keeping three implementations in agreement by hand.
+// here touches Parameters or View. That rule is what lets a material Custom node and a
+// compute dispatch call the same code rather than keeping two implementations in
+// agreement by hand.
 //
-// The C++ side exists for parameter derivation, authoring and diagnostics. IT MUST NEVER
-// PLACE ENTITIES. The shim stubs both texture types to their own neutral -- 0.5 for the
-// UNORM modulation volumes, 0 for the signed warp volumes -- so the C++ field reduces
-// exactly to the analytic one -- and a texture-free approximation of a textured field
-// produces a perfectly ordinary-looking galaxy that ignores what the material draws.
+// GPU ONLY. Nothing evaluates this field on the CPU. The parity rules below are kept so a
+// C++ path stays cheap to re-attach, and such a path would stub every texture fetch to a
+// neutral and so evaluate the ANALYTIC field alone -- a texture-free approximation of a
+// textured field, which produces a perfectly ordinary-looking galaxy that ignores what
+// the material draws. It must never place entities.
 //
 // PLACEMENT IS NOT IN THIS FILE. GalaxyPlacement.ush holds the key lattice, the candidate
 // and probe construction, the stochastic count and the analytic ceiling; it includes this
@@ -30,7 +30,8 @@
 //     exp2(y*log2(x)); log2(0) is -INF and some compilers yield NaN.
 //   - Bound anything that can overflow float32. exp overflows near 88 on GPU against
 //     709 for double on CPU, so the GPU fails first and over a wider region.
-//   - No swizzles beyond .x/.y/.z/.w, and no HLSL intrinsic the shim does not define.
+//   - No swizzles beyond .x/.y/.z/.w, and no HLSL intrinsic a small C++ shim could not
+//     define -- see GPU ONLY above for what that standard is kept for.
 //     VECTOR FORMS ARE THE TRAP: uint3, a vector saturate or float3 * float compile
 //     cleanly as HLSL and fail on the C++ side alone, where nothing routine catches it.
 //
@@ -61,16 +62,18 @@
 // NoiseOffset stays and still does its own job: it varies which region of an asset a
 // GALAXY reads, which is what gives two galaxies on the same archetype different noise.
 
-// THE SIGNED TEXTURE TYPE. The two warp fetches read curl/gradient vector assets whose
-// values are already in [-1,1]; the two modulation fetches read UNORM multinoise in
-// [0,1]. The shader compiler has one resource type for both -- the difference is entirely
-// in the decode, written out at each fetch site -- so this alias exists solely to let the
-// shared file NAME the convention. The C++ shim defines Texture3DSigned as a real distinct
-// type with its own neutral, which is what makes a fetch site given the wrong convention a
-// compile error there rather than a silent shear here.
-#ifndef ULS_HLSL_SHIM
+// THE SIGNED TEXTURE TYPE. The two warp fetches read curl/gradient vector assets already in
+// [-1,1]; the two modulation fetches read UNORM multinoise in [0,1]. The shader compiler has
+// one resource type for both -- the difference is entirely in the decode, written out at
+// each fetch site -- so what this alias buys is that the four resources are TOLD APART AT
+// THE SIGNATURE. GalaxySample takes four texture/sampler pairs and the type is the only
+// thing in that list saying which two are signed.
+//
+// AN ALIAS, NOT A CHECK. It costs nothing and it cannot catch a swap -- both sides resolve
+// to Texture3D. A C++ shim could make it a distinct type and turn a wrongly-decoded fetch
+// into a compile error, which is what the parity rules above keep the door open for; there
+// is no such shim in the build today.
 #define Texture3DSigned Texture3D
-#endif
 
 // ==========================================================================
 // THE STEP FLOOR THE FIELD ITSELF IMPLIES
@@ -263,7 +266,7 @@ struct GalaxyDensityParams
         uint n = ((uint) InIndex * 73856093u) ^ ((uint) InSeed * 19349663u);
 
         // Scalar rather than uint4: this was the only integer vector in the file, and
-        // keeping it out means the C++ shim needs no such type. Arithmetic identical.
+        // keeping it out keeps the file inside the parity subset. Arithmetic identical.
         uint a = n * 1664525u + 1013904223u;
         uint b = a * 1664525u + 1013904223u;
         uint c = b * 1664525u + 1013904223u;
@@ -804,9 +807,9 @@ GalaxyDensityParams MakeGalaxyDensityParams(
     // field -> galaxy.
     {
         // COMPONENTWISE, AND NORMALIZED BY HAND. This file compiles as C++ too, through
-        // HLSLShim.h, and the shim has neither swizzles nor normalize -- a struct
-        // member cannot present a .xyz the way an HLSL vector does. Shared code stays in
-        // the intersection of the two languages; dot and rsqrt are both in the shim.
+        // the parity subset, which has neither swizzles nor normalize -- a C++ struct member
+        // cannot present a .xyz the way an HLSL vector does. dot and rsqrt are in the
+        // subset; normalize is not.
         float3 Raw = float3(InFieldOrientation.x, InFieldOrientation.y, InFieldOrientation.z);
         float LenSq = dot(Raw, Raw);
 
@@ -1019,11 +1022,6 @@ GalaxyDensityParams MakeGalaxyDensityParams(
 // Perlin-Worley volume it was mixing four VIEWS of one field: the values decorrelate but
 // the structure does not, so all four channels transition in the same places and
 // NoiseChannelWeights was doing far less than its signature suggests.
-//
-// Compiles on both sides: the shim stubs each texture type to its own neutral -- 0.5 for
-// the UNORM modulation volumes, 0 for the signed warp volumes -- so every noise term comes
-// out zero and GalaxySample reduces to SampleAnalytic term for term. Getting a neutral
-// wrong is silent: a signed asset stubbed at 0.5 would shear the whole C++ field.
 //
 // NEVER BIND, ONLY RECEIVE, as everywhere else here. Nothing owns a texture; each
 // function takes the one its caller already has. Anything that binds a resource, or

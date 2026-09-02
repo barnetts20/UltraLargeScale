@@ -295,7 +295,7 @@ float3 MakeUniverseProbe(float3 InCellCentre, float InCellExtent,
 // all-ones exponent, which is a NaN. Neither survives a round trip reliably, and both
 // fail silently on a subset of values.
 //
-// SCALAR ONLY, in both directions, so the C++ shim can compile it: the shim has no uint3
+// SCALAR ONLY, in both directions, which is the parity subset: it has no uint3
 // and no vector saturate. A vector form here fails on the C++ side alone, which is a
 // build the shader compiler will never catch.
 uint PackUniverseDecor(float3 InDecor)

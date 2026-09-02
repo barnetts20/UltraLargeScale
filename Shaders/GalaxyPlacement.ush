@@ -359,7 +359,7 @@ float3 MakeGalaxyProbe(float3 InCellCentre, float InCellExtent,
     float4 h = GalaxyKeyHash4(InCellX, InCellY, InCellZ,
                      InKeySeed - (int) (InProbeIndex + 1u) * GALAXY_SLOT_STRIDE);
 
-    // Componentwise, and no swizzle. The shim gives float3/float4 members and
+    // Componentwise, and no swizzle. The parity subset gives float3/float4 members and
     // compound assignment only -- no .xyz, no free operator+ -- so the whole core
     // is written this way and this function is not the place to start relying on
     // more. Matches MakeGalaxyCandidate exactly, which is the point: a probe and a
@@ -382,10 +382,9 @@ float3 MakeGalaxyProbe(float3 InCellCentre, float InCellExtent,
 // or on the all-ones exponent, which is a NaN. Neither survives a round trip
 // reliably, and both fail silently on a subset of values.
 //
-// SCALAR ONLY, in both directions. The C++ shim provides float3 and a scalar
-// saturate; it has no uint3 and no vector saturate, and this file has to compile
-// through it. Vector forms here fail on the C++ side alone, which is a build the
-// shader compiler will never catch.
+// SCALAR ONLY, in both directions, which is the parity subset: float3 and a scalar
+// saturate, no uint3 and no vector saturate. Vector forms here compile as HLSL and put the
+// file outside the subset, which nothing currently catches.
 uint PackGalaxyDecor(float3 InDecor)
 {
     uint qx = (uint) (saturate(InDecor.x) * 1023.0f + 0.5f);

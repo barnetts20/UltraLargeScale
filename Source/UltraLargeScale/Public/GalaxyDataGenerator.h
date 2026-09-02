@@ -1,11 +1,10 @@
 ﻿// GalaxyDataGenerator.h
-// Galaxy density field and tier generation.
+// Tier generation for the galaxy layer.
 //
-// The density field itself lives in Shaders/GalaxyDensityCore.ush and is compiled by
-// BOTH the shader and this module, so star placement and the rendered gas are one
-// function rather than two implementations kept in agreement by hand. Only
-// GalaxyDataGenerator.cpp compiles it, inside namespace HLSLShim -- see
-// HLSLShim.h for why that namespace must not be opened.
+// NO FIELD EVALUATION HERE. The density field lives in GalaxyDensityCore.ush and is
+// evaluated only by the GPU -- the raymarch draws it and GalaxyEntityGen.usf places
+// against it, both from the same file. This class marshals parameters into a dispatch and
+// reads the results back.
 
 #pragma once
 
@@ -16,14 +15,6 @@
 #include "GalaxyParams.h"
 #include "FTierStreamingSystem.h"
 #include "FNiagaraParticleBuffer.h"
-
-/** Declared in GalaxyDensityCore.ush, compiled inside namespace HLSLShim by
- *  GalaxyDataGenerator.cpp. Held by pointer so this header needs neither the shim nor
- *  the field itself. */
-namespace HLSLShim
-{
-	struct GalaxyDensityParams;
-}
 
 /** Owns density evaluation and tier generation for the galaxy layer; mirrors
  *  UniverseDataGenerator. The galaxy actor wires tier callbacks that delegate here;
@@ -44,35 +35,16 @@ public:
 
 	FGalaxyParams Params;
 
-	/** Clamped, pre-inverted fields plus the 16 per-arm records, derived once in
-	 *  Initialize(). Rebuilding it per sample would repeat 16 hashes, a tan and every
-	 *  reciprocal on every candidate. */
-	TUniquePtr<HLSLShim::GalaxyDensityParams> Derived;
-
-#pragma region Density Sampling
-
-	/** Raw field value at a normalized position, InNormPos in [-1,1] (position /
-	 *  Extent).
-	 *
-	 *  UNBOUNDED. This is an OPTICAL DEPTH, not a probability: it peaks near 260 at
-	 *  the default tuning while most of the volume sits below 0.01. Feeding it
-	 *  straight to a rejection test accepts every candidate above 1.0 -- the arms,
-	 *  the inner disc and the whole bulge -- erasing the structure it describes.
-	 *  Always route it through GalaxySpawnProbability, in GalaxyPlacement.ush, first. */
-	float SampleDensity(const FVector& InNormPos) const;
-
-#pragma endregion
-
 #pragma region Initialization
 
-	/** Derive the density parameters. MUST run before any sampling; SampleDensity
-	 *  returns zero until it does. */
+	/** Clears the per-tier calibration cache. MUST run whenever Params changes -- see the
+	 *  note in the body for what a surviving entry costs on a pooled actor. */
 	void Initialize();
 
-	// THERE IS NO SECOND FIELD HERE. The only thing this layer places against is
-	// GalaxyDensityCore.ush, evaluated through Derived above. A noise graph built beside it
-	// would be a field nobody renders, and entities placed against one are entities sitting
-	// beside the structure they belong to.
+	// THERE IS NO SECOND FIELD HERE, and no CPU evaluation of the first one. The only thing
+	// this layer places against is GalaxyDensityCore.ush, sampled by the dispatch. A noise
+	// graph built beside it would be a field nobody renders, and entities placed against one
+	// are entities sitting beside the structure they belong to.
 
 #pragma endregion
 
@@ -184,7 +156,8 @@ private:
 	 *  pointer and leaves the mutex where it is.
 	 *
 	 *  A moved-from generator has a null lock, which GetTierBudgetScale treats the same
-	 *  way SampleDensity treats a null Derived: return zero rather than dereference. */
+	 *  same way a moved-from generator is handled elsewhere: return zero rather than
+	 *  dereference. */
 	mutable TUniquePtr<FCriticalSection> TierBudgetScaleLock =
 		MakeUnique<FCriticalSection>();
 

@@ -99,13 +99,6 @@ namespace GalaxySeed
 // the single marshal site. See FGalaxyDensityArgs.
 // -----------------------------------------------------------------------------
 
-/** HLSLShim::GalaxyDensityParams is the DERIVED field -- a different type entirely,
- *  declared in GalaxyDensityCore.ush, which GalaxyDataGenerator.cpp compiles INSIDE
- *  namespace HLSLShim. The namespace is what keeps the shim's sqrt/abs/exp from
- *  colliding with the float overloads MSVC's <cmath> puts at global scope, so the type
- *  is namespace-qualified everywhere outside that file. */
-namespace HLSLShim { struct GalaxyDensityParams; }
-
 /** GLOBAL ORIENTATION of the whole field. Applied at the sample entry point, so every
  *  layer, the noise frame and the m=1 modes all turn together.
  *
@@ -517,11 +510,9 @@ struct ULTRALARGESCALE_API FGalaxyMasterParams
 
  /** The arguments of MakeGalaxyDensityParams, in order, packed.
   *
-  *  ONE MARSHAL SITE, and that is why it exists. ToDerived and FillShaderParameters each
-  *  listed every parameter independently -- the same thirty values written out twice, kept
-  *  in step by nothing but care. Both read this struct instead, so adding a parameter to the
-  *  derivation breaks Pack() at compile time, and Pack() is the only place the packing
-  *  decisions live.
+  *  ONE MARSHAL SITE, and that is why it exists. FillShaderParameters reads it rather than
+  *  listing every parameter independently, so adding a parameter to the derivation breaks
+  *  at compile time and Pack() is the only place the packing decisions live.
   *
   *  THE MATERIAL'S CUSTOM NODE IS STILL A THIRD LIST, and no C++ change reaches it: a Custom
   *  node fails at SHADER compile rather than at build, so a parameter missed there surfaces
@@ -824,10 +815,6 @@ struct ULTRALARGESCALE_API FGalaxyProceduralParams
 
 		return Out;
 	}
-
-	/** The CPU derivation, from the packed arguments. Defined in GalaxyDataGenerator.cpp,
-	 *  the one translation unit that compiles the shim and the .ush. */
-	HLSLShim::GalaxyDensityParams ToDerived() const;
 
 	/** Fills a compute shader parameter struct from the packed arguments, member for
 	 *  member. The shader-side names match MakeGalaxyDensityParams's parameter names, so a

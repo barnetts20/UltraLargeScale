@@ -436,10 +436,10 @@ struct ULTRALARGESCALE_API FUniverseRegionParams
  *  authoritative derivation; this is the CPU copy, needed to reduce a cell index BEFORE it
  *  narrows to a float3 pin.
  *
- *  A MIRROR IS NOT THE PREFERENCE. UniverseDensityCore.ush compiles for C++ behind
- *  HLSLShim.h, so this could in principle call the real thing -- but no universe
- *  translation unit includes the core, and pulling the whole field surface into
- *  UniverseActor.cpp to share four lines of integer arithmetic is the worse trade.
+ *  A MIRROR, BECAUSE NOTHING COMPILES THE CORE AS C++. It could in principle call the real
+ *  thing -- the core is written to a subset a shim can satisfy -- but no translation unit
+ *  in the module does, and pulling the whole field surface into UniverseActor.cpp to share
+ *  four lines of integer arithmetic is the worse trade.
  *
  *  WHAT A DISAGREEMENT COSTS IS BOUNDED, which is why the mirror is tolerable at all: the
  *  core reduces AGAIN with its own period, so a mismatch here cannot seam the field. It can
@@ -994,15 +994,14 @@ struct ULTRALARGESCALE_API FUniverseDensityParams
 	}
 
 	/** THERE IS NO CPU DERIVATION, and adding one would not give this layer a CPU placement
-	 *  path. The galaxy layer has one -- it compiles its core into C++ behind
-	 *  HLSLShim.h and returns a constructed params struct -- and the same construction
-	 *  here would be three lines against this struct.
+	 *  path. Neither layer has one any more: the galaxy's built a params struct that nothing
+	 *  ever sampled, and it went with the shim.
 	 *
-	 *  IT WOULD SAMPLE A DIFFERENT FIELD. The shim stubs every Texture3D fetch to a neutral
-	 *  0.5, so a C++ evaluation reduces to the unwarped analytic web. This field is more
+	 *  IT WOULD SAMPLE A DIFFERENT FIELD. A C++ shim stubs every texture fetch to a neutral,
+	 *  so the evaluation reduces to the unwarped analytic web. This field is more
 	 *  texture-dependent than the galaxy's, not less -- two region fetches and three warp
-	 *  fetches -- and turning them all neutral changes the GEOMETRY, not the shading. See
-	 *  the same warning in HLSLShim.h: the shim path must never place entities.
+	 *  fetches -- and turning them all neutral changes the GEOMETRY, not the shading. A
+	 *  shimmed path must never place entities.
 	 *
 	 *  So placement lands on the compute harness, which samples the same volumes the
 	 *  material does, and FillShaderParameters is how it gets its inputs. A CPU probe for

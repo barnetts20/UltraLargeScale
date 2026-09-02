@@ -198,7 +198,7 @@ protected:
 	/** Pushes the density parameter set onto a material instance.
 	 *
 	 *  The material graph is a PASS-THROUGH: these are the identical raw values
-	 *  FGalaxyProceduralParams::ToDerived hands MakeGalaxyDensityParams, and every
+	 *  FGalaxyProceduralParams::Pack hands FillShaderParameters, and every
 	 *  correlation between them is resolved inside that shared derivation. Scaling or
 	 *  combining anything here instead would desync the render from star placement,
 	 *  which is exactly what the shared field exists to prevent. */

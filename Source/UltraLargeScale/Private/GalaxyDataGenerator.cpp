@@ -1,9 +1,11 @@
 ﻿// GalaxyDataGenerator.cpp
-// Density evaluation and tier generation for the galaxy layer.
+// Tier generation for the galaxy layer.
 //
-// The density field lives in Shaders/GalaxyDensityCore.ush and is compiled by BOTH
-// the shader and this module, so star placement and the rendered gas are one function
-// rather than two implementations kept in agreement by hand.
+// NO FIELD EVALUATION HERE. The density field lives in GalaxyDensityCore.ush and is
+// evaluated only by the GPU -- the raymarch draws it and GalaxyEntityGen.usf places
+// against it, both from the same file, which is what makes the stars and the gas one
+// function rather than two kept in agreement by hand. This module marshals parameters
+// and reads back results.
 
 #include "GalaxyDataGenerator.h"
 
@@ -11,129 +13,15 @@
 #include "ProceduralSpaceActor.h"
 #include "Misc/ScopeLock.h"
 #include <atomic>
-// SHIM FIRST, then the shared field compiled INSIDE the shim's namespace.
-//
-// The namespace is never opened. MSVC's <cmath> declares float overloads of
-// sqrt/abs/exp/pow and friends at GLOBAL scope, which libstdc++ does not; opening the
-// namespace would put both sets in the same scope and every call in the field would
-// be a genuine tie. Compiling the field inside the namespace instead makes ordinary
-// unqualified lookup find HLSLShim::sqrt and stop, never reaching ::sqrt.
-#include "HLSLShim.h"
-
-namespace HLSLShim
-{
-#include "GalaxyDensityCore.ush"
-}
-
-using HLSLShim::float3;
-using HLSLShim::float4;
-using HLSLShim::GalaxyDensityParams;
-using HLSLShim::MakeGalaxyDensityParams;
 
 #pragma region Lifetime
 
-// Out of line so GalaxyDensityParams is complete where TUniquePtr destroys it.
+// Out of line so the header need not be complete for the compiler-generated bodies.
 GalaxyDataGenerator::GalaxyDataGenerator() = default;
 GalaxyDataGenerator::GalaxyDataGenerator(FGalaxyParams InParams) : Params(MoveTemp(InParams)) {}
 GalaxyDataGenerator::~GalaxyDataGenerator() = default;
 GalaxyDataGenerator::GalaxyDataGenerator(GalaxyDataGenerator&&) noexcept = default;
 GalaxyDataGenerator& GalaxyDataGenerator::operator=(GalaxyDataGenerator&&) noexcept = default;
-
-#pragma endregion
-
-#pragma region Parameter Derivation
-
-namespace
-{
-	// THE ONLY CONVERSION BETWEEN THE TWO VECTOR WORLDS, and it lives here because this is
-	// the one translation unit where both exist. FGalaxyDensityArgs is engine types so the
-	// header stays free of the shim; MakeGalaxyDensityParams takes the shim's, so the
-	// crossing happens once, componentwise, rather than at thirty call sites.
-	//
-	// COMPONENTWISE, NOT A REINTERPRET. The two layouts happen to agree today and a cast
-	// would compile; it would also silently reorder the moment either type gained a member
-	// or changed alignment, and the symptom would be a galaxy whose every parameter is one
-	// slot out.
-	HLSLShim::float4 ToShim(const FVector4f& InV)
-	{
-		return HLSLShim::float4(InV.X, InV.Y, InV.Z, InV.W);
-	}
-
-	HLSLShim::float3 ToShim(const FVector3f& InV)
-	{
-		return HLSLShim::float3(InV.X, InV.Y, InV.Z);
-	}
-}
-
-HLSLShim::GalaxyDensityParams FGalaxyProceduralParams::ToDerived() const
-{
-	// PURE PASS-THROUGH FROM Pack(). Every correlation -- arm width from the disc scale
-	// height, bulge and void radii from the disc radius, arm growth from the disc flare --
-	// is resolved inside MakeGalaxyDensityParams, which the material also calls. That is
-	// what lets the authored struct and the material's pin set be the same list of raw
-	// values, so neither side can drift from the other.
-	//
-	// THE ARGUMENT ORDER IS THE DERIVATION'S. MakeGalaxyDensityParams is called
-	// positionally and the material's Custom node calls it positionally too, so a parameter
-	// is only ever APPENDED -- inserting one shifts every argument after it, and the
-	// material fails at shader compile rather than at build.
-	const FGalaxyDensityArgs A = Pack();
-
-	return MakeGalaxyDensityParams(
-		ToShim(A.LateralScale),
-		ToShim(A.VerticalScale),
-		ToShim(A.LayerDensity),
-		ToShim(A.NoiseAmount),
-		ToShim(A.WarpAmount),
-		ToShim(A.ArmAsym),
-		ToShim(A.SpiralTwist),
-		ToShim(A.CentralVoid),
-		ToShim(A.NoiseScale),
-		ToShim(A.WarpScale),
-		ToShim(A.NoiseChannelWeights),
-		ToShim(A.NoiseOffset),
-		A.BoundsFadeStart,
-		A.DiscScaleLengthRatio,
-		A.DiscVerticalFalloff,
-		A.DiscFlare,
-		A.DiscWarpAmplitude,
-		A.DiscWarpPhase,
-		A.DiscWarpTwist,
-		A.DiscLopsidedAmount,
-		A.DiscLopsidedPhase,
-		A.ArmCount,
-		A.ArmAsymSeed,
-		A.ArmProfileExponent,
-		A.ArmRadialGrowth,
-		A.ArmHostFalloff,
-		A.BulgeConcentration,
-		A.BackgroundConcentration,
-		// THE SHIM'S TEXTURE FETCHES RETURN A NEUTRAL 0.5, so every noise term is zero here
-		// whatever this is set to and the C++ field reduces to the analytic one. Kept at the
-		// compute path's value rather than describing a mode nothing uses.
-		A.NoiseEnable,
-		ToShim(A.FieldOrientation));
-}
-
-#pragma endregion
-
-#pragma region Density Sampling
-
-float GalaxyDataGenerator::SampleDensity(const FVector& InNormPos) const
-{
-	if (!Derived)
-	{
-		return 0.0f;
-	}
-
-	// SampleAnalytic is non-const only because HLSL has no such qualifier; it reads
-	// and returns. TUniquePtr::operator-> hands back a non-const pointee even from a
-	// const method, so this needs no cast, and it stays safe under ParallelFor.
-	return Derived->SampleAnalytic(float3(
-		static_cast<float>(InNormPos.X),
-		static_cast<float>(InNormPos.Y),
-		static_cast<float>(InNormPos.Z)));
-}
 
 #pragma endregion
 
@@ -150,18 +38,12 @@ void GalaxyDataGenerator::Initialize()
 	// are placed at a density solved for the previous one's field. Nothing warns; the only
 	// visible trace is the ABSENCE of the "calibrated tier" line a first-run galaxy logs, and
 	// the counts then miss SlotCapacity by whatever ratio the two fields' masses differ by.
-	//
-	// BEFORE Derived is rebuilt, so a caller racing this cannot find a stale scale
-	// beside a fresh field.
 	if (TierBudgetScaleLock.IsValid())
 	{
 		FScopeLock Lock(TierBudgetScaleLock.Get());
 		TierBudgetScales.Empty();
 	}
 
-	// Derived once. MakeGalaxyDensityParams runs 16 arm hashes, a tan and every
-	// reciprocal; per-candidate it would dominate generation.
-	Derived = MakeUnique<GalaxyDensityParams>(Params.Procedural.ToDerived());
 }
 
 #pragma endregion
@@ -173,8 +55,7 @@ float GalaxyDataGenerator::GetTierBudgetScale(
 	int32 InSeedOffset,
 	bool bInCellsShareSlot) const
 {
-	// Null only on a moved-from generator. Same contract as SampleDensity against a null
-	// Derived: report nothing rather than dereference.
+	// Null only on a moved-from generator: report nothing rather than dereference.
 	if (!TierBudgetScaleLock.IsValid())
 	{
 		return 0.0f;

@@ -3,12 +3,11 @@
 // warp, regional variance and both region fetches included.
 //
 // THIS LAYER HAS NO CPU ALTERNATIVE, and that is a stronger statement than it was for the
-// galaxy. GalaxyHLSLShim.h stubs Texture3D fetches to a neutral 0.5, so a C++ evaluation
-// of this field reduces to the unwarped analytic web -- and this field is more texture
-// dependent than the galaxy's, not less: two region fetches and three warp fetches, and
-// turning them all neutral changes the GEOMETRY rather than the shading. Placing entities
-// against a texture-free approximation of a textured field is a silent failure, which is
-// why the shim already says in bold that it must never place entities.
+// galaxy. A C++ evaluation would have to stub every texture fetch to a neutral, reducing
+// this field to the unwarped analytic web -- and it is more texture dependent than the
+// galaxy's, not less: two region fetches and three warp fetches, and turning them all
+// neutral changes the GEOMETRY rather than the shading. Placing entities against a
+// texture-free approximation of a textured field is a silent failure.
 //
 // ONE GROUP PER CELL, not one thread per candidate.
 //

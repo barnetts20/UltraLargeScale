@@ -1,25 +1,21 @@
 #pragma once
 
 // UniverseDensityCore.ush
-// Cosmic-web density field. TAKES RESOURCES: FOUR volume textures, threaded down from
-// the caller and never bound here. Two are UNORM multinoise, read by the region-axis
-// fetches; two are signed vector fields, read by the warp octaves. The full mapping is
-// in the fetch table below.
+// Cosmic-web density field. TAKES RESOURCES: four volume textures, threaded down from the
+// caller and never bound here -- two UNORM multinoise read by the region fetches, two
+// signed vector fields read by the warp octaves. The fetch table is below.
 //
-// This file is compiled by C++ behind HLSLShim.h exactly as the galaxy core is.
-// The shim stubs BOTH texture types to their own neutral -- 0.5 for the UNORM variance
-// volumes, which is the midpoint of every authored range, and 0 for the signed warp
-// volumes, which is zero displacement -- and the C++ field therefore reduces to the
-// UNWARPED analytic web while the shader gets the warped one. Getting either neutral
-// wrong is silent: a signed asset stubbed at 0.5 shears the whole C++ field instead of
-// leaving it alone. That divergence is deliberate and bounded: it is a displacement of
-// at most WarpAmount cells, it affects nothing that is currently consuming the CPU
-// field, and entity generation for this layer lands on the compute harness the galaxy
-// layer already uses, which samples the same four textures the shader does.
-// The ray march lives in UniverseDensityRaymarch.ush, which includes this file, and is the
-// ray march and nothing else -- warp, regional variance, the analytic web and the density
-// composition all live here, in SampleAtPosition. Entity generation lives in
-// UniverseEntityGen.usf, which includes UniversePlacement.ush, which includes this file.
+// GPU ONLY. Nothing evaluates this field on the CPU: the raymarch draws it and
+// UniverseEntityGen.usf places against it, both from this file, which is what makes the
+// entities and the render one function rather than two kept in agreement by hand.
+//
+// THE PARITY RULES BELOW STILL HOLD, and they are a standard the file keeps rather than
+// one anything enforces. A C++ shim compiling this core is cheap to re-attach while they
+// do; note that such a path would stub every texture fetch to a neutral and so evaluate
+// the UNWARPED analytic web, which is a different field and must never place entities.
+//
+// THE FILE SET. UniverseDensityRaymarch.ush includes this and is the march alone.
+// UniverseEntityGen.usf includes UniversePlacement.ush, which includes this.
 //
 // PARITY RULES -- both compilers see this file:
 //   - Suffix every float literal (0.5f, not 0.5). C++ types an unsuffixed literal as
@@ -28,135 +24,54 @@
 //   - No swizzles beyond .x/.y/.z/.w, no integer vectors, no HLSL-only intrinsics
 //     outside the shim.
 //
-// STRUCTURE: the web is the SKELETON of a cellular decomposition. Space is divided
-// into cells, each holding one hashed node, and each node is the centre of a VOID.
-// The features are the elements of the skeleton between the nodes, identified by how
-// many nodes are simultaneously nearest:
+// STRUCTURE. The web is the SKELETON of a cellular decomposition: space divides into
+// cells, each holding one hashed node, and each node is the centre of a void. A feature
+// is identified by how many nodes are simultaneously nearest:
 //
 //   1 node closest        void       -- the interior of a cell
 //   2 nodes equidistant   wall       -- a face, the sheet between two voids
 //   3 nodes equidistant   filament   -- an edge, where three sheets meet
 //   4 nodes equidistant   cluster    -- a vertex, where four filaments converge
 //
-// NOTHING IS RANKED ANY MORE. "How many nodes are simultaneously nearest" used to be
-// answered by sorting the neighbourhood into F1/F2/F3 and reading the differences:
-// F2-F1 small meant two nodes tied, F3-F1 small meant three did. It is now answered
-// directly, and continuously, by an EFFECTIVE PARTICIPANT COUNT. Give every candidate
-// a weight that falls off with distance, normalize the weights to sum to one, and
-// take the inverse participation ratio:
+// THE MEASURE IS AN EFFECTIVE PARTICIPANT COUNT. Every candidate carries a weight that
+// falls off with distance; normalizing those and taking the inverse participation ratio
+// gives
 //
 //     p_i = w_i / sum_j w_j        N = 1 / sum_i p_i^2 = (sum w)^2 / (sum w^2)
 //
-// N is 1 where one node dominates, 2 where two tie, 3 where three do, 4 at a vertex.
-// It is exactly what the rank differences were measuring, without the sort. Two
-// running sums replace a three-deep insertion chain, both sums are reassociable so the
-// unrolled 27 has no serial dependency left at all, and the value is smooth in
-// position rather than merely continuous.
+// which reads 1 where one node dominates, 2 where two tie, k where k do. Two running
+// sums, both reassociable, so the unrolled 27 carries no serial dependency. N is smooth
+// in position; the one exposure is truncation at the window edge, bounded in numbers at
+// LatticeWeightSums.
 //
-// WHY THIS AND NOT THE SORT. Sorted order statistics of a FIXED set are already
-// continuous -- min and max of continuous functions are continuous, and a rank swap
-// inside the window costs a gradient kink, not a jump. The jumps came from the SET
-// changing: crossing a cell plane retires one 3x3x3 slab and admits another, and a
-// departing node that was inside the top three steps F2 or F3 discontinuously. Soft
-// weights fix that to exactly the degree that a candidate at the window edge carries
-// negligible weight, which is a checkable condition rather than a hope -- see the
-// truncation bound at LatticeWeightSums, which is where the remaining exposure
-// lives and is stated in numbers.
+// CLUSTERS ARE ONE LINE off the same sums -- saturate(N - 3) in DensityFromWeb. There is
+// no cluster stage at present; the measure simply has it available.
 //
-// CLUSTERS ARE STILL NOT ANALYTIC, but they could be again for free. A fourth rank,
-// F4, used to be tracked so F4-F1 could measure cluster-ness; that came out, and the
-// noise-mask stage that replaced it has since come out too. The participation count
-// hands the geometric version back at no cost -- the vertex case is just N ~ 4, one
-// more saturate off the same two sums -- so whatever replaces the mask has that
-// available for free, and it is one line in DensityFromWeb rather than a stage.
-//
-// ORGANICS: an unweighted Euclidean diagram has planar faces, straight edges and one
-// void size, which is most of why a cellular field reads as manufactured. Three
-// corrections, none of which cost a hash in the 27-cell loop:
+// ORGANICS. An unweighted Euclidean diagram has planar faces, straight edges and one void
+// size, which is most of why a cellular field reads as manufactured. Three corrections,
+// none of which costs a hash in the 27-cell loop:
 //   - a per-node power-diagram offset, so voids differ in size
-//   - two fetches from the packed noise volume supplying a two-octave domain warp
-//   - one fetch from the packed noise volume supplying the regional variance
+//   - two fetches driving a two-octave domain warp, which curves the bisectors
+//   - two fetches driving the regional variance
 //
-// THE PER-NODE ANISOTROPIC METRIC IS GONE. It measured distance in each node's own
-// stretched space so bisectors came out as quadrics rather than planes, and the warp
-// now does that job better: it curves the bisectors without touching the metric, so
-// it costs nothing in the ranking loop and nothing in the search guarantee. What the
-// metric cost was 22% of the ranking loop, an inflation of every in-span distance
-// that pushed true neighbours out of the searched window, and a stretch magnitude of
-// |s|^2 that was largest for nodes near a cell CORNER -- a modulation locked to the
-// cell grid, in a field whose visible failure was cell-grid-aligned.
-//
-// COORDINATES: sampled as an integer cell plus a fractional offset, not a single
-// float3. That is not premature -- virtual traversal reaches magnitudes near 1e11,
-// where float32 has no fractional precision left and a cell-relative formulation is
-// the only thing that survives. SampleAtPosition does the decomposition for now;
-// when traversal lands, the caller supplies cell and frac directly and that helper
-// goes away rather than being unpicked.
-//
-// It now decomposes TWICE, once per lattice, and the second split is where the
-// formulation earns itself: re-expressing a 1e11 cell count in a coarser lattice's
-// units is exact under integer division and catastrophically inexact as a float
-// multiply. See TWO LATTICES, ONE BLEND.
+// COORDINATES: an integer cell plus a fractional offset, never a single float3. Virtual
+// traversal reaches 1e11, where float32 has no fractional precision left. The split
+// happens TWICE, once per lattice, and the second is where the formulation earns itself:
+// re-expressing a 1e11 cell count in a coarser lattice's units is exact under integer
+// division and catastrophically inexact as a float multiply. See TWO LATTICES, ONE BLEND.
 
-// ==========================================================================
-// COST PROBE -- temporary, for bisecting an instruction count
-// ==========================================================================
-// A ladder that removes one stage per level AT COMPILE TIME. Read the material's
-// instruction count at each level; the difference between two rungs is what that
-// stage actually costs. Leave it at 0 in anything shipped.
+// THE SIGNED TEXTURE TYPE. The two warp octaves read curl/gradient vector assets already
+// in [-1,1]; the two variance fetches read UNORM multinoise in [0,1]. The shader compiler
+// has one resource type for both -- the difference is entirely in the decode, written out
+// at each fetch site -- so what this alias buys is that the four resources are TOLD APART
+// AT THE SIGNATURE. SampleCell and SampleAtPosition each take four texture/sampler pairs,
+// and the type is the only thing in that list saying which two are signed.
 //
-//   0  everything
-//   1  no regional variance -- both FETCHES and both RESOLVE chains
-//   2  also no domain warp
-//   3  also no neighbourhood search -- one cell per lattice instead of twenty-seven
-//
-// RENUMBERED when the cluster/gas stage came out; level 1 used to remove its detail
-// fetch and there is no such fetch any more. A new stage that adds one should take
-// level 1 back and push the rest down, since the outermost thing is the cheapest to
-// bisect away first.
-//
-// RUNG 1 FORCES THE ENABLES OFF rather than neutralising the fetch, and the difference
-// is the whole point of the rung. Returning a constant 0.5 from the fetch removed two
-// texture reads and left all nine VarianceT/VarianceRemap resolves standing -- nine
-// pow() pairs -- so the reported gap between rungs 0 and 1 was the fetches alone under
-// a label that named the whole stage. It also moved the FIELD: a neutral CHANNEL of 0.5
-// still goes through each consumer's bias, and 0.5^bias is not the midpoint of a range
-// unless the bias is 1, so the probed field and the runtime-disabled field disagreed
-// wherever a bias was authored. Clearing bRegionEnableA/B in the derivation removes the
-// fetches, the resolves and the divergence in one place. See the override at the end of
-// MakeUniverseDensityParams.
-//
-// WHY A COMPILE-TIME LADDER AND NOT THE PARAMETERS. bWarpEnable, bRegionEnableA,
-// bRegionEnableB, bLatticeLarge and bShape are RUNTIME branches, so both sides of each are
-// compiled and both are counted. Setting WarpAmount to zero in a material instance
-// removes the work at runtime and changes the reported instruction count by nothing
-// at all. The number describes the union of every feature path in the file, whatever
-// the pins are set to, which is why it can only be bisected with defines.
-//
-// Expect the last step to be the largest single drop by a wide margin. The
-// neighbourhood search is a 3x3x3 loop with compile-time bounds, so it is FULLY
-// UNROLLED: twenty-seven copies of the hash, the squared distance and the two weight
-// exponentials, on the order of a thousand instructions and the floor under everything
-// else here.
-//
-// Note that level 3 does not merely make the field meaningless, it makes it EMPTY: a
-// single candidate gives (sum w)^2 / (sum w^2) = 1 identically, so both feature
-// measures read as pure void and the density collapses to the floor. That is fine for
-// an instruction count and useless for anything else.
-#ifndef UNIVERSE_COST_PROBE
-#define UNIVERSE_COST_PROBE 0
-#endif
-
-// THE SIGNED TEXTURE TYPE. The two warp octaves read curl/gradient vector assets whose
-// values are already in [-1,1]; the two variance fetches read UNORM multinoise in [0,1].
-// The shader compiler has one resource type for both -- the difference is entirely in the
-// decode, which is written out at each fetch site -- so this alias exists solely to let
-// the shared file NAME the convention. The C++ shim defines Texture3DSigned as a real
-// distinct type with its own neutral, which is what makes a fetch site given the wrong
-// convention a compile error there rather than a silent shear here.
-#ifndef ULS_HLSL_SHIM
+// AN ALIAS, NOT A CHECK. It costs nothing and it cannot catch a swap -- both sides resolve
+// to Texture3D. A C++ shim could make it a distinct type and turn a wrongly-decoded fetch
+// into a compile error, which is what the parity rules above keep the door open for; there
+// is no such shim in the build today.
 #define Texture3DSigned Texture3D
-#endif
 
 #define UNIVERSE_POW_EPSILON 1e-6f
 
@@ -309,8 +224,8 @@
 // is not, and for the measurement that established it.
 //
 // Neither saving shows up in a material's reported instruction count, which counts the
-// union of every path. See the COST PROBE note above for why that number cannot be read
-// as cost here.
+// union of every path -- both sides of every runtime branch are compiled and counted, so
+// an instruction count cannot be read as the cost of any one configuration.
 #define UNIVERSE_LATTICE_SKIP 40.0f
 
 // ==========================================================================
@@ -987,7 +902,7 @@ struct UniverseDensityParams
 
         // COMPONENTS, NOT A SWIZZLE. This read c.xyz, which broke this file's own parity
         // rule -- no swizzles beyond .x/.y/.z/.w -- and was one of the reasons the universe
-        // core had never actually compiled under HLSLShim.h. Identical in HLSL,
+        // core had never actually compiled as C++. Identical in HLSL,
         // buildable in C++.
         return float3(c.x, c.y, c.z);
     }
@@ -1161,11 +1076,6 @@ struct UniverseDensityParams
                       int InCellX, int InCellY, int InCellZ, float3 InFrac,
                       float InScale, float3 InPhase)
     {
-        // NO COST-PROBE SHORT-CIRCUIT HERE ANY MORE. Rung 1 used to return a constant 0.5
-        // from this function, which left every VarianceT/VarianceRemap resolve in the
-        // instruction count and pushed a neutral CHANNEL through each consumer's bias
-        // instead of reproducing the runtime-disabled midpoint. The rung now clears
-        // bRegionEnableA/B in the derivation, so this function is simply not called.
         // Same masked cell-relative construction as the warp, and exact for the same
         // reason. Both region scales are quantized so the 4096-cell wrap closes
         // seamlessly. Scale and phase are arguments rather than struct reads because
@@ -1349,25 +1259,15 @@ struct UniverseDensityParams
             wrapZ[wi] = StepCell(InCellZ, wi - 1, InPeriod);
         }
 
-#if UNIVERSE_COST_PROBE >= 3
-        // Probe level 3: one cell, not twenty-seven. The field is not merely
-        // meaningless here, it is EMPTY -- a single candidate per lattice gives N = 1
-        // identically once the two sums are combined, and both features read as void.
-        // The point is the instruction count with the unrolled search removed.
-        for (int oz = 0; oz <= 0; oz++)
-        {
-            for (int oy = 0; oy <= 0; oy++)
-            {
-                for (int ox = 0; ox <= 0; ox++)
-                {
-#else
+        // LITERAL BOUNDS, so the walk unrolls fully. A radius carried in a variable
+        // compiles to a real loop and puts back the serial dependency the two reassociable
+        // sums exist to remove.
         for (int oz = -1; oz <= 1; oz++)
         {
             for (int oy = -1; oy <= 1; oy++)
             {
                 for (int ox = -1; ox <= 1; ox++)
                 {
-#endif
                     float4 h = CellHash(wrapX[ox + 1], wrapY[oy + 1], wrapZ[oz + 1]);
 
                     // Node position relative to the sample, in this lattice's cell
@@ -1605,11 +1505,11 @@ struct UniverseDensityParams
         // the two authored lattices is the predictable "what does this look like with
         // variance off," where a bias-shaped 0.5 would be a number nobody authored.
         //
-        // IT IS ONLY REACHED UNDER THE COST PROBE. bRegionEnableA carries `ratio > 1.5`
-        // precisely so a second lattice pays for fetch A on its own, and tLattice below is
-        // forced to zero when there is no second lattice -- so at runtime this value is
-        // either overwritten or multiplied out. Rung 1 clears the enables with a second
-        // lattice still live, which is the one configuration that reads it.
+        // NOTHING READS IT. bRegionEnableA carries `ratio > 1.5` precisely so a second
+        // lattice pays for fetch A on its own, and tLattice below is forced to zero when
+        // there is no second lattice -- so this value is either overwritten or multiplied
+        // out in every configuration. It stays because it is the variable's definition, and
+        // because the reasoning above is what a future consumer would need.
         float mLatticeBlend = 0.5f;
 
 
@@ -1704,7 +1604,6 @@ struct UniverseDensityParams
                                        WarpAmountSmallRange);
         }
 
-#if UNIVERSE_COST_PROBE < 2
         if (bWarpEnable > 0.5f)
         {
             // CELL-RELATIVE base coordinate. The integer cell is MASKED and only then
@@ -1918,7 +1817,6 @@ struct UniverseDensityParams
             cz += (int) iz;
             frac = float3(wx - ix, wy - iy, wz - iz);
         }
-#endif
 
         // ==================================================================
         // THE DIAGRAM
@@ -2208,7 +2106,7 @@ struct UniverseDensityParams
 // cell, far below any tuning granularity that matters.
 //
 // floor(x + 0.5) rather than round(): HLSL rounds halves away from zero and the C++
-// shim's round() defers to nearbyint, which rounds halves to even. A scale landing
+// C++ round() defers to nearbyint, which rounds halves to even. A scale landing
 // exactly on a half would then quantize differently on the two sides, which is exactly
 // the class of silent divergence the shared file exists to prevent.
 //
@@ -2587,18 +2485,6 @@ UniverseDensityParams MakeUniverseDensityParams(
                      || (InVoidFloorRange.x != InVoidFloorRange.y)
                      || (InWarpAmountSmallRange.x != InWarpAmountSmallRange.y))
                      ? 1.0f : 0.0f;
-
-#if UNIVERSE_COST_PROBE >= 1
-    // RUNG 1 OF THE COST PROBE, and it belongs here rather than at the fetch. Clearing the
-    // two enables removes the fetches, the branches and all nine VarianceT/VarianceRemap
-    // resolves -- nine pow() pairs -- so the gap between rungs 0 and 1 is the regional
-    // variance stage rather than its two texture reads. It also makes the probed field
-    // identical to the runtime-disabled one, which a neutral 0.5 returned from the fetch
-    // was not: that value still passed through each consumer's bias, and 0.5^bias is the
-    // midpoint of a range only when the bias is 1.
-    P.bRegionEnableA = 0.0f;
-    P.bRegionEnableB = 0.0f;
-#endif
 
     // See UNIVERSE_MIN_STEP_FRACTION. min of the two ends because a range may be authored
     // in reverse.
