@@ -364,6 +364,13 @@ float AUniverseActor::GetEffectiveCellSizeLarge() const
 	return FMath::Max(Authored, 0.0f);
 }
 
+int32 AUniverseActor::GetFieldCellPeriod() const
+{
+	return UniverseCellWrap::DerivePeriod(UniverseCellWrap::DeriveRatio(
+		static_cast<double>(GetEffectiveCellSizeSmall()),
+		static_cast<double>(GetEffectiveCellSizeLarge())));
+}
+
 double AUniverseActor::GetVolumetricProxyExtent() const
 {
 	// (2R + 1) cells across, half-extent per cell, so this is the half-span of the
@@ -398,8 +405,7 @@ FUniverseFieldOffset AUniverseActor::ComputeFieldOffset() const
 		static_cast<double>(GetEffectiveCellSizeSmall()), 1e-6);
 	const double InvCell = 1.0 / CellSmall;
 
-	FUniverseFieldOffset Offset =
-		FUniverseFieldOffset::FromCellPosition((VirtualTraversal / Ext) * InvCell);
+	const FVector CellPos = (VirtualTraversal / Ext) * InvCell;
 
 	// REDUCED BEFORE IT NARROWS, and that ordering is the whole point. The split above runs
 	// in double and is exact at any traversal; the pin it is headed for is a float3 and stops
@@ -407,24 +413,18 @@ FUniverseFieldOffset AUniverseActor::ComputeFieldOffset() const
 	// inside the exact range, so the material receives the number this function computed
 	// rather than the nearest float to it.
 	//
-	// FRAC IS UNTOUCHED. It is in [0,1) by construction and carries no magnitude, so it has
-	// nothing to lose -- wrapping it would be wrapping a value that never leaves one cell.
+	// FRAC IS UNTOUCHED, and the split runs before the reduction so it keeps every bit the
+	// double position had. Only the integer part is reduced, and it is reduced IN DOUBLE
+	// before it narrows -- see FromCellPositionWrapped. Splitting first and wrapping the
+	// int32 afterwards was the earlier form and held only to 2.1e9 cells, past which the
+	// cast is undefined and the offset collapses toward zero.
 	//
 	// THE CORE REDUCES AGAIN, with a period it derives itself, and that redundancy is
 	// deliberate: this reduction is about float exactness, the core's is what defines the
 	// field's periodicity. If the two ever disagree -- a stale cell size, a material instance
 	// owning CellSizeRange -- the field still wraps cleanly and only the offset loses
 	// precision. See UniverseCellWrap.
-	const int32 Period = UniverseCellWrap::DerivePeriod(
-		UniverseCellWrap::DeriveRatio(
-			CellSmall, static_cast<double>(GetEffectiveCellSizeLarge())));
-
-	Offset.Cell = FIntVector(
-		UniverseCellWrap::Wrap(Offset.Cell.X, Period),
-		UniverseCellWrap::Wrap(Offset.Cell.Y, Period),
-		UniverseCellWrap::Wrap(Offset.Cell.Z, Period));
-
-	return Offset;
+	return FUniverseFieldOffset::FromCellPositionWrapped(CellPos, GetFieldCellPeriod());
 }
 
 void AUniverseActor::PushFieldOffset(UMaterialInstanceDynamic* InMID) const
@@ -433,11 +433,12 @@ void AUniverseActor::PushFieldOffset(UMaterialInstanceDynamic* InMID) const
 
 	const FUniverseFieldOffset Offset = ComputeFieldOffset();
 
-	// THE CELL COUNT NARROWS HERE, from int32 to a float pin, and the narrowing is the
-	// documented ceiling rather than a bug: exactness is lost above 2^24 cells, and the
-	// core then casts back through (int), which bounds it again at int32. Both limits sit
-	// under what the cell/frac design is built to survive -- see FUniverseFieldOffset.
-	// This is the line that becomes a high/low pair per axis when traversal gets there.
+	// THE CELL COUNT NARROWS HERE, from int32 to a float pin, and it is EXACT because the
+	// offset arrives reduced below the field period, which sits under 2^24. This used to be
+	// the documented ceiling of the whole coordinate design; the wrap retired it. What is
+	// left is double precision in VirtualTraversal itself, which decays gracefully rather
+	// than wrapping. This line does NOT need to become a high/low pair per axis -- that was
+	// the alternative to the wrap, and the wrap is what shipped.
 	InMID->SetVectorParameterValue(TEXT("OffsetCell"), FLinearColor(
 		static_cast<float>(Offset.Cell.X),
 		static_cast<float>(Offset.Cell.Y),

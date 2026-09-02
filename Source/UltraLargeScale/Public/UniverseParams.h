@@ -510,8 +510,11 @@ struct ULTRALARGESCALE_API FUniverseRegionParams
  *  UniverseDensityCore.ush for the two divisors the period has to carry, and for why this
  *  is not the situation ScaleStructure's coprime scales exist to avoid.
  *
- *  THE REDUCTION IS THE CALLER'S. FromCellPosition does the split and nothing else; the
- *  wrap belongs where the period is known, which is AUniverseActor::ComputeFieldOffset.
+ *  THE REDUCTION IS THE CALLER'S, because the period is not known here. Callers that have
+ *  one use FromCellPositionWrapped, which reduces in double BEFORE narrowing to int32 --
+ *  splitting first and wrapping the int afterwards works only until the cell position
+ *  passes 2.1e9, where the cast is undefined and the offset collapses toward zero.
+ *
  *  An unreduced offset arriving here is not an error -- the core reduces again with its
  *  own period -- it just wastes the exactness the reduction exists to preserve. */
  /** THE FIELD PERIOD, MIRRORED. The authoritative derivation is in
@@ -569,6 +572,30 @@ namespace UniverseCellWrap
 		const int32 R = InValue % InPeriod;
 		return (R < 0) ? (R + InPeriod) : R;
 	}
+
+	/** THE PRESENTATION HALF OF Wrap, and the ONLY thing it is for.
+	 *
+	 *  Every consumer of a cell index -- the hash, StepCell's bounds check, the & 4095
+	 *  texture wrap, the gen cells -- wants the unsigned [0, period) form Wrap produces, and
+	 *  none of them may be handed this one. What that form costs is legibility: the index is
+	 *  reduced with a FLOORED modulo, so one cell left of the origin reports period-1. That
+	 *  is not a rollover, it is the torus closure -- cell -1 and cell period-1 are the same
+	 *  cell, and that identity is exactly what makes the wrap seamless -- but nobody reads
+	 *  sixteen million as 'minus one', least of all while debugging something else.
+	 *
+	 *  This folds to [-period/2, period/2), which moves the displayed discontinuity half a
+	 *  period away in each direction instead of leaving it at spawn. It lives here rather
+	 *  than in the readout so the two mappings sit together and a second reader cannot
+	 *  invent a third convention.
+	 *
+	 *  DISPLAY ONLY. Feeding this back into anything that hashes gives a different cell.
+	 *  Period must be even for the halves to meet, which the derivation guarantees -- it is
+	 *  a multiple of 4096. */
+	inline int32 ToSigned(int32 InWrapped, int32 InPeriod)
+	{
+		if (InPeriod <= 0) return InWrapped;
+		return (InWrapped >= InPeriod / 2) ? (InWrapped - InPeriod) : InWrapped;
+	}
 }
 
 
@@ -584,6 +611,25 @@ struct ULTRALARGESCALE_API FUniverseFieldOffset
 	/** Fractional remainder per axis, in [0,1). */
 	UPROPERTY(BlueprintReadWrite, Category = "Field Offset")
 	FVector Frac = FVector::ZeroVector;
+
+	/** WHICH REPEAT OF THE FIELD Cell was reduced out of: floor(cellPos / period), per
+	 *  axis. Zero in the period containing the origin, -1 one period negative, and so on.
+	 *
+	 *  NOT MARSHALLED. Pack() ignores it and no pin carries it, so the shader cannot tell
+	 *  one period from another -- which is the definition of the field repeating. It is
+	 *  produced here because FromCellPositionWrapped computes it anyway to do the reduction,
+	 *  and thrown away it would have to be recomputed by anything that wanted it.
+	 *
+	 *  WHAT IT IS FOR TODAY is reading the wrap. Cross the origin on an axis and Cell jumps
+	 *  from 0 to period-1 with nothing saying why; this is the term that says why, and it
+	 *  moves by exactly one when it happens.
+	 *
+	 *  IT IS NOT AUniverseActor::CellCoord. That is the sector lattice ConfigureCell writes,
+	 *  spaced at 2 * Extent -- about 730 Mly -- and it exists for tiling universe actors.
+	 *  This is spaced at the field period, about five million times further apart. Two
+	 *  lattices, unrelated scales; do not let the word "sector" merge them. */
+	UPROPERTY(BlueprintReadWrite, Category = "Field Offset")
+	FIntVector Period = FIntVector::ZeroValue;
 
 	/** Splits a small-cell position into the exact cell/frac pair the core wants.
 	 *
@@ -602,6 +648,63 @@ struct ULTRALARGESCALE_API FUniverseFieldOffset
 			static_cast<int32>(Floored.X),
 			static_cast<int32>(Floored.Y),
 			static_cast<int32>(Floored.Z));
+		Out.Frac = InCellPos - Floored;
+		return Out;
+	}
+
+	/** The split and the wrap in one, with the reduction taken IN DOUBLE before the cast
+	 *  to int32 -- which is the only ordering that survives an arbitrary traversal.
+	 *
+	 *  FromCellPosition alone casts a floored double straight to int32, so a cell position
+	 *  past 2.1e9 is undefined behaviour. In practice it wraps, the reduction that follows
+	 *  then operates on a number that no longer means anything, and the field offset
+	 *  collapses toward zero -- which is reachable in seconds at a high enough compression
+	 *  factor and looks exactly like the field snapping back to the origin.
+	 *
+	 *  FLOOR FIRST, REDUCE SECOND, and that order matters too. Flooring is exact in double
+	 *  at any magnitude, so Frac comes out with the full precision the position had;
+	 *  reducing first would take the cancellation on the fractional part as well and lose
+	 *  it for nothing. Only the integer part is reduced, and only then narrowed.
+	 *
+	 *  What is left as a ceiling is double precision in the position itself, which decays
+	 *  gracefully rather than wrapping: Frac keeps ulp(cellPos) of resolution, and that
+	 *  stays far below one cell until well past any bound this universe is likely to have.
+	 *
+	 *  InPeriod <= 0 means 'no wrap' and falls through to the plain split, overflow and
+	 *  all -- a caller that has no period has no business pretending to one. */
+	static FUniverseFieldOffset FromCellPositionWrapped(const FVector& InCellPos, int32 InPeriod)
+	{
+		if (InPeriod <= 0)
+		{
+			return FromCellPosition(InCellPos);
+		}
+
+		const double Period = static_cast<double>(InPeriod);
+
+		const FVector Floored(
+			FMath::Floor(InCellPos.X),
+			FMath::Floor(InCellPos.Y),
+			FMath::Floor(InCellPos.Z));
+
+		// Floored modulo, matching WrapCell in the core and Wrap in UniverseCellWrap: the
+		// result is in [0, Period) for negative inputs too, so a cell left of the origin
+		// hashes as the counterpart it should rather than as its own negative mirror.
+		// THE QUOTIENT IS KEPT, not discarded. It is the repeat index, it costs nothing here,
+		// and recovering it later would mean redoing this division against a cell index that
+		// no longer carries the magnitude it was taken from.
+		auto Split = [Period](double InValue, int32& OutRepeat) -> int32
+			{
+				const double Q = FMath::Floor(InValue / Period);
+				const double R = InValue - Q * Period;
+				OutRepeat = static_cast<int32>(FMath::Clamp(Q, -2147483648.0, 2147483647.0));
+				return static_cast<int32>(FMath::Clamp(R, 0.0, Period - 1.0));
+			};
+
+		FUniverseFieldOffset Out;
+		int32 Rx = 0, Ry = 0, Rz = 0;
+		Out.Cell = FIntVector(
+			Split(Floored.X, Rx), Split(Floored.Y, Ry), Split(Floored.Z, Rz));
+		Out.Period = FIntVector(Rx, Ry, Rz);
 		Out.Frac = InCellPos - Floored;
 		return Out;
 	}

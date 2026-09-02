@@ -333,9 +333,25 @@ protected:
 	 *  owns CellSizeRange, and a lattice ratio built from one live component and one authored
 	 *  component is a ratio neither side ever has.
 	 *
-	 *  Only ComputeFieldOffset needs it, and only to derive the field period it reduces the
-	 *  offset by. Nothing renders from it. */
+	 *  Only GetFieldCellPeriod needs it, and only to derive the period the offset is reduced
+	 *  by. Nothing renders from it. */
 	float GetEffectiveCellSizeLarge() const;
+
+	/** THE FIELD'S REPEAT PERIOD IN SMALL CELLS, derived from the effective cell sizes
+	 *  exactly as MakeUniverseDensityParams derives it.
+	 *
+	 *  PUBLIC, in the same narrow island ComputeFieldOffset uses, because a reader needs it
+	 *  to INTERPRET that offset: the cell index comes back in [0, period), so a position one
+	 *  cell left of the origin reports period-1 rather than -1. That is correct -- the two
+	 *  ARE the same cell -- but without the period there is no way to fold it back to signed
+	 *  for display. See UniverseCellWrap::ToSigned.
+	 *
+	 *  The two cell-size accessors it derives from stay protected: they are the ingredients,
+	 *  and exposing them is what would let a caller rebuild the period instead of asking for
+	 *  it -- the same rule as GetVolumetricProxyExtent and the field offset. */
+public:
+	int32 GetFieldCellPeriod() const;
+protected:
 
 	/** HALF-EXTENT OF THE PROXY, and the single number both the box scale and the offset
 	 *  normalization are derived from -- they are the same frame, and computing them from

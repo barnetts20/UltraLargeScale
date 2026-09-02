@@ -25,13 +25,13 @@ namespace
 	void SplitCellCentre(const FVector& InCentreCaller, double InInvFieldCell, int32 InPeriod,
 		FIntVector3& OutCell, FVector3f& OutFrac)
 	{
-		const FUniverseFieldOffset Split =
-			FUniverseFieldOffset::FromCellPosition(InCentreCaller * InInvFieldCell);
+		// Wrapped BEFORE the narrow to int32, not after: a cell position past 2.1e9 makes the
+		// plain split's cast undefined, and reducing the result of that is reducing a number
+		// that already means nothing. Same call the material offset uses.
+		const FUniverseFieldOffset Split = FUniverseFieldOffset::FromCellPositionWrapped(
+			InCentreCaller * InInvFieldCell, InPeriod);
 
-		OutCell = FIntVector3(
-			UniverseCellWrap::Wrap(Split.Cell.X, InPeriod),
-			UniverseCellWrap::Wrap(Split.Cell.Y, InPeriod),
-			UniverseCellWrap::Wrap(Split.Cell.Z, InPeriod));
+		OutCell = FIntVector3(Split.Cell.X, Split.Cell.Y, Split.Cell.Z);
 
 		OutFrac = FVector3f(
 			static_cast<float>(Split.Frac.X),

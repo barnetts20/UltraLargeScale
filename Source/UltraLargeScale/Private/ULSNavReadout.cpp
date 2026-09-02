@@ -130,21 +130,10 @@ FULSNavSample ULSSampleUniverseNav(const AUniverseActor& InUniverse)
 
 	Out.Coord.RealCm = (SectorOffsetUnits + InUniverse.VirtualTraversal) * UnitScaleCm;
 
-	// DISPLAY ONLY. Truncation rather than floor, so the derived index is symmetric about
-	// the origin the way the lattice would not be -- this is a "how many sector spans out"
-	// figure, not a lattice coordinate, and dressing it up as one is exactly what the note
-	// on SectorDerived is warning against.
-	if (SectorSpan > 0.0)
-	{
-		Out.Coord.SectorDerived = FIntVector(
-			static_cast<int32>(FMath::Clamp(FMath::TruncToDouble(InUniverse.VirtualTraversal.X / SectorSpan), -2.1e9, 2.1e9)),
-			static_cast<int32>(FMath::Clamp(FMath::TruncToDouble(InUniverse.VirtualTraversal.Y / SectorSpan), -2.1e9, 2.1e9)),
-			static_cast<int32>(FMath::Clamp(FMath::TruncToDouble(InUniverse.VirtualTraversal.Z / SectorSpan), -2.1e9, 2.1e9)));
-	}
-
 	// The universe's own derivation, not a copy of it. See the note on FULSNavSample.
 	Out.FieldOffset = InUniverse.ComputeFieldOffset();
 
+	Out.FieldCellPeriod = InUniverse.GetFieldCellPeriod();
 	Out.SpeedScale = InUniverse.GetEffectiveSpeedScale();
 	Out.VirtualTraversal = InUniverse.VirtualTraversal;
 	Out.FrameOfReferenceWorld = InUniverse.CurrentFrameOfReferenceLocation;

@@ -30,30 +30,27 @@ class AUniverseActor;
  *  renumbers itself mid-flight, and the symptom is that two visits to the same structure
  *  report different positions with nothing else looking wrong.
  *
- *  SECTOR IS READ, NOT DERIVED, AND IS THEREFORE ALWAYS (0,0,0) TODAY. ConfigureCell is
- *  the only writer and nothing calls it with a non-zero coordinate: the universe is
- *  level-placed, there is one of it, and nothing hands the player between sectors.
- *  VirtualTraversal is consequently free to run arbitrarily far past one sector extent --
- *  the octree rebases under it rather than the sector index advancing -- so at long
- *  traversals the authoritative Sector says 0 while Local says several thousand sector
- *  spans.
+ *  SECTOR IS READ, NOT DERIVED, AND IS ALWAYS (0,0,0) TODAY -- which is why it is no
+ *  longer DISPLAYED. ConfigureCell is the only writer and nothing calls it with a non-zero
+ *  coordinate: the universe is level-placed, there is one of it, and nothing hands the
+ *  player between sectors. VirtualTraversal runs arbitrarily far past one sector extent
+ *  instead, because the octree rebases under it rather than the sector index advancing.
  *
- *  SectorDerived below reports that overflow, and is explicitly NOT written back into
- *  Sector. Folding it would make this readout claim a sector the octree, the tier grids
- *  and the spawn scan all disagree it is in -- and since none of them would complain, the
- *  first symptom would be a written-down coordinate that does not lead back to the same
- *  place. The fold belongs in whatever implements sector handoff, next to the
- *  corresponding octree change. Until then this pair is the honest description: the
- *  lattice index, and how far past it the traversal has gone. */
+ *  THE FIELD KEPT ITS PLACE IN THE ARITHMETIC ANYWAY. RealCm below offsets by it, so if a
+ *  sector lattice ever does go live the coordinate is already correct and only the row has
+ *  to come back. What was removed is a HUD line reading 0, 0, 0 forever -- a permanently
+ *  constant readout is worse than none, because it teaches you to stop reading the panel
+ *  it sits in.
+ *
+ *  IT IS STILL NOT FOLDED. Deriving a sector index from the traversal overflow would make
+ *  this claim a sector the octree, the tier grids and the spawn scan all disagree it is
+ *  in, and none of them would complain -- the first symptom would be a written-down
+ *  coordinate that does not lead back to the same place. The fold belongs in whatever
+ *  implements sector handoff, next to the corresponding octree change. */
 struct FULSUniverseCoord
 {
 	/** AUniverseActor::CellCoord, verbatim. */
 	FIntVector Sector = FIntVector::ZeroValue;
-
-	/** What Sector WOULD be if the lattice were live: Local divided by one sector span,
-	 *  truncated. Display only -- see the note above. Zero until the traversal exceeds a
-	 *  sector, at which point the HUD annotates the Sector row rather than replacing it. */
-	FIntVector SectorDerived = FIntVector::ZeroValue;
 
 	/** AUniverseActor::VirtualTraversal, universe-local units. */
 	FVector Local = FVector::ZeroVector;
@@ -167,6 +164,11 @@ struct FULSNavSample
 	 *  velocity is what makes real speed and compressed speed comparable: they are then
 	 *  two derivatives of the same input, so their ratio is meaningful. */
 	FVector FrameOfReferenceWorld = FVector::ZeroVector;
+
+	/** The field's repeat period in small cells, from AUniverseActor::GetFieldCellPeriod.
+	 *  Needed to read FieldOffset: the index arrives in [0, period), so one cell left of the
+	 *  origin is period-1, not -1. Zero means the universe could not supply one. */
+	int32 FieldCellPeriod = 0;
 
 	int32 SpawnedGalaxyCount = 0;
 

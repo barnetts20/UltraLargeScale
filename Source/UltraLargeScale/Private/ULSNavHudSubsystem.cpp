@@ -293,32 +293,36 @@ void UULSNavHudSubsystem::OnDebugDraw(UCanvas* InCanvas, APlayerController* InPC
 
 	if (Sample.bValid)
 	{
-		// SECTOR IS ALWAYS 0,0,0 TODAY and that is correct, not a bug in the readout:
-		// ConfigureCell is the only writer of CellCoord and nothing calls it with a
-		// non-zero coordinate. The note carries the derived overflow when the traversal
-		// has run past a sector span, so a stuck zero next to a large Position reads as
-		// "the lattice is not live yet" instead of "the coordinate is broken". See the
-		// note on FULSUniverseCoord::SectorDerived for why it is not folded in.
-		{
-			FRow SectorRow;
-			SectorRow.Label = TEXT("Sector");
-			SectorRow.Value = FString::Printf(TEXT("%d, %d, %d"),
-				Sample.Coord.Sector.X, Sample.Coord.Sector.Y, Sample.Coord.Sector.Z);
-
-			if (Sample.Coord.SectorDerived != FIntVector::ZeroValue)
-			{
-				SectorRow.Note = FString::Printf(TEXT("(lattice unused; VT is %d, %d, %d spans out)"),
-					Sample.Coord.SectorDerived.X, Sample.Coord.SectorDerived.Y, Sample.Coord.SectorDerived.Z);
-			}
-			Rows.Add(SectorRow);
-		}
-
 		Rows.Add({ TEXT("Position"), ULSScale::FormatVectorCm(Sample.Coord.RealCm), FString() });
 
-		Rows.Add({ TEXT("Field cell"), FString::Printf(TEXT("%d, %d, %d"),
-			Sample.FieldOffset.Cell.X, Sample.FieldOffset.Cell.Y, Sample.FieldOffset.Cell.Z),
-			FString::Printf(TEXT("+ %.3f, %.3f, %.3f"),
-				Sample.FieldOffset.Frac.X, Sample.FieldOffset.Frac.Y, Sample.FieldOffset.Frac.Z) });
+		// THE HIGHER-ORDER TERM, and the reason the row below is readable at all.
+		//
+		// Without it the cell index flips from -max to max at the wrap with nothing saying
+		// why, which reads as an overflow. This says why: it moves by exactly one, in the
+		// direction of travel, on the frame the flip happens.
+		//
+		// NOT THE SECTOR LATTICE. AUniverseActor::CellCoord is spaced at 2 * Extent; this is
+		// spaced at the field period, millions of times further apart. See the note on
+		// FUniverseFieldOffset::Period.
+		Rows.Add({ TEXT("Field period"), FString::Printf(TEXT("%d, %d, %d"),
+			Sample.FieldOffset.Period.X, Sample.FieldOffset.Period.Y, Sample.FieldOffset.Period.Z),
+			(Sample.FieldCellPeriod > 0)
+				? FString::Printf(TEXT("(%d cells per repeat)"), Sample.FieldCellPeriod)
+				: FString() });
+
+		// SIGNED FOR DISPLAY, unsigned everywhere else. UniverseCellWrap::ToSigned carries the
+		// reasoning; the short version is that cell -1 legitimately arrives as period-1 and
+		// nobody reads that as minus one.
+		{
+			const int32 Period = Sample.FieldCellPeriod;
+
+			Rows.Add({ TEXT("Field cell"), FString::Printf(TEXT("%d, %d, %d"),
+				UniverseCellWrap::ToSigned(Sample.FieldOffset.Cell.X, Period),
+				UniverseCellWrap::ToSigned(Sample.FieldOffset.Cell.Y, Period),
+				UniverseCellWrap::ToSigned(Sample.FieldOffset.Cell.Z, Period)),
+				FString::Printf(TEXT("+ %.3f, %.3f, %.3f"),
+					Sample.FieldOffset.Frac.X, Sample.FieldOffset.Frac.Y, Sample.FieldOffset.Frac.Z) });
+		}
 
 		if (CVarNavHudRaw.GetValueOnGameThread() != 0)
 		{
