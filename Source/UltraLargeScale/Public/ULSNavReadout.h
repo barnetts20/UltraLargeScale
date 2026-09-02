@@ -3,7 +3,7 @@
 
 #include "CoreMinimal.h"
 #include "DataTypes.h"
-#include "UniverseParams.h"   // FUniverseFieldOffset
+#include "UniverseParams.h"   // FUniverseFieldOffset, UniverseCellWrap
 
 class AUniverseActor;
 
@@ -164,6 +164,12 @@ struct FULSNavSample
 	 *  velocity is what makes real speed and compressed speed comparable: they are then
 	 *  two derivatives of the same input, so their ratio is meaningful. */
 	FVector FrameOfReferenceWorld = FVector::ZeroVector;
+
+	/** The finest streaming tier's grid coord: the coordinate that keys every cell and, via
+	 *  ComposeSeed, every entity seed. Unlike the field cell index it does not wrap, so it is
+	 *  the last unbounded integer in the coordinate chain. Unset (INT32_MIN) until that tier
+	 *  has streamed at least once. */
+	FIntVector GridCoord = FIntVector(INT32_MIN);
 
 	/** The field's repeat period in small cells, from AUniverseActor::GetFieldCellPeriod.
 	 *  Needed to read FieldOffset: the index arrives in [0, period), so one cell left of the

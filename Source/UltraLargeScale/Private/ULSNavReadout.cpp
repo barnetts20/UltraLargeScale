@@ -133,6 +133,7 @@ FULSNavSample ULSSampleUniverseNav(const AUniverseActor& InUniverse)
 	// The universe's own derivation, not a copy of it. See the note on FULSNavSample.
 	Out.FieldOffset = InUniverse.ComputeFieldOffset();
 
+	Out.GridCoord = InUniverse.GetFinestTierCoord();
 	Out.FieldCellPeriod = InUniverse.GetFieldCellPeriod();
 	Out.SpeedScale = InUniverse.GetEffectiveSpeedScale();
 	Out.VirtualTraversal = InUniverse.VirtualTraversal;

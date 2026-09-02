@@ -536,6 +536,24 @@ protected:
 	FParticleTierConfig SmallTierConfig;
 	FParticleTierState  SmallTierState;
 
+public:
+	/** THE FINEST TIER'S CURRENT GRID COORD, and the one worth watching.
+	 *
+	 *  All three tiers key their cells on an absolute grid coord, and that coord is what
+	 *  ComposeSeed turns into every entity's seed -- so it is the coordinate that carries
+	 *  generation identity, and unlike the field cell index it does NOT wrap into a small
+	 *  range. The finest grid has the smallest cells, so its coord climbs fastest and reaches
+	 *  int32 first: around 5.8e17 local units against the Large tier's 9.2e18.
+	 *
+	 *  Exposed for the nav readout. Returning the Small tier specifically rather than all
+	 *  three because the other two are strictly further from their limit, and a readout that
+	 *  shows three numbers when one of them dominates is three numbers nobody reads.
+	 *
+	 *  INT32_MIN on every axis is the sentinel for a tier that has never streamed -- see
+	 *  FParticleTierState::CenterCoord -- not a coordinate. */
+	FIntVector GetFinestTierCoord() const { return SmallTierState.CenterCoord; }
+protected:
+
 	/** GC-safe owner for all Niagara components created by InitializeTier.
 	 *  FParticleTierState::NiagaraComponents holds raw aliases into this array.
 	 *  Do not reorder or remove entries at runtime. */

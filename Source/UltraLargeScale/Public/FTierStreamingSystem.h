@@ -467,12 +467,52 @@ struct FTierStreamingSystem
 {
 #pragma region Grid Coord Helpers
 
-	/** Converts a local position to a grid coordinate at the given depth. */
+	/** Narrows a grid coordinate to int32 with a DEFINED result at any magnitude.
+	 *
+	 *  FMath::FloorToInt32 ends in a plain cast, and casting an out-of-range double to
+	 *  int32 is undefined behaviour. On x86 it does not wrap -- it yields the integer
+	 *  indefinite value, INT32_MIN -- so EVERY coordinate past the limit collapses onto the
+	 *  same one. The whole streaming grid folds to a single cell: one coord, one seed, one
+	 *  centre, every tier spawning its neighbourhood on top of itself. That reads as a spawn
+	 *  or pooling bug and says nothing about a coordinate running out.
+	 *
+	 *  Wrapping instead makes the far behaviour "generation repeats", which is both
+	 *  survivable and consistent with what the density field already does. It costs no
+	 *  range: the wrap period IS the int32 span, so every coordinate the old cast handled
+	 *  correctly comes back bit-identical, and only the region that was undefined changes.
+	 *
+	 *  NOT NEARLY REACHABLE, and that is not the reason it is here. The Small tier -- the
+	 *  finest grid, so the fastest-climbing coord -- runs out around 5.8e17 local units,
+	 *  some twenty-seven field periods out and far past where double VirtualTraversal is
+	 *  producing metre-scale render jitter. This is the third narrowing in this system to
+	 *  get the ordering wrong (see FUniverseFieldOffset::FromCellPositionWrapped and
+	 *  FUniverseGenCell), and it is the one whose failure is least recoverable. */
+	static int32 WrapGridAxis(double InValue)
+	{
+		constexpr double Span = 4294967296.0;   // 2^32
+		constexpr double Min = -2147483648.0;   // INT32_MIN
+
+		// Floored modulo onto [INT32_MIN, INT32_MAX], matching the convention used for the
+		// field cell wrap: truncation toward zero would fold the two halves of the range
+		// together and map two distinct regions onto one coordinate.
+		const double Shifted = InValue - Min;
+		const double Wrapped = Shifted - FMath::Floor(Shifted / Span) * Span + Min;
+
+		return static_cast<int32>(FMath::Clamp(Wrapped, Min, 2147483647.0));
+	}
+
+	/** Converts a local position to a grid coordinate at the given depth.
+	 *
+	 *  THE FLOOR HAPPENS IN DOUBLE AND THE NARROWING AFTER IT -- see WrapGridAxis. The
+	 *  + 0.5 is the centre-aligned lattice and is unchanged; only the cast moved. */
 	static FIntVector PositionToGridCoord(const FVector& InPos, int32 InGridDepth,
 		double Extent, double GridExtentMultiplier)
 	{
 		const double CellSize = (Extent * GridExtentMultiplier) / (1 << InGridDepth);
-		return FIntVector(FMath::FloorToInt32(InPos.X / CellSize + 0.5), FMath::FloorToInt32(InPos.Y / CellSize + 0.5), FMath::FloorToInt32(InPos.Z / CellSize + 0.5));
+		return FIntVector(
+			WrapGridAxis(FMath::Floor(InPos.X / CellSize + 0.5)),
+			WrapGridAxis(FMath::Floor(InPos.Y / CellSize + 0.5)),
+			WrapGridAxis(FMath::Floor(InPos.Z / CellSize + 0.5)));
 	}
 
 	/** Converts a grid coordinate back to the cell center position. */

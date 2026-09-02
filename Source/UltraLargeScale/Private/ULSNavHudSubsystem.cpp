@@ -295,6 +295,46 @@ void UULSNavHudSubsystem::OnDebugDraw(UCanvas* InCanvas, APlayerController* InPC
 	{
 		Rows.Add({ TEXT("Position"), ULSScale::FormatVectorCm(Sample.Coord.RealCm), FString() });
 
+		// THE LAST UNBOUNDED INTEGER IN THE CHAIN. The field cell index wraps and the period
+		// index above counts the wraps; this one does neither, because wrapping it would make
+		// generation repeat and the whole point of keying seeds on it is that they do not.
+		//
+		// SHOWN AS A COORDINATE, NOT A PERCENTAGE, because the coordinate is useful every
+		// session -- it is the streaming cell you are in, so watching it tick is how you see
+		// a boundary cross happen -- while the headroom is 0.00% for any distance anyone will
+		// ever fly. The note appears only once the headroom is worth reading, which keeps a
+		// permanently-zero number off the panel.
+		{
+			const FIntVector GC = Sample.GridCoord;
+			FRow GridRow;
+			GridRow.Label = TEXT("Grid cell");
+
+			if (GC.X == INT32_MIN && GC.Y == INT32_MIN && GC.Z == INT32_MIN)
+			{
+				// The sentinel FParticleTierState uses for a tier that has never streamed.
+				// Printing it raw would put -2147483648 on screen and read as an overflow.
+				GridRow.Value = TEXT("--");
+				GridRow.Note = TEXT("(finest tier not streamed yet)");
+				GridRow.ValueColor = LabelColor;
+			}
+			else
+			{
+				GridRow.Value = FString::Printf(TEXT("%d, %d, %d"), GC.X, GC.Y, GC.Z);
+
+				const double Used = FMath::Max3(
+					FMath::Abs(static_cast<double>(GC.X)),
+					FMath::Abs(static_cast<double>(GC.Y)),
+					FMath::Abs(static_cast<double>(GC.Z))) / 2147483647.0;
+
+				if (Used > 0.01)
+				{
+					GridRow.Note = FString::Printf(TEXT("%.1f%% of int32"), Used * 100.0);
+					GridRow.ValueColor = (Used > 0.5) ? WarnColor : FColor(230, 230, 230);
+				}
+			}
+			Rows.Add(GridRow);
+		}
+
 		// THE HIGHER-ORDER TERM, and the reason the row below is readable at all.
 		//
 		// Without it the cell index flips from -max to max at the wrap with nothing saying
