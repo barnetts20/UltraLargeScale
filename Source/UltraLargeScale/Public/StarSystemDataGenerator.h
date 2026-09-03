@@ -2,19 +2,9 @@
  *
  *  NOT A GENERATOR IN THE SENSE THE OTHER TWO LAYERS USE THE WORD. The universe and galaxy
  *  layers place entities against a density field evaluated on the GPU; this layer lays its
- *  bodies out ANALYTICALLY -- AStarSystemActor computes the orbits itself, fills
+ *  bodies out analytically -- AStarSystemActor computes the orbits itself, fills
  *  GeneratedOrbits, and reads positions back through GetOrbitPosition. There is no field,
- *  no dispatch, and nothing here to calibrate.
- *
- *  THE NAME IS THE MIRROR'S, not a description. FStarSystemParams sits beside
- *  FUniverseParams and FGalaxyParams for the same reason. If this layer ever does acquire a
- *  density field, the shape to copy is GalaxyDataGenerator -- and the shared pieces are
- *  already in place: FTierBatchCell, FTierStreamingSystem::SubdivideCells and the
- *  Pack()/FillShaderParameters marshal pattern.
- *
- *  WHETHER IT SHOULD is an open question rather than a pending task. A handful of bodies on
- *  orbits is not a density distribution, and a field this layer does not need would cost a
- *  shader and buy nothing. */
+ *  no dispatch, and nothing here to calibrate. */
 
 #pragma once
 
@@ -59,12 +49,8 @@ public:
 
 	/** A point on the ellipse InOrbit describes, at its own Phase.
 	 *
-	 *  THE ONLY THING THIS CLASS COMPUTES. AStarSystemActor lays the orbits out itself --
-	 *  it fills GeneratedOrbits directly and calls this per planet -- so what lives here is
-	 *  the orbit TYPE and the ellipse evaluation, not a generation pass.
-	 *
-	 *  It reads nothing but its argument, which is what lets the actor call it against a
-	 *  temporary copy with a swept Phase to draw an orbit track. */
+	 *  Reads nothing but its argument, so the caller may pass a temporary copy with a swept
+	 *  Phase to walk the whole orbit track. */
 	FVector GetOrbitPosition(const FOrbit& Orbit) const;
 
 	/** The system's orbits. POPULATED BY THE ACTOR, not here. */

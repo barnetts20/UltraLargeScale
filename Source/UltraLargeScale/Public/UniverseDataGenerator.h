@@ -9,14 +9,12 @@
 #include "UniverseParams.h"
 #include "UniverseEntityGen.h"
 
-/** Generates the data that populates a universe sector: owns tier geometry, calibration
- *  and the GPU entity dispatch. The sector actor wires tier callbacks that delegate here;
- *  this class has no knowledge of actors, Niagara, octrees, or the streaming pipeline.
+/** Generates the data that populates a universe sector: owns tier geometry, calibration and
+ *  the GPU entity dispatch. The sector actor wires tier callbacks that delegate here; this
+ *  class has no knowledge of actors, Niagara, octrees, or the streaming pipeline.
  *
- *  IT NO LONGER EVALUATES A FIELD ANYWHERE. Everything that did was FastNoise, and the
- *  field this layer places against is UniverseDensityCore.ush -- which the C++ shim
- *  cannot stand in for, since its geometry depends on texture fetches the shim stubs to
- *  a neutral 0.5. */
+ *  It evaluates no field. The field is UniverseDensityCore.ush, and the C++ shim cannot stand
+ *  in for it -- the shim stubs texture fetches to 0.5, and the geometry depends on them. */
 class ULTRALARGESCALE_API UniverseDataGenerator {
 public:
 	UniverseDataGenerator() {};
@@ -26,146 +24,75 @@ public:
 
 	FUniverseParams Params;
 
-	// NO CPU PLACEMENT PATH, AND NO FALLBACK. All three tiers bind GenerateBatchCallback
-	// and dispatch.
-	//
-	// A CPU SAMPLER HERE WOULD EVALUATE A DIFFERENT FIELD from the one the ray march draws:
-	// the shim stubs every texture fetch to a neutral 0.5, so the C++ evaluation reduces to
-	// the unwarped analytic web. Falling back to one would place entities against a universe
-	// nobody is looking at, which is why the GPU path fails closed instead of degrading.
-
 #pragma region GPU Entity Generation
 
-	/** The field's normalized frame, as a HALF EXTENT in caller units.
-	 *
-	 *  The ray march proxy's half extent, which is the Large tier's neighbourhood span --
-	 *  NOT UniverseParams.Extent. Supplied by the actor rather than derived here, because
-	 *  the actor owns the proxy and a second derivation of the same number is how the
-	 *  render and placement end up sampling two different scalings of one field.
-	 *
-	 *  Zero until the actor sets it, which every GPU path below treats as unconfigured. */
+	/** The field's normalized frame, as a HALF EXTENT in caller units: the ray march proxy's
+	 *  half extent, which is the Large tier's neighbourhood span -- NOT UniverseParams.Extent.
+	 *  Supplied by the actor, which owns the proxy. Zero until it does, which every GPU path
+	 *  below treats as unconfigured. */
 	double FieldExtent = 0.0;
 
-	/** The field's four volume textures, resolved.
-	 *
-	 *  THE SAME OBJECTS THE MATERIAL SAMPLES, guaranteed rather than asked for: the actor
-	 *  loads all four from the authored paths in MaterialParams and hands the same bundle to
-	 *  the material instance and to this. The galaxy layer keeps a separate NoiseTexture
-	 *  property that must be set to match its material's, which is a correspondence nothing
-	 *  checks -- placement and render can silently sample different assets and the only
-	 *  symptom is entities off the structure. Resolving from the authored paths removes the
-	 *  question, and it matters four times as much now that there are four of them.
-	 *
-	 *  ONE BUNDLE, NOT FOUR MEMBERS, so a caller cannot pass a partial set. See
-	 *  FUniverseFieldTextures for why all-or-nothing is the only sound rule here.
-	 *
-	 *  Held raw rather than as a UPROPERTY because this class is not a UObject; the actor
-	 *  owns the references that keep them alive. */
+	/** The field's four volume textures, resolved. THE SAME OBJECTS THE MATERIAL SAMPLES: the
+	 *  actor loads all four from the authored paths and hands one bundle to both, so placement
+	 *  and render cannot sample different assets. ONE BUNDLE, NOT FOUR MEMBERS, so a caller
+	 *  cannot pass a partial set. Held raw -- the actor owns the references. */
 	FUniverseFieldTextures FieldTextures;
 
-	/** ONE FIELD CELL IN CALLER UNITS: FieldExtent * CellSizeSmall.
-	 *
-	 *  NAMED RATHER THAN SPELLED AT EACH SITE. Calibration and the gen-cell split both need
-	 *  this number, and two spellings of it put them on fields a fraction of a cell apart --
-	 *  which shows as entities sitting beside the structure rather than as anything
-	 *  obviously wrong. */
+	/** One field cell in caller units: FieldExtent * CellSizeSmall. Named rather than spelled
+	 *  at each site, since two spellings put calibration and the gen-cell split on fields a
+	 *  fraction of a cell apart. */
 	double FieldCellSize() const
 	{
 		return FieldExtent
 			* FMath::Max(static_cast<double>(Params.DensityParams.Lattice.CellSizeSmall), 1e-6);
 	}
 
-	/** The field's repeat period in small cells. Gen cell indices cross to the shader
-	 *  through a float3 and must be reduced by the period the CORE derives, never another;
-	 *  reducing by a different one puts placement and the render on wraps that disagree, a
-	 *  long way out, with nothing logging it. See SplitCellCentre. */
+	/** The field's repeat period in small cells. Gen cell indices cross to the shader through a
+	 *  float3 and must be reduced by the period the CORE derives, never another. */
 	int32 FieldCellPeriod() const
 	{
 		return UniverseCellWrap::FieldCellPeriod(Params.DensityParams.Lattice);
 	}
 
-	/** The dispatch's InvFieldExtent uniform: what converts a caller-space offset into the
-	 *  field's normalized frame.
-	 *
-	 *  NARROWED HERE AND NOWHERE ELSE. It reaches the shader as a float, and the guard is
-	 *  the division guard rather than a range limit -- an unset FieldExtent is zero, which
-	 *  every GPU path rejects before reaching this. */
+	/** The dispatch's InvFieldExtent uniform: converts a caller-space offset into the field's
+	 *  normalized frame. Narrowed to float here and nowhere else. */
 	float InvFieldExtent() const
 	{
 		return static_cast<float>(1.0 / FMath::Max(FieldExtent, 1e-9));
 	}
 
-	/** THE CELL TYPE AND THE SUBDIVISION ARE SHARED. Both live on FTierStreamingSystem
-	 *  because every layer needs the same ones and a per-layer copy of either is a place the
-	 *  child COORD -- the placement key -- can drift between layers. See FTierBatchCell.
+	/** Marshals a tier's cells into the dispatch's FUniverseGenCell records.
 	 *
-	 *  THIS LAYER PASSES NO CULL. The cosmic web has no outside: every child can hold
-	 *  structure, and dropping one on geometry would delete a cell that belongs. The probe
-	 *  pass's envelope test culls void children instead, at the cost of their probes.
-	 *
-	 *  Ascending coords, not Centred. Switching would reroll every entity this layer
-	 *  places; see ETierChildCoords. */
-
-	 /** Marshals a tier's cells into the dispatch's FUniverseGenCell records.
-	  *
-	  *  ONE BUILDER FOR CALIBRATION AND GENERATION, and that is the point rather than a
-	  *  convenience. A cell's centre is split into an exact field cell plus a fraction, and a
-	  *  calibration that split its cells differently from generation would solve the tier's
-	  *  constant against a field offset by a fraction of a cell from the one entities land
-	  *  in. The two paths differ in which cells they pass and in nothing else.
-	  *
-	  *  The slot travels from the cell. Calibration parents are built at slot 0 and children
-	  *  inherit their parent's, so the calibration path carries a single token slot without
-	  *  needing to say so here. */
+	 *  ONE BUILDER FOR CALIBRATION AND GENERATION. A cell's centre is split into an exact
+	 *  field cell plus a fraction, and a calibration that split differently from generation
+	 *  would solve the tier's constant against a field offset by a fraction of a cell. The two
+	 *  paths differ only in which cells they pass. The slot travels from the cell. */
 	void BuildGenCells(const TArray<FTierBatchCell>& InCells,
 		TArray<FUniverseGenCell>& OutCells) const;
 
-	/** A representative block of the field, for calibration.
-	 *
-	 *  THE GALAXY ENUMERATES ITS WHOLE GRID AND THIS CANNOT. That grid is bounded by the
-	 *  galaxy volume, so "every cell the tier will ever generate" is a finite list. This
-	 *  field is unbounded and the tier grid is a streaming window that moves with the
-	 *  player -- there is no whole grid to measure, and the set of cells that will ever be
-	 *  generated is infinite.
-	 *
-	 *  What makes a sample sufficient instead is HOMOGENEITY. One parameter set describes
-	 *  the field everywhere, and its variation is bounded by the authored ranges rather
-	 *  than by position, so a block of cells anywhere is statistically the same as a block
-	 *  anywhere else. This builds one at a FIXED coord -- not the current neighbourhood --
-	 *  so the answer is deterministic and cacheable rather than depending on where the
-	 *  player happened to be when a tier first streamed.
-	 *
-	 *  THE ASSUMPTION IS CHECKABLE and worth checking: the lattice crossover band runs
-	 *  about five times the mean density of either end, so if a block lands entirely inside
-	 *  or outside it the constant will be off by that factor. Widening the block trades
-	 *  calibration cost for a better average. */
+	/** A representative block of the field, for calibration. Built at a FIXED coord, not the
+	 *  current neighbourhood, so the answer is deterministic and cacheable. A sample suffices
+	 *  because the field is HOMOGENEOUS -- one parameter set describes it everywhere. The
+	 *  lattice crossover band runs about five times the mean density of either end, so a block
+	 *  landing entirely inside or outside it puts the constant off by that factor. */
 	void BuildCalibrationGrid(const FTierParams& InTierParams,
 		double InCellHalfExtent, TArray<FTierBatchCell>& OutCells) const;
 
-	/** The tier's placement constant: accepted count per cell is this times cell mass.
-	 *
-	 *  Measured ONCE per tier, lazily, and cached against the tier's seed offset. Returns 0
-	 *  if calibration could not run, which the caller treats as a failed batch rather than
-	 *  generating with a meaningless constant. */
+	/** The tier's placement constant: accepted count per cell is this times cell mass. Measured
+	 *  ONCE per tier, lazily, and cached against the tier's seed offset. Returns 0 if
+	 *  calibration could not run, which the caller must treat as a failed batch. */
 	float GetTierBudgetScale(const FTierParams& InTierParams, int32 InSeedOffset,
 		int32 InGridDepth, double InCellHalfExtent) const;
 
-	/** GPU generation for a whole batch of tier slots, in one dispatch.
+	/** GPU generation for a whole batch of tier slots, in one dispatch. One group per cell:
+	 *  the group probes its cell for a rejection envelope, derives its own candidate budget
+	 *  from it, and spends itself on that cell's candidates.
 	 *
-	 *  ONE GROUP PER CELL. The group probes its cell for a rejection envelope, derives its
-	 *  own candidate budget from it, and spends itself on that cell's candidates. Nothing
-	 *  on this side evaluates the field -- and for this layer that is structural rather
-	 *  than a preference, since the C++ shim stubs texture fetches to a neutral 0.5 and
-	 *  this field's GEOMETRY depends on them.
+	 *  BACKGROUND THREAD ONLY; it blocks on a GPU readback.
 	 *
-	 *  BACKGROUND THREAD ONLY; it blocks on a GPU readback. Safe because tier generation
-	 *  already runs on AnyBackgroundHiPriTask, so the wait costs a worker, not a frame.
-	 *
-	 *  FAILS CLOSED. There is no CPU path behind it, so a failure blanks the affected slots
-	 *  and zeroes their counts before returning. A slot is reused as the player crosses
-	 *  boundaries, so "nothing written" is not an empty slot -- it is the previous
-	 *  occupant's entities still sitting there at a coord they no longer belong to, which
-	 *  reads as a placement bug rather than a generation failure. */
+	 *  FAILS CLOSED: a failure blanks the affected slots and zeroes their counts before
+	 *  returning, because a slot is reused as the player crosses boundaries and "nothing
+	 *  written" leaves the previous occupant's entities at a coord they do not belong to. */
 	bool GenerateTierBatchGPU(
 		const TArray<FTierBatchCell>& InQueuedCells,
 		FNiagaraParticleBuffer& InBuffer,
@@ -175,30 +102,21 @@ public:
 		TArray<int32>& OutSlotCounts) const;
 
 private:
-	/** The GPU placement key seed for one tier. THE ONE PLACE that maps a tier index to a
-	 *  seed, because CalibrateBlocking and GenerateBatchBlocking must be handed the
-	 *  identical value or a tier calibrates against a field it will not generate.
-	 *
-	 *  The tier index rides MixSeed's index argument rather than being added to the seed:
-	 *  additive offsets alias across sectors whose seeds land within the offset range of
-	 *  each other, and offset 0 would hand the large tier the unmixed sector seed, which is
-	 *  also whatever else reaches for it. */
+	/** The GPU placement key seed for one tier. THE ONE PLACE that maps a tier index to a seed:
+	 *  CalibrateBlocking and GenerateBatchBlocking must be handed the identical value, or a
+	 *  tier calibrates against a field it will not generate. */
 	int32 TierKeySeed(int32 InSeedOffset) const
 	{
 		return ProcSeed::MixSeed(Params.Seed, UniverseSeed::Placement, InSeedOffset);
 	}
 
-	/** Calibrated placement constants, keyed by tier seed offset.
-	 *
-	 *  Mutable and lock-guarded because tier generation runs on background workers and two
-	 *  tiers can enter this concurrently. The measurement is deterministic, so a duplicated
-	 *  one is wasteful rather than wrong -- the lock is held across it anyway because a GPU
-	 *  probe of a calibration block is not something to run twice. */
+	/** Calibrated placement constants, keyed by tier seed offset. Mutable and lock-guarded
+	 *  because tier generation runs on background workers and two tiers can enter this
+	 *  concurrently. The lock is held across the measurement, not just the map write. */
 	mutable TMap<int32, float> TierBudgetScales;
 
-	/** Held by pointer because FCriticalSection is neither copyable nor movable, and a
-	 *  defaulted move over a mutex member fails to compile. A moved-from generator has a
-	 *  null lock, which GetTierBudgetScale treats as unconfigured rather than dereferencing. */
+	/** Held by pointer because FCriticalSection is neither copyable nor movable. A moved-from
+	 *  generator has a null lock, which GetTierBudgetScale treats as unconfigured. */
 	mutable TUniquePtr<FCriticalSection> TierBudgetScaleLock =
 		MakeUnique<FCriticalSection>();
 

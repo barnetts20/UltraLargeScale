@@ -6,8 +6,8 @@
 #include "Templates/SubclassOf.h"
 #include "ActorPoolManager.generated.h"
 
-/** One inert sub-pool, keyed in UActorPoolManager::SubPools by the spawn UClass.
- *  USTRUCT so the Inert array can be a UPROPERTY (GC-visible) inside the TMap. */
+/** One inert sub-pool, keyed in UActorPoolManager::SubPools by the spawn UClass. USTRUCT so
+ *  the Inert array can be a GC-visible UPROPERTY inside the TMap. */
 USTRUCT()
 struct FActorSubPool
 {
@@ -17,21 +17,15 @@ struct FActorSubPool
     UPROPERTY()
     TArray<TObjectPtr<AActor>> Inert;
 
-    /** Target prewarm count for this type; set by RegisterType, consumed by PrewarmAll.
-     *  Non-reflected: it's plain config, never serialized. */
+    /** Target prewarm count for this type; set by RegisterType, consumed by PrewarmAll. */
     int32 Prewarm = 0;
 };
 
 /**
- * Central, generic actor pool. One UActorPoolManager instance is owned by the
- * single permanent AUniverseActor; every layer reaches it by resolving up the
- * parent chain (GetPoolManager()), exactly like GetEffectiveSpeedScale.
- *
- * The manager is fully generic -- it only ever touches AActor* and the UClass
- * identity. All per-type behavior (seed->config, typed ReInit, wake/teardown)
- * lives elsewhere: proc-gen on the F*ParamBounds structs, ReInit on the typed
- * parent's call, wake/teardown on IPooledActor. Adding a new poolable type is a
- * UClass + RegisterType + a ReInit/bounds -- no manager change.
+ * Central, generic actor pool. One instance is owned by the permanent AUniverseActor; every
+ * layer reaches it by resolving up the parent chain via GetPoolManager(). The manager only
+ * ever touches AActor* and the UClass identity -- per-type behaviour lives on the
+ * F*ParamBounds structs, the typed parent's ReInit, and IPooledActor.
  */
 UCLASS()
 class ULTRALARGESCALE_API UActorPoolManager : public UObject
@@ -39,63 +33,40 @@ class ULTRALARGESCALE_API UActorPoolManager : public UObject
     GENERATED_BODY()
 
 public:
-    /** Register a spawnable type and its prewarm target. Idempotent: re-registering
-     *  updates the prewarm count without discarding already-pooled instances.
-     *  Register the CONCRETE spawn class (the same token later passed to Acquire). */
+    /** Register a spawnable type and its prewarm target. Idempotent: re-registering updates
+     *  the count without discarding pooled instances. Pass the CONCRETE spawn class. */
     void RegisterType(TSubclassOf<AActor> Class, int32 Prewarm);
 
-    /** Fill every registered sub-pool up to its prewarm target with inert blanks.
-     *  Call from Universe BeginPlay, before any child activates. Caches World for
-     *  grow-on-exhaust. Top-up semantics: safe to call again (won't double-spawn). */
+    /** Fill every registered sub-pool up to its prewarm target with inert blanks, and cache
+     *  World for grow-on-exhaust. Call from Universe BeginPlay, before any child activates;
+     *  tops up rather than refilling, so it is safe to call again. */
     void PrewarmAll(UWorld* World);
 
-    /** Pop an inert instance of Class (grow + warn if the sub-pool is empty), wake it
-     *  via IPooledActor::OnAcquired, and return it. Association (parent pointer,
-     *  Params via ReInit) is the caller's job. */
+    /** Pop an inert instance of Class (grow and warn if the sub-pool is empty), wake it via
+     *  IPooledActor::OnAcquired, and return it. Association is the caller's job. */
     AActor* AcquireByClass(TSubclassOf<AActor> Class);
 
-    /** Tear down an instance (IPooledActor::OnReturnToPool -> generic inert) and push
-     *  it back onto its sub-pool. Keyed on Actor->GetClass(). */
+    /** Tear down an instance (OnReturnToPool, then generic inert) and push it back onto its
+     *  sub-pool. Keyed on Actor->GetClass(). */
     void Release(AActor* Actor);
 
-    /** Re-pool an actor whose teardown the caller has ALREADY performed (a layer
-     *  with an async pre-teardown the generic Release can't own): applies generic
-     *  inert + re-pools, WITHOUT calling OnReturnToPool again.
-     *  Release() == OnReturnToPool() + ReturnPrepared(). */
+    /** Re-pool an actor whose teardown the caller has ALREADY performed: applies generic
+     *  inert and re-pools WITHOUT calling OnReturnToPool again, for layers with an async
+     *  pre-teardown Release cannot own. Release() == OnReturnToPool() + ReturnPrepared(). */
     void ReturnPrepared(AActor* Actor);
 
-    /** Typed convenience wrapper. T::StaticClass() must have been registered.
-     *
-     *  THE KEY IS THE C++ CLASS, NOT WHATEVER WAS REGISTERED, and that is the one way to
-     *  break this pool without any code here changing. AUniverseActor registers
-     *  GalaxyActorClass -- a TSubclassOf variable -- and acquires through this wrapper,
-     *  which hardcodes AGalaxyActor::StaticClass(). They match only because the
-     *  constructor sets them equal. Point one of those spawn-class members at a Blueprint
-     *  subclass and the two keys diverge: the prewarmed instances sit under one key while
-     *  every acquire misses under the other.
-     *
-     *  IT DEGRADES SILENTLY INTO A NON-POOL. AcquireByClass registers the missing key with
-     *  prewarm 0 and then grows by one on every single acquire, so the pool becomes
-     *  spawn-per-acquire with two warnings a time. HOW TO TELL IT APART from a genuinely
-     *  undersized pool, since the exhaustion warning is the same in both cases: an
-     *  undersized pool's NumInert oscillates, a key mismatch leaves NumInert on the
-     *  REGISTERED class pinned at its prewarm count forever, untouched.
-     *
-     *  Acquire by the same token that was registered if those members ever become
-     *  editable. */
+    /** Typed convenience wrapper; T::StaticClass() must have been registered. Keys on the
+     *  C++ class, so it matches AcquireByClass only when the registered token IS
+     *  T::StaticClass() -- registering a Blueprint subclass instead splits the two keys. */
     template<typename T>
     T* Acquire() { return Cast<T>(AcquireByClass(T::StaticClass())); }
 
-    /** Live/inert diagnostics for the dev HUD. Inert count for a registered type. */
+    /** Inert count for a registered type. Diagnostics for the dev HUD. */
     int32 NumInert(TSubclassOf<AActor> Class) const;
 
-    /** Destroy every inert instance and clear the pools. Call from Universe EndPlay.
-     *
-     *  INERT ONLY, because the manager does not track live instances at all -- an acquired
-     *  actor leaves its sub-pool and is owned by whoever acquired it until it is released.
-     *  At EndPlay that is correct by accident rather than by design: the world teardown
-     *  that follows destroys them. It also means there is no leak detection here, and
-     *  NumInert is the only diagnostic the manager can offer. */
+    /** Destroy every INERT instance and clear the pools. Call from Universe EndPlay. Live
+     *  instances are neither tracked nor destroyed: an acquired actor belongs to whoever
+     *  acquired it until released. */
     void Shutdown();
 
     /** UObject world hook so engine utilities resolve a world off the manager. */
@@ -105,8 +76,8 @@ private:
     /** Spawn one blank of Class and drop it straight into the inert state. */
     AActor* SpawnInert(TSubclassOf<AActor> Class);
 
-    /** Generic quiet: hide, collision off, tick off, park at origin, deactivate any
-     *  Niagara components. The typed OnReturnToPool has already run before this. */
+    /** Generic quiet: hide, collision off, tick off, park at origin, deactivate Niagara
+     *  components. The typed OnReturnToPool runs before this. */
     static void ApplyInert(AActor* Actor);
 
     UPROPERTY()
