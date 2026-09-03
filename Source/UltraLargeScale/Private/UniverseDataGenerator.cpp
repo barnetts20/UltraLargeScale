@@ -25,9 +25,8 @@ namespace
 	void SplitCellCentre(const FVector& InCentreCaller, double InInvFieldCell, int32 InPeriod,
 		FIntVector3& OutCell, FVector3f& OutFrac)
 	{
-		// Wrapped BEFORE the narrow to int32, not after: a cell position past 2.1e9 makes the
-		// plain split's cast undefined, and reducing the result of that is reducing a number
-		// that already means nothing. Same call the material offset uses.
+		// Wrapped BEFORE the narrow to int32: past 2.1e9 the plain split's cast is undefined,
+		// and reducing the result of that reduces a number that already means nothing.
 		const FUniverseFieldOffset Split = FUniverseFieldOffset::FromCellPositionWrapped(
 			InCentreCaller * InInvFieldCell, InPeriod);
 
@@ -50,10 +49,8 @@ void UniverseDataGenerator::BuildGenCells(
 	OutCells.Reset();
 	OutCells.Reserve(InCells.Num());
 
-	// Hoisted, not because the divide is expensive but because both are properties of the
-	// batch rather than of a cell: reading them per cell would let a caller believe they
-	// could vary within one dispatch, and they cannot -- the shader derives its own period
-	// from one parameter set for the whole draw.
+	// Hoisted not for the divide but because both are properties of the batch rather than of a
+	// cell: the shader derives its own period from one parameter set for the whole draw.
 	const double InvFieldCell = 1.0 / FMath::Max(FieldCellSize(), UE_DOUBLE_SMALL_NUMBER);
 	const int32 CellPeriod = FieldCellPeriod();
 
@@ -66,8 +63,8 @@ void UniverseDataGenerator::BuildGenCells(
 		Cell.HalfExtent = static_cast<float>(In.HalfExtent);
 		Cell.Coord = FIntVector3(In.Coord.X, In.Coord.Y, In.Coord.Z);
 
-		// THE SHADER CAPS PER SLOT, so it needs to know which one. Every child of a
-		// subdivided streamed cell carries its parent's.
+		// THE SHADER CAPS PER SLOT, so it needs to know which; every child carries its
+		// parent's.
 		Cell.SlotIndex = static_cast<uint32>(FMath::Max(In.SlotIndex, 0));
 
 		OutCells.Add(Cell);
@@ -89,37 +86,23 @@ void UniverseDataGenerator::BuildCalibrationGrid(
 		return;
 	}
 
-	// THE SPAN IS MEASURED IN FIELD CELLS, NOT TIER CELLS, and that is the whole correction.
-	//
-	// A field cell is FieldExtent * CellSizeSmall in caller units, and it is the scale the
-	// web's structure actually lives at. A tier cell is unrelated to it and shrinks by four
-	// per grid depth, so sizing the sample in tier cells made the fine tiers sample a
-	// vanishing fraction of the field -- the Small tier was measuring four tenths of one
-	// field cell and calibrating the whole universe against it.
+	// THE SPAN IS MEASURED IN FIELD CELLS, NOT TIER CELLS. A field cell is the scale the web's
+	// structure lives at, while a tier cell is unrelated and shrinks by four per grid depth, so
+	// sizing in tier cells makes a fine tier sample a vanishing fraction of the field.
 	const double FieldCell = FieldCellSize();
 
 	const double Span = FieldCell * UniverseEntityGen::kCalibrationSpanFieldCells;
 
-	// How many tier cells fit across that span. The scatter picks coords in this range, so
-	// a fine tier draws its sample from a much wider coord range than a coarse one -- which
-	// is exactly the point, since their cells differ in size but the field does not.
-	// CLAMPED IN DOUBLE BEFORE THE NARROW. Span is measured in field cells and CellFull in
-	// tier cells, so the quotient grows by four per grid depth with nothing in FTierParams
-	// bounding the depth. RoundToInt on a double past 2.1e9 is undefined, and the value it
-	// yields on x86 is INT32_MIN -- a negative range makes RandRange draw from an inverted
-	// interval and the whole tier calibrates against garbage coords. The ceiling is far
-	// above any workable configuration; it exists so the failure is "sample too wide"
-	// rather than undefined.
+	// How many tier cells fit across that span: a fine tier draws from a much wider coord range
+	// than a coarse one, since their cells differ in size but the field does not. CLAMPED IN
+	// DOUBLE BEFORE THE NARROW -- the quotient grows by four per grid depth, and RoundToInt on
+	// a double past 2.1e9 yields INT32_MIN on x86, inverting RandRange's interval.
 	const int32 HalfRange = static_cast<int32>(FMath::Clamp(
 		FMath::RoundToDouble(Span / (2.0 * CellFull)), 1.0, 1048576.0));
 
-	// SCATTERED, AND DETERMINISTIC. A fixed stream, so the sample is a property of the tier
-	// rather than of when it first streamed -- the result is cached for the session and two
-	// runs of the same seed must calibrate identically.
-	//
-	// Drawn on the tier's own coord lattice rather than at arbitrary positions, because the
-	// coord is a placement key: MakeUniverseProbe hashes it, so a cell at a coord the grid
-	// could never produce would be probed with jitter no real cell ever sees.
+	// SCATTERED, AND DETERMINISTIC: a fixed stream, so the sample is a property of the tier
+	// rather than of when it streamed, and drawn on the tier's own coord lattice, since the
+	// coord is a placement key that would otherwise get jitter no real cell ever sees.
 	FRandomStream Stream(ProcSeed::MixSeed(
 		Params.Seed, UniverseSeed::Placement, InTierParams.GridDepth));
 
@@ -146,9 +129,8 @@ void UniverseDataGenerator::BuildCalibrationGrid(
 	}
 
 	// SUBDIVIDED EXACTLY AS GENERATION WILL SUBDIVIDE. A cell's mass is the mean over its own
-	// volume, so probing an undivided parent reports a mean that is too low by a factor
-	// growing with the subdivision depth -- which comes back as a constant that is too high
-	// and a tier that over-delivers.
+	// volume, so probing an undivided parent reports a mean too low by a factor growing with
+	// depth -- which comes back as a constant too high and a tier that over-delivers.
 	FTierStreamingSystem::SubdivideCells(Parents,
 		FMath::Clamp(InTierParams.GenerationSubdivision, 0,
 			FTierParams::MaxGenerationSubdivision),
@@ -163,8 +145,8 @@ float UniverseDataGenerator::GetTierBudgetScale(
 {
 	if (!TierBudgetScaleLock.IsValid())
 	{
-		// Moved-from. Return zero rather than dereference; the caller treats it as a failed
-		// batch, which is the honest answer.
+		// Moved-from: return zero rather than dereference, and the caller treats it as a
+		// failure.
 		return 0.0f;
 	}
 
@@ -180,18 +162,10 @@ float UniverseDataGenerator::GetTierBudgetScale(
 		return 0.0f;
 	}
 
-	// THE PARAMETERS THIS TIER IS ACTUALLY RUNNING WITH, logged before anything is measured
-	// against them.
-	//
-	// NOT INSTRUMENTATION FOR ITS OWN SAKE. A tier parameter that fails to arrive looks
-	// exactly like a tier parameter that has no effect, and this layer has already lost two
-	// debugging rounds to that: GenerationSubdivision read 0 after being set to 2, and
-	// SpawnExponent showed no difference between 0.01 and 16, both because the edit was
-	// landing on a copy nothing read. The indirection responsible is gone -- see the note
-	// where FUniverseParamBounds used to be -- but the class of failure is not, since a
-	// generator holds a COPY of the params taken at InitializeData.
-	//
-	// Read these before concluding anything about a parameter's effect.
+	// THE PARAMETERS THIS TIER IS ACTUALLY RUNNING WITH. A tier parameter that fails to arrive
+	// looks exactly like one that has no effect, and a generator holds a COPY taken at
+	// InitializeData, so an edit can land on something nothing reads. Read these before
+	// concluding anything about a parameter's effect.
 	UE_LOG(LogTemp, Log,
 		TEXT("UniverseEntityGen: tier offset %d effective params -- GridDepth %d, ")
 		TEXT("NeighborhoodRadius %d, SlotCapacity %d, GenerationSubdivision %d, ")
@@ -209,10 +183,9 @@ float UniverseDataGenerator::GetTierBudgetScale(
 		return 0.0f;
 	}
 
-	// THE SAME BUILDER GENERATION USES. Calibration coords are drawn near the origin, so
-	// this path was never the one that lost precision -- it shares the split anyway, because
-	// a calibration that decomposed its cells differently from generation would solve the
-	// constant against a field offset by a fraction of a cell from the one entities land in.
+	// THE SAME BUILDER GENERATION USES: a calibration that decomposed its cells differently
+	// would solve the constant against a field offset by a fraction of a cell from where
+	// entities land.
 	TArray<FUniverseGenCell> Cells;
 	BuildGenCells(AllCells, Cells);
 
@@ -227,12 +200,10 @@ float UniverseDataGenerator::GetTierBudgetScale(
 		InvFieldExtent(), FieldTextures, CellMass)
 		&& CellMass.Num() == AllCells.Num())
 	{
-		// REDUCED HERE, NOT ON THE GPU, and in double.
-		//
-		// A slot receives the sum of what its cells produce, and for this layer every
-		// streamed cell owns its own slot, so the divisor is a per-parent SUM rather than a
-		// per-cell value. A global maximum over children would be wrong by the child count,
-		// and a mean would let dense cells overflow while the rest ran empty.
+		// REDUCED HERE, NOT ON THE GPU, and in double. A slot receives the sum of what its
+		// cells produce, and every streamed cell owns its own slot, so the divisor is a
+		// per-parent SUM: a global max over children would be wrong by the child count, and a
+		// mean would let dense cells overflow while the rest ran empty.
 		TMap<int32, double> ParentSums;
 
 		double TotalMass = 0.0;
@@ -255,11 +226,10 @@ float UniverseDataGenerator::GetTierBudgetScale(
 		}
 		Sums.Sort();
 
-		// A PERCENTILE, NOT THE MAXIMUM. See kCalibrationPercentile: this field's dynamic
-		// range is wider than a slot can represent, so the choice is not whether to clip but
-		// where to put the knee. Dividing by the max leaves everything but the densest cells
-		// invisible; dividing just below the tail lets the top couple of percent pin at
-		// capacity while every other cell tracks density.
+		// A PERCENTILE, NOT THE MAXIMUM (see kCalibrationPercentile): this field's dynamic
+		// range is wider than a slot can represent, so the choice is where to put the knee, not
+		// whether to clip. Dividing by the max leaves all but the densest cells invisible,
+		// while dividing just below the tail lets the top couple of percent pin at capacity.
 		double Divisor = 0.0;
 		double MedianSum = 0.0;
 		double MaxSum = 0.0;
@@ -282,10 +252,10 @@ float UniverseDataGenerator::GetTierBudgetScale(
 				static_cast<double>(InTierParams.SlotCapacity) / Divisor);
 		}
 
-		// THE SHAPE OF THE DISTRIBUTION, which is what says whether one constant can serve
-		// the whole field. The max-over-median ratio is the field's dynamic range as this
-		// tier's cells see it: a few times over means a constant works well, orders of
-		// magnitude means the tail will always clip and the percentile is doing real work.
+		// THE SHAPE OF THE DISTRIBUTION, which says whether one constant can serve the whole
+		// field: max over median is the dynamic range this tier's cells see, a few times over
+		// meaning a constant works and orders of magnitude meaning the percentile is doing real
+		// work.
 		const double Range = (MedianSum > 0.0) ? (MaxSum / MedianSum) : 0.0;
 
 		UE_LOG(LogTemp, Log,
@@ -305,10 +275,9 @@ float UniverseDataGenerator::GetTierBudgetScale(
 			InSeedOffset, AllCells.Num());
 	}
 
-	// CACHED EVEN AT ZERO IS WRONG, so it is not. A failed calibration is usually transient
-	// -- the render thread was busy, the texture had not streamed -- and caching the
-	// failure would leave the tier permanently empty for the session with nothing to
-	// retry it.
+	// CACHED EVEN AT ZERO IS WRONG, so it is not: a failed calibration is usually transient,
+	// and caching the failure would leave the tier empty for the session with nothing to retry
+	// it.
 	if (Scale > 0.0f)
 	{
 		TierBudgetScales.Add(InSeedOffset, Scale);
@@ -325,16 +294,14 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 	int32 InGridDepth,
 	TArray<int32>& OutSlotCounts) const
 {
-	// FAIL CLOSED, VISIBLY. There is no CPU path behind this, so a failure means these
-	// slots get nothing -- and a slot is REUSED as the player crosses boundaries, so
-	// "nothing written" is not an empty slot, it is the previous occupant's entities still
-	// sitting there at a coord they no longer belong to.
+	// FAIL CLOSED, VISIBLY: there is no CPU path behind this, and a slot is REUSED across
+	// boundary crosses, so "nothing written" leaves the previous occupant at a stale coord.
 	auto FailBatch = [&InQueuedCells, &InBuffer, &OutSlotCounts]() -> bool
 		{
 			OutSlotCounts.SetNumZeroed(InBuffer.SlotCoord.Num());
 
-			// The QUEUED cells, not the subdivided ones: blanking is per slot, and the
-			// children of a cell all share its slot.
+			// The QUEUED cells, not the subdivided ones: blanking is per slot and children
+			// share.
 			for (const FTierBatchCell& Cell : InQueuedCells)
 			{
 				if (OutSlotCounts.IsValidIndex(Cell.SlotIndex))
@@ -352,16 +319,13 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 		return true;
 	}
 
-	// LOUD ONCE, then quiet. ensure fires on its first hit per call site per session, which
-	// is right for a setup error: it stops the developer and lands in the log without
-	// spamming on every boundary cross. A misconfiguration would otherwise surface only as
-	// a tier that never populates, which reads as a streaming problem rather than a setup
-	// one.
+	// LOUD ONCE, then quiet: ensure fires on its first hit per call site per session. A
+	// misconfiguration would otherwise surface only as a tier that never populates, which reads
+	// as a streaming problem rather than a setup one.
 	if (!FieldTextures.IsComplete())
 	{
-		// NAMES THE MISSING ONES. With four assets "the texture is unresolved" sends the
-		// developer to check four paths, and the common case is that three are fine and one
-		// path has a typo in it.
+		// NAMES THE MISSING ONES: with four assets, "the texture is unresolved" sends the
+		// developer to check four paths when three are usually fine.
 		ensureMsgf(false,
 			TEXT("UniverseEntityGen: field textures unresolved (%s), so the sector will ")
 			TEXT("place NOTHING -- placement is GPU-only and the dispatch samples all four. ")
@@ -382,10 +346,9 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 		return FailBatch();
 	}
 
-	// Descend inside each queued cell. Children clear of the structure are culled by the
-	// probe pass and draw no candidates, and the ones that survive have a peak much closer
-	// to their own mean -- which is what keeps the accepted fraction high enough that the
-	// candidate budget is not mostly waste.
+	// Descend inside each queued cell. Children clear of the structure are culled by the probe
+	// pass, and survivors have a peak much closer to their own mean, keeping the accepted
+	// fraction high.
 	TArray<FTierBatchCell> Subdivided;
 	FTierStreamingSystem::SubdivideCells(InQueuedCells,
 		FMath::Clamp(InTierParams.GenerationSubdivision, 0,
@@ -413,9 +376,8 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 	TArray<FUniverseGenCell> Cells;
 	BuildGenCells(Subdivided, Cells);
 
-	// ONE SHARED BUFFER, sized on what the SLOTS can hold rather than on cells times a
-	// worst case. Every queued cell owns one slot, so this is exactly what the batch can
-	// possibly keep.
+	// ONE SHARED BUFFER, sized on what the SLOTS can hold rather than cells times a worst case:
+	// every queued cell owns one slot, so this is exactly what the batch can keep.
 	const int32 EntityCapacity = InQueuedCells.Num() * InBuffer.SlotCapacity;
 
 	TArray<FUniverseEntityOut> Entities;
@@ -430,40 +392,31 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 		return FailBatch();
 	}
 
-	// --- scatter ---
-	//
-	// STORAGE ORDER SAYS NOTHING. The dispatch compacts with a global atomic, so an
-	// entity's position in the readback is scheduling dependent; its CellIndex is what
-	// says which cell -- and therefore which slot -- it belongs to. Keying off position
-	// would shuffle a region's entities between visits.
+	// --- scatter --- STORAGE ORDER SAYS NOTHING. The dispatch compacts with a global atomic,
+	// so an entity's position in the readback is scheduling dependent; its CellIndex says which
+	// cell, and therefore which slot, it belongs to. Keying off position shuffles a region
+	// between visits.
 	OutSlotCounts.SetNumZeroed(InBuffer.SlotCoord.Num());
 
-	// Per-slot write cursors. The buffer reserves SlotCapacity per slot and the dispatch
-	// does not know about that partition, so the overflow is caught here.
+	// Per-slot write cursors: the buffer reserves SlotCapacity per slot, the dispatch does not
+	// know about that partition, so the overflow is caught here.
 	TArray<int32> SlotCursors;
 	SlotCursors.SetNumZeroed(InBuffer.SlotCoord.Num());
 
-	// RECORDS ACTUALLY WRITTEN. The shader now caps each slot at SlotCapacity before it
-	// claims a global index, so this is bounded by capacity rather than being the raw
-	// accepted count -- the demand figure moved to the per-slot counters below.
+	// RECORDS ACTUALLY WRITTEN. The shader caps each slot at SlotCapacity before claiming a
+	// global index, so this is bounded by capacity; the demand figure is in the per-slot
+	// counters below.
 	const uint32 TotalAccepted =
 		Counts.IsValidIndex(UniverseEntityGen::GlobalCursorIndex(Cells.Num()))
 		? Counts[UniverseEntityGen::GlobalCursorIndex(Cells.Num())]
 		: 0u;
 
-	// THE CURSOR BOUNDS THE LOOP, NOT THE ARRAY LENGTH, and the difference is not cosmetic.
-	//
-	// The readback copies the WHOLE entity buffer -- capacity records -- because the copy
-	// size has to be known before the dispatch runs. The shader only appends up to the
-	// global cursor, so everything past it is untouched: whatever RDG's pool handed back,
-	// which is a previous dispatch's entities or uninitialised device memory.
-	//
-	// Walking the full array therefore scatters garbage. Read as a record it gives NaN
-	// positions and arbitrary CellIndex values, and a CellIndex that lands in range by
-	// chance passes every bounds test here and writes a NaN position into the buffer. That
-	// is two bugs at once: the octree's child-index arithmetic on a NaN goes out of bounds
-	// and crashes releasing a garbage TSharedPtr, and the entities that do survive bear no
-	// relation to the density field, because they were never placed against it.
+	// THE CURSOR BOUNDS THE LOOP, NOT THE ARRAY LENGTH. The readback copies the WHOLE buffer,
+	// capacity records, because the copy size must be known before the dispatch runs, while the
+	// shader appends only up to the global cursor -- so everything past it is whatever RDG's
+	// pool handed back. Walking the full array scatters garbage: NaN positions and arbitrary
+	// CellIndex values, and one landing in range by chance passes every bounds test and writes
+	// a NaN, which crashes the octree's child-index arithmetic out of bounds.
 	const int32 Written = FMath::Min(
 		static_cast<int32>(FMath::Min<uint32>(TotalAccepted, static_cast<uint32>(INT32_MAX))),
 		EntityCapacity);
@@ -471,11 +424,10 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 	int32 Dropped = 0;
 	int32 Rejected = 0;
 
-	// THE SAMPLED DENSITY OF WHAT WAS ACTUALLY PLACED, which answers the alignment question
+	// THE SAMPLED DENSITY OF WHAT WAS ACTUALLY PLACED, answering the alignment question
 	// numerically rather than by eye. Every accepted entity passed a test against its cell's
-	// envelope, so if the dispatch is reading the field it means to read, these values sit
-	// well up the field's range. A mean hovering near the void floor means the dispatch is
-	// sampling somewhere the render is not.
+	// envelope, so these should sit well up the field's range; a mean near the void floor means
+	// the dispatch is sampling somewhere the render is not.
 	double DensitySum = 0.0;
 	float DensityMin = TNumericLimits<float>::Max();
 	float DensityMax = 0.0f;
@@ -514,19 +466,14 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 		}
 
 		// THE CELL'S CENTRE IS ADDED BACK HERE, IN DOUBLE. E.Pos is the entity's offset from
-		// its cell centre in caller units -- bounded by the cell -- so the sum is exact where
-		// the shader returning an absolute float32 was not. SourceCell.Centre is the same
-		// double the split above consumed, so this is the inverse of that split and not a
-		// reconstruction of it.
+		// its cell centre, so the sum is exact where an absolute float32 was not, and
+		// SourceCell.Centre is the same double the split above consumed.
 		const FVector Pos = SourceCell.Centre + FVector(E.Pos.X, E.Pos.Y, E.Pos.Z);
 
-		// BELT AND BRACES, and it should never fire now that the cursor bounds the loop.
-		// It stays because the consumer is the octree, whose child-index arithmetic on a
-		// non-finite coordinate walks out of its Children array and crashes releasing a
-		// garbage shared pointer -- a failure whose stack points at the octree and says
-		// nothing about where the bad value came from. One comparison is cheap insurance
-		// against ever debugging that again; if Rejected is non-zero, the entity buffer is
-		// being read past what the shader wrote.
+		// BELT AND BRACES, which should never fire now that the cursor bounds the loop. It
+		// stays because the octree's child-index arithmetic on a non-finite coordinate
+		// crashes with a stack that says nothing about where the value came from. If Rejected
+		// is non-zero, the buffer is being read past what the shader wrote.
 		if (Pos.ContainsNaN() || !FMath::IsFinite(E.Extent))
 		{
 			++Rejected;
@@ -541,18 +488,15 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 		DensityMax = FMath::Max(DensityMax, E.Density);
 		++DensityCount;
 
-		// The decoratives are three decorrelated uniforms; the colour convention matches
-		// what the CPU path wrote, so the Niagara systems need no change.
+		// Three decorrelated uniforms, in the colour convention the Niagara systems already
+		// read.
 		const FVector3f Decor = E.DecodeDecor();
 
 		if (Params.MaterialParams.bDebugColorByDensity)
 		{
-			// THE DENSITY THE DISPATCH ACTUALLY READ at this entity's own position, painted
-			// so it can be compared against the raymarch drawing the same field. See
-			// bDebugColorByDensity for how to read the three outcomes.
-			//
-			// Normalised by the analytic ceiling rather than by anything measured, so the
-			// scale means the same thing between tiers and survives a retune of the ranges.
+			// THE DENSITY THE DISPATCH ACTUALLY READ at this entity's position, painted so it
+			// can be compared against the raymarch; see bDebugColorByDensity. Normalised by
+			// the analytic ceiling, so the scale means the same across tiers and retunes.
 			const FUniverseDensityParams& DP = Params.DensityParams;
 
 			const float Ceiling =
@@ -571,9 +515,8 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 
 		if (InBuffer.Rotations.IsValidIndex(Idx))
 		{
-			// A unit vector from the decoratives rather than a fourth hash: the three are
-			// already decorrelated from position and from each other, and a face normal only
-			// has to be stable per entity.
+			// A unit vector from the decoratives, already decorrelated, rather than a fourth
+			// hash.
 			const FVector Dir(
 				static_cast<double>(Decor.X) * 2.0 - 1.0,
 				static_cast<double>(Decor.Y) * 2.0 - 1.0,
@@ -585,8 +528,8 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 		++Cursor;
 	}
 
-	// PAD EVERY QUEUED SLOT, including the ones that received nothing. A slot left
-	// untouched still holds its previous occupant.
+	// PAD EVERY QUEUED SLOT, including ones that received nothing: untouched still holds the
+	// last.
 	for (const FTierBatchCell& Cell : InQueuedCells)
 	{
 		if (SlotCursors.IsValidIndex(Cell.SlotIndex))
@@ -598,15 +541,11 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 		}
 	}
 
-	// HOW FAR THE CALIBRATED CONSTANT IS OUT, which is the only observer of that: a slot
-	// that is merely full looks identical whether it wanted one more entity or twenty times
-	// more, and the per-slot counters keep counting past the ceiling so the difference is
-	// visible.
-	//
-	// THIS IS THE NUMBER THAT SAYS WHETHER CALIBRATION GENERALISES. It is measured once at
-	// the origin against a field that is only statistically homogeneous, so a demand ratio
-	// that stays near 1 means the sample was representative and a ratio in the tens means
-	// it was not -- the constant is describing a part of the field the player is not in.
+	// HOW FAR THE CALIBRATED CONSTANT IS OUT, and the only observer of it: a full slot looks
+	// the same whether it wanted one more entity or twenty times more, and the counters keep
+	// counting past the ceiling. THIS IS THE NUMBER THAT SAYS WHETHER CALIBRATION
+	// GENERALISES -- a ratio near 1 means the origin sample was representative, a ratio in the
+	// tens means the constant describes a part of the field the player is not in.
 	uint32 SlotDemand = 0;
 	uint32 WorstSlotDemand = 0;
 
@@ -625,36 +564,22 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 		? (static_cast<double>(WorstSlotDemand) / static_cast<double>(InBuffer.SlotCapacity))
 		: 0.0;
 
-	// THE DIAGNOSTIC THAT DECIDES SUBDIVISION. Probes and candidates are both field
-	// evaluations, and a universe field evaluation is a fifty-four candidate walk plus five
-	// texture fetches -- so the ratio between them is the whole cost argument. Below about
-	// 1 the probes have overtaken placement and the tier wants one subdivision level fewer;
-	// above about 9 it wants one more.
+	// THE DIAGNOSTIC THAT DECIDES SUBDIVISION. Probes and candidates are both field evaluations
+	// -- here a fifty-four candidate walk plus five fetches -- so their ratio is the whole cost
+	// argument: below about 1 the tier wants one subdivision fewer, above 9 one more.
 	uint32 CandidatesEvaluated = 0;
 
-	// THE ENVELOPE CHECK, and it is the first thing to read when placement has the right
-	// SHAPE but the wrong GRADIENT.
+	// THE ENVELOPE CHECK, the first thing to read when placement has the right SHAPE but the
+	// wrong GRADIENT. Acceptance is saturate(d / envelope)^g, so everything above the envelope
+	// accepts with probability 1. WHAT THAT COSTS IS THE COUNT, NOT THE SHAPE -- the clipped
+	// region is the cell's brightest part -- but accepted_i = BudgetScale x mass_i holds only
+	// while nothing saturates. A clipping cell therefore OVER-DELIVERS against its budget and
+	// the surplus is cut by slot capacity rather than by the field, so bright cells all pin at
+	// capacity while faint ones under-fill; check `dropped over capacity` alongside this.
 	//
-	// Acceptance is saturate(d / envelope)^g, so everything above the envelope accepts with
-	// probability 1. WHAT THAT COSTS IS THE COUNT, NOT THE SHAPE, and the distinction is
-	// worth keeping straight: the clipped region is the cell's brightest part, so entities
-	// landing in it are still on the structure. What breaks is the relation the whole budget
-	// rests on -- accepted_i = BudgetScale x mass_i holds only while nothing saturates.
-	//
-	// A clipping cell therefore OVER-DELIVERS against its budget, and the surplus is then
-	// cut by slot capacity rather than by the field. That is what reads as a loose fit at
-	// the large scale: bright cells all pin at capacity and become indistinguishable from
-	// each other, while faint cells under-fill. Check `dropped over capacity` alongside
-	// this; the two move together.
-	//
-	// THE SPAWN EXPONENT MAKES THIS SHARPER IN BOTH DIRECTIONS. At g = 8 a candidate at
-	// 90% of the envelope accepts at 0.43 while one at 100% accepts at 1, so the fraction
-	// sitting in the clipped region dominates the result. A high exponent is only
-	// meaningful once the envelope is known to be tight.
-	//
-	// This field is worse for it than the galaxy's: its features are the SURFACES between
-	// nodes, which sit at no particular place relative to the generation grid, so a thin
-	// wall crossing a cell can fall between all fifty-six jittered probes.
+	// THE SPAWN EXPONENT MAKES THIS SHARPER BOTH WAYS: at g = 8 a candidate at 90% of the
+	// envelope accepts at 0.43 against 1 at 100%, so a high exponent is only meaningful once
+	// the envelope is known to be tight.
 	int32 CellsClipped = 0;
 	double WorstOvershoot = 0.0;
 
@@ -704,9 +629,8 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 		? (100.0 * static_cast<double>(Written) / static_cast<double>(EntityCapacity))
 		: 0.0);
 
-	// FOUR TIMES CAPACITY IS THE POINT AT WHICH THE SLOT STOPS DESCRIBING THE FIELD. Below
-	// that a full slot is a genuinely dense region; far above it, every dense region is
-	// equally full and the population no longer varies with density at all.
+	// FOUR TIMES CAPACITY IS WHERE THE SLOT STOPS DESCRIBING THE FIELD: below it a full slot is
+	// a genuinely dense region, far above it every dense region is equally full.
 	if (DemandRatio > 4.0)
 	{
 		UE_LOG(LogTemp, Warning,
@@ -718,11 +642,9 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 	}
 
 	// A FEW PERCENT IS NORMAL -- a finite probe set cannot find every peak, which is what
-	// EnvelopePad exists to absorb. A large fraction means acceptance is saturating across
-	// the batch and the placement gradient is being flattened cell by cell, which is a
-	// SAMPLING problem rather than a tuning one: raise EnvelopePad, or lower the spawn
-	// exponent until the envelope is trustworthy. Raising the candidate budget does not
-	// help, because every extra candidate is drawn against the same short envelope.
+	// EnvelopePad absorbs. A large fraction means acceptance is saturating and the gradient is
+	// flattened cell by cell, a SAMPLING problem: raise EnvelopePad or lower the spawn
+	// exponent. Raising the budget does not help, every candidate seeing the same envelope.
 	if (Cells.Num() > 0 && CellsClipped * 4 > Cells.Num())
 	{
 		UE_LOG(LogTemp, Warning,
@@ -734,9 +656,8 @@ bool UniverseDataGenerator::GenerateTierBatchGPU(
 			InSeedOffset, CellsClipped, Cells.Num(), WorstOvershoot);
 	}
 
-	// A NON-FINITE RECORD IS NOT A TUNING PROBLEM. It means the scatter read past what the
-	// dispatch wrote, which is a plumbing fault rather than a field one, and it is worth
-	// saying loudly because the crash it causes surfaces inside the octree.
+	// A NON-FINITE RECORD IS NOT A TUNING PROBLEM: the scatter read past what the dispatch
+	// wrote -- a plumbing fault whose crash surfaces inside the octree.
 	if (Rejected > 0)
 	{
 		UE_LOG(LogTemp, Warning,

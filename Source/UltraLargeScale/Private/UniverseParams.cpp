@@ -1,8 +1,8 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
-// UniverseParams.h is otherwise all USTRUCTs and inline packing. Validate() is the one
-// thing that wants to be out of line: it logs, so it would drag the format machinery into
-// every translation unit that only wanted the authored struct.
+// UniverseParams.h is otherwise all USTRUCTs and inline packing. Validate() is out of line
+// because it logs, which would otherwise drag the format machinery into every translation unit
+// that only wanted the struct.
 
 #include "UniverseParams.h"
 
@@ -10,18 +10,16 @@ bool FUniverseDensityParams::Validate(const TCHAR* InContext) const
 {
 	bool bOk = true;
 
-	// --- THE FOLD CEILING ---
-	// First, because past it the coarse web tears rather than bends, and it does so only in
-	// the regions the lattice blend has handed to the coarse tier. Region-dependent tearing
-	// reads as a lattice problem, a region scale problem or a hash problem long before it
-	// reads as a warp amplitude problem.
+	// --- THE FOLD CEILING --- first, because past it the coarse web tears rather than bends,
+	// and only in the regions the blend has handed to the coarse tier. Region-dependent tearing
+	// reads as a lattice, region-scale or hash problem long before it reads as a warp amplitude
+	// problem.
 	const float Shear = PredictedFoldShear();
 	if (Shear > 1.0f)
 	{
 		bOk = false;
-		// BOTH GRADIENTS REPORTED, one per octave, because the octaves read separate assets
-		// now and each term carries its own. A single number here would be an average of two
-		// and would send the reader to the wrong pin half the time.
+		// BOTH GRADIENTS REPORTED, one per octave: the octaves read separate assets, so a
+		// single averaged number would send the reader to the wrong pin half the time.
 		UE_LOG(LogTemp, Warning,
 			TEXT("%s: predicted warp shear on the coarse lattice is %.3f, above the fold ")
 			TEXT("ceiling of 1. The web will tear rather than bend, and only in coarse ")
@@ -41,22 +39,14 @@ bool FUniverseDensityParams::Validate(const TCHAR* InContext) const
 			InContext, Shear);
 	}
 
-	// --- SCALE COPRIMALITY ---
-	// Four texture scales, each a whole number of 1/4096ths. Any pair re-aligns every
-	// 4096/gcd cells, so a shared factor puts a visible repeat inside the precision wrap.
-	// ADDING A FIFTH FETCH MEANS ADDING IT TO THIS TABLE and checking it against all four.
+	// --- SCALE COPRIMALITY --- four texture scales, each a whole number of 1/4096ths, so any
+	// pair re-aligns every 4096/gcd cells. ADDING A FIFTH FETCH MEANS ADDING IT TO THIS TABLE
+	// and checking it against all four.
 	//
-	// WEAKER THAN IT WAS, AND WORTH KNOWING WHICH WAY. When every fetch read one packed
-	// volume, a shared factor between two scales meant those two fetches literally repeated
-	// each other's CONTENT at the re-alignment period -- the same texels, twice. All four
-	// of these now read different assets, so that failure is gone outright: two fetches into
-	// two unrelated volumes cannot repeat content whatever their periods do.
-	//
-	// What survives is the weaker structural version: two fields whose periods share a
-	// factor have their region BOUNDARIES co-occur, so provinces start and stop in the same
-	// places even though they are made of different noise. That is still worth avoiding and
-	// still what this check finds, but it is a subtlety rather than a visible tiling seam,
-	// so treat a warning here as advisory rather than as a defect.
+	// ADVISORY, NOT A DEFECT. Each fetch reads its own asset, so a shared factor cannot make
+	// two fetches repeat each other's content; what survives is that their region BOUNDARIES
+	// co-occur, so provinces start and stop in the same places even though they are made of
+	// different noise.
 	struct FNamedScale { const TCHAR* Name; float Scale; };
 	const FNamedScale Scales[] = {
 		{ TEXT("Region.ScaleStructure"),  Region.ScaleStructure },
@@ -73,15 +63,14 @@ bool FUniverseDensityParams::Validate(const TCHAR* InContext) const
 			const int32 Period = ScaleRepeatPeriod(Scales[i].Scale, Scales[j].Scale);
 
 			// 4096 is the precision wrap itself, so a coprime pair never repeats before the
-			// field wraps anyway and there is nothing to report.
+			// field does.
 			if (Period >= 4096)
 			{
 				continue;
 			}
 
-			// Anything reachable inside a single session is the case that matters. A pair
-			// repeating every few hundred cells is a visible grid; one repeating every
-			// couple of thousand is a note rather than a fault.
+			// A pair repeating every few hundred cells is a visible grid; every couple of
+			// thousand is a note.
 			const bool bSevere = (Period < 512);
 			bOk = bOk && !bSevere;
 
@@ -97,10 +86,9 @@ bool FUniverseDensityParams::Validate(const TCHAR* InContext) const
 		}
 	}
 
-	// --- NEGATIVE VOID FLOOR ---
-	// The march's exp(-density) turns negative density into unbounded gain rather than
-	// opacity. Both ends, since a range spanning zero puts the negative end somewhere and a
-	// noise channel decides where.
+	// --- NEGATIVE VOID FLOOR --- the march's exp(-density) turns negative density into
+	// unbounded gain rather than opacity. Both ends are tested, since a range spanning zero
+	// puts the negative end somewhere.
 	if (FMath::Min(Void.Floor.Min, Void.Floor.Max) < 0.0f)
 	{
 		bOk = false;
@@ -110,9 +98,9 @@ bool FUniverseDensityParams::Validate(const TCHAR* InContext) const
 			InContext, Void.Floor.Min, Void.Floor.Max);
 	}
 
-	// --- WALL FALLOFF AT OR BELOW ZERO ---
-	// 0 makes every non-zero base read as 1 and floods the field; below zero is a
-	// division-by-zero shape that lights the void up rather than clearing it.
+	// --- WALL FALLOFF AT OR BELOW ZERO --- 0 makes every non-zero base read as 1 and floods
+	// the field; below zero is a division-by-zero shape that lights the void up rather than
+	// clearing it.
 	if (FMath::Min(Wall.Falloff.Min, Wall.Falloff.Max) <= 0.0f)
 	{
 		bOk = false;
@@ -123,10 +111,9 @@ bool FUniverseDensityParams::Validate(const TCHAR* InContext) const
 			InContext, Wall.Falloff.Min, Wall.Falloff.Max);
 	}
 
-	// --- DEGENERATE FEATURE WIDTH ---
-	// Not a range limit; a division. The core guards it, but a zero width also drives
-	// MinFeatureStep to zero, which hands the march's step floor back to the authored pin
-	// alone -- an absolute distance with no knowledge of the cell size.
+	// --- DEGENERATE FEATURE WIDTH --- not a range limit but a division. The core guards it,
+	// but a zero width also drives MinFeatureStep to zero, handing the march's step floor back
+	// to the authored pin alone.
 	if (FMath::Max(FeatureWidth.Min, FeatureWidth.Max) <= 0.0f)
 	{
 		bOk = false;
@@ -136,12 +123,11 @@ bool FUniverseDensityParams::Validate(const TCHAR* InContext) const
 			InContext);
 	}
 
-	// --- VOID SIZE SPREAD AGAINST THE SEARCH WINDOW ---
-	// The power-diagram offset is what erodes the 27-cell neighbourhood: a node out-reaches
-	// an unoffset neighbour by this much in squared distance, and once that approaches the
-	// cell separation the true nearest node can sit outside the window. The bound degrades
-	// with wide features as well as with large offsets, which is why the width is in the
-	// test rather than a fixed threshold.
+	// --- VOID SIZE SPREAD AGAINST THE SEARCH WINDOW --- the power-diagram offset erodes the
+	// 27-cell neighbourhood: a node out-reaches an unoffset neighbour by this much in squared
+	// distance, and once that approaches the cell separation the true nearest node can sit
+	// outside the window. The bound degrades with wide features too, which is why the width is
+	// in the test rather than a fixed threshold.
 	const float MaxSpread = FMath::Max(Void.SizeSpread.Min, Void.SizeSpread.Max);
 	const float MaxWidth = FMath::Max(FeatureWidth.Min, FeatureWidth.Max);
 	if (MaxSpread > 0.5f || (MaxSpread > 0.25f && MaxWidth > 0.5f))
@@ -154,15 +140,11 @@ bool FUniverseDensityParams::Validate(const TCHAR* InContext) const
 			InContext, MaxSpread, MaxWidth);
 	}
 
-	// --- REGION FETCHES THAT WILL BE SKIPPED ---
-	// The core pays for a region fetch only if at least one consumer of that fetch is
-	// non-degenerate, so flattening a whole group silently turns its variance off. That is
-	// legal and occasionally wanted, but it is not visible from the details panel, and the
-	// symptom -- a field with no provincial variation at all -- reads as a broken texture
-	// long before it reads as an authored constant.
-	//
-	// EVERY RANGE MUST APPEAR IN ITS FETCH'S LIST, matching the core's own bRegionEnable
-	// tests. A range that moves between fields has to move between these lists with it.
+	// --- REGION FETCHES THAT WILL BE SKIPPED --- the core pays for a region fetch only if at
+	// least one consumer is non-degenerate, so flattening a whole group silently turns its
+	// variance off. Legal and occasionally wanted, but invisible from the details panel, and
+	// the symptom reads as a broken texture rather than as an authored constant. EVERY RANGE
+	// MUST APPEAR IN ITS FETCH'S LIST, matching the core's bRegionEnable tests.
 	const bool bStructureLive =
 		!Void.SizeSpread.IsDegenerate() ||
 		!FeatureWidth.IsDegenerate() ||
@@ -195,11 +177,10 @@ bool FUniverseDensityParams::Validate(const TCHAR* InContext) const
 	}
 
 
-	// A ratio past WrapAlign makes one period block exceed the float-exact range, so the
-	// period falls back to a single block that is ABOVE it and the offset pin starts
-	// quantizing again -- with the wrap in place and apparently working, which is the part
-	// that would waste an afternoon. Not reachable by any sane authoring (coarse cells four
-	// thousand times the fine ones), but silent if it ever happens.
+	// A ratio past WrapAlign makes one period block exceed the float-exact range, so the period
+	// falls back to a single block ABOVE it and the offset pin quantizes again -- with the wrap
+	// in place and apparently working. Not reachable by sane authoring, but silent if it ever
+	// happens.
 	{
 		const int32 WrapRatio = UniverseCellWrap::DeriveRatio(
 			static_cast<double>(Lattice.CellSizeSmall),

@@ -20,39 +20,25 @@ AGalaxyActor::AGalaxyActor()
 	SetActorTickEnabled(false);
 	Octree = MakeShared<FOctree>(Params.Extent);
 
-	// Acquire the fallback field textures -- the same assets the material samples.
-	// APPLIED THROUGH ResolveFieldTextures, NOT HERE.
+	// Acquire the fallback field textures -- the same assets the material samples -- but APPLY
+	// THEM THROUGH ResolveFieldTextures, NOT HERE. Placement is GPU-only and the dispatch samples
+	// all four, so an unresolved texture means the galaxy generates nothing at all, silently.
+	// Writing into Params here would do nothing for a POOLED galaxy, since ReInit assigns Params
+	// wholesale before the first batch, so the reference is parked on the actor and applied after
+	// Params is assigned, where every path passes through. Acquired here regardless because
+	// ConstructorHelpers only runs during UObject construction, which also keeps the asset cooked.
 	//
-	// NOT a convenience. Placement is GPU-only and the dispatch samples all four, so an
-	// unresolved texture means the galaxy generates nothing at all, silently.
+	// Set NEVER STREAM on these assets. The material handles streaming residency and a compute
+	// dispatch does not: if mip 0 is not resident when the dispatch runs it reads whatever is, and
+	// placement silently stops matching the render.
+	// FOUR, one per fetch. The warp pair takes signed vector volumes and the modulation pair UNORM
+	// multinoise -- not interchangeable, and binding a multinoise volume to a warp slot translates
+	// that family instead of displacing it.
 	//
-	// Writing it into Params here would accomplish nothing for a POOLED galaxy:
-	// ReInit assigns Params wholesale from the universe's resolved params, so the
-	// constructor's value is gone before the first batch. It survives only for a
-	// level-placed actor, which is the path that matters least. So the reference is
-	// parked on the actor and applied after Params is assigned, where every path
-	// passes through.
-	//
-	// Acquired here regardless because ConstructorHelpers only runs during UObject
-	// construction -- and keeping it means the asset is cooked rather than left to a
-	// runtime LoadObject that may not find it.
-	//
-	// Set NEVER STREAM on this asset. GalaxyDensityCore.ush reads mip 0 on both paths, but
-	// the material handles streaming residency and a compute dispatch does not: if
-	// mip 0 is not resident when the dispatch runs it reads whatever is, and placement
-	// silently stops matching the render.
-	// FOUR NOW, one per fetch. The warp pair takes signed vector volumes and the modulation
-	// pair UNORM multinoise -- they are not interchangeable, and binding a multinoise volume
-	// to a warp slot translates that family instead of displacing it.
-	//
-	// ONE ASSET PER ROLE, THE SAME IN BOTH SLOTS OF IT. These are fallbacks, not a curation:
-	// gas and halo reading SEPARATE FETCHES is what makes distinct content possible, and
-	// filling the archetype bags is what makes it real. Until they are filled, the honest
-	// default is the same asset in both slots rather than an arbitrary pairing.
-	//
-	// THE VISIBLE GAIN ARRIVES WITH THE BAGS. Point NoiseDiscTextures at ridged bakes and
-	// NoiseHaloTextures at smooth ones and the two families diverge with no per-sample cost
-	// and no shared domain offset needed to pull them apart.
+	// ONE ASSET PER ROLE, THE SAME IN BOTH SLOTS OF IT. These are fallbacks, not a curation: gas
+	// and halo reading SEPARATE FETCHES is what makes distinct content possible, and filling the
+	// archetype bags is what makes it real. Point NoiseDiscTextures at ridged bakes and
+	// NoiseHaloTextures at smooth ones and the two families diverge at no per-sample cost.
 	{
 		static ConstructorHelpers::FObjectFinder<UVolumeTexture> DefaultWarp(
 			TEXT("/UniverseNoisePack/128/VT_PerlinCurl_S4.VT_PerlinCurl_S4"));
@@ -209,28 +195,22 @@ void AGalaxyActor::InitializeData()
 {
 	double StartTime = FPlatformTime::Seconds();
 
-	// REBUILT AGAINST THE CURRENT Params.Extent, as AStarSystemActor::InitializeData
-	// already did and this layer did not.
+	// REBUILT AGAINST THE CURRENT Params.Extent. Nothing else sizes this tree to the galaxy it
+	// belongs to: the constructor builds it from the DEFAULT Extent of 2^31, and
+	// AUniverseActor::FinishGalaxyPoolReturn rebuilds it from the extent of the occupant being
+	// RETIRED, so on every acquire after the first the tree was sized for the previous galaxy.
+	// Extent is clamped to [2048, 4.4e12], thirty-one octaves, and MaxDepth is floor(log2(Extent)),
+	// so a mismatched tree quantizes at the wrong depth entirely.
 	//
-	// Nothing else sizes this tree to the galaxy it belongs to. The constructor builds it
-	// from the DEFAULT Extent, 2^31, and AUniverseActor::FinishGalaxyPoolReturn rebuilds it
-	// from the extent of the occupant being RETIRED -- so on every acquire after the first,
-	// the tree was sized for the previous galaxy. Extent is derived per galaxy from its
-	// parent particle and clamped to [MinDerivedExtent, MaxDerivedExtent], 2048 to 4.4e12,
-	// which is thirty-one octaves: MaxDepth is floor(log2(Extent)), so a mismatched tree
-	// quantizes at the wrong depth entirely.
+	// WHAT THAT LOOKS LIKE, since none of it names the octree: a tree too COARSE drops star systems
+	// to first-writer-wins collisions at oversized nodes, while one too SMALL takes particles
+	// outside its root cube, which InsertPosition does not check -- they descend into the outermost
+	// octant repeatedly and land in a node whose cube does not contain them. IsPlayerInsideBounds
+	// measures against Octree->Extent too, so the scan hand-off uses the wrong radius.
 	//
-	// WHAT THAT LOOKS LIKE, since none of it names the octree. A tree too COARSE drops star
-	// systems to first-writer-wins collisions at nodes far larger than intended. A tree too
-	// SMALL takes particles outside its root cube, which InsertPosition does not check for
-	// -- they descend into the outermost octant repeatedly and land in a node whose cube
-	// does not contain them. IsPlayerInsideBounds measures against Octree->Extent too, so
-	// the scan hand-off in AUniverseActor::DetermineAndDispatchScan uses the wrong radius.
-	//
-	// HERE rather than in ReInit because this is the first phase of the init chain that
-	// runs with Params assigned, and it is upstream of every insert: the tiers do not
-	// generate until InitializeNiagara. Nothing on the game thread reads the pointer
-	// meanwhile -- every reader gates on InitializationState reaching Ready.
+	// HERE rather than in ReInit because this is the first phase of the init chain that runs with
+	// Params assigned, and it is upstream of every insert. Nothing on the game thread reads the
+	// pointer meanwhile -- every reader gates on InitializationState reaching Ready.
 	Octree = MakeShared<FOctree>(Params.Extent);
 
 	// Bake the resolved texture back into Params so the generator, which only sees
@@ -380,19 +360,14 @@ void AGalaxyActor::InitializeVolumetric()
 			Self->VolumetricComponent->SetMaterial(0, Self->VolumeMaterial);
 			Self->VolumetricComponent->SetVisibility(true);
 
-			// WHAT THE MARCH ACTUALLY COSTS, which is now a property of the parameters
-			// alone rather than of where the camera is -- so it can be logged once at init
-			// and stay true. The budget and the count it resolves to differ by
-			// ln(1+g)/g and the gap is wide enough to surprise: at growth 2 a budget of
-			// 192 buys about 105 steps.
-			//
-			// The base step is here beside them because it is what MinFeatureStep is
-			// compared against: when half the narrowest layer thickness exceeds this
-			// number, the field's own floor binds and further budget buys nothing. The
-			// floor itself is NOT logged here -- it is derived inside
-			// MakeGalaxyDensityParams, which this translation unit does not compile, and
-			// recomputing it locally would be exactly the second home for one value that
-			// every alignment bug so far has turned out to be.
+			// WHAT THE MARCH ACTUALLY COSTS, a property of the parameters alone rather than of
+			// where the camera is, so it can be logged once at init and stay true. The budget and
+			// the count it resolves to differ by ln(1+g)/g, wide enough to surprise: at growth 2 a
+			// budget of 192 buys about 105 steps. The base step sits beside them because it is what
+			// MinFeatureStep is compared against -- when half the narrowest layer thickness exceeds
+			// it, the field's own floor binds and further budget buys nothing. That floor is NOT
+			// logged here: it is derived in MakeGalaxyDensityParams, which this TU does not
+			// compile, and recomputing it locally would give one value a second home.
 			const FGalaxyMaterialParams& MP = Self->Params.Config.MaterialParams;
 			UE_LOG(LogTemp, Log,
 				TEXT("AGalaxyActor::InitializeVolumetric - march budget %.0f at growth ")
@@ -520,10 +495,9 @@ void AGalaxyActor::PushDensityParams(UMaterialInstanceDynamic* InMID) const
 	// NOT PUSHED: EnableNoise. It is a StaticSwitchParameter, resolved at material
 	// compile time -- a MID cannot change one, and setting it silently does nothing.
 	//
-	// It is a VISUALISATION AID on the material asset, not a field parameter. Placement
-	// always samples the texture, so turning it off shows the analytic layers alone
-	// while the stars stay where the textured field put them. There is deliberately no
-	// per-galaxy property behind it.
+	// It is a VISUALISATION AID on the material asset, not a field parameter: placement always
+	// samples the texture, so turning it off shows the analytic layers alone while the stars stay
+	// where the textured field put them. There is deliberately no per-galaxy property behind it.
 }
 
 void AGalaxyActor::InitializeNiagara()
@@ -577,17 +551,15 @@ void AGalaxyActor::BuildTierConfigs()
 	LargeTierConfig.bWantRotations = { false };
 	LargeTierConfig.OctreeInsertBufferIndex = 0;
 	LargeTierConfig.TierIndex = 0;
-	// IDENTICAL IN SHAPE TO THE OTHER TWO. Build one cell per queued slot, hand it over.
+	// IDENTICAL IN SHAPE TO THE OTHER TWO: build one cell per queued slot, hand it over. The large
+	// tier differs only in data -- one slot covering the whole galaxy, subdivided deeply enough to
+	// resolve structure, every child writing to that slot. It needs no bespoke cull grid or cell
+	// builder, since GenerationSubdivision produces exactly that tiling and a second one beside it
+	// would be a second place the child coords could drift from what calibration measured.
 	//
-	// The large tier differs only in data: one slot covering the whole galaxy, subdivided
-	// deeply enough to resolve structure, with every child writing to that one slot. It
-	// needs no bespoke cull grid or cell builder -- GenerationSubdivision produces exactly
-	// that tiling, and a second one beside it would be a second place the child coords could
-	// drift from the ones calibration measured.
-	//
-	// bCellsShareSlot is the one flag that distinguishes it, and it is about CALIBRATION,
-	// not generation: many cells feeding one slot means the slot holds their sum, so the
-	// tier's constant divides capacity by total mass rather than by the largest cell.
+	// bCellsShareSlot is the one flag that distinguishes it, and it is about CALIBRATION rather
+	// than generation: many cells feeding one slot means the slot holds their sum, so the tier's
+	// constant divides capacity by total mass rather than by the largest cell.
 	LargeTierConfig.GenerateBatchCallback =
 		[this](const TArray<TPair<FIntVector, int32>>& Slots, TArray<int32>& OutCounts) -> bool
 		{
@@ -660,14 +632,11 @@ void AGalaxyActor::BuildTierConfigs()
 				Cells, MidTierState.Buffers[0], Params.Config.MidTier, 7, false, OutCounts);
 		};
 
-	// THE MID AND SMALL CALLBACKS BELOW ARE THE SAME FUNCTION TWICE, and the copy has
-	// already drifted -- compare the comment indentation inside each. AUniverseActor
-	// builds its three through MakeTierBatchCallback for exactly this reason, and its
-	// note there predicts this: "the galaxy layer writes its two out separately and they
-	// have already drifted in whitespace". The factory takes a config, a state, a tier
-	// params and a seed offset; the only thing blocking the same treatment here is that
-	// the Large tier passes bCellsShareSlot true where the other two pass false, which is
-	// one more argument rather than a second code path.
+	// THE MID AND SMALL CALLBACKS BELOW ARE THE SAME FUNCTION TWICE, and the copy has already
+	// drifted -- compare the comment indentation inside each. AUniverseActor builds its three
+	// through MakeTierBatchCallback for exactly this reason. The only thing blocking the same
+	// treatment here is that the Large tier passes bCellsShareSlot true where the other two pass
+	// false, which is one more argument rather than a second code path.
 
 	// --- Small tier: neighborhood streaming ---
 	SmallTierConfig.TierName = TEXT("Small");

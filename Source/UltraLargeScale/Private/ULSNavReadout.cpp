@@ -7,15 +7,11 @@
 
 namespace
 {
-	/** Fills the common part of a layer entry from any procedural actor.
-	 *
-	 *  THE EXTENT COMES FROM THE OCTREE, not from Params.Extent, because
-	 *  IsPlayerInsideBounds tests against Octree->Extent and this fraction has to agree
-	 *  with that test. They are the same number today (both layers build their tree at
-	 *  Params.Extent), and the day one of them stops being -- a rebased tree, a
-	 *  multiplier like the universe's PersistentTreeMultiplier -- the readout would
-	 *  otherwise start reporting "outside" for a player the spawn scan is still treating
-	 *  as inside, with nothing else changing. */
+	/** Fills the common part of a layer entry from any procedural actor. THE EXTENT COMES FROM
+	 *  THE OCTREE, not Params.Extent, because IsPlayerInsideBounds tests against Octree->Extent
+	 *  and this fraction has to agree with it. They are the same number today, and the day one
+	 *  stops being -- a rebased tree, a multiplier like PersistentTreeMultiplier -- the readout
+	 *  would report "outside" for a player the spawn scan still treats as inside. */
 	template <typename TActor>
 	FULSLayerCoord MakeLayerCoord(const TCHAR* InLayerName, const TActor& InActor)
 	{
@@ -39,18 +35,12 @@ namespace
 		return Out;
 	}
 
-	/** Picks the layer instance the player is in, or the nearest one if none contains
-	 *  them.
+	/** Picks the layer instance the player is in, or the nearest if none contains them.
 	 *
-	 *  NEAREST-BY-BOUNDS-FRACTION, not nearest by distance, and the difference matters
-	 *  when two candidates have different extents: a small system 2 extents away and a
-	 *  large one 5 extents away are not ranked by raw distance in any way that means
-	 *  anything to a player. Fraction ranks them by "how close to being inside".
-	 *
-	 *  IT RETURNS A NON-CONTAINING CANDIDATE ON PURPOSE. Showing nothing when the player
-	 *  is between galaxies hides the useful case -- approaching one -- and makes an empty
-	 *  row indistinguishable from a broken walk. The caller dims it and the fraction says
-	 *  which it is. */
+	 *  NEAREST-BY-BOUNDS-FRACTION, not by distance, which matters when candidates have different
+	 *  extents: a small system 2 extents away and a large one 5 away are not usefully ranked by
+	 *  raw distance. IT RETURNS A NON-CONTAINING CANDIDATE ON PURPOSE -- showing nothing when the
+	 *  player is between galaxies makes an empty row look like a broken walk. */
 	template <typename TActor, typename TMap>
 	const TActor* SelectNearest(const TMap& InSpawned, double& OutBestFraction)
 	{
@@ -61,9 +51,8 @@ namespace
 		{
 			const TActor* Candidate = Pair.Value.Get();
 
-			// READY ONLY. A pooled actor mid-init still holds the VirtualTraversal of
-			// whoever had it last, and that value is a perfectly well-formed position
-			// inside a galaxy that is not there any more.
+			// READY ONLY. A pooled actor mid-init still holds the VirtualTraversal of whoever
+			// had it last -- a well-formed position inside a galaxy that is not there any more.
 			if (!Candidate || Candidate->InitializationState != ELifecycleState::Ready)
 			{
 				continue;
@@ -97,10 +86,8 @@ FULSNavSample ULSSampleUniverseNav(const AUniverseActor& InUniverse)
 	FULSNavSample Out;
 	Out.State = InUniverse.InitializationState;
 
-	// EVERYTHING BELOW READS STATE THE TICK MAINTAINS, so it is only meaningful once the
-	// tick is maintaining it. Before Ready, VirtualTraversal is whatever the last
-	// occupant of this pooled actor left behind and CurrentFrameOfReferenceLocation has
-	// not been primed -- both are numbers, neither is a position.
+	// EVERYTHING BELOW READS STATE THE TICK MAINTAINS: before Ready, both VirtualTraversal and
+	// CurrentFrameOfReferenceLocation are numbers rather than positions.
 	if (InUniverse.InitializationState != ELifecycleState::Ready)
 	{
 		return Out;
@@ -112,12 +99,10 @@ FULSNavSample ULSSampleUniverseNav(const AUniverseActor& InUniverse)
 	Out.Coord.Local = InUniverse.VirtualTraversal;
 	Out.Coord.UnitScaleCm = UnitScaleCm;
 
-	// THE ONLY ARITHMETIC IN THIS FILE, kept on one line so the UnitScale that was used is
-	// visible next to the multiply. Double throughout: traversal reaches ~4e9 units against
-	// a UnitScale of 1.6e17, so the product reaches ~7e26 -- well inside double range, with
-	// ~15 significant digits left, resolving to roughly half an AU at the far edge of the
-	// octree. THAT IS THIS COORDINATE'S PRECISION FLOOR, and the reason the nested layers
-	// below it exist rather than a defect to fix here.
+	// THE ONLY ARITHMETIC IN THIS FILE, on one line so the UnitScale used is visible next to
+	// the multiply. Double throughout: traversal reaches ~4e9 against a UnitScale of 1.6e17, so
+	// the product reaches ~7e26, inside double range with ~15 digits left -- about half an AU
+	// at the octree's far edge, which is THIS COORDINATE'S PRECISION FLOOR.
 	Out.Coord.RealCm = InUniverse.VirtualTraversal * UnitScaleCm;
 
 	// The universe's own derivation, not a copy of it. See the note on FULSNavSample.
@@ -130,14 +115,11 @@ FULSNavSample ULSSampleUniverseNav(const AUniverseActor& InUniverse)
 	Out.FrameOfReferenceWorld = InUniverse.CurrentFrameOfReferenceLocation;
 	Out.SpawnedGalaxyCount = InUniverse.SpawnedGalaxies.Num();
 
-	// --- Nested layers ------------------------------------------------------------
-	//
-	// STRICTLY TOP-DOWN, and the star system is looked up inside the CHOSEN galaxy rather
-	// than across all of them. Every galaxy owns its own SpawnedStarSystems keyed on its
-	// own octree nodes, and a system's VirtualTraversal is only meaningful relative to its
-	// parent; searching all galaxies for the nearest system would happily return one
-	// belonging to a galaxy the player is nowhere near, at a bounds fraction that looks
-	// entirely convincing.
+	// --- Nested layers ------------------------------------------------------------ STRICTLY
+	// TOP-DOWN: the star system is looked up inside the CHOSEN galaxy, not across all of them.
+	// A system's VirtualTraversal is only meaningful relative to its parent, so searching all
+	// galaxies would return one belonging to a galaxy the player is nowhere near, at a bounds
+	// fraction that looks entirely convincing.
 	double GalaxyFraction = 0.0;
 	const AGalaxyActor* Galaxy =
 		SelectNearest<AGalaxyActor>(InUniverse.SpawnedGalaxies, GalaxyFraction);
@@ -147,10 +129,9 @@ FULSNavSample ULSSampleUniverseNav(const AUniverseActor& InUniverse)
 		Out.Layers.Add(MakeLayerCoord(TEXT("Galaxy"), *Galaxy));
 		Out.SpawnedSystemCount = Galaxy->SpawnedStarSystems.Num();
 
-		// ONLY DESCEND FROM A CONTAINING GALAXY. A star system belonging to a galaxy the
-		// player is outside of is not "the nearest system"; it is a coordinate in a frame
-		// that is not the player's, and printing it under the galaxy row implies a
-		// containment that is not there.
+		// ONLY DESCEND FROM A CONTAINING GALAXY. A system in a galaxy the player is outside of
+		// is a coordinate in someone else's frame, and printing it under the galaxy row implies
+		// a containment that is not there.
 		if (Galaxy->IsPlayerInsideBounds())
 		{
 			double SystemFraction = 0.0;
